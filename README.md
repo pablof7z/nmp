@@ -73,16 +73,16 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 |---|---|
 | M0 — Founding gate | **PASSED** (conditional; amendments applied) |
 | M1 — Grammar engine spike | **PROVED** — 12/12 contract tests green; independently verified honest |
-| M2 — Compiler/router + coalescing | **built** (91 tests green workspace-wide; CI live) — in independent verification |
+| M2 — Compiler/router + coalescing | **PROVED** — 91 tests green; kill did not fire; independently verified honest |
 | M3 — Store + transport + write outbox | planning (Opus) |
 | M4–M6 | not started |
 
-**Proved so far (running, verified code):**
-- **The crown jewel — the reactive filter-binding grammar is general.** A headless resolver (`nmp-resolver`) drives the real path (signed event → store insert → replaceable supersede → binding re-eval → surgical demand delta) and proves, at two different depths and via one shared code path: depth-1 `$myFollows` re-routes surgically (`{A,B,C}→{A,B,D}` = exactly close-C/open-D, zero churn on A,B); depth-2 NIP-29 groups cascade without reopening the outer handle; `set_active_pubkey` re-roots the whole graph, closing every old-account atom before opening the new (no cross-account leak); `follows − mutes` (`SetOp/Diff`) resolves in-engine so the app never hand-maintains an expansion.
-- An independent Opus review confirmed this is **not hollow green**: zero kind-branches in the decision path (hand-audited), real pipeline (not synthetic — the v1 C5 failure mode is retired), exact metric asserts (`atoms_opened+closed == |symmetric diff|`, never a silent rebuild), and a third unrelated shape needing zero engine change. Review: [`docs/reviews/2026-07-11-M1-verification.md`](docs/reviews/2026-07-11-M1-verification.md).
+**Proved so far (running code, each independently verified by a separate Opus review):**
+- **M1 — the crown jewel, the reactive filter-binding grammar, is general.** A headless resolver drives the real path (signed event → insert → replaceable supersede → binding re-eval → surgical demand delta) and proves, via *one shared code path* at two depths: depth-1 `$myFollows` re-routes surgically (`{A,B,C}→{A,B,D}` = exactly close-C/open-D, zero churn on A,B); depth-2 NIP-29 groups cascade without reopening the outer handle; account switch re-roots the graph, closing every old-account atom before the new opens (no cross-account leak); `follows − mutes` (`SetOp/Diff`) resolves in-engine so the app never hand-maintains an expansion. Verified: zero kind-branches (hand-audited), real pipeline (v1's C5 synthetic-stand-in failure mode retired), exact metric asserts (no silent rebuild), a third unrelated shape needing zero engine change.
+- **M2 — per-relay routing is correct and coalescing is off the correctness path.** The compiler turns M1's per-element demand into per-relay wire plans: outbox routing (no `relays:` param exists), a 2-relay-minimum coverage solver with a required fan-out cap, and widen-only coalescing with mandatory local re-filter — so a wrong merge rule costs bandwidth, never correctness (proven by property tests + a differential oracle against the real resolver). The kill measurement, run honestly with printed numbers, did not fire (600→15 wire subs; 100 authors vs a 1000 limit). CI (fmt/clippy/test) now gates every push.
 
-**Two nits carried into M2** (neither invalidates M1): the no-kind-branch test guard is defeatable and needs hardening; `QueryHandle::Drop` currently discards its withdrawal delta (fine headless, must-wire when deltas hit the wire — touches ledger #2).
+Reviews: [`docs/reviews/`](docs/reviews/). Nits carried forward: M2's kill probe is single-skeleton (sub-count dimension under-stressed — strengthen at M5); the fan-out cap is per-skeleton not global (matters for ledger #4 once queries span many kinds).
 
-**Not yet proved:** everything downstream of the demand set — per-relay wire compilation, coalescing, outbox routing, real transport, persistence, the SDK boundary, and the falsifier app (the two remaining thesis-gates are M1 ✓ and M5). **Disproved so far:** nothing.
+**Not yet proved:** persistence, real relay transport, the write outbox, negentropy/coverage watermarks (M3); the SDK boundary (M4); the falsifier app (M5 — the second and final thesis-gate). **Disproved so far:** nothing.
 
 This section is the truth anchor. It always says exactly where we are, including what has failed. Earlier gate detail (M0's amendments) is in [`docs/VISION.md`](docs/VISION.md) §9.
