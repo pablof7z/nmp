@@ -26,9 +26,9 @@ There is no NMP app architecture to learn, because there is no NMP app architect
 Every filter field value is a `Binding`:
 
 ```
-Filter   := { kinds, authors: Binding, tags: {name: Binding}, since/until/limit, … }
-Binding  := Literal(set) | Reactive(IdentityField) | Derived(inner: Filter, project: Selector)
-Selector := Authors | Ids | Tag(name) | AddressCoord | …   // CLOSED, introspectable — never a closure
+Binding  := Literal(set) | Reactive(ActivePubkey) | Derived(inner: Filter, project: Selector)
+          | SetOp(Union|Intersect|Diff, [Binding])
+Selector := Authors | Ids | Tag(char) | AddressCoord    // CLOSED, introspectable — never a closure
 ```
 
 - **"My follows' notes, forever correct"** is one declaration:
@@ -71,9 +71,12 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 
 | Milestone | State |
 |---|---|
-| M0 — Founding gate | **in adversarial review** |
-| M1–M6 | not started |
+| M0 — Founding gate | **PASSED** (conditional; amendments applied) |
+| M1 — Grammar engine spike | planning (Opus) |
+| M2–M6 | not started |
 
-**Proved so far:** nothing. **Disproved so far:** nothing.
+**M0 outcome (2026-07-11):** two independent Opus agents — an adversarial refuter and a ~25-shape completeness auditor — both concluded the two-noun surface holds: no read needs an app closure, nothing forces a third app-facing noun. It was *not* a rubber stamp — the refuter found a real self-contradiction (the grammar couldn't express "follows minus mutes", which bug-ledger #11 requires), fixed by adding a `SetOp` binding. Also added: a write durability class and an engine-internal encrypt/decrypt capability. Details in [`docs/VISION.md`](docs/VISION.md) §9.
+
+**Proved so far:** the *surface* is coherent on paper (M0). **Nothing is proved in running code yet** — the grammar's central bet (surgical re-routing at two depths) is not tested until M1 runs. **Disproved so far:** nothing.
 
 This section is the truth anchor. It will always say exactly where we are, including what has failed.

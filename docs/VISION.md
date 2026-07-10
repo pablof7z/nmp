@@ -32,11 +32,16 @@ What makes v2 different is not any single mechanism — most exist in some form 
 **P2 — The reactive filter-binding grammar is the crown jewel.** Every filter field value is a `Binding`:
 
 ```
-Filter   := { kinds, authors: Binding, tags: {name: Binding}, since/until/limit, … }
-Binding  := Literal(set) | Reactive(IdentityField) | Derived(inner: Filter, project: Selector)
-Selector := Authors | Ids | Tag(name) | AddressCoord | …    // CLOSED, introspectable
+Filter   := { kinds, authors: Binding, tags: {name: Binding}, since/until/limit, search? }
+Binding  := Literal(set)
+          | Reactive(IdentityField)                          // legal in authors AND tag positions
+          | Derived(inner: Filter, project: Selector)
+          | SetOp(op: Union|Intersect|Diff, operands: [Binding])   // M0 amendment
+Selector := Authors | Ids | Tag(char) | AddressCoord         // CLOSED, introspectable; Tag parameterized
 IdentityField := ActivePubkey | …
 ```
+
+**M0-gate amendments (2026-07-11, both amendments and the gate verdict are recorded in §9).** `SetOp` was added because "my follows minus my mutes" — the most common compound author set — is otherwise inexpressible, which would force apps into hand-maintained expansion and contradict bug-ledger #11. `Reactive` is legal in tag positions (the NIP-29 root is `#p:[Reactive(ActivePubkey)]`). `AddressCoord` does **not** factor into independent field-sets (a set of `a`-coords over-matches as a cartesian product), so a coordinate-projecting `Derived` node either fans out into N outer filters or over-fetches a superset and relies on P5 widen-only local re-filter — the resolver states which, and M1 tests it. The write noun carries a **durability class** (`durable | ephemeral | at-most-once`); ephemeral (typing/presence/NIP-42 auth) and idempotent-RPC (NWC pay) writes are not forced through durable per-relay acks. An engine-internal **encrypt/decrypt capability** sits beside the signer (key co-located in the engine); bug-ledger #12 is scoped to unencrypted content. None of these is a new app-facing noun.
 
 Nesting is bounded (≤3 deep; owner-confirmed no realistic case exceeds it — so no unbounded incremental-dataflow engine, no cycle handling). `Selector` is a closed vocabulary, **never an app closure**: introspectability is the linchpin that lets the engine hash, dedup, coalesce, and route demand (the Electric-SQL "Shape" lesson; the Replicache closure trap). A use case outside the vocabulary extends the vocabulary; it never admits code. At every node the semantics are **replace-not-rebuild** (unchanged members produce zero wire churn) and **recompile-not-reopen** (the outer handle stays open across re-routes; one updated payload, no teardown/reopen race). v1's C5 (`dependent_interests.rs`) is a hardcoded one-level special case of this grammar, welded to kind:3, whose end-to-end path was never truly proven — v2 builds the general primitive and proves it at two different depths.
 
@@ -170,3 +175,19 @@ The ledger is append-only in spirit: a newly discovered bug class demands a surf
 - *NIP-51 relay-set mode* (falsifier stretch goal) is a new build with no v1 primitive; if M5 is at risk, it drops first — depth-1 + depth-2 already prove the grammar's generality.
 
 **What would change the recommendation wholesale:** M1's kill firing (grammar not general) or M5's kill firing (library thesis broken). Everything else in this plan is adjustable in place. Those two are the bet; the plan is built so each is falsified as early and as cheaply as possible.
+
+---
+
+## 9. M0 gate verdict (2026-07-11)
+
+**PASS — no kill.** Two independent Opus agents (an adversarial refuter tasked to break the grammar, and a completeness auditor cataloguing ~25 real Nostr read/write shapes) both concluded the two-noun surface holds: no read requires an app closure, and nothing forces a genuine third app-facing concept. NIP-45 relay-COUNT is the only read that isn't a live query, and it is a *deliberate scope exclusion* (count locally over a coverage window), not a missing noun.
+
+The pass was **conditional on amendments**, all applied above and folded into M1:
+
+- **`SetOp(Union|Intersect|Diff, [Binding])`** — the refuter's sharpest finding: without set-difference the grammar could not express mute-filtered follows and thereby *contradicted its own bug-ledger #11*. Now consistent.
+- **Write durability class** (`durable|ephemeral|at-most-once`) — ledger #9's "no void/bool ever" was over-strict for ephemeral and idempotent-RPC writes.
+- **Engine-internal encrypt/decrypt capability** co-located with the signer — a real hole: DMs and private lists need decryption where the key lives, or identity-as-input breaks. Ledger #12 scoped to unencrypted content.
+- **`Reactive` legal in tag positions; `AddressCoord` fan-out/over-fetch escape stated and M1-tested; `Tag(char)` parameterized; `search` Filter field reserved.**
+- Routing needs lane vocabulary beyond NIP-65 (group-host/NIP-29, DM-inbox/kind:10050, search-relay) — an M2 concern, noted so it isn't discovered late.
+
+The full agent findings live in the design record. This gate is called clean; M1 proceeds.
