@@ -59,7 +59,7 @@ pub enum SetAlgebra {
 /// `kinds` are LITERAL in M1 (not bindable) — the simplest shape that
 /// matches every M1 falsifier; the grammar does not forbid making `kinds`
 /// bindable later.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Filter {
     /// Literal kind set (not bindable in M1).
     pub kinds: Option<BTreeSet<u16>>,
@@ -76,20 +76,6 @@ pub struct Filter {
     pub until: Option<u64>,
     /// Result-count cap.
     pub limit: Option<usize>,
-}
-
-impl Default for Filter {
-    fn default() -> Self {
-        Self {
-            kinds: None,
-            authors: None,
-            ids: None,
-            tags: BTreeMap::new(),
-            since: None,
-            until: None,
-            limit: None,
-        }
-    }
 }
 
 impl Filter {

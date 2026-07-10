@@ -13,7 +13,7 @@ use crate::tag_name::TagName;
 /// Every field is co-pinned: for a coordinate-derived atom (see M1 plan
 /// §3.5), `kinds`/`authors`/`#d` are singletons TOGETHER, not independent
 /// field-sets.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConcreteFilter {
     /// Literal kind set.
     pub kinds: Option<BTreeSet<u16>>,
@@ -29,20 +29,6 @@ pub struct ConcreteFilter {
     pub until: Option<u64>,
     /// Result-count cap.
     pub limit: Option<usize>,
-}
-
-impl Default for ConcreteFilter {
-    fn default() -> Self {
-        Self {
-            kinds: None,
-            authors: None,
-            ids: None,
-            tags: BTreeMap::new(),
-            since: None,
-            until: None,
-            limit: None,
-        }
-    }
 }
 
 /// A canonical, stable hash of a [`ConcreteFilter`] — the demand/refcount
