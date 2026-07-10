@@ -50,6 +50,13 @@ impl Harness {
         self.engine.unsubscribe(id)
     }
 
+    /// Flush any handles dropped since the last mutating call (M1 nit #2 /
+    /// M2 plan §8.2), surfacing their withdrawal even with no other
+    /// activity to piggyback the drain on.
+    pub fn poll_pending_drops(&mut self) -> DemandDelta {
+        self.engine.poll_pending_drops()
+    }
+
     /// Script a "relay push": insert `events` into the store and let the
     /// engine react (M1 plan §3.3 — the real path).
     pub fn deliver(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
@@ -76,6 +83,17 @@ impl Harness {
 // `src/**` excluding this file precisely because a real relay/event
 // producer legitimately deals in concrete kinds; only the resolver's
 // event-to-node routing must stay kind-blind.
+
+/// A kind:1 (text note) event. Genuinely missing from M1's builder set
+/// (M1's contract tests never needed a plain content note); added for M2's
+/// differential oracle (`nmp-router/tests/differential_oracle.rs`), which
+/// needs real signed content events to populate its per-relay model store.
+pub fn kind1(author: &nostr::Keys, content: &str, created_at: u64) -> nostr::Event {
+    EventBuilder::new(Kind::TextNote, content)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(author)
+        .expect("test fixture event must sign cleanly")
+}
 
 /// A kind:3 (contact list) event: `follows` encoded as `p` tags.
 ///

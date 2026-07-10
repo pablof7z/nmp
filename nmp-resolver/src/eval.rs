@@ -51,6 +51,21 @@ pub(crate) fn merge_element_into(cf: &mut ConcreteFilter, slot: &FieldSlot, el: 
     }
 }
 
+/// The single legit kind-value read in this crate: `Selector::AddressCoord`
+/// projects an event's kind INTO the `(kind, author, d)` coordinate it
+/// contributes to a `ResolvedSet` -- a data projection, not a routing
+/// branch (M1 verification review nit 1 / M2 plan §8.1). Scoped narrowly to
+/// this one-line helper (rather than the whole `project_events` function,
+/// and taking the whole `&Event` so the field read itself stays inside the
+/// annotated/marked line too) so the `#[allow]` cannot silently cover an
+/// unrelated kind-branch added later; `nmp-resolver/tests/no_kind_branches.rs`
+/// additionally asserts this is the ONLY `KIND-VALUE-READ`-marked site in
+/// the crate (or its `nmp-router` sibling).
+#[allow(clippy::disallowed_methods)]
+fn kind_value_for_coord_projection(event: &nostr::Event) -> u16 {
+    event.kind.as_u16() // KIND-VALUE-READ: projection into Element::Coord, not a routing branch
+}
+
 /// Project a batch of queried events through `project`, per the closed
 /// [`Selector`] vocabulary. A single event may contribute zero, one, or
 /// several elements (e.g. an event with multiple `p` tags contributes one
@@ -78,7 +93,7 @@ pub(crate) fn project_events(events: &[nostr::Event], project: &Selector) -> Res
             }
             Selector::AddressCoord => {
                 out.insert(Element::Coord {
-                    kind: event.kind.as_u16(),
+                    kind: kind_value_for_coord_projection(event),
                     author: event.pubkey.to_hex(),
                     d: event.tags.identifier().unwrap_or("").to_string(),
                 });

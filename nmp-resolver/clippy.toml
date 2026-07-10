@@ -1,0 +1,32 @@
+# Scoped clippy configuration -- crate-local, NOT workspace-wide (M2 plan
+# §8.1, hardening M1 nit #1: the defeatable no-kind-branch guard).
+#
+# Reading an event's `kind` value as a bare `u16`/`u64` and then comparing
+# it (`match k { 3 => ..., 39002 => ... }`) is exactly the shape of a
+# laundered kind-specific branch that `tests/no_kind_branches.rs`'s original
+# substring/`match` scan was shown to miss (M1 verification review,
+# 2026-07-11). Banning `nostr::Kind::as_u16` at the clippy level makes
+# obtaining a bare, comparable kind value CI-red by construction -- upstream
+# of whatever `match`/`if` shape a text scanner can be fooled by.
+#
+# Scoped to THIS crate (and its `nmp-router` sibling, which carries an
+# identical file) rather than the workspace root: `nmp-store`'s
+# `address_key.rs` legitimately reads `event.kind.as_u16()` to classify an
+# event's STORAGE bucket (replaceable/addressable/regular) -- a real,
+# pre-existing, out-of-scope concern for the resolver's routing kill guard
+# (M1 never claimed `nmp-store` is kind-blind, only the resolver's
+# event-to-node ROUTING is). A workspace-wide ban would falsely flag that
+# unrelated site; clippy resolves the nearest `clippy.toml` per crate, so
+# placing it here scopes the ban to exactly the two crates the M2 plan
+# names.
+#
+# `nostr::Kind` has no `as_u64` method in 0.44.4 (only `as_u16`); it is
+# listed here anyway as a forward-hardening entry in case a future `nostr`
+# version adds one. `allow-invalid = true` suppresses clippy's own
+# "does not refer to a reachable function" warning for this not-yet-real
+# path (that warning would otherwise become a hard error under this
+# workspace's `-D warnings` CI gate).
+disallowed-methods = [
+    "nostr::Kind::as_u16",
+    { path = "nostr::Kind::as_u64", reason = "forward-hardening: does not exist in nostr 0.44.4", allow-invalid = true },
+]

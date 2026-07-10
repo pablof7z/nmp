@@ -115,6 +115,15 @@ impl DeltaAcc {
     }
 }
 
+/// Concatenate two already-internally-ordered `DemandDelta`s: `first`'s ops
+/// then `second`'s ops. Used to merge a drained drop-delta (all `Close`,
+/// M1 nit #2) ahead of a call's own delta (already closes-then-opens),
+/// preserving "all closes precede all opens" overall.
+fn merge_deltas(mut first: DemandDelta, second: DemandDelta) -> DemandDelta {
+    first.ops.extend(second.ops);
+    first
+}
+
 struct GraphEntry {
     descriptor: LiveQuery,
     refcount: u32,
@@ -183,20 +192,20 @@ impl<S: EventStore> Engine<S> {
     // ---- identity re-root (M1 plan §3.6) --------------------------------
 
     pub fn set_active_pubkey(&mut self, pk: Option<nostr::PublicKey>) -> DemandDelta {
-        self.drain_pending_drops();
+        let drop_delta = self.drain_pending_drops();
         self.identity = pk;
         let seed: BTreeSet<NodeId> = self.reactive_nodes.iter().copied().collect();
         if seed.is_empty() {
-            return DemandDelta::empty();
+            return drop_delta;
         }
         self.metrics.recompute_passes += 1;
-        self.run_recompute(seed)
+        merge_deltas(drop_delta, self.run_recompute(seed))
     }
 
     // ---- subscribe / unsubscribe (M1 plan §4) ---------------------------
 
     pub fn subscribe(&mut self, q: LiveQuery) -> (QueryHandle, DemandDelta) {
-        self.drain_pending_drops();
+        let drop_delta = self.drain_pending_drops();
         let handle_id = self.alloc_handle();
 
         if let Some(&root) = self.descriptor_to_root.get(&q) {
@@ -218,7 +227,7 @@ impl<S: EventStore> Engine<S> {
                 id: handle_id,
                 pending_drops: Rc::downgrade(&self.pending_drops),
             };
-            return (handle, acc.into_delta());
+            return (handle, merge_deltas(drop_delta, acc.into_delta()));
         }
 
         let root = self.build_filter_node(&q.0, ParentLink::Root, 0);
@@ -240,12 +249,22 @@ impl<S: EventStore> Engine<S> {
             id: handle_id,
             pending_drops: Rc::downgrade(&self.pending_drops),
         };
-        (handle, acc.into_delta())
+        (handle, merge_deltas(drop_delta, acc.into_delta()))
     }
 
     pub fn unsubscribe(&mut self, id: HandleId) -> DemandDelta {
-        self.drain_pending_drops();
-        self.unsubscribe_inner(id)
+        let drop_delta = self.drain_pending_drops();
+        merge_deltas(drop_delta, self.unsubscribe_inner(id))
+    }
+
+    /// Flush any handles dropped since the last mutating call, surfacing
+    /// their withdrawal as a `DemandDelta` even with no other activity (M1
+    /// nit #2, M2 plan §8.2). Every other mutating call already drains and
+    /// MERGES pending drops into its own returned delta; this method exists
+    /// so a driver can force that flush on a bare `Drop` with nothing else
+    /// to piggyback on.
+    pub fn poll_pending_drops(&mut self) -> DemandDelta {
+        self.drain_pending_drops()
     }
 
     fn unsubscribe_inner(&mut self, id: HandleId) -> DemandDelta {
@@ -286,11 +305,25 @@ impl<S: EventStore> Engine<S> {
         acc.into_delta()
     }
 
-    fn drain_pending_drops(&mut self) {
+    /// Drain every handle dropped since the last call and MERGE their
+    /// withdrawal into a `DemandDelta` (M1 nit #2: previously this
+    /// discarded `unsubscribe_inner`'s return with `let _ = ...`, so a
+    /// dropped handle's CLOSE never reached the wire). `unsubscribe_inner`
+    /// only ever produces `Close` ops, so simple concatenation across
+    /// multiple drained drops preserves the "all closes precede all opens"
+    /// invariant trivially.
+    fn drain_pending_drops(&mut self) -> DemandDelta {
         let ids: Vec<HandleId> = std::mem::take(&mut *self.pending_drops.borrow_mut());
+        let mut ops = Vec::new();
         for id in ids {
-            let _ = self.unsubscribe_inner(id);
+            let delta = self.unsubscribe_inner(id);
+            debug_assert!(
+                delta.opened().is_empty(),
+                "an unsubscribe delta must never contain Open ops"
+            );
+            ops.extend(delta.ops);
         }
+        DemandDelta { ops }
     }
 
     fn alloc_handle(&mut self) -> HandleId {
@@ -301,7 +334,7 @@ impl<S: EventStore> Engine<S> {
     // ---- ingest: the real path (M1 plan §3.3) ---------------------------
 
     pub fn ingest(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
-        self.drain_pending_drops();
+        let drop_delta = self.drain_pending_drops();
 
         let mut changed: Vec<nostr::Event> = Vec::new();
         for event in events {
@@ -311,7 +344,7 @@ impl<S: EventStore> Engine<S> {
             }
         }
         if changed.is_empty() {
-            return DemandDelta::empty();
+            return drop_delta;
         }
         self.metrics.recompute_passes += 1;
 
@@ -335,7 +368,7 @@ impl<S: EventStore> Engine<S> {
                 }
             }
         }
-        self.run_recompute(seed)
+        merge_deltas(drop_delta, self.run_recompute(seed))
     }
 
     // ---- recompute rounds (shared by ingest + re-root) ------------------
