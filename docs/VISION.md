@@ -191,3 +191,17 @@ The pass was **conditional on amendments**, all applied above and folded into M1
 - Routing needs lane vocabulary beyond NIP-65 (group-host/NIP-29, DM-inbox/kind:10050, search-relay) — an M2 concern, noted so it isn't discovered late.
 
 The full agent findings live in the design record. This gate is called clean; M1 proceeds.
+
+---
+
+## 10. Result-contract refinement — the Collection observation mode (provisional; Tier-A at M4)
+
+A Fable consult on a forwarded composite-feed design settled the one open question about the *result* side of the query noun (our grammar work had been all demand-side). Recorded here as provisional; it amends the result contract, so it takes a Tier-A propose/refute round when M4 (the SDK boundary) approaches. **It does not touch M1** — M1 is the headless demand resolver, upstream of result delivery.
+
+- **"Collection" is not a third noun.** It is an opt-in **observation mode** of the existing live query: an engine-maintained ordered, windowed view over the query's replica, sharing the *same* demand key and graph node. A plain query yields row deltas; a collection observation adds ordering + a bounded window + pagination on top of the same node.
+- **Pagination is not a second demand mechanism.** `loadMore` only widens the node's own `since/until/limit` (widen-only, consistent with P5). `has_more`/`exhausted`/`gap` is bug-ledger #7's coverage variant surfacing — "unknown vs proven-complete," not a new concept.
+- **Heterogeneous feeds take a *list* of queries, merged result-side.** `observeCollection([query, …])` unions the delivered rows and dedups by a canonical row key. Ordering (`OrderKey`) and row identity (`RowKey`) are **closed vocabularies**, never app comparators or closures.
+- **The governing rule (from Q2): "values in, code after."** Anything the engine uses to *decide* — demand, admission, row-keying, ordering, cursors — must be a closed introspectable value. App closures may fold *delivered* rows into view state, but may never parameterize engine behavior. This is the exact line the forwarded doc crossed (its lane-mapper's app-computed sort/row keys fed engine cursor correctness) — and why its "protocol modules register closure lane-mappings" thesis is rejected as the v1 feed framework reborn.
+- **NMP owns the virtualizable collection, not the virtualization.** It provides stable row ids, deterministic order, a bounded window, deltas, and coverage state; SwiftUI/Compose/Dioxus decide which visible rows to instantiate.
+
+Rejected: registering app/protocol closures as feed lane-mappings. Adopted as candidate bug-ledger **#13** (two-cursor separation).
