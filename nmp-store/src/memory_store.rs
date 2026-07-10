@@ -231,7 +231,10 @@ mod tests {
             store.insert(kind3_event(&alice, 100)),
             InsertOutcome::Inserted
         );
-        assert_eq!(store.insert(kind3_event(&bob, 100)), InsertOutcome::Inserted);
+        assert_eq!(
+            store.insert(kind3_event(&bob, 100)),
+            InsertOutcome::Inserted
+        );
 
         let results = store.query(&Filter::new().kind(Kind::ContactList));
         assert_eq!(results.len(), 2);
@@ -256,11 +259,16 @@ mod tests {
         let g1_new_id = g1_new.id;
         assert_eq!(
             store.insert(g1_new),
-            InsertOutcome::Superseded { replaced: g1_old_id }
+            InsertOutcome::Superseded {
+                replaced: g1_old_id
+            }
         );
 
-        let mut results =
-            store.query(&Filter::new().kind(Kind::from(30_003u16)).author(k.public_key()));
+        let mut results = store.query(
+            &Filter::new()
+                .kind(Kind::from(30_003u16))
+                .author(k.public_key()),
+        );
         results.sort_by_key(|e| e.id);
         let mut expected = vec![g1_new_id, g2.id];
         expected.sort();

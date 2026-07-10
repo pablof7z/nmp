@@ -222,7 +222,10 @@ mod tests {
 
         assert_eq!(
             nf.kinds,
-            Some(BTreeSet::from([nostr::Kind::from(1u16), nostr::Kind::from(3u16)]))
+            Some(BTreeSet::from([
+                nostr::Kind::from(1u16),
+                nostr::Kind::from(3u16)
+            ]))
         );
         assert_eq!(
             nf.authors,

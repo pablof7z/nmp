@@ -110,7 +110,11 @@ mod tests {
         let mut set = Set::new();
         set.insert(binding.clone());
         set.insert(binding);
-        assert_eq!(set.len(), 1, "identical SetOp bindings should dedup under Ord+Hash");
+        assert_eq!(
+            set.len(),
+            1,
+            "identical SetOp bindings should dedup under Ord+Hash"
+        );
 
         // SetAlgebra variants are distinguishable and totally ordered.
         assert_ne!(SetAlgebra::Union, SetAlgebra::Diff);
