@@ -1,9 +1,31 @@
-//! `nmp-resolver` — the graph engine, atom refcounting, identity register, metrics.
+//! `nmp-resolver` — the graph engine, atom refcounting, identity register,
+//! and metrics that resolve the reactive filter-binding grammar
+//! (`nmp-grammar`) into abstract demand-set deltas over an `EventStore`
+//! (`nmp-store`). See `docs/plans/M1-grammar-engine-plan.md` §2.3-§6 for the
+//! full spec this crate implements; `src/testkit.rs` is the scripted
+//! fake-relay harness, and `tests/` holds the M1 contract tests (the pass
+//! criteria).
 //!
-//! Scaffold only. This crate is filled in by Steps 3-7 of the M1 build order
-//! (`docs/plans/M1-grammar-engine-plan.md` §7); this builder's scope was
-//! Steps 0-2 (workspace scaffold, `nmp-grammar`, `nmp-store`). The types below
-//! are the minimal skeleton needed for the workspace to build; none of §2.3's
-//! `Engine`/`Harness` behavior is implemented yet.
+//! Module layout:
+//! - `types` — the small shared vocabulary (`NodeId`, `Element`,
+//!   `FieldSlot`, `ParentLink`).
+//! - `eval` — pure leaf computations (projection, set algebra, identity
+//!   resolution, element merging). No kind-literal branching anywhere in
+//!   this crate (excluding `testkit`/`tests`) — see the M1 plan's kill
+//!   guard (§3.3 step 2, §6) and contract test 10.
+//! - `graph` — the node graph: data + pure, store-independent algorithm
+//!   (atom computation, wide-query-filter computation, structural
+//!   traversal).
+//! - `engine` — `Engine<S: EventStore>`: construction, incremental
+//!   recompute, identity re-root, subscribe/unsubscribe, and the public
+//!   API surface (`LiveQuery`, `HandleId`, `QueryHandle`, `Metrics`,
+//!   `GraphSnapshot`).
 
+mod eval;
+mod graph;
+mod types;
+
+mod engine;
 pub mod testkit;
+
+pub use engine::{Engine, GraphNodeInfo, GraphSnapshot, HandleId, LiveQuery, Metrics, QueryHandle};

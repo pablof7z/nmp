@@ -1,0 +1,556 @@
+//! The M1 contract tests (plan §5) — the pass criteria for the resolver.
+//! Each test drives the REAL path through [`Harness`]: build event ->
+//! `deliver` -> insert/supersede -> re-eval -> assert delta + metrics.
+//!
+//! Test 10 (the structural no-kind-branch guard) lives in
+//! `tests/no_kind_branches.rs`.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use nmp_grammar::{
+    Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp,
+    TagName,
+};
+use nmp_resolver::testkit::{
+    addressable, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
+};
+use nmp_resolver::LiveQuery;
+use nostr::{EventBuilder, Keys, Kind};
+
+// ---- ConcreteFilter builders (test-local; mirrors nmp-grammar's own test
+// helpers, kept separate since these assert resolver *output*, not grammar
+// lowering) --------------------------------------------------------------
+
+fn cf_kinds_authors(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
+    ConcreteFilter {
+        kinds: Some(kinds.iter().copied().collect()),
+        authors: Some(authors.iter().map(|s| s.to_string()).collect()),
+        ..ConcreteFilter::default()
+    }
+}
+
+fn cf_kinds_tag(kinds: &[u16], tag: char, values: &[&str]) -> ConcreteFilter {
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        TagName::new(tag).unwrap(),
+        values.iter().map(|s| s.to_string()).collect(),
+    );
+    ConcreteFilter {
+        kinds: Some(kinds.iter().copied().collect()),
+        tags,
+        ..ConcreteFilter::default()
+    }
+}
+
+fn cf_coord(kind: u16, author: &str, d: &str) -> ConcreteFilter {
+    let mut tags = BTreeMap::new();
+    tags.insert(TagName::new('d').unwrap(), BTreeSet::from([d.to_string()]));
+    ConcreteFilter {
+        kinds: Some(BTreeSet::from([kind])),
+        authors: Some(BTreeSet::from([author.to_string()])),
+        tags,
+        ..ConcreteFilter::default()
+    }
+}
+
+// ---- LiveQuery shape builders --------------------------------------------
+
+/// `kinds:[1], authors := Derived(inner=(kinds:[3], authors:[Reactive]),
+/// project=Tag(p))` — "my follows" (tests 1, 3, 4, 5, 6, 8).
+fn my_follows_filter() -> Filter {
+    Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: Filter {
+                kinds: Some(BTreeSet::from([3u16])),
+                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                ..Filter::default()
+            },
+            project: Selector::Tag(TagName::new('p').unwrap()),
+        }))),
+        ..Filter::default()
+    }
+}
+
+/// `kinds:[39000,39001,39002], #d := Derived(inner=(kinds:[39002],
+/// #p:[Reactive]), project=Tag(d))` — NIP-29-shaped groups (tests 2, 7).
+fn nip29_groups_filter() -> Filter {
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        TagName::new('d').unwrap(),
+        Binding::Derived(Box::new(Derived {
+            inner: Filter {
+                kinds: Some(BTreeSet::from([39_002u16])),
+                tags: {
+                    let mut inner_tags = BTreeMap::new();
+                    inner_tags.insert(
+                        TagName::new('p').unwrap(),
+                        Binding::Reactive(IdentityField::ActivePubkey),
+                    );
+                    inner_tags
+                },
+                ..Filter::default()
+            },
+            project: Selector::Tag(TagName::new('d').unwrap()),
+        })),
+    );
+    Filter {
+        kinds: Some(BTreeSet::from([39_000u16, 39_001u16, 39_002u16])),
+        tags,
+        ..Filter::default()
+    }
+}
+
+/// `kinds:[1], authors := SetOp(Diff, [Derived(follows), Derived(mutes)])`
+/// — "follows minus mutes" (test 9, amendment #1).
+fn follows_minus_mutes_filter() -> Filter {
+    let follows = Binding::Derived(Box::new(Derived {
+        inner: Filter {
+            kinds: Some(BTreeSet::from([3u16])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        project: Selector::Tag(TagName::new('p').unwrap()),
+    }));
+    let mutes = Binding::Derived(Box::new(Derived {
+        inner: Filter {
+            kinds: Some(BTreeSet::from([10_000u16])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        project: Selector::Tag(TagName::new('p').unwrap()),
+    }));
+    Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::SetOp(Box::new(SetOp {
+            op: SetAlgebra::Diff,
+            operands: vec![follows, mutes],
+        }))),
+        ..Filter::default()
+    }
+}
+
+/// `authors := Derived(inner=(kinds:[30003], authors:[Reactive]),
+/// project=AddressCoord)` — the co-pinned coordinate case (test 11,
+/// amendment #3). The binding is attached to the `authors` slot
+/// arbitrarily: an `AddressCoord` projection overrides
+/// kinds/authors/`#d` together regardless of which grammar field carries
+/// it (M1 plan §3.5).
+fn address_coord_filter() -> Filter {
+    Filter {
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: Filter {
+                kinds: Some(BTreeSet::from([30_003u16])),
+                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                ..Filter::default()
+            },
+            project: Selector::AddressCoord,
+        }))),
+        ..Filter::default()
+    }
+}
+
+/// `kinds:[1], #e := Derived(inner=(kinds:[10003], authors:[Reactive]),
+/// project=Tag(e))` — a third, unrelated depth-1 shape (test 12, the
+/// generality witness): bookmarks' `e`-tags. Built and passed with zero
+/// changes to `nmp-resolver/src` beyond what tests 1-2 needed.
+fn bookmarks_filter() -> Filter {
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        TagName::new('e').unwrap(),
+        Binding::Derived(Box::new(Derived {
+            inner: Filter {
+                kinds: Some(BTreeSet::from([10_003u16])),
+                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                ..Filter::default()
+            },
+            project: Selector::Tag(TagName::new('e').unwrap()),
+        })),
+    );
+    Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        tags,
+        ..Filter::default()
+    }
+}
+
+fn dummy_event_id(seed: &str) -> nostr::EventId {
+    let keys = Keys::generate();
+    EventBuilder::new(Kind::TextNote, seed)
+        .sign_with_keys(&keys)
+        .unwrap()
+        .id
+}
+
+// ---- 1. depth1_myfollows_surgical_delta ---------------------------------
+
+#[test]
+fn depth1_myfollows_surgical_delta() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+    let d = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    h.deliver(vec![kind3(
+        &a,
+        &[a.public_key(), b.public_key(), c.public_key()],
+        100,
+    )]);
+
+    let inner = cf_kinds_authors(&[3], &[&a.public_key().to_hex()]);
+    let atom_a = cf_kinds_authors(&[1], &[&a.public_key().to_hex()]);
+    let atom_b = cf_kinds_authors(&[1], &[&b.public_key().to_hex()]);
+    let atom_c = cf_kinds_authors(&[1], &[&c.public_key().to_hex()]);
+    let demand = h.demand();
+    assert_eq!(
+        demand,
+        BTreeSet::from([
+            inner.clone(),
+            atom_a.clone(),
+            atom_b.clone(),
+            atom_c.clone()
+        ])
+    );
+
+    let before = h.metrics();
+    let delta = h.deliver(vec![kind3(
+        &a,
+        &[a.public_key(), b.public_key(), d.public_key()],
+        101,
+    )]);
+    let atom_d = cf_kinds_authors(&[1], &[&d.public_key().to_hex()]);
+
+    assert_eq!(
+        delta.ops,
+        vec![
+            DemandOp::Close(atom_c.clone()),
+            DemandOp::Open(atom_d.clone())
+        ]
+    );
+    let after = h.metrics();
+    assert_eq!(after.atoms_closed - before.atoms_closed, 1);
+    assert_eq!(after.atoms_opened - before.atoms_opened, 1);
+    assert_eq!(after.recompute_passes - before.recompute_passes, 1);
+
+    let demand = h.demand();
+    assert!(demand.contains(&inner), "inner kind:3 atom untouched");
+    assert!(demand.contains(&atom_a), "A untouched");
+    assert!(demand.contains(&atom_b), "B untouched");
+    assert!(!demand.contains(&atom_c), "C closed");
+    assert!(demand.contains(&atom_d), "D opened");
+}
+
+// ---- 2. depth2_nip29_groups_cascade_one_level ---------------------------
+
+#[test]
+fn depth2_nip29_groups_cascade_one_level() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    h.deliver(vec![
+        kind39002(&a, "g1", &[a.public_key()], 100),
+        kind39002(&a, "g2", &[a.public_key()], 100),
+    ]);
+
+    let inner = cf_kinds_tag(&[39_002], 'p', &[&a.public_key().to_hex()]);
+    let outer_kinds = [39_000u16, 39_001, 39_002];
+    let outer_g1 = cf_kinds_tag(&outer_kinds, 'd', &["g1"]);
+    let outer_g2 = cf_kinds_tag(&outer_kinds, 'd', &["g2"]);
+    let demand = h.demand();
+    assert!(demand.contains(&inner));
+    assert!(demand.contains(&outer_g1));
+    assert!(demand.contains(&outer_g2));
+
+    let snapshot_before = h.graph_snapshot().nodes.len();
+    let before = h.metrics();
+    let delta = h.deliver(vec![kind39002(&a, "g3", &[a.public_key()], 101)]);
+    let outer_g3 = cf_kinds_tag(&outer_kinds, 'd', &["g3"]);
+
+    assert_eq!(delta.ops, vec![DemandOp::Open(outer_g3.clone())]);
+    let after = h.metrics();
+    assert_eq!(
+        after.atoms_opened - before.atoms_opened,
+        1,
+        "zero churn: only g3 opens"
+    );
+    assert_eq!(
+        after.atoms_closed - before.atoms_closed,
+        0,
+        "inner atom unchanged, zero churn"
+    );
+    assert_eq!(
+        after.nodes_recomputed - before.nodes_recomputed,
+        2,
+        "cascade depth == 1: exactly the Derived node + the outer FilterNode"
+    );
+
+    // recompile-not-reopen: the graph's node structure itself is untouched.
+    assert_eq!(h.graph_snapshot().nodes.len(), snapshot_before);
+    assert!(
+        h.demand().contains(&inner),
+        "inner atom still present, zero churn"
+    );
+}
+
+// ---- 4. stale_older_kind3_rejected_without_firing -----------------------
+
+#[test]
+fn stale_older_kind3_rejected_without_firing() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    h.deliver(vec![kind3(
+        &a,
+        &[
+            a.public_key(),
+            Keys::generate().public_key(),
+            Keys::generate().public_key(),
+        ],
+        100,
+    )]);
+
+    let before = h.metrics();
+    let demand_before = h.demand();
+    let delta = h.deliver(vec![kind3(
+        &a,
+        &[Keys::generate().public_key(), Keys::generate().public_key()],
+        50, // older than the winner already in the store
+    )]);
+
+    assert!(delta.is_empty());
+    let after = h.metrics();
+    assert_eq!(after.recompute_passes, before.recompute_passes);
+    assert_eq!(h.demand(), demand_before);
+}
+
+// ---- 5. duplicate_delivery_no_fire --------------------------------------
+
+#[test]
+fn duplicate_delivery_no_fire() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let ev = kind3(&a, &[a.public_key()], 100);
+    h.deliver(vec![ev.clone()]);
+
+    let before = h.metrics();
+    let delta = h.deliver(vec![ev]);
+
+    assert!(delta.is_empty());
+    assert_eq!(h.metrics().recompute_passes, before.recompute_passes);
+}
+
+// ---- 6. unchanged_set_ingest_empty_delta --------------------------------
+
+#[test]
+fn unchanged_set_ingest_empty_delta() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    h.deliver(vec![kind3(
+        &a,
+        &[a.public_key(), b.public_key(), c.public_key()],
+        100,
+    )]);
+
+    let before = h.metrics();
+    // Same members, newer timestamp: supersedes, but the projected set is
+    // unchanged -- set-diff, not event-diff, gates downstream.
+    let delta = h.deliver(vec![kind3(
+        &a,
+        &[a.public_key(), b.public_key(), c.public_key()],
+        101,
+    )]);
+
+    assert!(delta.is_empty());
+    let after = h.metrics();
+    assert_eq!(after.atoms_opened, before.atoms_opened);
+    assert_eq!(after.atoms_closed, before.atoms_closed);
+}
+
+// ---- 7. concurrent_depth2_changes_batch_one_delta -----------------------
+
+#[test]
+fn concurrent_depth2_changes_batch_one_delta() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    h.deliver(vec![kind39002(&a, "g1", &[a.public_key()], 100)]);
+
+    let before = h.metrics();
+    // One batch: add g3, and remove-by-supersede g1 (a newer g1 event that
+    // no longer lists A as a member, so it no longer matches #p:A_pk).
+    let delta = h.deliver(vec![
+        kind39002(&a, "g3", &[a.public_key()], 100),
+        kind39002(&a, "g1", &[], 101),
+    ]);
+
+    let outer_kinds = [39_000u16, 39_001, 39_002];
+    let g1 = cf_kinds_tag(&outer_kinds, 'd', &["g1"]);
+    let g3 = cf_kinds_tag(&outer_kinds, 'd', &["g3"]);
+    assert_eq!(delta.ops, vec![DemandOp::Close(g1), DemandOp::Open(g3)]);
+
+    let after = h.metrics();
+    assert_eq!(
+        after.recompute_passes - before.recompute_passes,
+        1,
+        "one compile-invalidation for the whole batch"
+    );
+}
+
+// ---- 8. identical_descriptors_share_graph -------------------------------
+
+#[test]
+fn identical_descriptors_share_graph() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (handle1, _delta1) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (handle2, delta2) = h.subscribe(LiveQuery(my_follows_filter()));
+    assert!(
+        delta2.is_empty(),
+        "second subscribe to an identical descriptor shares the graph"
+    );
+
+    let demand_with_both = h.demand();
+    let inner = cf_kinds_authors(&[3], &[&a.public_key().to_hex()]);
+    assert_eq!(demand_with_both, BTreeSet::from([inner.clone()]));
+
+    let close_first = h.unsubscribe(handle1.id());
+    assert!(
+        close_first.is_empty(),
+        "refcount 1 remains: nothing actually closes yet"
+    );
+    assert_eq!(h.demand(), demand_with_both);
+
+    let close_second = h.unsubscribe(handle2.id());
+    assert_eq!(close_second.closed(), vec![&inner]);
+    assert!(h.demand().is_empty());
+}
+
+// ---- 9. follows_minus_mutes_surgical ------------------------------------
+
+#[test]
+fn follows_minus_mutes_surgical() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(follows_minus_mutes_filter()));
+    h.deliver(vec![kind3(
+        &a,
+        &[a.public_key(), b.public_key(), c.public_key()],
+        100,
+    )]);
+
+    let atom_a = cf_kinds_authors(&[1], &[&a.public_key().to_hex()]);
+    let atom_b = cf_kinds_authors(&[1], &[&b.public_key().to_hex()]);
+    let atom_c = cf_kinds_authors(&[1], &[&c.public_key().to_hex()]);
+    assert_eq!(
+        h.demand()
+            .into_iter()
+            .filter(|cf| cf.kinds.as_ref() == Some(&BTreeSet::from([1u16])))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([atom_a.clone(), atom_b.clone(), atom_c.clone()])
+    );
+
+    let before = h.metrics();
+    let delta = h.deliver(vec![kind10000_mutes(&a, &[a.public_key()], 100)]);
+
+    assert_eq!(delta.ops, vec![DemandOp::Close(atom_a.clone())]);
+    let after = h.metrics();
+    assert_eq!(after.atoms_opened - before.atoms_opened, 0);
+    assert_eq!(after.atoms_closed - before.atoms_closed, 1);
+    assert_eq!(after.recompute_passes - before.recompute_passes, 1);
+
+    let demand = h.demand();
+    assert!(!demand.contains(&atom_a));
+    assert!(demand.contains(&atom_b), "B untouched");
+    assert!(demand.contains(&atom_c), "C untouched");
+}
+
+// ---- 11. address_coord_fans_out_per_coordinate --------------------------
+
+#[test]
+fn address_coord_fans_out_per_coordinate() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(address_coord_filter()));
+    h.deliver(vec![
+        addressable(&a, 30_003, "g1", 100),
+        addressable(&a, 30_003, "g2", 100),
+    ]);
+
+    let a_hex = a.public_key().to_hex();
+    let atom_g1 = cf_coord(30_003, &a_hex, "g1");
+    let atom_g2 = cf_coord(30_003, &a_hex, "g2");
+    let demand = h.demand();
+    assert!(demand.contains(&atom_g1));
+    assert!(demand.contains(&atom_g2));
+
+    // Co-pinned: kinds/authors/#d travel together in ONE atom per
+    // coordinate, never as an independent cartesian of separate
+    // field-sets.
+    // Only the co-pinned (AddressCoord-produced) atoms carry a `d` tag at
+    // all -- the inner FilterNode's own atom (kinds:30003, authors:A_pk,
+    // no `#d`) is a different, unrelated demand atom and must be excluded
+    // from this check.
+    let d_tag = TagName::new('d').unwrap();
+    for atom in &demand {
+        if atom.tags.contains_key(&d_tag) {
+            assert!(atom.kinds.as_ref().is_some_and(|k| k.contains(&30_003)));
+            assert_eq!(atom.authors.as_ref().unwrap().len(), 1);
+            assert_eq!(atom.tags.get(&d_tag).unwrap().len(), 1);
+        }
+    }
+
+    let before = h.metrics();
+    let delta = h.deliver(vec![addressable(&a, 30_003, "g3", 100)]);
+    let atom_g3 = cf_coord(30_003, &a_hex, "g3");
+
+    assert_eq!(delta.ops, vec![DemandOp::Open(atom_g3)]);
+    let after = h.metrics();
+    assert_eq!(after.atoms_opened - before.atoms_opened, 1);
+    assert_eq!(after.atoms_closed - before.atoms_closed, 0);
+}
+
+// ---- 12. arbitrary_depth1_shape_needs_no_engine_change ------------------
+
+#[test]
+fn arbitrary_depth1_shape_needs_no_engine_change() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let e1 = dummy_event_id("bookmark-1");
+    let e2 = dummy_event_id("bookmark-2");
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(bookmarks_filter()));
+    let delta = h.deliver(vec![kind10003_bookmarks(&a, &[e1, e2], 100)]);
+
+    let atom_e1 = cf_kinds_tag(&[1], 'e', &[&e1.to_hex()]);
+    let atom_e2 = cf_kinds_tag(&[1], 'e', &[&e2.to_hex()]);
+    let opened: BTreeSet<ConcreteFilter> = delta.opened().into_iter().cloned().collect();
+    assert_eq!(opened, BTreeSet::from([atom_e1.clone(), atom_e2.clone()]));
+    assert!(h.demand().contains(&atom_e1));
+    assert!(h.demand().contains(&atom_e2));
+}
