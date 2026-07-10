@@ -1,0 +1,11 @@
+[package]
+name = "nmp-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nostr.workspace = true
+nmp-grammar.workspace = true
+nmp-store.workspace = true
