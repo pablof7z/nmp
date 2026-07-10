@@ -73,8 +73,9 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 |---|---|
 | M0 — Founding gate | **PASSED** (conditional; amendments applied) |
 | M1 — Grammar engine spike | **PROVED** — 12/12 contract tests green; independently verified honest |
-| M2 — Compiler/router + coalescing | planning (Opus) |
-| M3–M6 | not started |
+| M2 — Compiler/router + coalescing | **built** (91 tests green workspace-wide; CI live) — in independent verification |
+| M3 — Store + transport + write outbox | planning (Opus) |
+| M4–M6 | not started |
 
 **Proved so far (running, verified code):**
 - **The crown jewel — the reactive filter-binding grammar is general.** A headless resolver (`nmp-resolver`) drives the real path (signed event → store insert → replaceable supersede → binding re-eval → surgical demand delta) and proves, at two different depths and via one shared code path: depth-1 `$myFollows` re-routes surgically (`{A,B,C}→{A,B,D}` = exactly close-C/open-D, zero churn on A,B); depth-2 NIP-29 groups cascade without reopening the outer handle; `set_active_pubkey` re-roots the whole graph, closing every old-account atom before opening the new (no cross-account leak); `follows − mutes` (`SetOp/Diff`) resolves in-engine so the app never hand-maintains an expansion.
