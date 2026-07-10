@@ -72,7 +72,7 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 | Milestone | State |
 |---|---|
 | M0 — Founding gate | **PASSED** (conditional; amendments applied) |
-| M1 — Grammar engine spike | planning (Opus) |
+| M1 — Grammar engine spike | **in progress** — `nmp-grammar` + `nmp-store` green (28 tests); resolver + 12 contract tests building |
 | M2–M6 | not started |
 
 **M0 outcome (2026-07-11):** two independent Opus agents — an adversarial refuter and a ~25-shape completeness auditor — both concluded the two-noun surface holds: no read needs an app closure, nothing forces a third app-facing noun. It was *not* a rubber stamp — the refuter found a real self-contradiction (the grammar couldn't express "follows minus mutes", which bug-ledger #11 requires), fixed by adding a `SetOp` binding. Also added: a write durability class and an engine-internal encrypt/decrypt capability. Details in [`docs/VISION.md`](docs/VISION.md) §9.
