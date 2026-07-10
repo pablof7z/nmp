@@ -72,11 +72,16 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 | Milestone | State |
 |---|---|
 | M0 — Founding gate | **PASSED** (conditional; amendments applied) |
-| M1 — Grammar engine spike | **in progress** — `nmp-grammar` + `nmp-store` green (28 tests); resolver + 12 contract tests building |
-| M2–M6 | not started |
+| M1 — Grammar engine spike | **PROVED** — 12/12 contract tests green; independently verified honest |
+| M2 — Compiler/router + coalescing | planning (Opus) |
+| M3–M6 | not started |
 
-**M0 outcome (2026-07-11):** two independent Opus agents — an adversarial refuter and a ~25-shape completeness auditor — both concluded the two-noun surface holds: no read needs an app closure, nothing forces a third app-facing noun. It was *not* a rubber stamp — the refuter found a real self-contradiction (the grammar couldn't express "follows minus mutes", which bug-ledger #11 requires), fixed by adding a `SetOp` binding. Also added: a write durability class and an engine-internal encrypt/decrypt capability. Details in [`docs/VISION.md`](docs/VISION.md) §9.
+**Proved so far (running, verified code):**
+- **The crown jewel — the reactive filter-binding grammar is general.** A headless resolver (`nmp-resolver`) drives the real path (signed event → store insert → replaceable supersede → binding re-eval → surgical demand delta) and proves, at two different depths and via one shared code path: depth-1 `$myFollows` re-routes surgically (`{A,B,C}→{A,B,D}` = exactly close-C/open-D, zero churn on A,B); depth-2 NIP-29 groups cascade without reopening the outer handle; `set_active_pubkey` re-roots the whole graph, closing every old-account atom before opening the new (no cross-account leak); `follows − mutes` (`SetOp/Diff`) resolves in-engine so the app never hand-maintains an expansion.
+- An independent Opus review confirmed this is **not hollow green**: zero kind-branches in the decision path (hand-audited), real pipeline (not synthetic — the v1 C5 failure mode is retired), exact metric asserts (`atoms_opened+closed == |symmetric diff|`, never a silent rebuild), and a third unrelated shape needing zero engine change. Review: [`docs/reviews/2026-07-11-M1-verification.md`](docs/reviews/2026-07-11-M1-verification.md).
 
-**Proved so far:** the *surface* is coherent on paper (M0). **Nothing is proved in running code yet** — the grammar's central bet (surgical re-routing at two depths) is not tested until M1 runs. **Disproved so far:** nothing.
+**Two nits carried into M2** (neither invalidates M1): the no-kind-branch test guard is defeatable and needs hardening; `QueryHandle::Drop` currently discards its withdrawal delta (fine headless, must-wire when deltas hit the wire — touches ledger #2).
 
-This section is the truth anchor. It will always say exactly where we are, including what has failed.
+**Not yet proved:** everything downstream of the demand set — per-relay wire compilation, coalescing, outbox routing, real transport, persistence, the SDK boundary, and the falsifier app (the two remaining thesis-gates are M1 ✓ and M5). **Disproved so far:** nothing.
+
+This section is the truth anchor. It always says exactly where we are, including what has failed. Earlier gate detail (M0's amendments) is in [`docs/VISION.md`](docs/VISION.md) §9.
