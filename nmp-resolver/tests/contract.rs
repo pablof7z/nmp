@@ -297,6 +297,73 @@ fn depth2_nip29_groups_cascade_one_level() {
     );
 }
 
+// ---- 3. identity_reroot_closes_old_before_new ---------------------------
+
+#[test]
+fn identity_reroot_closes_old_before_new() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let e = Keys::generate();
+    let f = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    h.deliver(vec![kind3(&a, &[a.public_key(), b.public_key()], 100)]);
+
+    let old_inner = cf_kinds_authors(&[3], &[&a.public_key().to_hex()]);
+    let old_a = cf_kinds_authors(&[1], &[&a.public_key().to_hex()]);
+    let old_b = cf_kinds_authors(&[1], &[&b.public_key().to_hex()]);
+    let demand_before = h.demand();
+    assert!(demand_before.contains(&old_inner));
+    assert!(demand_before.contains(&old_a));
+    assert!(demand_before.contains(&old_b));
+
+    let delta = h.set_active(Some(b.public_key()));
+
+    // Every Close index precedes every Open index.
+    let mut seen_open = false;
+    for op in &delta.ops {
+        match op {
+            DemandOp::Open(_) => seen_open = true,
+            DemandOp::Close(_) => assert!(!seen_open, "a Close appeared after an Open"),
+        }
+    }
+
+    let closes: BTreeSet<ConcreteFilter> = delta.closed().into_iter().cloned().collect();
+    assert_eq!(
+        closes,
+        BTreeSet::from([old_inner.clone(), old_a.clone(), old_b.clone()]),
+        "all old atoms closed"
+    );
+    // Reverse-of-open order: the inner (foundation, opened first at
+    // construction) is closed LAST.
+    assert_eq!(delta.closed().last(), Some(&&old_inner));
+
+    let new_inner = cf_kinds_authors(&[3], &[&b.public_key().to_hex()]);
+    assert_eq!(
+        delta.opened(),
+        vec![&new_inner],
+        "only the new inner atom opens"
+    );
+
+    let demand_after = h.demand();
+    let a_hex = a.public_key().to_hex();
+    assert!(
+        !demand_after
+            .iter()
+            .any(|cf| cf.authors.as_ref().is_some_and(|s| s.contains(&a_hex))),
+        "no atom mentioning the old pubkey survives -- no cross-account leak"
+    );
+    assert!(demand_after.contains(&new_inner));
+
+    let delta2 = h.deliver(vec![kind3(&b, &[e.public_key(), f.public_key()], 100)]);
+    let atom_e = cf_kinds_authors(&[1], &[&e.public_key().to_hex()]);
+    let atom_f = cf_kinds_authors(&[1], &[&f.public_key().to_hex()]);
+    let opened: BTreeSet<ConcreteFilter> = delta2.opened().into_iter().cloned().collect();
+    assert_eq!(opened, BTreeSet::from([atom_e, atom_f]));
+}
+
 // ---- 4. stale_older_kind3_rejected_without_firing -----------------------
 
 #[test]
