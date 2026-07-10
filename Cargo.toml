@@ -5,6 +5,9 @@ members = [
     "nmp-store",
     "nmp-resolver",
     "nmp-router",
+    "nmp-transport",
+    "nmp-signer",
+    "nmp-engine",
 ]
 
 [workspace.package]
@@ -18,4 +21,7 @@ nostr = "0.44.4"
 nmp-grammar = { path = "nmp-grammar" }
 nmp-store = { path = "nmp-store" }
 nmp-resolver = { path = "nmp-resolver" }
+nmp-router = { path = "nmp-router" }
+nmp-transport = { path = "nmp-transport" }
+nmp-signer = { path = "nmp-signer" }
 proptest = "1"

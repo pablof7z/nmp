@@ -1,0 +1,10 @@
+[package]
+name = "nmp-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `nip44` for `CryptoCapability`'s NIP-44 encrypt/decrypt surface (§3.3).
+nostr = { workspace = true, features = ["nip44"] }

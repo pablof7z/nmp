@@ -7,3 +7,8 @@ publish.workspace = true
 
 [dependencies]
 nostr.workspace = true
+# M3 §3.1: the persistent backend (`RedbStore`) lives here, behind the same
+# `EventStore` trait `MemoryStore` already implements. Pure-Rust embedded
+# ACID key-value store — no C toolchain/`build.rs`, no wasm landmine. A1
+# lands `RedbStore`; Step 0 only wires the dependency.
+redb = "4.1"
