@@ -1,0 +1,24 @@
+# Bug-class acceptance ledger
+
+This is the replacement for the old repo's principle corpus + doctrine-lint + audit treadmill. Each entry names a **Nostr bug** and the **structural mechanism** — a property of types or API surface — that excludes it.
+
+**Falsification standard.** To claim an entry holds, an agent attempts to *write the bug* against the public surface and records why the attempt cannot compile, cannot reach the wire, or cannot corrupt state. **Lints are not admissible mechanisms.** These falsification tests live in CI; an entry whose mechanism erodes (e.g. a new API adds a `Vec<RelayUrl>` route-override anywhere) is a red build.
+
+The ledger is append-only in spirit: a newly discovered bug class demands a *surface change* plus a new entry — never a lint.
+
+| # | Bug | Structural mechanism | CI proof status |
+|---|---|---|---|
+| 1 | **Stale replaceable event retained** | One mutating store door; replaceable supersession runs inside insert (dedup-first, then supersede; newest `created_at`, lexically-smallest-id tiebreak). No public index/storage setter; reads by address return only the current winner. | not yet |
+| 2 | **Lost or leaked subscription** | Wire subs are derived exclusively from the live-query demand set — there is no open-a-REQ API. A leak requires a live handle (countable in diagnostics); a loss requires dropping a handle (the app's explicit act). Drop → refcount edge → demand withdrawal (debounced grace). | not yet |
+| 3 | **Wrong-relay routing / manual relay lists** | No `relays:` parameter on reads or writes. Relay choice is compiler output from lane-typed facts; the only relay inputs are role-tagged operator config, treated as policy, not a route-override channel. | not yet |
+| 4 | **Uncapped fan-out** | The relay set for a demand set is the coverage solver's output; its cap is a required parameter with an engine default — never an accumulated union of per-author relay lists. No code path connects to a relay outside a solver-produced plan. | not yet |
+| 5 | **Dedup or provenance loss** | Insert merges provenance on duplicate id before any other processing; provenance is a field of the stored row. Ids/signatures never re-derived post-verification. No API returns an event without retained provenance. | not yet |
+| 6 | **Private-event republish** | Every explicit route carries a typed provenance class; routes from private lanes admit only *narrowing* overrides — a private route type has no widen operation. Unroutable private recipients fail closed (typed error), never fall back to public. | not yet |
+| 7 | **Cache-miss treated as empty (and inverse over-fetch)** | Query results carry coverage as a type: rows + coverage variant (`Unknown` vs `CompleteUpTo(watermark)`). "Not found" is only constructible from a proven watermark; the sync planner consults the same watermark before re-fetching a proven window. | not yet |
+| 8 | **Assuming NIP-77 support** | Negentropy sync requires a probed-capability token obtainable only from the prober's cache. Unprobed relays can't be passed to the negentropy path — the parameter type won't accept them; they get plain REQ. | not yet |
+| 9 | **Enqueue treated as converged** | Write acceptance returns a receipt whose status is a stream with per-relay terminal acks; no publish API returns `void`/`bool`. "Is it sent?" is answerable only by reading receipt states (accepted / signed / routed / sent(relay) / acked(relay)). | not yet |
+| 10 | **Multi-account desync / cross-account leak** | All account-scoped demand hangs off `Reactive(ActivePubkey)` — no second place account context lives. Switch is a root replacement whose resolver-ordered execution closes the old graph (reverse-of-open, exactly-once) before opening the new; a stale account's callbacks have no surviving subscription. | not yet |
+| 11 | **App owning interest expansion** | `Derived` bindings resolve inside the engine; the query API returns final rows, never expanded intermediate sets; `Selector` is closed. No seam lets the app observe, cache, or hand-maintain an expansion (diagnostics expose expansions read-only, off the data path). The NDK-era "app watches kind:3 and re-issues REQs" bug has nothing to attach to. | not yet |
+| 12 | **Presentation in core** | Engine emits raw tokens only — hex pubkeys, Unix timestamps, verbatim kind:0. No display helper in the engine crate; no formatted-string field on any FFI type. Formatting is unreachable because the vocabulary to express it is absent, not because a lint forbids it. | not yet |
+
+Every entry is `not yet` until its milestone builds the mechanism and its falsification test is green in CI. This table is a second truth anchor: it never claims a mechanism holds before the test proves it.

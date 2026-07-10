@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+.DS_Store
+*.xcuserstate
+xcuserdata/
+/ios/**/build/
+/android/**/build/
+.gradle/
+*.swp
