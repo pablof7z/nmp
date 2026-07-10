@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the exact toolchain (channel + components) pinned by
+      # rust-toolchain.toml at the repo root.
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (workspace, all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
