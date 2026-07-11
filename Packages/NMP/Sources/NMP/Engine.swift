@@ -69,6 +69,17 @@ public final class NMPEngine: Sendable {
         try NMPQuery(engine: ffi, filter: filter.toFfi())
     }
 
+    // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
+    // permanently": per-relay wire-sub count, the exact wire filters sent,
+    // events actually received per relay per kind, and per-filter coverage.
+    // Read-only, off the data path -- never influences routing/delivery.
+
+    /// Open a live diagnostics stream. The returned `NMPDiagnostics` is
+    /// iterated the same way as `NMPQuery` -- teardown is deinit-tied.
+    public func observeDiagnostics() -> NMPDiagnostics {
+        NMPDiagnostics(engine: ffi)
+    }
+
     // MARK: - Lifecycle
 
     /// Stop the engine. Idempotent. Also called automatically on `deinit` as

@@ -67,6 +67,59 @@ final class LiveRelayTests: XCTestCase {
         }
     }
 
+    /// The diagnostic surface (M5), proven live: once the follow feed has
+    /// actually produced rows, `observeDiagnostics()` must show a relay
+    /// whose `eventsByKind` reports a REAL received kind:1 count > 0 --
+    /// never fabricated, and matching what the row stream already proved
+    /// arrived.
+    func testDiagnosticsSnapshotShowsRealEventsByKindForTheFollowFeed() async throws {
+        let engine = try NMPEngine(config: NMPConfig(indexerRelays: Self.indexerRelays))
+        defer { engine.shutdown() }
+
+        try engine.setActiveAccount(Self.fiatjafHex)
+
+        let followFeed = NMPFilter(
+            kinds: [1],
+            authors: .derived(
+                inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                project: .tag("p")
+            ),
+            limit: 50
+        )
+        let query = try engine.observe(followFeed)
+        let rows = await Self.firstNonEmptyBatch(from: query, timeoutSeconds: 30)
+
+        guard rows != nil else {
+            query.cancel()
+            throw XCTSkip(
+                "Observed no follow-feed rows within 30s from \(Self.indexerRelays) alone -- "
+                    + "diagnostics has nothing real to report in this test environment."
+            )
+        }
+
+        let diagnostics = engine.observeDiagnostics()
+        let snapshot = await Self.firstSnapshotWithReceivedKind1(from: diagnostics, timeoutSeconds: 10)
+        diagnostics.cancel()
+        query.cancel()
+
+        guard let snapshot else {
+            return XCTFail(
+                "expected a diagnostics snapshot reporting a real kind:1 event count, once the "
+                    + "follow feed had already produced rows"
+            )
+        }
+
+        XCTAssertGreaterThanOrEqual(snapshot.relays.count, 1)
+        let hasReceivedKind1 = snapshot.relays.contains { relay in
+            relay.eventsByKind.contains { $0.kind == 1 && $0.count > 0 }
+        }
+        XCTAssertTrue(
+            hasReceivedKind1,
+            "at least one relay must show a real received kind:1 count, matching the rows "
+                + "already observed"
+        )
+    }
+
     /// The same self-bootstrapping proof for a LITERAL author set (no
     /// derived binding involved at all): fiatjaf's own kind:1 notes, from a
     /// fresh engine configured with ONLY the indexer relays.
@@ -104,6 +157,38 @@ final class LiveRelayTests: XCTestCase {
                 for await batch in query {
                     if !batch.rows.isEmpty {
                         return batch.rows
+                    }
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                return nil
+            }
+
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// Races the diagnostics stream's first snapshot that already reports a
+    /// received kind:1 event against a hard timeout so this test can never
+    /// hang. `NMPDiagnostics` is latest-wins (see `nmp-engine::runtime::
+    /// diagnostics_channel`'s doc), so the count only ever grows -- once a
+    /// row is known to have arrived, a subsequent snapshot showing it is a
+    /// matter of when, not if.
+    private static func firstSnapshotWithReceivedKind1(
+        from diagnostics: NMPDiagnostics, timeoutSeconds: UInt64
+    ) async -> DiagnosticsSnapshot? {
+        await withTaskGroup(of: DiagnosticsSnapshot?.self) { group in
+            group.addTask {
+                for await snapshot in diagnostics {
+                    let hasKind1 = snapshot.relays.contains { relay in
+                        relay.eventsByKind.contains { $0.kind == 1 && $0.count > 0 }
+                    }
+                    if hasKind1 {
+                        return snapshot
                     }
                 }
                 return nil

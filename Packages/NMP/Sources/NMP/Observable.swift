@@ -28,3 +28,28 @@ public final class NMPQuerySnapshot {
         consumeTask?.cancel()
     }
 }
+
+/// `@Observable` sugar ON TOP of `NMPDiagnostics`, mirroring
+/// `NMPQuerySnapshot` exactly (M5 plan §1.3) -- for a DiagnosticsView that
+/// would rather bind straight to an `@Observable` object than manage its own
+/// `@State`.
+@available(iOS 17.0, macOS 14.0, *)
+@Observable
+public final class NMPDiagnosticsSnapshotObserver {
+    public private(set) var snapshot: DiagnosticsSnapshot = DiagnosticsSnapshot()
+
+    private var consumeTask: Task<Void, Never>?
+
+    public init(_ diagnostics: NMPDiagnostics) {
+        consumeTask = Task { [weak self] in
+            for await snapshot in diagnostics {
+                guard !Task.isCancelled else { return }
+                self?.snapshot = snapshot
+            }
+        }
+    }
+
+    deinit {
+        consumeTask?.cancel()
+    }
+}
