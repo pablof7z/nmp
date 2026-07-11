@@ -112,10 +112,28 @@ shape so the resolver sorts it exactly like a relay insert. The resolver gains a
 thin caller mirroring `ingest_observed` (`engine.rs:416`):
 
 ```
-// ResolverEngine
-pub fn accept_local(&mut self, accept: AcceptWrite) -> DemandDelta
-// -> store.accept_write; Inserted/Superseded feed `react(inserted, removed)`
+// Engine<S: EventStore>  (U2, landed #74)
+pub fn accept_local(&mut self, accept: AcceptWrite)
+    -> Result<(AcceptOutcome, DemandDelta), PersistenceError>
+// One resolver-OWNED store.accept_write(accept)? call; match the returned
+// outcome BY REFERENCE to derive react inputs (never consume/reconstruct):
+//   Inserted | Superseded | Kind5Processed -> row.event into `inserted`
+//     (Superseded's `replaced` and Kind5Processed's `hidden` into `removed`)
+//   Duplicate | Stale | Refused -> empty delta
+// then return `Ok((outcome, self.react(inserted, removed)))`.
 ```
+
+**Contract note (ratified post-U1, supersedes the `-> DemandDelta` sketch
+above; this is the shape landed in #74).** `accept_local` OWNS the single
+`accept_write` call and returns the outcome UNCHANGED alongside the delta.
+U3 must NOT call `store.accept_write` and `resolver.accept_local` separately
+— that is **double acceptance** (two transactions, two allocated
+`intent_id`/`receipt_id` pairs). U3 calls `resolver.accept_local` ONCE and
+reads the store-allocated ids off the returned outcome via
+`AcceptOutcome::journaled_intent_id()` / `journaled_receipt_id()` to journal
+its `PendingWrite` and emit `Accepted`. A door-level `PersistenceError`
+propagates as `Err` with the resolver graph untouched (`accept_write` is
+atomic — nothing committed on `Err`).
 
 The pending row now participates immediately in ordinary filtering, `Derived`
 bindings (an optimistic kind:3 edit re-resolves follows because `react` re-queries
@@ -359,18 +377,30 @@ crash-injection**: kill between event-table write and outbox write leaves neithe
 (single transaction) — assert via a fault-injecting `Database` wrapper /
 mid-transaction panic + reopen.
 
-### U2 — Resolver: local add path
+### U2 — Resolver: local add path — **LANDED (#74)**
 **Files:** `nmp-resolver/src/engine.rs` (`accept_local` mirroring `ingest_observed`
-`:416`; route `Superseded` into `react(inserted, removed)`). Small. **Depends U1.**
-**Tests:** `accept_local` seeds the add path; a superseding local edit both adds
-the new row and removes the predecessor through one `react`; `Derived` over kind:3
-re-resolves; `Metrics` witness (`atoms_opened+atoms_closed == |symmetric diff|`)
-holds.
+`:416`; owns ONE `store.accept_write(accept)?` call and routes `Inserted`/
+`Superseded`/`Kind5Processed` into `react(inserted, removed)` — see §1.2's ratified
+signature: returns `Result<(AcceptOutcome, DemandDelta), PersistenceError>`, the
+outcome unchanged, so U3 makes a SINGLE call and reads the ids off it — plus
+`testkit.rs`'s `Harness::accept`/`accept_write_of` fixtures and
+`tests/local_write_u2.rs`). Small. **Depends U1.**
+**Tests (all in `tests/local_write_u2.rs`):** `accept_local` seeds the add path
+(`Inserted`); a superseding local edit adds the new row AND removes the predecessor
+through one `react` (`Superseded`); an older edit is `Stale` and an identical body is
+`Duplicate` (empty delta each); a local kind:5 is `Kind5Processed` — the pending
+deletion row enters `inserted` (opens a deletions-by-`e`-tag `Derived`) while the
+newly-hidden target enters `removed` (closes the follow atoms) in the SAME `react`;
+`Derived` over kind:3 re-resolves; `Metrics` witness (`atoms_opened+atoms_closed ==
+|symmetric diff|`) holds on every case.
 
 ### U3 — Engine core: rewire the write lifecycle through durable accept
-**Files:** `nmp-engine/src/core/mod.rs` — `on_publish` (`:530`) calls
-`store.accept_write` and `resolver.accept_local` (emit `Accepted` only after the
-commit); `on_signed` (`:603`) calls `promote_signed` **before** `Effect::PublishEvent`
+**Files:** `nmp-engine/src/core/mod.rs` — `on_publish` (`:530`) makes ONE
+`resolver.accept_local(accept)?` call (which internally owns the single
+`store.accept_write` — NOT a separate `store.accept_write` + `resolver.accept_local`
+pair, which would double-accept) and reads the store-allocated ids off the returned
+`AcceptOutcome` (`journaled_intent_id()`/`journaled_receipt_id()`), emitting
+`Accepted` only after the commit; `on_signed` (`:603`) calls `promote_signed` **before** `Effect::PublishEvent`
 and validates exact body/id/pubkey + `verify`; `on_signer_completed` Err (`:582`)
 and a new `on_cancel` route to §3 compensation; `PendingWrite` (`:222`) grows
 `displaced` + intent-id linkage; `AwaitingSigner` persistence (§4);

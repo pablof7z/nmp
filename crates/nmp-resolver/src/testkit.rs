@@ -9,7 +9,9 @@
 use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, DemandDelta};
-use nmp_store::MemoryStore;
+use nmp_store::{
+    sentinel_signature, AcceptOutcome, AcceptWrite, IntentSigState, MemoryStore, WriteDurability,
+};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
 use crate::engine::{Engine, GraphSnapshot, HandleId, LiveQuery, Metrics, QueryHandle};
@@ -61,6 +63,19 @@ impl Harness {
     /// engine react (M1 plan §3.3 — the real path).
     pub fn deliver(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
         self.engine.ingest(events)
+    }
+
+    /// Script a LOCAL optimistic write: enter `accept` through the
+    /// `EventStore::accept_write` door and let the engine react
+    /// (`crashsafe-accepted-2-3-plan.md` §1.2, U2). The pass-through mirror
+    /// of `deliver` for the write side; unwraps the persistence `Result`
+    /// (a volatile `MemoryStore` never fails a door) and returns both the
+    /// store outcome (so a test can assert the `Inserted`/`Superseded`/
+    /// `Stale` classification) and the `DemandDelta`.
+    pub fn accept(&mut self, accept: AcceptWrite) -> (AcceptOutcome, DemandDelta) {
+        self.engine
+            .accept_local(accept)
+            .expect("accept_write persistence (MemoryStore never fails a door)")
     }
 
     pub fn demand(&self) -> BTreeSet<ConcreteFilter> {
@@ -202,4 +217,33 @@ pub fn expiring_kind1(
         .tag(Tag::expiration(Timestamp::from(expiration)))
         .sign_with_keys(author)
         .expect("test fixture event must sign cleanly")
+}
+
+/// Freeze any signed fixture event (`kind1`/`kind3`/`addressable`/… above)
+/// into the sentinel-sig `AcceptWrite` the local write door takes — the
+/// NIP-01 id never depends on `sig`, so the frozen body keeps the exact id
+/// and matches queries identically to its eventual signed form
+/// (`crashsafe-accepted-2-3-plan.md` §1.1 Q1). Mirrors
+/// `nmp-store/tests/outbox_contract.rs`'s `compose`+`accept` fixtures so the
+/// resolver's local-add contract exercises the SAME door shape. `accepted_at`
+/// is the journal timestamp; the frozen body keeps its own `created_at`.
+pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
+    let frozen = nostr::Event::new(
+        signed.id,
+        signed.pubkey,
+        signed.created_at,
+        signed.kind,
+        signed.tags.clone(),
+        signed.content.clone(),
+        sentinel_signature(),
+    );
+    AcceptWrite {
+        expected_pubkey: signed.pubkey,
+        frozen,
+        signing_identity_ref: "local".to_string(),
+        durability: WriteDurability::Durable,
+        routing: "author-outbox".to_string(),
+        sig_state: IntentSigState::Pending,
+        accepted_at: Timestamp::from(accepted_at),
+    }
 }
