@@ -800,6 +800,9 @@ dependencies = [
  "nmp-store",
  "nmp-transport",
  "nostr 0.44.4",
+ "nostr-relay-builder",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

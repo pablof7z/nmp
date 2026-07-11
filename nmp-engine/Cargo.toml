@@ -18,3 +18,15 @@ nmp-signer.workspace = true
 # wraps this external set-reconciliation crate. See
 # `src/negentropy/mod.rs` for a naming gotcha this introduces.
 negentropy = { version = "0.5", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# In-process test relay for the runtime (C) integration tests: reconnection
+# replay (test 6) and the end-to-end subscribe/publish/reconnect drive.
+# Async under the hood (nostr-sdk); confined to dev-dependencies and
+# `#[tokio::test]` -- the production `EngineThread`/`Pool` stay free of any
+# imposed runtime (D8). Mirrors `nmp-transport`'s own dev-dependency set
+# (see that crate's `tests/mock_relay.rs` for the same version-shadowing
+# gotcha noted below).
+nostr-relay-builder = "0.45.0-alpha.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
