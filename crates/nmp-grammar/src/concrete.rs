@@ -300,7 +300,7 @@ mod tests {
         let cf = ConcreteFilter {
             kinds: Some(BTreeSet::from([9u16, 30_315u16])),
             tags: BTreeMap::from([(
-                TagName::new('h').expect("h is governed"),
+                IndexedTagName::new('h').expect("'h' is an ASCII letter"),
                 BTreeSet::from(["group-id".to_string()]),
             )]),
             ..ConcreteFilter::default()
@@ -312,6 +312,87 @@ mod tests {
             wire.generic_tags.get(&h_tag),
             Some(&BTreeSet::from(["group-id".to_string()]))
         );
+    }
+
+    /// The full indexed-filter path, not just construction/FFI round-trip
+    /// (#64 acceptance evidence / codex-nova review item 2): every `a-z`/
+    /// `A-Z` `IndexedTagName` (a) lowers to the EXACT case-preserving
+    /// `#<letter>` wire JSON key, and (b) matches an event carrying that
+    /// exact tag through the same local `nostr::Filter::match_event` path
+    /// the store uses. `x`/`Z` fall out of this loop -- NOT a hand-picked
+    /// subset, unlike the whitelist this replaced.
+    #[test]
+    fn to_nostr_lowers_and_matches_every_ascii_letter_indexed_tag() {
+        use nostr::filter::MatchEventOptions;
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+
+        for c in ('a'..='z').chain('A'..='Z') {
+            let cf = ConcreteFilter {
+                tags: BTreeMap::from([(
+                    IndexedTagName::new(c).unwrap(),
+                    BTreeSet::from(["v".to_string()]),
+                )]),
+                ..ConcreteFilter::default()
+            };
+            let wire = cf.to_nostr();
+
+            // (a) the wire JSON carries the EXACT case-preserving `#<letter>`
+            // key -- not folded to a canonical case, not dropped.
+            let json = wire.as_json();
+            assert!(
+                json.contains(&format!("\"#{c}\":[\"v\"]")),
+                "expected wire JSON for {c:?} to contain the exact key \"#{c}\", got: {json}"
+            );
+
+            // (b) the lowered filter matches an event carrying that exact
+            // tag, via the same `nostr::Filter::match_event` path the store
+            // uses to serve queries (never a hand-rolled matcher).
+            let keys = Keys::generate();
+            let event = EventBuilder::new(Kind::Custom(9999), "hi")
+                .tag(Tag::parse([c.to_string(), "v".to_string()]).unwrap())
+                .sign_with_keys(&keys)
+                .expect("test fixture must sign cleanly");
+            assert!(
+                wire.match_event(&event, MatchEventOptions::new()),
+                "filter for #{c} must match an event carrying that exact tag"
+            );
+        }
+    }
+
+    /// Lower/upper-case and distinct-letter indexed tag keys must never
+    /// cross-match: a filter built for `e` must not match an event tagged
+    /// `E`, and a filter for `x` must not match an event tagged `z` --
+    /// exercised through the real `to_nostr`/`match_event` path, not just
+    /// `IndexedTagName`'s own `PartialEq`.
+    #[test]
+    fn to_nostr_indexed_tag_match_is_case_and_letter_exact() {
+        use nostr::filter::MatchEventOptions;
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        fn filter_for(c: char) -> nostr::Filter {
+            ConcreteFilter {
+                tags: BTreeMap::from([(
+                    IndexedTagName::new(c).unwrap(),
+                    BTreeSet::from(["v".to_string()]),
+                )]),
+                ..ConcreteFilter::default()
+            }
+            .to_nostr()
+        }
+
+        fn event_with_tag(c: char) -> nostr::Event {
+            let keys = Keys::generate();
+            EventBuilder::new(Kind::Custom(9999), "hi")
+                .tag(Tag::parse([c.to_string(), "v".to_string()]).unwrap())
+                .sign_with_keys(&keys)
+                .expect("test fixture must sign cleanly")
+        }
+
+        let opts = MatchEventOptions::new();
+        assert!(!filter_for('e').match_event(&event_with_tag('E'), opts));
+        assert!(!filter_for('E').match_event(&event_with_tag('e'), opts));
+        assert!(!filter_for('x').match_event(&event_with_tag('z'), opts));
+        assert!(!filter_for('Z').match_event(&event_with_tag('z'), opts));
     }
 
     #[test]

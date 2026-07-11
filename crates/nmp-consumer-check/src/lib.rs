@@ -31,9 +31,9 @@
 //! the two nouns are not just nameable but usable.
 
 use nmp::{
-    Derived, DiagnosticsSnapshot, Durability, Filter, FilterCoverageEntry, IdentityField, Kind,
-    Lane, LiveQuery, PublicKey, QueryCoverage, RelayDiagnosticsSnapshot, Selector, Tag, TagName,
-    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    Derived, DiagnosticsSnapshot, Durability, Filter, FilterCoverageEntry, IdentityField,
+    IndexedTagName, Kind, Lane, LiveQuery, PublicKey, QueryCoverage, RelayDiagnosticsSnapshot,
+    Selector, Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
 };
 
 /// The reactive index kind an app might declare its own membership list
@@ -45,13 +45,17 @@ const CALLER_CONTENT_KIND: u16 = 9999;
 
 /// A caller-owned derived-index query shape: kind `9999` content authored
 /// by whoever the active pubkey's kind `9998` "index" event currently names
-/// via its `p` tags. Structurally identical to the reactive-derived-set
-/// shape this repo's other falsifiers build (a `Derived`/`Reactive`/
-/// `Tag`-projection), just re-kinded onto two arbitrary caller-owned kinds
-/// instead of any NIP-01 core schema -- proves `Filter`/`Binding`/`Derived`/
-/// `Selector`/`IdentityField`/`TagName` are all nameable and constructible
-/// from `nmp` alone, without asserting anything about what a specific kind
-/// means.
+/// via its `p` tags, restricted to one arbitrary caller-owned `#d` group.
+/// Structurally identical to the reactive-derived-set shape this repo's
+/// other falsifiers build (a `Derived`/`Reactive`/`Tag`-projection), just
+/// re-kinded onto two arbitrary caller-owned kinds instead of any NIP-01
+/// core schema -- proves `Filter`/`Binding`/`Derived`/`Selector`/
+/// `IdentityField`/`IndexedTagName` are all nameable and constructible from
+/// `nmp` alone, without asserting anything about what a specific kind
+/// means. `Selector::Tag` takes an arbitrary `String` key (the local
+/// event-tag projection, #64) while the inner `Filter.tags` entry is keyed
+/// by `IndexedTagName` (the wire/local indexed-filter alphabet, #64) --
+/// deliberately exercising both halves of that split from this crate alone.
 pub fn build_derived_index_query() -> LiveQuery {
     LiveQuery(Filter {
         kinds: Some(std::collections::BTreeSet::from([CALLER_CONTENT_KIND])),
@@ -59,9 +63,15 @@ pub fn build_derived_index_query() -> LiveQuery {
             inner: Filter {
                 kinds: Some(std::collections::BTreeSet::from([CALLER_INDEX_KIND])),
                 authors: Some(nmp::Binding::Reactive(IdentityField::ActivePubkey)),
+                tags: std::collections::BTreeMap::from([(
+                    IndexedTagName::new('d').expect("'d' is a valid ASCII-letter indexed tag key"),
+                    nmp::Binding::Literal(std::collections::BTreeSet::from([
+                        "arbitrary-caller-group".to_string(),
+                    ])),
+                )]),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('p').expect("'p' is a valid tag name")),
+            project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     })
