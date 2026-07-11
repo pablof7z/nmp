@@ -24,3 +24,13 @@ xcuserdata/
 # regenerated, never committed, same as /target above.
 /Packages/NMP/.build
 /Packages/NMP/.swiftpm
+
+# M5 falsifier app -- xcodegen-generated project (memory:
+# xcodegen-pbxproj-churn -- xcodegen churns pbxproj UUIDs on every regen, so
+# the .xcodeproj itself is never committed; only `project.yml` + `Sources/`
+# are the source of truth). Regenerate via `xcodegen generate` in
+# apps/Falsifier.
+/apps/Falsifier/Falsifier.xcodeproj
+/apps/Falsifier/Generated-Info.plist
+/apps/Falsifier/build/
+/apps/Falsifier/DerivedData/
