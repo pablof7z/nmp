@@ -29,8 +29,8 @@ pub enum FfiIdentityField {
 pub enum FfiSelector {
     Authors,
     Ids,
-    /// `name` is exactly one character from the closed M1 tag-name set
-    /// (`p, e, a, d, E, t, q`) -- validated on the way IN by
+    /// `name` is exactly one character from the closed tag-name set
+    /// (`p, e, a, d, E, t, q, h`) -- validated on the way IN by
     /// `convert::tag_name_from_ffi`, never trusted verbatim.
     Tag {
         name: String,
@@ -119,7 +119,7 @@ impl FfiSetOp {
 /// (`nmp_grammar::Filter` mirror). `tags` is keyed by the tag's single
 /// character as a one-character `String` (UniFFI has no native `char`
 /// mirror as clean as this one) -- `convert::tag_name_from_ffi` validates
-/// every key against the closed M1 set on the way in.
+/// every key against the closed set on the way in.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Record)]
 pub struct FfiFilter {
     pub kinds: Option<Vec<u16>>,

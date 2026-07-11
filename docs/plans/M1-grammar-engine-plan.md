@@ -42,7 +42,7 @@ nostr (external crate)
 
 ```rust
 /// A single-letter Nostr tag name, PARAMETERIZED — never per-tag enum variants.
-/// Valid single-letter set for M1: p, e, a, d, E, t, q (validated at construction).
+/// Valid single-letter set: p, e, a, d, E, t, q, h (validated at construction).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TagName(char);
 impl TagName { pub fn new(c: char) -> Option<Self>; pub fn as_char(&self) -> char; }

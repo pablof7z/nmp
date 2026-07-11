@@ -4,19 +4,19 @@
 
 /// A single-letter Nostr tag name.
 ///
-/// M1's valid set is `p, e, a, d, E, t, q` (validated at construction via
+/// The valid set is `p, e, a, d, E, t, q, h` (validated at construction via
 /// [`TagName::new`]). Note `e` and `E` are *distinct* tag names (lowercase
 /// "referenced event", uppercase "root event" per NIP-10-style conventions) —
 /// [`TagName`] preserves case rather than folding it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TagName(char);
 
-/// The closed set of single-letter tag names M1's grammar can bind.
-const VALID: [char; 7] = ['p', 'e', 'a', 'd', 'E', 't', 'q'];
+/// The closed set of single-letter tag names the grammar can bind.
+const VALID: [char; 8] = ['p', 'e', 'a', 'd', 'E', 't', 'q', 'h'];
 
 impl TagName {
-    /// Construct a [`TagName`], validating `c` against the closed M1 set
-    /// (`p, e, a, d, E, t, q`). Returns `None` for any other character.
+    /// Construct a [`TagName`], validating `c` against the closed set
+    /// (`p, e, a, d, E, t, q, h`). Returns `None` for any other character.
     pub fn new(c: char) -> Option<Self> {
         if VALID.contains(&c) {
             Some(Self(c))
@@ -42,10 +42,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_the_closed_m1_set() {
+    fn accepts_the_closed_set() {
         for c in VALID {
             assert!(TagName::new(c).is_some(), "expected {c:?} to be valid");
         }
+    }
+
+    #[test]
+    fn accepts_nip29_group_tag() {
+        assert_eq!(TagName::new('h').map(|tag| tag.as_char()), Some('h'));
     }
 
     #[test]
