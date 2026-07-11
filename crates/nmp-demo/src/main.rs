@@ -146,7 +146,7 @@ fn main() {
     // self-bootstrapping outbox: `nmp_engine::core::EngineCore`'s internal
     // kind:10002 auto-discovery, routed through these same two indexers via
     // the router's existing discovery-kind eligibility).
-    let directory = LiveDirectory::new(indexers.clone());
+    let directory = LiveDirectory::builder().indexers(indexers.clone()).build();
     println!(
         "\n-- no bootstrap phase: the engine discovers write relays live from the \
          indexers above as demand needs them --"

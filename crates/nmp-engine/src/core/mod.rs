@@ -1156,8 +1156,12 @@ impl<S: EventStore> EngineCore<S> {
         else {
             return;
         };
-        let relays = parse_nip65_write_relays(&winner.event);
-        self.directory.ingest_write_relays(author.to_hex(), relays);
+        let write_relays = parse_nip65_write_relays(&winner.event);
+        self.directory
+            .ingest_write_relays(author.to_hex(), write_relays);
+        let read_relays = parse_nip65_read_relays(&winner.event);
+        self.directory
+            .ingest_read_relays(author.to_hex(), read_relays);
     }
 
     /// Open a real negentropy reconciliation for `filter` against `probed`
@@ -1451,4 +1455,175 @@ fn parse_nip65_write_relays(event: &nostr::Event) -> Vec<LanedRelay> {
             }
         })
         .collect()
+}
+
+/// Parse NIP-65 `r` tags off a kind:10002 event into its READ relay set
+/// (lane `Nip65Read`): the mirror of `parse_nip65_write_relays` -- an
+/// absent marker or an explicit `"read"` marker is a read relay; an
+/// explicit `"write"` marker is excluded (`routing-and-ownership.md` §2.4 --
+/// an unmarked `r` tag counts as BOTH read and write, per NIP-65).
+fn parse_nip65_read_relays(event: &nostr::Event) -> Vec<LanedRelay> {
+    event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            if s.first().map(String::as_str) != Some("r") {
+                return None;
+            }
+            let url = RelayUrl::parse(s.get(1)?).ok()?;
+            match s.get(2).map(String::as_str) {
+                Some("write") => None,
+                _ => Some(LanedRelay::new(url, Lane::Nip65Read)),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod nip65_read_write_split_tests {
+    //! Unit A's NIP-65 read/write parse split (`routing-and-ownership.md`
+    //! §2.4) -- private free functions, so tested directly in-module rather
+    //! than via the heavier `tests/self_bootstrap_outbox.rs`-style engine
+    //! harness (which already covers `parse_nip65_write_relays` end-to-end
+    //! via `relay_list_parse_excludes_explicit_read_only_relays`).
+
+    use nmp_router::LiveDirectory;
+    use nmp_store::MemoryStore;
+    use nmp_transport::RelayFrame;
+    use nostr::nips::nip65::RelayMetadata;
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage, SubscriptionId, Tag, Tags};
+
+    use super::*;
+
+    fn relay_list_event(author: &Keys, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::RelayList, "")
+            .tags(Tags::from_list(tags))
+            .sign_with_keys(author)
+            .expect("test fixture event must sign cleanly")
+    }
+
+    #[test]
+    fn nip65_unmarked_relay_is_both_read_and_write() {
+        let author = Keys::generate();
+        let r = RelayUrl::parse("wss://both.example.com").unwrap();
+        let event = relay_list_event(&author, vec![Tag::relay_metadata(r.clone(), None)]);
+
+        assert_eq!(
+            parse_nip65_write_relays(&event),
+            vec![LanedRelay::new(r.clone(), Lane::Nip65Write)],
+            "an unmarked r tag must count as a write relay"
+        );
+        assert_eq!(
+            parse_nip65_read_relays(&event),
+            vec![LanedRelay::new(r, Lane::Nip65Read)],
+            "an unmarked r tag must ALSO count as a read relay (NIP-65: unmarked = both)"
+        );
+    }
+
+    #[test]
+    fn nip65_write_marked_excluded_from_read() {
+        let author = Keys::generate();
+        let r = RelayUrl::parse("wss://write-only.example.com").unwrap();
+        let event = relay_list_event(
+            &author,
+            vec![Tag::relay_metadata(r.clone(), Some(RelayMetadata::Write))],
+        );
+
+        assert_eq!(
+            parse_nip65_write_relays(&event),
+            vec![LanedRelay::new(r, Lane::Nip65Write)],
+            "an explicit write-marked relay must still be a write relay"
+        );
+        assert!(
+            parse_nip65_read_relays(&event).is_empty(),
+            "an explicit write-marked relay must be excluded from the read set"
+        );
+    }
+
+    #[test]
+    fn nip65_read_marked_excluded_from_write() {
+        let author = Keys::generate();
+        let r = RelayUrl::parse("wss://read-only.example.com").unwrap();
+        let event = relay_list_event(
+            &author,
+            vec![Tag::relay_metadata(r.clone(), Some(RelayMetadata::Read))],
+        );
+
+        assert!(
+            parse_nip65_write_relays(&event).is_empty(),
+            "an explicit read-marked relay must be excluded from the write set"
+        );
+        assert_eq!(
+            parse_nip65_read_relays(&event),
+            vec![LanedRelay::new(r, Lane::Nip65Read)],
+            "an explicit read-marked relay must still be a read relay"
+        );
+    }
+
+    /// `ingest_relay_list_winner` stores BOTH sets from the ONE kind:10002
+    /// winner in a single pass (`routing-and-ownership.md` §2.4) -- proven
+    /// through the real `EngineCore::on_relay_frame` path (not a bypassed
+    /// direct directory poke), against a relay list mixing an unmarked
+    /// (both), an explicit write-only, and an explicit read-only relay.
+    #[test]
+    fn live_directory_stores_read_and_write_from_one_winner() {
+        let author = Keys::generate();
+        let relay_url = RelayUrl::parse("wss://relay.example.com").unwrap();
+        let both = RelayUrl::parse("wss://both.example.com").unwrap();
+        let write_only = RelayUrl::parse("wss://write-only.example.com").unwrap();
+        let read_only = RelayUrl::parse("wss://read-only.example.com").unwrap();
+
+        let dir = LiveDirectory::builder().build();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
+
+        core.handle(EngineMsg::RelayConnected(
+            TransportRelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            relay_url.clone(),
+        ));
+
+        let event = relay_list_event(
+            &author,
+            vec![
+                Tag::relay_metadata(both.clone(), None),
+                Tag::relay_metadata(write_only.clone(), Some(RelayMetadata::Write)),
+                Tag::relay_metadata(read_only.clone(), Some(RelayMetadata::Read)),
+            ],
+        );
+        core.handle(EngineMsg::RelayFrame(
+            TransportRelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            RelayFrame::Text(RelayMessage::event(SubscriptionId::new("s"), event).as_json()),
+        ));
+
+        let author_hex = author.public_key().to_hex();
+        let write_relays: BTreeSet<RelayUrl> = core
+            .directory
+            .write_relays(&author_hex)
+            .into_iter()
+            .map(|lr| lr.url)
+            .collect();
+        let read_relays: BTreeSet<RelayUrl> = core
+            .directory
+            .read_relays(&author_hex)
+            .into_iter()
+            .map(|lr| lr.url)
+            .collect();
+
+        assert_eq!(
+            write_relays,
+            BTreeSet::from([both.clone(), write_only.clone()]),
+            "write set must be {{unmarked, write-marked}}, excluding read-marked"
+        );
+        assert_eq!(
+            read_relays,
+            BTreeSet::from([both, read_only]),
+            "read set must be {{unmarked, read-marked}}, excluding write-marked"
+        );
+    }
 }

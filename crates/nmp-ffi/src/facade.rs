@@ -38,7 +38,9 @@ use crate::types::{FfiFilter, FfiWriteIntent};
 const ROUTER_CAP: usize = 10;
 
 /// Construction config for [`NmpEngine::new`]. See the module doc: the only
-/// relay fact a caller ever supplies is `indexer_relays`.
+/// relay facts a caller ever supplies are the three operator-configured
+/// lanes -- `indexer_relays`, `app_relays`, `fallback_relays`
+/// (`routing-and-ownership.md` §2.1) -- everything else is discovered live.
 #[derive(uniffi::Record, Clone, Debug, Default)]
 pub struct NmpEngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
@@ -47,6 +49,10 @@ pub struct NmpEngineConfig {
     /// authoritative -- ledger #7).
     pub store_path: Option<String>,
     pub indexer_relays: Vec<String>,
+    /// Operator app relay set (`Lane::AppRelay`). Default empty.
+    pub app_relays: Vec<String>,
+    /// Operator fallback relay set (`Lane::Fallback`). Default empty.
+    pub fallback_relays: Vec<String>,
 }
 
 fn build_directory(config: &NmpEngineConfig) -> Result<LiveDirectory, FfiError> {
@@ -55,7 +61,21 @@ fn build_directory(config: &NmpEngineConfig) -> Result<LiveDirectory, FfiError> 
         .iter()
         .map(|u| parse_relay_url(u))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(LiveDirectory::new(indexers))
+    let app_relays = config
+        .app_relays
+        .iter()
+        .map(|u| parse_relay_url(u))
+        .collect::<Result<Vec<_>, _>>()?;
+    let fallback_relays = config
+        .fallback_relays
+        .iter()
+        .map(|u| parse_relay_url(u))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LiveDirectory::builder()
+        .indexers(indexers)
+        .app_relays(app_relays)
+        .fallback_relays(fallback_relays)
+        .build())
 }
 
 /// The UniFFI-exported engine object. `new` is the ONE construction call the

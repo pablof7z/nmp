@@ -454,7 +454,7 @@ impl NmpWorld {
             .iter()
             .map(|name| self.relays[name].url.clone())
             .collect();
-        let mut directory = LiveDirectory::new(indexer_urls);
+        let mut directory = LiveDirectory::builder().indexers(indexer_urls).build();
         for (person, relay_names) in self.write_relay_of.clone() {
             let pk_hex = self.person(&person).public_key().to_hex();
             let laned: Vec<LanedRelay> = relay_names

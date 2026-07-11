@@ -164,7 +164,7 @@ fn resolving_39_authors_one_at_a_time_does_not_churn_the_discovery_sub() {
     let authors: Vec<Keys> = (0..N).map(|_| Keys::generate()).collect();
     let indexer = RelayUrl::parse("wss://indexer.example.com").unwrap();
 
-    let dir = LiveDirectory::new([indexer.clone()]);
+    let dir = LiveDirectory::builder().indexers([indexer.clone()]).build();
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
     let mut log = DiscoveryReqLog::default();
 
@@ -273,7 +273,7 @@ fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
     let b = Keys::generate();
     let indexer = RelayUrl::parse("wss://indexer.example.com").unwrap();
 
-    let dir = LiveDirectory::new([indexer.clone()]);
+    let dir = LiveDirectory::builder().indexers([indexer.clone()]).build();
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
 
     let _ = connect(&mut core, 0, &indexer);
