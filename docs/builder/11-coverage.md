@@ -1,126 +1,99 @@
-# Coverage: empty vs unknown
+# Query evidence: cache state and per-source acquisition
 
-**Status: BUILT** — coverage is a real type on every delivered batch, proven by the capstone `watermark_cold_start_offline` live test. This is the trust chapter: read it before you render an empty state anywhere.
+**Status: CURRENT + TARGET.** Persisted per-(filter, relay) watermarks and the
+current aggregate `Coverage` type are built. The target public contract does
+not interpret those facts as global completeness. It returns cached rows plus
+small, source-scoped acquisition evidence; full per-relay proof remains in
+diagnostics.
 
-After this chapter you can tell the difference between *"there are no results"* and *"we can't know yet whether there are results"* — and render each one honestly. A builder who collapses the two ships a silent-stale bug: a screen that says "no messages," "no followers," "empty wallet," when the truth is only that the engine hasn't proven anything yet. Coverage is the API's structural defense against that bug, and it costs you one `switch`.
+## The fact NMP cannot know
 
-## Coverage is a type, not a footnote
+No client knows the complete global Nostr result for a filter. A matching event
+may exist on a relay the engine has never heard of, on a private relay, or on a
+LAN relay that is currently offline. EOSE means one relay finished answering
+one request; it does not certify the network.
 
-Every `RowBatch` carries rows **and** a coverage value. They are inseparable:
+Therefore NMP must not publish `synced`, `complete`, `syncHealth`, or
+`authoritative empty` as interpretations of the global result.
 
-```swift
-// Packages/NMP/Sources/NMP/Row.swift
-public enum Coverage: Sendable, Hashable {
-    case completeUpTo(UInt64)   // proven: these rows are EVERYTHING up to this Unix second
-    case unknown                // NOT proven: absence here means nothing
-}
+## What a query snapshot can say honestly
 
-public struct RowBatch: Sendable {
-    public let rows: [Row]
-    public let coverage: Coverage
-}
-```
+A query delivery consists of:
 
-The two cases are not "verbose" and "terse" versions of the same answer. They are different *claims*:
+1. **Rows currently accepted by the canonical store.** These may be useful
+   immediately from cache.
+2. **Cache evidence.** Whether rows came from persisted state and the relevant
+   last-observed/watermark facts.
+3. **Acquisition evidence for the current source plan.** Which planned sources
+   are connecting, requesting, waiting for AUTH, at EOSE, unavailable, limited,
+   or failed.
 
-- **`.completeUpTo(watermark)`** is an authoritative statement: *the engine can prove the visible rows are the complete set up to `watermark`.* If that set is empty, the emptiness is real — there genuinely are no matching events up to that time. This is a fact you can render and act on.
-- **`.unknown`** is the absence of that proof: *the engine has not established completeness.* Zero rows under `.unknown` means *nothing*. It is not "empty" — it is "not yet." You have no license to tell the user anything is absent.
+The app interprets those facts for its UI. NMP does not collapse them into a
+promise that the result is globally complete.
 
-This is bug-ledger #7 made structural. `.completeUpTo` is *only* constructible from a proven watermark — the store records, per `(filter, relay)` window, how far a real EOSE or negentropy reconciliation has proven the window complete, and coverage aggregates those watermarks. "Not found" cannot be fabricated; it can only be earned. (Aggregation is unanimous, not optimistic: a query is `CompleteUpTo` only when *every* atom is proven at *every* relay in its current covering set. One lagging relay, one atom with no covering relay at all, and the whole query stays `.unknown` — a slow relay is never misread as authoritative-empty.)
-
-## The bug this prevents
-
-Here is the wrong reader, and it is the natural one to write:
-
-```swift
-// WRONG — silent-stale bug. Renders "No results" on a cache miss.
-if rows.isEmpty {
-    Text("No results")          // ← lies whenever coverage is .unknown
-}
-```
-
-The instant a query opens — before any relay has answered — `rows` is empty and `coverage` is `.unknown`. This code paints "No results" over a query that is simply still working. On a cold start, on a flaky network, on a relay that's merely slow, the user sees a confident, wrong emptiness. Worse: a write built on top of a mis-read empty (a follow list that looks empty because it hasn't loaded) is how "the client wiped my follows" happens (see *Editing replaceable state safely*). Empty-vs-unknown is not a UI nicety; it is a correctness boundary.
-
-Here is the honest reader — always branch on coverage first:
+Illustrative target shape, not frozen API:
 
 ```swift
-switch coverage {
-case .unknown:
-    ProgressView("Loading…")                    // not proven — say so, don't claim empty
-case .completeUpTo(let watermark):
-    if rows.isEmpty {
-        ContentUnavailableView("Nothing here",   // authoritative empty — safe to render
-            systemImage: "tray",
-            description: Text("Complete as of \(formatted(watermark)).")
-        )
-    } else {
-        FeedList(rows)                           // real rows, known-complete up to watermark
-    }
+struct QuerySnapshot {
+    let rows: [Row]
+    let cache: CacheEvidence
+    let acquisition: AcquisitionEvidence
 }
 ```
 
-The falsifier's feed does exactly this: it renders the coverage line verbatim — `"unknown"` vs `"complete up to \(formatted(ts))"` — so the distinction is visible on screen, permanently, as an acceptance test you can watch.
+The query snapshot should remain small. Exact wire filters, relay URLs,
+connection generations, AUTH challenges, lane provenance, and raw watermarks
+belong on the diagnostics stream.
 
-```swift
-private var coverageText: String {
-    switch coverage {
-    case .unknown: return "unknown"
-    case .completeUpTo(let ts): return "complete up to \(formatted(ts))"
-    }
-}
-```
+## Empty remains evidence-dependent
 
-## Worked: the cold-start, offline, authoritative read
+An empty row set means only "the canonical local store currently has no
+matching row." The surrounding evidence can explain that:
 
-The reason coverage is worth a whole chapter is that it makes *offline* trustworthy. Walk the capstone test — `watermark_cold_start_offline`, the flagship falsifier for ledger #7 — because it is the exact scenario your app hits every launch.
+- there was no persisted match and sources have not answered;
+- every currently planned relay reached EOSE for the requested window;
+- one planned relay is offline;
+- another is blocked on AUTH;
+- the query was locally limited;
+- no source could be planned for part of the demand.
 
-**Phase 1 — online.** The app subscribes to account A's `kind:1` notes. Three of A's posts sit on a real relay. The engine fetches them over a plain REQ/EOSE round trip, and the batch resolves to those three rows with `CompleteUpTo(_)` — the EOSE *proved* the window complete, and that watermark is persisted to the on-disk store (redb), keyed by `(filter, relay)`.
+Those are useful and different facts. None licenses the stronger statement
+"no matching event exists anywhere on Nostr."
 
-```rust
-// Phase 1 assertion (integration_capstone.rs)
-ids == post_ids && matches!(coverage, QueryCoverage::CompleteUpTo(_))
-// "phase 1 (online) must fetch all 3 seeded posts and reach CompleteUpTo via a real EOSE"
-```
+Apps may render an empty state after applying their own product policy to the
+evidence. They should be able to explain that policy, for example "nothing was
+found on the three relays currently checked" rather than "nothing exists."
 
-**Now go offline.** The relay is killed. The engine restarts cold on the *same* store file — zero relays reachable.
+## Watermarks remain valuable
 
-**Phase 2 — cold, offline read.** The app re-subscribes to A's notes. With no network at all, the first batch is served **the instant `subscribe` returns**, computed purely from the local store plus the router plan:
+Removing the global-completeness interpretation does not remove watermarks.
+NMP still owns persisted per-source coverage facts because they support:
 
-```rust
-// The flagship assertion — offline, zero network round trips
-ids == post_ids && matches!(coverage, QueryCoverage::CompleteUpTo(_))
-// "offline cold read must be AUTHORITATIVE: CompleteUpTo from the persisted
-//  watermark, serving the 3 cached rows with zero network — if this reads
-//  Unknown, ledger #7 is not real"
-```
+- immediate offline cache delivery;
+- avoiding redundant acquisition for already-examined source windows;
+- resuming after restart;
+- showing what each planned relay has or has not answered;
+- diagnostics and deterministic sync planning.
 
-The persisted watermark survived the restart. So an offline launch is not a degraded "here's some stale cache, good luck" — it is an *authoritative* read: these three rows are provably everything, as of the watermark, and your UI can render them as complete without a spinner and without lying. Cold-start offline is a feature, and coverage is what makes it one.
+The correction is semantic: a watermark proves something about one source and
+one request shape, not about the whole network.
 
-## The authoritative-empty case — and its control
+## Cold-start offline
 
-The subtle half, and the one that separates coverage from a boolean "is-cached" flag: **a proven-empty read is `CompleteUpTo`, not `.unknown`.** If the engine has synced a window and found nothing, the honest answer is "complete, and complete means empty" — you *should* render "nothing here," because there provably is nothing.
+On an offline relaunch, NMP should immediately return cached matching rows and
+the persisted evidence that produced them. The app can show useful stale data
+without a spinner if that fits its product. It can also show that no current
+source is reachable. NMP does not label the cache "the truth" or upgrade an
+empty cache into an authoritative empty result.
 
-The capstone proves this with a control account B in the same store, whose shape was *never queried* in phase 1. On the offline restart, B's read must come back **`Unknown`**, not `CompleteUpTo`:
+## Current implementation gap
 
-```rust
-// Control: a never-synced shape has no coverage row anywhere
-rows.is_empty() && matches!(coverage, QueryCoverage::Unknown)
-// "a never-synced shape must read Unknown, never CompleteUpTo — a
-//  proven-empty watermark must not be confused with a genuine cache-miss"
-```
-
-Two empty result sets, two different truths: A's other windows can be authoritatively empty (synced, nothing there → `CompleteUpTo`), while B is genuinely unknown (never synced → `Unknown`). A boolean cache flag cannot tell these apart. The coverage *type* must, and does — which is precisely why it is a type and not a footnote.
-
-## Coverage also stops redundant fetches
-
-The watermark is not read-only trivia for your UI; the engine consults it too. Before re-fetching a window it has already proven `CompleteUpTo`, the sync planner checks the same watermark and skips the round trip. So the type that keeps your UI honest is the same type that keeps your bandwidth sane — the inverse of the empty-vs-unknown bug (redundant over-fetch) is closed by the same mechanism.
-
-## What to hold onto
-
-1. **Never render an empty state on `rows.isEmpty` alone.** Branch on `coverage` first. `.unknown` → loading; `.completeUpTo` + empty → an honest, authoritative empty.
-2. **`.unknown` means "no license to claim absence."** Not empty, not error — *not yet*.
-3. **`.completeUpTo(watermark)` is a proof, including the empty case.** A synced-and-empty window is safe to render as empty; that is different from never-synced.
-4. **When coverage is stuck at `.unknown` longer than you expect,** the answer is on the diagnostics screen — which atom has no covering relay, which relay hasn't EOSE'd. See *Diagnostics & debugging: "why is my feed empty?"*, whose entire first question is this one.
+The shipping SDK exposes `Coverage.unknown | completeUpTo` on `RowBatch` and
+some builder examples still branch on it. That shape must be replaced across
+the canonical Rust facade, FFI, Swift, and Kotlin. Until then,
+`completeUpTo(t)` must be read narrowly: all sources in that current plan met
+the engine's existing aggregation rule up to `t`; it is not global
+completeness.
 
 ---
 

@@ -1,18 +1,28 @@
-# Capabilities: signer, AUTH policy, encrypt/decrypt
+# Signer, crypto, and AUTH capabilities
 
-**Status: PARTIAL** — the signing and encrypt/decrypt capabilities are BUILT (`nmp-signer/src/*`, local nsec today); NIP-42 AUTH policy is **PLANNED-shape** in this chapter (the intended design, not yet shipped — the transport currently defers AUTH). Every AUTH example below is clearly marked as such.
+**Status: CURRENT + TARGET.** Local signing and NIP-44 crypto traits are built.
+The standard secure-storage provider boundary, NIP-46 reattachment, pinned
+per-write signer override, durable `AwaitingSigner`, completed decrypt return
+path, and NIP-42 policy/evidence model are target work.
 
-After this chapter you will know what a *capability* is (and why it is not a callback), how to plug in a signer, why decryption lives *inside* the engine next to the key, and what the AUTH-policy surface will look like when it lands.
+After this chapter you will know what NMP persists, what the platform signer
+provider owns, and why a capability is not an app callback in an engine
+decision path.
 
-## A capability is something the engine invokes — not a callback into your code
+## A capability answers a bounded engine request
 
-The design rule from the cross-platform contract: **capabilities and policies, not callbacks.** Where an app must influence engine behavior, it supplies a *capability object* (or a declarative *policy value*) at construction/registration time. The engine then invokes that capability *at the right moment* — but it never calls back into your app to make a routing, demand, or ordering decision mid-flight.
+NMP may ask a provider to sign a frozen body, decrypt protocol ciphertext, or
+answer another typed cryptographic operation. The engine owns when that request
+is valid and how the result affects state. The provider owns the operation and
+returns a typed result correlated to that request.
 
-The difference is not cosmetic. A callback the engine invokes to decide *where to route* or *what to admit* would be an opaque closure in the decision path — exactly the seam the whole "values in, code after" architecture exists to exclude. A capability is narrower: it answers a *bounded question the engine asks* ("sign this template," "decrypt this ciphertext"), at a *placement the engine chooses* ("at the awaiting-capability stage," "before emitting raw tokens"). You pick *which* capability exists; the engine owns *when* it runs.
+This is not a closure that decides routing, admission, ordering, or demand.
+Opaque app code never enters those correctness paths. The provider cannot
+mutate the store, choose arbitrary relays, or rewrite the frozen body.
 
-## The signer capability
+## Current signer seam
 
-Signing is a capability with two methods:
+The Rust signer trait is built, and `LocalKeySigner` can resolve synchronously:
 
 ```rust
 pub trait SigningCapability {
@@ -21,92 +31,96 @@ pub trait SigningCapability {
 }
 ```
 
-`sign` returns a `SignerOp` — a **pollable thunk**, not an `async fn`. It may resolve synchronously (`SignerOp::Ready`) or later (`SignerOp::Pending`), and the engine polls it on its own blocking recv loop. There is no tokio anywhere in `nmp-signer`; this is the D8 "no poll-loop, blocking recv" discipline. A local key resolves instantly; a remote signer (NIP-46) would resolve `Pending` while the round trip happens, without the engine ever spawning an async runtime.
+`SignerOp` can be ready or pending, which leaves room for a remote operation
+without putting an app callback in the reducer. The current Swift SDK accepts
+an nsec through `addAccount`, registers the resulting local signer, and
+`setActiveAccount` couples that signer to `Reactive(ActivePubkey)`.
 
-You register a signer once. On Rust:
+That coupling is current implementation truth, not the target authority model.
 
-```rust
-use nmp_signer::LocalKeySigner;
+## Target signer selection
 
-let pubkey = handle.add_signer(LocalKeySigner::new(keys));  // keyed by its own public_key()
-handle.set_active_account(pubkey);                          // now it signs + roots reads
+The common path stays small:
+
+```text
+publish(draft)                    // signer registered for currentPubkey
+publish(draft, as: identityRef)   // explicit exceptional override
 ```
 
-`add_signer` registers the capability keyed by the pubkey it reports; `set_active_account` is what makes it the *active* signer (and re-roots reads onto the same identity — see *Identity & multi-account*). On Swift the same thing is one call:
+Most apps never pass a signer with each write. The default follows
+`$currentPubkey`; an override supports a podcast key, disposable identity,
+hardware key, delegation, or other non-active identity without re-rooting
+queries.
 
-```swift
-let alice = try await nmp.addAccount(secretKey: "nsec1…")  // key crosses ONCE, lives engine-side
-try nmp.setActiveAccount(alice)
-```
+Signer choice is resolved and pinned before durable `Accepted`. A later
+current-pubkey change cannot redirect the intent. If the matching capability is
+missing or temporarily offline, the canonical pending row and receipt remain
+`AwaitingSigner(pubkey)` until a matching provider attaches or the app cancels.
+Missing NIP-46 connectivity is waiting, not terminal failure.
 
-The engine invokes `sign` at the **awaiting-capability stage** of a write: a `WriteIntent` with an unsigned template produces a `RequestSign` effect, the signer resolves it, and the write proceeds to routing. Signing and publishing stay orthogonal — a caller that already holds a signed event supplies it directly and skips the signer entirely. The receipt stream reports `AwaitingCapability` while this is outstanding, so it is observable, not hidden (see *Writing: intents, receipts, and the durability guarantee lattice*).
+Every returned signed event must match the frozen body and expected pubkey
+exactly and verify cryptographically before it can promote the canonical row
+from `Pending(intentId)` to `Signed(signature)`.
 
-`LocalKeySigner` also refuses to sign a template whose pubkey does not match its own key — a mismatch means the caller built the template for a different identity, and silently signing it under the wrong key is exactly the class of bug the capability boundary exists to prevent.
+## Secret material boundary
 
-## The crypto capability lives *with* the key
+The durable Rust event/outbox store persists obligations, expected pubkeys,
+frozen unsigned bodies, signatures, and receipt facts. It does **not** persist
+raw nsecs or other signing secrets.
 
-Encryption and decryption are a second capability, `CryptoCapability`, and the critical design fact is that it is **co-located with the signer** — the same type holds both, because the *key lives in the engine*:
+Platform SDKs should ship standard signer providers backed by Keychain,
+Android Keystore, or the platform's equivalent secure facility. That avoids
+forcing every app to hand-roll vault plumbing while leaving product policy in
+the app:
 
-```rust
-pub trait CryptoCapability {
-    fn nip44_encrypt(&self, peer: PublicKey, plaintext: &str) -> SignerOp<String>;
-    fn nip44_decrypt(&self, peer: PublicKey, ciphertext: &str) -> SignerOp<String>;
-}
-```
+- the app owns identity import, removal, backup, labels, and login UX;
+- the SDK owns a standard secure provider implementation;
+- custom NIP-46, hardware, or memory-only providers may implement the same
+  bounded capability seam;
+- the engine owns durable obligations and exact result validation.
 
-Why co-located, and why engine-side? Because identity-is-input requires it. If decryption lived in your app, your app would need the secret key — and then "the active identity" would be split across the engine and the app, breaking the single-root property that *Identity & multi-account* depends on. So the key crosses the FFI boundary exactly once (in `addAccount`) and never leaves; decryption happens where the key already is.
+A memory-only disposable key may vanish. NMP does not silently discard or
+re-author its accepted intent; the receipt waits for reattachment or explicit
+cancellation.
 
-This is the **ledger #12 amendment (presentation in core)**. Ledger #12 forbids any presentation in the engine — but it scopes that to *unencrypted* content. Encrypted payloads (NIP-17 gift-wrap, private NIP-51 list items) are decrypted by this engine-internal capability and the engine emits the **decrypted raw tokens** — still doing zero presentation. Decryption is a *capability*, not a third noun, and it does not re-introduce formatting: you get raw plaintext tokens out, and your app formats them, exactly as it formats a hex pubkey or a Unix timestamp.
+## Crypto operations
 
-`LocalKeySigner` implements both traits over one `nostr::Keys`, using rust-nostr's `nip44` for the actual crypto — no scratch cryptography. A round trip:
+NIP-44 encrypt/decrypt is also a typed capability. It may be implemented by the
+same provider that can sign for an identity, but the architectural requirement
+is capability locality, not that secret bytes live in the event store.
 
-```rust
-let ct = alice.nip44_encrypt(bob.public_key(), "gm")?;   // SignerOp::Ready(Ok(ciphertext))
-let pt = bob.nip44_decrypt(alice.public_key(), &ct)?;    // "gm"
-```
+Decryption produces raw protocol data. Formatting, display names, thread UI,
+and plaintext presentation policy remain app-owned. The current local crypto
+implementation exists; the end-to-end decrypt-result path into public query
+delivery is incomplete.
 
-Inside the engine, a decrypt is placed as a `RequestDecrypt(EventId, PublicKey, ciphertext)` effect at the point *before* raw tokens are emitted for a private event — the same "invoke at the right moment" placement as signing.
+## AUTH is source/access context
 
-### Gap: the decrypt feedback path
+NIP-42 can change what a relay returns, so AUTH state participates in a query's
+`AccessContext` and acquisition evidence. It is not a global "active account"
+side effect and not a cache-isolation boundary.
 
-The `CryptoCapability` trait and `LocalKeySigner`'s impl are built and tested, and the engine emits `RequestDecrypt` at the right seam. What is **not** yet fully wired is the return path that folds a decrypted result back into an emitted row across the FFI surface — so end-to-end decrypted delivery to a Swift app is not shippable today. The capability and its placement are correct; the plumbing that carries the plaintext back to `observe` is the remaining work.
+The target policy is a closed value supplied by the app, not a callback. When a
+relay challenges, NMP either applies the declared policy with the selected AUTH
+capability or exposes facts such as `authRequired`, `awaitingSigner`,
+`authenticated`, or `rejected`. Ordinary snapshots carry compact source
+evidence; diagnostics retains the exact relay, challenge, connection, policy,
+and error facts.
 
-## AUTH policy — the intended shape (PLANNED)
+AUTH operations do not silently change `$currentPubkey`, the signer pinned to
+another write, or literal multi-account queries.
 
-> Everything in this section is **PLANNED-shape**: the intended design, not yet shipped. The transport today defers NIP-42 — the `Closed`/`Notice`/`Auth` frames are parsed but not acted on (a plan §7 non-goal until a falsifier test forces it). Do not write code against this yet.
+## Status summary
 
-NIP-42 lets a relay challenge a connection with `AUTH`. The wrong way to handle it is a callback: "engine asks app, mid-subscription, whether to authenticate here" — that is an app closure in the transport decision path, precisely the shape the capability rule rejects. The right way is an **app-injected policy *value*** supplied at construction:
-
-```swift
-// PLANNED-shape — illustrative, not a shipping API.
-let nmp = try NMPEngine(config: .init(
-    indexerRelays: [...],
-    authPolicy: .init(
-        // Relays the user explicitly added → authenticate automatically.
-        autoAuth: .userConfiguredRelays,
-        // Any other relay that challenges → surface a prompt decision.
-        unknown: .prompt
-    )
-))
-```
-
-The policy is a **declarative value the engine evaluates**, not a function the engine calls. When a relay issues an `AUTH` challenge — including *mid-subscription*, after a REQ is already open — the engine consults the policy value:
-
-- **auto-auth** for relays the user configured themselves (the `UserConfigured` lane from *Relays: outbox, indexers, and roles*): the engine signs the AUTH event via the same signer capability and continues, no app round trip.
-- **prompt** for an unknown relay: the engine surfaces the decision as observable state (a diagnostic/receipt-style signal), and the app answers by *updating the policy value*, not by returning from a callback.
-
-The AUTH event itself is an `Ephemeral` write (fire-and-forget, no receipt — see *Offline & sync*), signed by the active signer capability at the transport edge. The key property carried over from the built capabilities: the app chooses *which policy exists*; the engine owns *when and how* AUTH runs. No closure ever enters the routing or admission path.
-
-## Summary of what's real today
-
-| Capability | Status | Notes |
+| Surface | Current | Target |
 |---|---|---|
-| `SigningCapability` (local nsec) | BUILT | `LocalKeySigner`; `SignerOp` pollable thunk, no async |
-| `CryptoCapability` (NIP-44 encrypt/decrypt) | BUILT (crypto) | co-located with signer; decrypt *return path* to FFI is the gap |
-| NIP-46 remote signer | PLANNED | same `SigningCapability` seam; resolves `SignerOp::Pending` |
-| NIP-42 AUTH policy | PLANNED | app-injected declarative policy value, not a callback |
-
-The seams are the durable part; the local implementations are what fill them today, and every future signer/AUTH capability plugs into the *same* traits without widening the public surface.
+| Local signer | Built | Standard provider remains supported |
+| Default signer | Coupled to `setActiveAccount` | Signer for `$currentPubkey` |
+| Per-write identity override | Not built | Explicit and pinned at acceptance |
+| Missing remote signer | Process-local pending/failure behavior | Durable `AwaitingSigner` and reattachment |
+| Secret storage | Local signer currently engine-side | Standard platform vault/provider; no raw secret in event/outbox persistence |
+| NIP-44 | Crypto trait built | Complete public result path |
+| NIP-42 | Transport defers AUTH | Typed policy plus source/access evidence |
 
 ---
 

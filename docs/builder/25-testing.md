@@ -68,25 +68,29 @@ Then wrap it and exercise your real app code:
 func testFeedFoldsRowsInArrivalOrder() async throws {
     let fake = FakeEngine()
     fake.scriptedBatches = [
-        (deltas: [.added(row(id: "a", kind: 1, content: "first"))],  coverage: .unknown),
-        (deltas: [.added(row(id: "b", kind: 1, content: "second"))], coverage: .completeUpTo(1_700_000_000)),
+        (deltas: [.added(row(id: "a", kind: 9999, content: "first"))],  coverage: .unknown),
+        (deltas: [.added(row(id: "b", kind: 9999, content: "second"))], coverage: .completeUpTo(1_700_000_000)),
     ]
     let engine = NMPEngine(ffi: fake)          // the fake seam
 
     var seen: [[Row]] = []
     var finalCoverage: Coverage = .unknown
-    for await batch in try engine.observe(NMPFilter(kinds: [1])) {
+    for await batch in try engine.observe(NMPFilter(kinds: [9999])) {
         seen.append(batch.rows)
         finalCoverage = batch.coverage
     }
 
     // Golden assertions on YOUR fold, deterministic, no network:
     XCTAssertEqual(seen.map { $0.map(\.id) }, [["a"], ["a", "b"]])  // accumulation
-    XCTAssertEqual(finalCoverage, .completeUpTo(1_700_000_000))     // empty vs unknown flipped
+    // Current API only: this is the scripted plan watermark, not global truth.
+    XCTAssertEqual(finalCoverage, .completeUpTo(1_700_000_000))
 }
 ```
 
-Because the SDK's `RowBridge` accumulates deltas into full snapshots for you, your test asserts the same accumulated shape your UI sees — including the crucial empty-vs-unknown coverage transition (see *[Coverage: empty vs unknown](11-coverage.md)*).
+Because the SDK's `RowBridge` accumulates deltas into full snapshots, your test
+asserts the same current shape the UI sees. Target tests should script compact
+per-source acquisition and shortfall evidence instead of interpreting aggregate
+coverage as authoritative.
 
 ## Injecting deterministic receipts
 
@@ -116,8 +120,8 @@ func observeDiagnostics(observer: DiagnosticsObserver) -> NmpDiagnosticsHandle {
             wireSubCount: 1,
             authorsServed: 2,
             byLane: [],
-            filters: ["{\"kinds\":[1],\"authors\":[\"…\"]}"],
-            eventsByKind: [FfiKindCount(kind: 1, count: 7)],
+            filters: ["{\"kinds\":[9999],\"authors\":[\"…\"]}"],
+            eventsByKind: [FfiKindCount(kind: 9999, count: 7)],
             coverage: [FfiFilterCoverage(filter: "…", coverage: .completeUpTo(1_700_000_000))]
         )],
         uncoveredAuthorCount: 0,
@@ -145,7 +149,23 @@ You still want *one* tier that proves the real wire path — Swift → FFI → e
 - Construct the real engine from **only** indexer relays (never a `relays:` param — there isn't one).
 - `setActiveAccount` to a well-known read-only pubkey; observe a real derived follow-feed.
 - Bound every network wait (~15–30s) and **`XCTSkip`** (don't fail) if the network didn't cooperate: "Package build + construction tests still pass independently of this network condition." A live tier that *fails* on a flaky relay would train you to ignore it; a live tier that *skips* keeps signal honest.
-- Cross-check planes: the live diagnostics test asserts a relay's `eventsByKind` reports a real `kind:1` count matching the rows the query already delivered — the acceptance test made visible, run as a test (see *[Diagnostics & debugging](22-diagnostics.md)*).
+- Cross-check planes: the current live Falsifier happens to assert kind:1
+  counts because that is its fixture. Add kind-diverse and protocol-module
+  cross-checks as those surfaces land.
+
+## Target contract tests beyond a fake stream
+
+Fakes are useful for app folding, but they cannot prove the promoted durable
+contracts. Their owning suites must also cover:
+
+- process death immediately after durable `Accepted`, followed by pending-row
+  and receipt reconstruction;
+- signer provider detachment/reattachment and exact response validation;
+- equal selections under incompatible source/AUTH contexts;
+- explicit per-limit shortfall and bounded slow-observer behavior;
+- NIP-module ownership collisions and byte-identical immutable composition;
+- destructive reset clearing all engine-owned local trust-domain state; and
+- Swift/Kotlin projection parity over the canonical Rust facade.
 
 ## The shape of a healthy test suite
 

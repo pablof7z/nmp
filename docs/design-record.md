@@ -3,7 +3,11 @@
 - **Session:** NMP first-principles redesign exploration
 - **Date:** 2026-07-10
 - **Context:** nostr-multi-platform repo; owner asked for a from-scratch evaluation of architectural directions against the north star (misuse-resistant multi-platform Nostr framework). Explicitly not assuming the current architecture, standalone-ness, or Dioxus integration.
-- **Status:** exploring
+- **Status:** converged and promoted into `docs/VISION.md` plus the focused
+  contracts under `docs/design/`.
+- **Reading rule:** this file preserves the chronological exploration. Earlier
+  proposals are evidence, not current normative guidance; the promoted frame at
+  the end names the conclusions that supersede them.
 
 ## Core question
 What architectural shape best delivers "one clear, reliable way to handle the hard Nostr concerns" such that misuse is prevented structurally, not by doctrine/lints/audits?
@@ -256,20 +260,76 @@ IdentityField := ActivePubkey | ...
 
 **MVP consequence:** the MVP must prove the GRAMMAR, not two features. Pick two instances of DIFFERENT SHAPE — `$myFollows` (1 level) and NIP-29-groups (2 levels) — so heterogeneity proves it's a general engine, not two hardcoded reads. This is a far stronger falsifier than two similar reads. `$bookmarkedRelaySets` is a third instance (Derived over kind:30002) if we want relay-mode too.
 
-## Final clarifications (2026-07-11, before owner slept)
-- **Binding nesting depth:** owner "can't imagine a case beyond 2 or 3." → commit to a nestable grammar but only prove/support bounded depth (≤3). No unbounded incremental-dataflow engine needed; no cycle concern; O(graph) cost stays trivial.
-- **Identity = pure input, trivially:** app just says "current signer is A… now current signer is B." Engine reacts; NEVER hardcode. `Reactive(ActivePubkey)` is literally whatever the app last set as active signer. This is the whole identity seam — no session model owned by the engine.
+## Promoted frame (2026-07-11)
 
-## Decisions
-Emerging + well-supported (as of owner sign-off through 2026-07-11):
-- **NMP = embeddable Nostr sync/routing ENGINE (library, not app framework).** Apps talk to it; they don't live inside it. Adoption pay-as-you-go.
-- **Two app-facing nouns:** live query (a `Filter` of `Binding`s) + write intent (durable, acknowledged receipt).
-- **Crown jewel = the reactive filter-binding grammar** (Literal | Reactive(identity) | Derived(inner Filter, closed-vocab Selector)); ≤3 deep; identity-reactive root; C5 replace-not-rebuild/recompile-not-reopen at every node. Selectors are DECLARATIVE/introspectable, never closures.
-- **Mission = storage + sync + routing correctness** (outbox default-on, 2-relay-min capped fan-out, REQ coalescing, negentropy-first-probed, coverage-watermark cache authority, provenance, replaceable-on-insert). NOT app-lifecycle.
-- **Native reactive delivery:** Swift `AsyncSequence`+`@Observable`, Kotlin `Flow`; detachable handle first, view-binding a thin adapter; teardown-with-grace.
-- **Identity as input; sign/publish orthogonal; switch = teardown-before-activate.**
-- **First-class diagnostic surface** (per-relay/per-kind subs+filters+events+COVERAGE) = acceptance test made visible.
-- **Process:** new repo (keep name NMP); import gate (nothing verbatim, re-justify); bug-class ledger REPLACES principle-corpus/doctrine-lint policing; YAGNI-but-correct; two-tier adversarial gate (different-model propose/refute + running falsifier) with pre-committed kill conditions; old repo stays alive, one-way harvest; nothing formalized until v2 (not before Aug 2026); optional UI package on top (north-star, not blocking).
-- **OUT of v2 scope:** Marmot/MLS, wallet, (likely) web/wasm-first, blessed display policy.
+The exploration converged after the original grammar/identity work. The current
+canonical statement is `docs/VISION.md`; detailed ownership lives in:
 
-STILL OPEN: merge-lattice coalescing not formally proven; identity-as-input vs actor-owned IdentityRuntime unreconciled; first slice = identity-seam vs C5-grammar-spike (which risk to kill first). → handed to Fable synthesis. **NMP = embeddable sync/routing engine (library, not app framework); live-query + write-intent API; native reactive delivery; identity as input; optional app-kernel on top.** Interior implementation (how much of current kernel survives) still open; prototype is the tiebreaker.
+- `docs/design/query-demand-and-evidence.md`
+- `docs/design/durable-write-signing-and-retry.md`
+- `docs/design/protocol-modules-and-composition.md`
+- `docs/design/bounded-delivery.md`
+
+### Settled invariants
+
+- NMP is an embeddable sync-and-routing engine, never an app framework. Direct
+  Rust and FFI use one invariant-preserving facade; Swift/Kotlin are native
+  projections of it.
+- The two nouns remain live query and write intent, but a live query's semantic
+  demand is `selection + source authority + access context`, not a bare filter.
+- The binding graph stays closed and inspectable. Reusable helpers construct
+  visible `Derived`/`SetOp` graphs; richer NIP helpers may return typed protocol
+  values without creating another demand lifecycle.
+- `$currentPubkey` is a reactive/default input, not a global engine identity.
+  Changing it reroots only dependent queries. Other account-spanning queries
+  remain live.
+- Ordinary publication defaults to the signer registered for
+  `$currentPubkey`; an explicit identity override is allowed. The selected
+  identity is pinned at `Accepted` and cannot drift after an account change.
+- Durable `Accepted` means the frozen unsigned body, receipt obligation, and a
+  stable canonical pending row are persisted atomically. Missing signer becomes
+  `AwaitingSigner(pubkey)`, not failure. The row promotes in place after exact
+  signature validation.
+- Pending rows reach observers only through the canonical store path.
+  Cancellation or terminal pre-signature failure retracts/compensates through
+  that path; relay rejection after signing affects the receipt only.
+- Durable retry uses logical backoff with one owner per domain and one deadline
+  scheduler. There is no hidden durable transport buffer, fixed-rate polling,
+  or silent give-up during temporary unavailability.
+- NMP persists signing obligations, not raw secrets. Platform SDKs should ship
+  standard secure signer providers; apps own identity policy and may replace
+  the provider.
+- One engine instance is one shared local trust domain. Accounts share the
+  canonical cache. AUTH/access context remains attributable acquisition
+  evidence, while mutually untrusted users require an explicit destructive
+  reset.
+- Query snapshots return rows plus compact evidence about current planned
+  sources. EOSE and watermarks remain per-source facts; NMP never claims global
+  completeness, `syncHealth`, or authoritative emptiness.
+- Latest-state query/diagnostic streams may coalesce intermediate frames.
+  Durable receipt facts remain reattachable. Every graph, wire, relay, and
+  result limit produces exact semantics or explicit shortfall, never silent
+  first-N truncation.
+- Core is content-agnostic. Opt-in NIP modules own only their exact protocol
+  schemas and expose typed builders, queries, and operations. Immutable unsigned
+  drafts compose contributions, then core validates and signs once.
+- Contextual publication does not transfer kind ownership. NIP-29 may add its
+  `h` tag and group-host route to a NIP-68 photo draft while owning only NIP-29
+  event schemas.
+- Public invariants are the frame; public syntax is provisional. Any shape
+  change needs failure evidence, cross-surface impact review, synchronized
+  projections/falsifiers, explicit human signoff, and removal of the superseded
+  path.
+
+### Earlier conclusions explicitly superseded
+
+- "Current signer" and `$currentPubkey` are not one inseparable global root.
+- Account switching does not require a global teardown-before-activate barrier.
+  It only diffs demand that actually depends on the changed reactive input.
+- A per-relay watermark cannot make an empty cache globally authoritative.
+- Kind/schema ownership does not monopolize contextual routing contributions.
+- A relay rejection of a signed event does not roll back the canonical row.
+- Protocol growth is not a catalog of kind:1-first recipes in core.
+
+The remaining uncertainty is implementation shape and public spelling, not
+these ownership boundaries.

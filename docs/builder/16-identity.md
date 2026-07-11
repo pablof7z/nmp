@@ -1,115 +1,116 @@
-# Identity & multi-account: re-root in one line
+# Identity: reactive reads, default signing, and explicit overrides
 
-**Status: BUILT** — `addAccount` / `setActiveAccount` ship on the Swift SDK and the Rust `Handle`; the re-root, teardown-before-activate, and read/write coupling are all live and headlessly tested (`nmp-engine/tests/core_headless.rs`, contract tests 3 & 10).
+**Status: CURRENT + TARGET.** `addAccount` / `setActiveAccount` and
+`Reactive(ActivePubkey)` are built. The current implementation also moves one
+active signer with that pubkey. The target contract below keeps the ergonomic
+default but removes that coupling as an authority boundary: a write may select
+another registered signer without changing reactive reads, and an accepted
+write never changes signer because the current pubkey later changes.
 
-After this chapter you can add several accounts, switch the active one with a single call, browse read-only with no key at all, and prove on the diagnostics screen that switching away from an account leaves nothing of the old account on the wire.
+## Three independent questions
 
-## Identity is the one input
+Identity appears in three places, and NMP must not collapse them:
 
-NMP has two nouns — a live query and a write intent — and exactly **one input** that feeds them: the active identity. There is no session object, no login flow, no "account vector" inside the engine. You state a fact ("the current account is A"), and everything account-shaped downstream — which follows expand, which outboxes are discovered, which key signs — is *derived* by the engine from that one fact.
+1. **Which value does a reactive query use?** `Reactive(ActivePubkey)` reads the
+   engine's current-pubkey input.
+2. **Which capability signs this write?** By default, the signer registered for
+   the current pubkey. A write can explicitly override that identity.
+3. **Which identity authenticates or decrypts?** AUTH and crypto capabilities
+   are selected for their operation; neither silently changes query inputs or
+   the signer of another write.
 
-Concretely, every account-scoped query hangs off a single binding, `Reactive(ActivePubkey)`. When you write `$myFollows` (see *Live queries and the binding grammar*), the `$myFollows` set is a `Derived` binding rooted at that one reactive atom. There is no second place in the engine where "the current account" lives. That single-rooting is not an implementation convenience — it is the structural mechanism behind **bug-class ledger #10 (multi-account desync / cross-account leak)**: because there is only one root, a switch is a *root replacement*, and a root replacement can be made atomic and exactly-once.
+Most apps use the default for all three. Keeping them independently expressible
+is what supports podcast keys, disposable identities, hardware signers, NIP-46,
+and multi-account views without forcing the app to pretend one key is globally
+active for every purpose.
 
-## The whole contract: two calls
-
-```swift
-import NMP
-
-let nmp = try NMPEngine(config: .init(
-    storePath: cachePath,
-    indexerRelays: ["wss://relay.damus.io", "wss://purplepag.es"]
-))
-
-// 1. Hand the engine a key. It crosses the boundary exactly ONCE and
-//    lives engine-side from here on; you get back the hex pubkey.
-let alice = try await nmp.addAccount(secretKey: "nsec1…")
-
-// 2. Make it active. This is the ONLY identity verb you call at runtime.
-try nmp.setActiveAccount(alice)
-```
-
-That is the entire adoption cost of identity. `addAccount` registers a signing capability keyed by its own public key; `setActiveAccount` is what actually roots reads and writes onto it. Registering an account does **not** activate it — the two steps are deliberately separate so a client can pre-load several keys at launch and switch between them instantly, with no re-authentication round trip.
-
-On Rust the same two verbs, shaped for the `Handle`:
-
-```rust
-use nmp_signer::LocalKeySigner;
-
-// Register a signing capability; returns the pubkey it was keyed under.
-let alice = handle.add_signer(LocalKeySigner::new(alice_keys));
-
-// Re-root reads AND the active signer together.
-handle.set_active_account(alice);
-```
-
-## `setActiveAccount` re-roots reads *and* the signer, together
-
-This is the load-bearing design decision, and it is worth stating precisely because the naive multi-account bug is exactly the thing it forecloses. In many Nostr clients, "the account I'm reading as" and "the key that signs my next note" are two separate pieces of state that drift apart — you switch your timeline to Bob but a queued reply still goes out under Alice's key. NMP makes that unrepresentable: `set_active_account` moves *both halves in one verb*.
-
-From the engine's own doc comment on the Rust verb:
-
-> Re-root every reactive query AND the active signing capability together onto `pk` … one verb moves both halves so reads and writes can never diverge onto different accounts.
-
-There is no `setReadAccount` and no separate `setSigningKey`. Because reads and writes are re-rooted by the same call, the class of bug where your feed shows one identity while your publishes carry another cannot occur — not because a lint forbids it, but because the API has no seam to express it.
-
-## What "re-root the whole binding graph" means
-
-When you call `setActiveAccount(bob)`, the engine, in order:
-
-1. Resolves the switch through the resolver as a root replacement.
-2. **Closes the old account's graph first** — every atom mentioning Alice is torn down in *reverse-of-open* order, exactly once, before anything for Bob opens. This is the "teardown-before-activate" discipline; the demand set for Alice's follows, her outboxes, her mentions, all withdraw from the wire.
-3. Opens Bob's graph — `Reactive(ActivePubkey)` now resolves to Bob, so `$myFollows` re-expands to Bob's follows, new outboxes get discovered, new REQs go out.
-4. Refreshes every live handle. Each subscription you hold gets a single row delta that "removes everything old, adds everything new" — the same diff mechanism a normal ingest uses, with no special-casing. Your `for await` loop simply sees Alice's rows disappear and Bob's appear.
-
-The ordering in step 2 is what closes the leak: a stale callback from Alice's now-withdrawn subscription has no surviving wire subscription to fire from. Per ledger #10, "a stale account's callbacks have no surviving subscription."
-
-## Read-only browsing needs no key
-
-`setActiveAccount` accepts *any* pubkey, whether or not you ever handed the engine its secret key. This is how you browse someone else's feed, or your own account before the user has entered their key:
+## The normal path stays small
 
 ```swift
-// No addAccount, no key — just view fiatjaf's world read-only.
-try nmp.setActiveAccount(
-    "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
-)
+let alice = try await nmp.addAccount(secretKey: "nsec1...")
+try nmp.setCurrentPubkey(alice)       // target name; current API is setActiveAccount
+
+let receipt = try await nmp.publish(draft)  // defaults to Alice's registered signer
 ```
 
-Reads re-root exactly as before. A `publish` attempted while active in a read-only state simply terminates with `WriteStatus.failed` (no active signer) — never a crash, never a silent no-op you can't observe (see *Writing: intents, receipts, and the durability guarantee lattice*). Logging out is `setActiveAccount(nil)`: reads re-root onto nothing, writes fail closed.
+The app does not pass or retain a signer object on every publish. NMP keeps a
+registry of signer capabilities keyed by stable identity. The current pubkey is
+the default selection because that is correct for the common case.
 
-## The account list is *your* state, not the engine's
-
-Note what is absent above: NMP never hands you a "list of accounts," a "current user" object, or any onboarding UX. The Falsifier app keeps its own `accounts` array and its own notion of which row is active; the only NMP calls its accounts screen makes are `addAccount` and `setActiveAccount`. From its own source:
+The exceptional path is explicit:
 
 ```swift
-func setActive(_ pubkey: String?) {
-    try engine.setActiveAccount(pubkey)   // the only NMP call
-    activePubkey = pubkey                  // this app's own state
-}
+let receipt = try await nmp.publish(draft, as: podcastIdentity)
 ```
 
-Labels, avatars, ordering, which account is "primary" — all app-owned. The engine owns only what is *derived* from the active pubkey. This is the identity-as-input rule from the design guidelines made concrete: "The app states a fact; there is no session model, login flow, or account vector in the engine."
+That override selects a registered capability; it does not expose key material
+to the call site and does not change `$currentPubkey`.
 
-## Proving zero cross-account leak
+## Reactive queries re-root by dependency
 
-You do not have to trust the re-root — you can watch it. Open a diagnostics stream (see *Diagnostics & debugging*) alongside your feed:
+Changing the current pubkey re-resolves only descriptors that depend on
+`Reactive(ActivePubkey)`. For example:
 
 ```swift
-Task {
-    for await snapshot in nmp.observeDiagnostics() {
-        for relay in snapshot.relays {
-            print(relay.relay, "subs:", relay.wireSubCount,
-                  "authors:", relay.authorsServed)
-        }
-    }
-}
+NMPFilter(kinds: [9999], authors: .reactive(.activePubkey))
 ```
 
-Switch from Alice to Bob and watch the numbers move. Alice's write relays — the ones carrying her follows' content — drop their subscriptions; Bob's appear. `authorsServed` per relay recomputes to Bob's follow graph. If any relay were still serving Alice's authors after the switch, `authorsServed` would show it, and the exact wire filters would name the stale pubkeys. That is the acceptance test made visible: the leak ledger #10 forbids is one you can falsify on screen in real time.
+Switching A to B makes that same live query withdraw the no-longer-needed A
+demand and open the B demand. Unchanged graph nodes remain shared.
 
-## Gaps to know
+A literal multi-account query does not depend on the current pubkey and remains
+unchanged:
 
-- **Signer breadth.** Only `LocalKeySigner` (local nsec) is built today. NIP-46 remote signers and platform signers plug into the same `SigningCapability` seam but are not yet shipped — see *Capabilities: signer, AUTH policy, encrypt/decrypt*.
-- **Re-root cost.** A switch re-expands the full follow graph and re-discovers outboxes; it is not free, but it is bounded by the new account's demand, not the whole store. There is no background pre-warming of inactive accounts — an inactive account carries zero live demand by design (that is the leak fix), so switching back re-discovers from cache.
+```swift
+NMPFilter(kinds: [9999], tags: ["p": .literal([accountA, accountB])])
+```
+
+There is no global account-switch barrier and no rule that all demand belonging
+to another registered identity must disappear. Teardown is dependency-driven:
+only demand no longer referenced by any live descriptor is withdrawn.
+
+## Accepted writes pin identity
+
+Signer selection happens before durable acceptance becomes visible:
+
+- no override -> capture the identity associated with the current pubkey;
+- override -> capture the requested identity;
+- already signed draft -> verify and preserve its author/signature.
+
+Once accepted, the write is permanently associated with that identity. Later
+changes to the current pubkey cannot redirect signing, retries, receipts, or
+AUTH to a different key.
+
+If the selected signer is unavailable, the durable intent remains
+`AwaitingSigner(pubkey)`. Attaching a valid capability for that pubkey resumes
+it. The app may cancel it; NMP does not silently reassign or discard it.
+
+## One engine is one local trust domain
+
+Registered accounts share the engine's public event cache. A public event that
+matches several queries is one canonical row regardless of which identity led
+to its acquisition. AUTH connection state and per-source evidence may still be
+keyed by access context because relays can expose different results after AUTH;
+that is acquisition correctness, not a claim that accounts distrust each other.
+
+An app serving mutually untrusted people must use the explicit destructive
+reset/logout operation to clear cached events, pending writes, receipts,
+coverage/evidence, and retained capabilities before handing the app over.
+Changing the current pubkey is not a privacy wipe.
+
+## What the app still owns
+
+NMP does not own an account list, login flow, account switcher, avatar, or
+"primary account" policy. The app owns those. NMP owns registered capability
+references, reactive dependency resolution, and already-accepted obligations.
+
+## Current implementation gap
+
+The shipping `setActiveAccount` verb still re-roots reads and moves the active
+signer together, and the SDK has no per-write signer override or destructive
+reset. Treat that as current implementation truth, not the target invariant.
+The public shape is provisional; the behavior above is the contract the next
+work must falsify across Rust, FFI, Swift, and Kotlin.
 
 ---
 

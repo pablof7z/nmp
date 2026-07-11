@@ -1,8 +1,7 @@
-Feature: My feed follows my follow list
-  The engine keeps "my follows' notes" correct forever: unfollowing someone
-  stops their notes and touches nobody else's subscriptions; following
-  someone new starts showing their notes. The app declares the feed once
-  and never manages subscriptions itself.
+Feature: A NIP-02-derived author query follows its contact list
+  This is one executable protocol-shaped example of Derived demand. The
+  engine is not specialized for notes or contact lists; the fixture proves
+  that the app never owns the expanded author set or subscription repair.
 
   Scenario: Unfollowing one person touches only that person's subscriptions
     Given my relay list names "me-relay" as my write relay

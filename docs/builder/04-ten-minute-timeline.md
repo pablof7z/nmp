@@ -1,8 +1,11 @@
-# Build a working timeline in 10 minutes
+# Build the current Falsifier timeline in 10 minutes
 
 **Status: BUILT** — every line below runs against the real Swift SDK (`Packages/NMP`) and the real Falsifier app (`apps/Falsifier`). No pseudo-code.
 
-After this chapter you'll have a running iOS app that shows a live `$myFollows` timeline against real relays, switches accounts, and — the part that matters — proves the rows arrived by *reading the diagnostics screen*, not by trusting a spinner.
+After this chapter you'll have a running iOS app that exercises one
+NIP-02-derived query against real relays and proves the rows arrived through
+diagnostics. This is the current M5 fixture, not a preferred NMP content model;
+the outer kinds remain caller-selected.
 
 We build the smallest possible version of the Falsifier app. Everything here is lifted verbatim from `apps/Falsifier/Sources/Falsifier/` — if a line looks too short to be real, that's the point.
 
@@ -45,12 +48,11 @@ import NMP
 final class AppModel {
     let engine: NMPEngine
 
-    // The ONLY relay fact you ever supply: two indexer relays. The engine
-    // self-discovers every author's real write relays from these alone.
-    // There is no `relays:` parameter anywhere else in this manual.
+    // Typed operator policy: two indexer relays. The engine discovers author
+    // write relays. Raw observe/publish calls take no app-expanded route list.
     static let indexerRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
 
-    var kinds: [UInt16] = [1]
+    var kinds: [UInt16] = [1] // Falsifier default, not an NMP default
     private(set) var activePubkey: String?
 
     init() throws {
@@ -88,9 +90,12 @@ struct TimelineApp: App {
 }
 ```
 
-## Minute 4–6 — say who you are
+## Minute 4–6 — set the current-pubkey input
 
-Identity is an *input*, not a session. You state a fact — "this account is active" — and the engine re-roots every reactive query onto it. Two methods do everything.
+The shipping API calls this the active account. Architecturally it is the
+current-pubkey input: only reactive queries that reference it should re-root.
+The current SDK also couples its local signer to this call; the target adds a
+per-write identity override and pins signer choice at durable acceptance.
 
 For a real feed you don't even need a secret key: browsing read-only is a first-class state. `setActiveAccount` accepts any pubkey, keyed or not.
 
@@ -102,8 +107,9 @@ extension AppModel {
         activePubkey = pubkeyHex
     }
 
-    // Keyed: the secret crosses the boundary exactly once, here, and lives
-    // engine-side forever after. `addAccount` returns the hex pubkey.
+    // CURRENT local-signer API. The target SDK stores secrets behind a
+    // standard platform secure-provider boundary; the event/outbox database
+    // persists obligations, never raw secret material.
     func logIn(secretKey: String) async {
         let pubkey = try? await engine.addAccount(secretKey: secretKey)
         if let pubkey {
@@ -114,7 +120,8 @@ extension AppModel {
 }
 ```
 
-For the tutorial, browse a well-known active account so there's live data immediately — fiatjaf's pubkey, straight from `AccountsView.swift`:
+For the current tutorial, use a well-known pubkey so the existing fixture has
+live data immediately:
 
 ```swift
 model.browse(pubkeyHex:
@@ -125,7 +132,11 @@ model.browse(pubkeyHex:
 
 Here are both nouns' read half in one screen. The query is a *value* you build; `observe` hands you an `AsyncSequence` of snapshots; you fold each snapshot into your own `@State`. NMP does zero rendering — `Row` carries raw tokens (hex pubkey, Unix timestamp, verbatim content), and formatting them is your app's job.
 
-First, the query. `$myFollows` is "kind:1 notes authored by whoever my kind:3 contact list currently names" — a `Derived` binding, reactive on the active account. This lives in *your* code, not NMP's (`FeedFilters.swift`):
+First, the query. `FeedFilters.follows(kinds:)` is an app-owned reusable
+declaration: it derives authors from the current pubkey's NIP-02 contact list
+and leaves the outer event kinds to the caller. The tutorial passes kind:1 only
+because that is the current Falsifier probe. NMP core exposes no home-feed or
+kind:1 convenience.
 
 ```swift
 import NMP
@@ -144,7 +155,9 @@ enum FeedFilters {
 }
 ```
 
-Read that binding aloud: *the authors are derived from the `p` tags of the kind:3 event authored by the active pubkey.* When you switch accounts, the whole feed re-roots with no second `observe` call. (The binding grammar gets a chapter of its own: *Live queries & the binding grammar*.)
+Read that binding aloud: *the authors are derived from the `p` tags of the
+kind:3 event authored by the current pubkey.* Changing that input reroots this
+dependent graph. A literal multi-account query would remain live.
 
 Now the view (`FeedView.swift`, trimmed):
 
@@ -184,7 +197,7 @@ struct FeedView: View {
     private var coverageText: String {
         switch coverage {
         case .unknown: return "unknown"
-        case .completeUpTo(let ts): return "complete up to \(date(ts))"
+        case .completeUpTo(let ts): return "current plan watermark \(date(ts))"
         }
     }
     private func shortHex(_ h: String) -> String {
@@ -200,7 +213,9 @@ struct FeedView: View {
 Run it. Within a few seconds, notes stream in. Note two things the types forced on you:
 
 - **You sorted the rows.** NMP delivered a set of live rows; *ordering is render policy*, so it's yours. The bridge accumulates the engine's added/removed deltas into a snapshot for you, but it does not pick an order.
-- **Coverage is its own value.** An empty `rows` with `coverage == .unknown` means "we can't prove anything yet" — not "there are nothing." That distinction is a type, not a convention (*Coverage: empty vs unknown*).
+- **The current SDK carries aggregate `Coverage`.** Read it narrowly as facts
+  about the current source plan, not global Nostr completeness. The target
+  snapshot carries compact per-source acquisition and shortfall evidence.
 
 ## Minute 8–10 — confirm it worked by reading, not trusting
 
@@ -249,9 +264,14 @@ struct DiagnosticsView: View {
 - **`events kind:3`** and **`kind:10002`** counts — the contact list and relay lists the engine fetched to resolve your `Derived` binding. That's the machinery you'd otherwise hand-roll, made visible.
 - The **exact wire filter JSON** sent to each relay. Expand it: you'll see the `authors` set the engine resolved from your follows. You never assembled that list; the compiler did.
 
-If kind:1 counts are climbing and your feed is populated, it worked — and now you can *prove* it worked, which is the whole discipline. If the feed were empty, this same screen would tell you why: no relays planned (no active account), authors uncovered (contact list not yet fetched), or coverage still `unknown` (in flight). "Why is my feed empty?" is always answered by reading, never by `print`. That's *Diagnostics & debugging*.
+If the requested-kind counts are climbing and the view is populated, this
+specific probe worked. If it is empty, inspect whether the current-pubkey
+binding resolved, which sources were planned, exact wire filters, connection /
+AUTH state, inbound counts, and shortfall. Diagnostics explains those facts; it
+does not declare a globally complete result.
 
-You now have the entire shape of an NMP app: **construct once, state identity, observe a query value, render raw tokens yourself, and read the diagnostics to trust it.** Everything else in this manual is depth on those five moves.
+You now have the current embedding shape: **construct once, set an input,
+observe a query value, render raw tokens yourself, and read diagnostics.**
 
 ---
 
