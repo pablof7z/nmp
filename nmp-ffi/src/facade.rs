@@ -4,30 +4,23 @@
 //! the native-only staticlib a Swift app links against in place of writing
 //! its own app-loop over `nmp-engine` directly.
 //!
-//! Directory scope note (honesty over gold-plating): `nmp_router::
-//! RelayDirectory` has exactly one concrete implementation anywhere in this
-//! workspace today -- `FixtureDirectory`, a static fact lookup with no
-//! network (see that type's own module doc and `nmp-demo/src/directory.rs`'s
-//! `BootstrapDirectory`, which wraps it with an app-owned one-shot NIP-65
-//! resolution phase). Building a live, self-refreshing directory
-//! implementation is a substantial separate piece of work already flagged
-//! as a known gap by the demo crate -- it is NOT part of this crate's scope
-//! (M4 plan §5's note: "M4 adds NO reducer behaviour... it does not touch
-//! `EngineCore`, `nmp-resolver`, or `nmp-router`"). `NmpEngineConfig` below
-//! accepts the SAME static snapshot shape `FixtureDirectory` already takes
-//! (indexers + a per-author write-relay map) so a Swift app can hand in
-//! whatever it already resolved (e.g. via its own bootstrap step) -- routing
-//! for an author with no entry in that map fails closed
-//! (`WriteStatus::Failed("no write relays known for author ...")`), exactly
-//! as it does for every other caller of this directory today.
+//! Directory: `nmp_router::LiveDirectory` (M5's self-bootstrapping outbox)
+//! is what backs every `NmpEngine` -- a Swift app supplies ONLY the operator
+//! indexer relay set; every author's NIP-65 write relays (including the
+//! app's own account) are discovered by the engine itself, live, via its
+//! own internal kind:10002 reads against those same indexers
+//! (`nmp_engine::core::EngineCore`'s auto-discovery). `NmpEngineConfig` no
+//! longer accepts a pre-resolved write-relay map -- there is nothing for a
+//! caller to resolve up front anymore (hard break from the prior
+//! `FixtureDirectory`-backed static-snapshot shape; every caller updated in
+//! the same change, per this repo's no-compat-alias rule).
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use nmp_engine::runtime::{EngineThread, Handle, QueryHandle};
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::LiveDirectory;
 use nmp_signer::LocalKeySigner;
 use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
@@ -44,9 +37,8 @@ use crate::types::{FfiFilter, FfiWriteIntent};
 /// compiler's per-tick atom-count cap; not tuned differently here.
 const ROUTER_CAP: usize = 10;
 
-/// Construction config for [`NmpEngine::new`]. See the module doc for why
-/// `write_relays` is a static snapshot rather than a live-resolved fact
-/// source.
+/// Construction config for [`NmpEngine::new`]. See the module doc: the only
+/// relay fact a caller ever supplies is `indexer_relays`.
 #[derive(uniffi::Record, Clone, Debug, Default)]
 pub struct NmpEngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
@@ -55,22 +47,15 @@ pub struct NmpEngineConfig {
     /// authoritative -- ledger #7).
     pub store_path: Option<String>,
     pub indexer_relays: Vec<String>,
-    pub write_relays: HashMap<String, Vec<String>>,
 }
 
-fn build_directory(config: &NmpEngineConfig) -> Result<FixtureDirectory, FfiError> {
-    let mut dir = FixtureDirectory::new();
-    for relay in &config.indexer_relays {
-        dir = dir.with_indexer(parse_relay_url(relay)?);
-    }
-    for (author, relays) in &config.write_relays {
-        let urls = relays
-            .iter()
-            .map(|u| parse_relay_url(u))
-            .collect::<Result<Vec<_>, _>>()?;
-        dir = dir.with_write(author.clone(), urls);
-    }
-    Ok(dir)
+fn build_directory(config: &NmpEngineConfig) -> Result<LiveDirectory, FfiError> {
+    let indexers = config
+        .indexer_relays
+        .iter()
+        .map(|u| parse_relay_url(u))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LiveDirectory::new(indexers))
 }
 
 /// The UniFFI-exported engine object. `new` is the ONE construction call the

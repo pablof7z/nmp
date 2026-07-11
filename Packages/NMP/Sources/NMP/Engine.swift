@@ -4,26 +4,26 @@
 
 import NMPFFI
 
-/// Construction config for `NMPEngine`. `writeRelays` is a static,
-/// pre-resolved snapshot (author hex -> that author's write relays) -- see
-/// `nmp-ffi`'s own `NmpEngineConfig` doc for why live NIP-65 discovery is
-/// explicitly out of scope here; hand in whatever your app's own bootstrap
-/// step already resolved.
+/// Construction config for `NMPEngine`. `indexerRelays` is the ONLY relay
+/// fact this app ever supplies: the engine self-navigates outbox routing
+/// from there on its own (M5's self-bootstrapping outbox -- it discovers
+/// each author's NIP-65 write relays live via its own internal kind:10002
+/// reads against `indexerRelays`, and re-routes content atoms to them as
+/// they resolve). No pre-resolved write-relay map is needed or accepted --
+/// see `nmp-ffi`'s own `NmpEngineConfig` doc.
 public struct NMPConfig: Sendable {
     /// `nil` -> in-memory store (nothing survives a restart). A path ->
     /// a persistent store reopened at that path across launches.
     public var storePath: String?
     public var indexerRelays: [String]
-    public var writeRelays: [String: [String]]
 
-    public init(storePath: String? = nil, indexerRelays: [String] = [], writeRelays: [String: [String]] = [:]) {
+    public init(storePath: String? = nil, indexerRelays: [String] = []) {
         self.storePath = storePath
         self.indexerRelays = indexerRelays
-        self.writeRelays = writeRelays
     }
 
     func toFfi() -> NmpEngineConfig {
-        NmpEngineConfig(storePath: storePath, indexerRelays: indexerRelays, writeRelays: writeRelays)
+        NmpEngineConfig(storePath: storePath, indexerRelays: indexerRelays)
     }
 }
 

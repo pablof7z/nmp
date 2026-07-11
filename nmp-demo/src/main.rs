@@ -5,21 +5,24 @@
 //! Flow:
 //! 1. Parse an npub/hex pubkey (default: a well-known active npub) and
 //!    optional `--nsec`/`--secs`.
-//! 2. Bootstrap (`bootstrap.rs`): resolve the target's kind:3 contacts and
-//!    every follow's kind:10002 write relays from two hardcoded operator
-//!    indexer relays -- entirely BEFORE the engine exists, because
-//!    `RelayDirectory` is a one-shot snapshot boxed into `EngineCore` at
-//!    construction (see `directory.rs`'s doc for why).
-//! 3. Spawn `EngineThread`, `set_active_pubkey(target)`, and `subscribe` the
-//!    $myFollows LiveQuery (kind:1 authored by whoever the target's kind:3
-//!    currently names, reactively).
+//! 2. Configure `nmp_router::LiveDirectory` with ONLY the two hardcoded
+//!    operator indexer relays -- no write relay pre-resolved for anyone.
+//!    Spawn `EngineThread` with that directory, `set_active_pubkey(target)`,
+//!    and `subscribe` the $myFollows LiveQuery (kind:1 authored by whoever
+//!    the target's kind:3 currently names, reactively).
+//! 3. The ENGINE ITSELF (M5's self-bootstrapping outbox --
+//!    `nmp_engine::core::EngineCore`'s internal kind:10002 auto-discovery)
+//!    notices the target -- and, as its kind:3 resolves, every follow --
+//!    has no known write relays yet, opens its OWN discovery reads against
+//!    the two indexers, and re-routes each author's kind:1 atom to their
+//!    real write relay the moment that author's relay list arrives. This
+//!    app never resolves a single relay itself: it only configures the two
+//!    indexers and subscribes (no bootstrap phase, no pre-resolution --
+//!    see `docs/known-gaps.md`'s former "RelayDirectory" gap).
 //! 4. Print every row as it streams in, plus whatever diagnostic the
 //!    `Handle` surface actually exposes (see the running summary for what
 //!    that is and is not).
 //! 5. Stop after `--secs` (default 20), print a summary, shut down clean.
-
-mod bootstrap;
-mod directory;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::RecvTimeoutError;
@@ -30,6 +33,7 @@ use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_engine::runtime::EngineThread;
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, TagName};
 use nmp_resolver::LiveQuery;
+use nmp_router::LiveDirectory;
 use nmp_signer::LocalKeySigner;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
@@ -96,8 +100,9 @@ fn print_usage() {
          \n\
          Subscribes to the follow-feed (kind:1 authored by whoever the\n\
          given pubkey's kind:3 contact list currently names) via the NMP\n\
-         engine against real relays, bootstrapped from two operator\n\
-         indexer relays (wss://purplepag.es, wss://relay.nostr.band).\n\
+         engine against real relays. The engine self-navigates outbox\n\
+         routing from two operator indexer relays alone (wss://purplepag.es,\n\
+         wss://relay.nostr.band) -- this app never resolves a relay itself.\n\
          Read-only unless --nsec is given. Runs for --secs then exits."
     );
 }
@@ -133,24 +138,17 @@ fn main() {
             .join(", ")
     );
 
-    println!("\n-- bootstrap: resolving contacts + NIP-65 write relays from indexers --");
-    let (directory, boot_stats) = bootstrap::bootstrap(&indexers, target, Duration::from_secs(8));
+    // No bootstrap phase: `LiveDirectory` starts knowing NOTHING beyond the
+    // indexer set. Every author's write relays -- including the target's
+    // own -- are discovered by the engine itself, live, from here on (M5's
+    // self-bootstrapping outbox: `nmp_engine::core::EngineCore`'s internal
+    // kind:10002 auto-discovery, routed through these same two indexers via
+    // the router's existing discovery-kind eligibility).
+    let directory = LiveDirectory::new(indexers.clone());
     println!(
-        "contact list found: {} | follows discovered: {} | kind:10002 events seen: {} \
-         | authors with write relays: {} | total write-relay URLs: {} | bootstrap took {:.1}s",
-        boot_stats.contact_list_found,
-        boot_stats.follows_discovered,
-        boot_stats.relay_list_events_seen,
-        boot_stats.authors_with_write_relays,
-        boot_stats.total_write_relay_urls,
-        boot_stats.elapsed.as_secs_f64(),
+        "\n-- no bootstrap phase: the engine discovers write relays live from the \
+         indexers above as demand needs them --"
     );
-    if !boot_stats.contact_list_found {
-        println!(
-            "WARNING: no kind:3 contact list found for this pubkey on the indexer relays \
-             within the bootstrap window -- the follow-feed will likely stay empty."
-        );
-    }
 
     let signer = match &args.nsec {
         Some(nsec) => match Keys::parse(nsec) {
