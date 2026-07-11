@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp,
-    TagName,
+    Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, IndexedTagName, Selector,
+    SetAlgebra, SetOp,
 };
 use nmp_resolver::testkit::{
     addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
@@ -32,7 +32,7 @@ fn cf_kinds_authors(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
 fn cf_kinds_tag(kinds: &[u16], tag: char, values: &[&str]) -> ConcreteFilter {
     let mut tags = BTreeMap::new();
     tags.insert(
-        TagName::new(tag).unwrap(),
+        IndexedTagName::new(tag).unwrap(),
         values.iter().map(|s| s.to_string()).collect(),
     );
     ConcreteFilter {
@@ -44,7 +44,10 @@ fn cf_kinds_tag(kinds: &[u16], tag: char, values: &[&str]) -> ConcreteFilter {
 
 fn cf_coord(kind: u16, author: &str, d: &str) -> ConcreteFilter {
     let mut tags = BTreeMap::new();
-    tags.insert(TagName::new('d').unwrap(), BTreeSet::from([d.to_string()]));
+    tags.insert(
+        IndexedTagName::new('d').unwrap(),
+        BTreeSet::from([d.to_string()]),
+    );
     ConcreteFilter {
         kinds: Some(BTreeSet::from([kind])),
         authors: Some(BTreeSet::from([author.to_string()])),
@@ -66,7 +69,7 @@ fn my_follows_filter() -> Filter {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('p').unwrap()),
+            project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     }
@@ -77,21 +80,21 @@ fn my_follows_filter() -> Filter {
 fn nip29_groups_filter() -> Filter {
     let mut tags = BTreeMap::new();
     tags.insert(
-        TagName::new('d').unwrap(),
+        IndexedTagName::new('d').unwrap(),
         Binding::Derived(Box::new(Derived {
             inner: Filter {
                 kinds: Some(BTreeSet::from([39_002u16])),
                 tags: {
                     let mut inner_tags = BTreeMap::new();
                     inner_tags.insert(
-                        TagName::new('p').unwrap(),
+                        IndexedTagName::new('p').unwrap(),
                         Binding::Reactive(IdentityField::ActivePubkey),
                     );
                     inner_tags
                 },
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('d').unwrap()),
+            project: Selector::Tag("d".to_string()),
         })),
     );
     Filter {
@@ -110,7 +113,7 @@ fn follows_minus_mutes_filter() -> Filter {
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        project: Selector::Tag(TagName::new('p').unwrap()),
+        project: Selector::Tag("p".to_string()),
     }));
     let mutes = Binding::Derived(Box::new(Derived {
         inner: Filter {
@@ -118,7 +121,7 @@ fn follows_minus_mutes_filter() -> Filter {
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        project: Selector::Tag(TagName::new('p').unwrap()),
+        project: Selector::Tag("p".to_string()),
     }));
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
@@ -157,14 +160,14 @@ fn address_coord_filter() -> Filter {
 fn bookmarks_filter() -> Filter {
     let mut tags = BTreeMap::new();
     tags.insert(
-        TagName::new('e').unwrap(),
+        IndexedTagName::new('e').unwrap(),
         Binding::Derived(Box::new(Derived {
             inner: Filter {
                 kinds: Some(BTreeSet::from([10_003u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('e').unwrap()),
+            project: Selector::Tag("e".to_string()),
         })),
     );
     Filter {
@@ -582,7 +585,7 @@ fn address_coord_fans_out_per_coordinate() {
     // all -- the inner FilterNode's own atom (kinds:30003, authors:A_pk,
     // no `#d`) is a different, unrelated demand atom and must be excluded
     // from this check.
-    let d_tag = TagName::new('d').unwrap();
+    let d_tag = IndexedTagName::new('d').unwrap();
     for atom in &demand {
         if atom.tags.contains_key(&d_tag) {
             assert!(atom.kinds.as_ref().is_some_and(|k| k.contains(&30_003)));

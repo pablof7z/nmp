@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, IdentityField, Selector, SetAlgebra, TagName};
+use nmp_grammar::{ConcreteFilter, IdentityField, IndexedTagName, Selector, SetAlgebra};
 
 use crate::types::{Element, FieldSlot, ResolvedSet};
 
@@ -32,7 +32,7 @@ pub(crate) fn merge_element_into(cf: &mut ConcreteFilter, slot: &FieldSlot, el: 
             cf.authors
                 .get_or_insert_with(BTreeSet::new)
                 .insert(author.clone());
-            let d_tag = TagName::new('d').expect("'d' is in M1's valid TagName set");
+            let d_tag = IndexedTagName::new('d').expect("'d' is an ASCII letter");
             cf.tags.entry(d_tag).or_default().insert(d.clone());
         }
         Element::Scalar(s) => match slot {
@@ -80,11 +80,17 @@ pub(crate) fn project_events(events: &[nostr::Event], project: &Selector) -> Res
             Selector::Ids => {
                 out.insert(Element::Scalar(event.id.to_hex()));
             }
-            Selector::Tag(tag) => {
-                let single = nostr::SingleLetterTag::from_char(tag.as_char())
-                    .expect("TagName is pre-validated against M1's closed single-letter set");
+            Selector::Tag(name) => {
+                // `name` is an arbitrary event-tag key (#64) -- NOT
+                // restricted to the single-letter wire-filter alphabet
+                // (`nostr::SingleLetterTag`). This is a purely local
+                // projection over already-acquired events, so it matches the
+                // tag array's raw name slot (index 0, same as `Tag::kind()`
+                // reads internally) directly -- case- and spelling-exact for
+                // both single-letter and multi-character/custom tag names --
+                // rather than going through `single_letter_tag()`.
                 for t in event.tags.iter() {
-                    if t.single_letter_tag() == Some(single) {
+                    if t.as_slice().first().map(String::as_str) == Some(name.as_str()) {
                         if let Some(value) = t.content() {
                             out.insert(Element::Scalar(value.to_string()));
                         }
@@ -149,5 +155,77 @@ pub(crate) fn resolve_setop(op: SetAlgebra, operands: &[&ResolvedSet]) -> Resolv
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn note_with_tags(tags: Vec<Tag>) -> nostr::Event {
+        let keys = Keys::generate();
+        EventBuilder::new(Kind::TextNote, "hi")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("test fixture must sign cleanly")
+    }
+
+    /// `Selector::Tag` is a purely local projection over already-acquired
+    /// events (#64) — it must project multi-character/punctuation event-tag
+    /// names exactly as it would a single-letter one, never rejecting them
+    /// as "unknown".
+    #[test]
+    fn tag_selector_projects_arbitrary_multi_character_event_tag_names() {
+        let event = note_with_tags(vec![
+            Tag::parse(["poop", "value1"]).unwrap(),
+            Tag::parse(["-", "value2"]).unwrap(),
+            Tag::parse(["alt", "value3"]).unwrap(),
+        ]);
+        for (name, expected) in [("poop", "value1"), ("-", "value2"), ("alt", "value3")] {
+            let set = project_events(
+                std::slice::from_ref(&event),
+                &Selector::Tag(name.to_string()),
+            );
+            assert_eq!(
+                set,
+                ResolvedSet::from([Element::Scalar(expected.to_string())])
+            );
+        }
+    }
+
+    /// Every ASCII letter is a valid `Selector::Tag` key, not just the old
+    /// hard-coded M1 set -- `x`/`Z` are the structural (not whitelist)
+    /// witnesses (#64 acceptance evidence).
+    #[test]
+    fn tag_selector_matches_previously_unlisted_letters() {
+        for c in ['x', 'Z'] {
+            let event = note_with_tags(vec![Tag::parse([c.to_string(), "v".to_string()]).unwrap()]);
+            let set = project_events(&[event], &Selector::Tag(c.to_string()));
+            assert_eq!(set, ResolvedSet::from([Element::Scalar("v".to_string())]));
+        }
+    }
+
+    /// Lowercase and uppercase tag names are distinct keys -- `e` and `E`
+    /// must not be folded together by the projection.
+    #[test]
+    fn tag_selector_is_case_and_spelling_exact() {
+        let event = note_with_tags(vec![
+            Tag::parse(["e", "lower"]).unwrap(),
+            Tag::parse(["E", "upper"]).unwrap(),
+        ]);
+        let lower = project_events(
+            std::slice::from_ref(&event),
+            &Selector::Tag("e".to_string()),
+        );
+        let upper = project_events(&[event], &Selector::Tag("E".to_string()));
+        assert_eq!(
+            lower,
+            ResolvedSet::from([Element::Scalar("lower".to_string())])
+        );
+        assert_eq!(
+            upper,
+            ResolvedSet::from([Element::Scalar("upper".to_string())])
+        );
     }
 }

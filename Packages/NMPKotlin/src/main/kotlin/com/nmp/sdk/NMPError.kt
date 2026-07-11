@@ -14,7 +14,8 @@ import uniffi.nmp_ffi.FfiException
  * (mirrors `nmp-ffi`'s own `FfiError`; see that type's doc for the Rust
  * side of each case). */
 sealed class NMPError(message: String) : Exception(message) {
-    data class InvalidTagName(val got: String) : NMPError("invalid tag name: $got")
+    data class NonIndexableFilterTag(val got: String) :
+        NMPError("not indexable as a filter key: $got")
     data class InvalidPublicKey(val got: String) : NMPError("invalid public key: $got")
     data class InvalidEventId(val got: String) : NMPError("invalid event id: $got")
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
@@ -28,7 +29,7 @@ sealed class NMPError(message: String) : Exception(message) {
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
-                is FfiException.InvalidTagName -> InvalidTagName(ffi.got)
+                is FfiException.NonIndexableFilterTag -> NonIndexableFilterTag(ffi.got)
                 is FfiException.InvalidPublicKey -> InvalidPublicKey(ffi.got)
                 is FfiException.InvalidEventId -> InvalidEventId(ffi.got)
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)

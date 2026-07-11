@@ -327,7 +327,7 @@ fn nip29_non_author_atom_routes_via_group_host() {
         tags: {
             let mut m = std::collections::BTreeMap::new();
             m.insert(
-                nmp_grammar::TagName::new('d').unwrap(),
+                nmp_grammar::IndexedTagName::new('d').unwrap(),
                 BTreeSet::from(["group1".to_string()]),
             );
             m

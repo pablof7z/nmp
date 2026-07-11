@@ -10,7 +10,7 @@ import NMPFFI
 /// (mirrors `nmp-ffi`'s own `FfiError`; see that type's doc for the Rust
 /// side of each case).
 public enum NMPError: Error, Sendable, Equatable {
-    case invalidTagName(String)
+    case nonIndexableFilterTag(String)
     case invalidPublicKey(String)
     case invalidEventId(String)
     case invalidRelayUrl(String)
@@ -23,7 +23,7 @@ public enum NMPError: Error, Sendable, Equatable {
 
     init(_ ffi: FfiError) {
         switch ffi {
-        case .InvalidTagName(let got): self = .invalidTagName(got)
+        case .NonIndexableFilterTag(let got): self = .nonIndexableFilterTag(got)
         case .InvalidPublicKey(let got): self = .invalidPublicKey(got)
         case .InvalidEventId(let got): self = .invalidEventId(got)
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)

@@ -158,7 +158,7 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
                 authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: nmp_grammar::Selector::Tag(nmp_grammar::TagName::new('p').unwrap()),
+            project: nmp_grammar::Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     });

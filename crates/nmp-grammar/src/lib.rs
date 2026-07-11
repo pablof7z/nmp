@@ -16,11 +16,11 @@
 mod binding;
 mod concrete;
 mod demand;
+mod indexed_tag_name;
 mod selector;
-mod tag_name;
 
 pub use binding::{Binding, Derived, Filter, SetAlgebra, SetOp};
 pub use concrete::{ConcreteFilter, DescriptorHash};
 pub use demand::{DemandDelta, DemandOp};
+pub use indexed_tag_name::IndexedTagName;
 pub use selector::{IdentityField, Selector};
-pub use tag_name::TagName;

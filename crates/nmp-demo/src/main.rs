@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::{DiagnosticsSnapshot, RowDelta};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_engine::runtime::EngineThread;
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, TagName};
+use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::LiveDirectory;
 use nmp_signer::LocalKeySigner;
@@ -442,7 +442,7 @@ fn build_follow_feed_query() -> LiveQuery {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('p').expect("'p' is a valid tag name")),
+            project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     })
@@ -502,7 +502,7 @@ mod tests {
                     derived.inner.authors,
                     Some(Binding::Reactive(IdentityField::ActivePubkey))
                 );
-                assert_eq!(derived.project, Selector::Tag(TagName::new('p').unwrap()));
+                assert_eq!(derived.project, Selector::Tag("p".to_string()));
             }
             other => panic!("expected a Derived authors binding, got {other:?}"),
         }

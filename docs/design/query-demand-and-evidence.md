@@ -39,10 +39,14 @@ Binding  := Literal(set)
           | Reactive(CurrentPubkey)
           | Derived(inner: Filter, project: Selector)
           | SetOp(Union | Intersect | Diff, [Binding])
-Selector := Authors | Ids | Tag(char) | AddressCoord
+Selector := Authors | Ids | Tag(name: String) | AddressCoord
 ```
 
-The exact public spelling may change. These properties may not:
+`Tag`'s `name` is an arbitrary event-tag key (#64): it projects
+already-acquired events locally, so it is never restricted to a single
+letter -- distinct from a wire/local `Filter`'s indexed tag keys, which stay
+exactly NIP-01's single-ASCII-letter alphabet. The exact public spelling may
+change. These properties may not:
 
 - every node is serializable, hashable, introspectable, and printable;
 - selectors are a closed typed vocabulary, never app closures;
