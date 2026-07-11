@@ -2,6 +2,54 @@
 
 Honest running list of things built-but-incomplete or deliberately deferred, so nothing hides. Each says who flagged it, why it's deferred, and when it must be closed. This is a truth-anchor companion to the bug-class ledger.
 
+## Promoted v2 contract gaps - next work frame
+
+The July 11 architecture promotion intentionally corrected several assumptions
+after the original milestones. These are agreed target contracts, not claims
+about current code:
+
+- **Demand is still filter-shaped.** The supported descriptor does not yet carry
+  `selection + source authority + access context` end to end. Hashing,
+  coalescing, routing, evidence, FFI, Swift, and Kotlin must project the same
+  semantic descriptor. See `docs/design/query-demand-and-evidence.md`.
+- **Current `Coverage` over-interprets relay evidence.** `Unknown` versus
+  aggregate `CompleteUpTo` and the builder's authoritative-empty language must
+  become rows plus compact per-current-plan acquisition facts. Diagnostics keep
+  exact per-relay EOSE/watermark/AUTH/error evidence; no public global
+  completeness or `syncHealth` state remains.
+- **Durable `Accepted` is not crash-safe acceptance of a canonical pending
+  row.** The intent journal, receipt, frozen unsigned body, stable pending row,
+  displaced replaceable state, and initial retry state are not yet one atomic
+  persistence boundary. Restart, cancellation, signature promotion, and
+  reattachment proofs are required.
+- **Signer selection is globally coupled today.** The target default is the
+  signer registered for `$currentPubkey`, with an optional per-write identity
+  override pinned at acceptance. Missing capability must persist as
+  `AwaitingSigner(pubkey)`. Standard platform secure signer providers and
+  reattachment are unbuilt.
+- **Durable logical retry is unbuilt.** The outbox does not yet persist exact
+  per-`(intent, relay)` attempt bytes, ordinal, outcome, and next eligibility.
+  The deadline driver must grow into the one scheduler for expiry, liveness,
+  signer operations, and retry without adding polling or transport-owned
+  durable buffering.
+- **Protocol-module composition is unbuilt.** The existing ownership design
+  incorrectly makes kind ownership gate all route authority. Modules must claim
+  only exact NIP-defined schemas while typed contextual operations may add their
+  own tags and route facts to immutable foreign-owned drafts. No kind:1-first
+  core catalog is part of the target.
+- **Boundedness is only partial.** Swift newest-frame buffering, indexed queries,
+  and router caps exist, but graph, derived-set, wire, relay, result, receipt,
+  ingestion, and scheduler bounds do not yet share an explicit shortfall
+  contract. Silent first-N behavior is forbidden.
+- **Destructive trust-domain reset is missing as a defined contract.** One
+  engine is one shared cache across accounts. A mutually-untrusted-user logout
+  must atomically clear cached events, pending writes, receipts,
+  coverage/evidence, and related local state.
+- **Public syntax remains provisional.** Any change now requires failure
+  evidence, Rust/persistence/diagnostics/FFI/Swift/Kotlin impact review, updated
+  falsifiers, human signoff, and removal of the superseded path. The repository
+  has not yet enforced this promotion protocol across every public projection.
+
 ## Load-bearing for M5 (the falsifier app) — must close before M5 claims pass
 
 - **~~`RelayDirectory` has no reactive update path~~ CLOSED (self-bootstrapping outbox).** `nmp_router::LiveDirectory` is a live, updatable `RelayDirectory` (write relays start empty, fed at runtime via `RelayDirectory::ingest_write_relays`); `nmp_engine::core::EngineCore::sync_discovery` watches active content demand for authors whose write relays are still unknown and opens an internal kind:10002 discovery subscription against the configured indexers for exactly them (reusing the ordinary resolver subscribe/unsubscribe machinery, not a parallel subscription system) -- when that kind:10002 lands, the winning event is re-read from the store and fed into the directory, and the very same recompile re-routes that author's content atoms to their real write relay. `nmp-demo`'s two-phase `bootstrap.rs`/`BootstrapDirectory` are deleted; the CLI now configures only two indexer relays and gets real notes with the engine doing discovery. `nmp-ffi`'s `NmpEngineConfig`/Swift `NMPConfig` lost the `write_relays`/`writeRelays` field for the same reason -- an app supplies indexers only. Headless proof: `nmp-engine/tests/self_bootstrap_outbox.rs`. Live proof: `nmp-demo` against real relays, and `Packages/NMP/Tests/NMPTests/LiveRelayTests.swift`.
@@ -26,13 +74,13 @@ Honest running list of things built-but-incomplete or deliberately deferred, so 
 
 ## Design-level (validated from external feedback — see docs/reviews/2026-07-11-external-feedback-triage.md)
 
-- **~~Supersession retraction blindness (the negative-delta family)~~ DESIGN COMPLETE (build pending).** The resolver dirty-marks only the *newly arrived* event; when a new event supersedes an old winner that matched a `Derived` inner filter, the derived set is never re-evaluated to *remove* the stale member — it stays indefinitely (`crates/nmp-engine/src/core/mod.rs` ~engine.rs:410). Kind:5 delete, NIP-40 expiry, and optimistic-write rejection all hit this same shape. This is the "negative-delta / retraction" family flagged as the top at-risk kernel responsibility (issue #10, Brainstorm's UNDO probe) — the resolver has only ever *grown or superseded*, never *retracted*. **Design landed** in `docs/design/retraction-and-negative-deltas.md`: one negative-delta lane, four feeders (supersession / kind:5 / NIP-40 expiry / optimistic rejection), zero new app-facing surface (the app only ever sees `RowDelta::Removed`, which it already handles). Key mechanism — the store's one door becomes symmetric (`InsertOutcome::Superseded { replaced: StoredEvent }` hands the evicted row back; new `expire_due`/`remove` doors return removed rows) and the resolver's existing `match_event` dirty-seed loop runs over `inserted.chain(removed)`; the shrink, surgical `WireOp::Close`, and `RowDelta::Removed` all fall out of existing machinery. Local echo = store citizen (a `Local` provenance field, NOT an overlay/second store); rejection = compensating re-insert, never un-supersede. **One owner decision open** — kind:5 tombstone retention: permanent (~40 B/deletion, recommended) vs GC-bounded with a documented resurrection window. Not yet built.
+- **Supersession retraction blindness - base design complete, pending-write section superseded (build pending).** The resolver still needs the symmetric negative-delta lane described in `docs/design/retraction-and-negative-deltas.md`: store commits return inserted and removed rows, and resolver invalidation consumes both. That mechanism remains correct for supersession, kind:5, NIP-40 expiry, and explicit pre-signature cancellation. The document's optimistic-write details are no longer canonical: a durable accepted row has typed `Pending(intentId) | Signed(signature)` state; missing signer waits indefinitely; only cancellation or terminal **pre-signature** failure retracts and compensates a displaced replaceable; relay rejection after signing changes receipt evidence only. `docs/design/durable-write-signing-and-retry.md` owns that correction. Kind:5 tombstone retention remains an owner decision. Not yet built.
 
 - **~~Four bounded correctness fixes from the external-feedback triage~~ LANDED (merge `9220f65`).** (1) Signature-verification gate at the network layer (`nmp-transport` frame seam) — kind-independent, verify-once per event id (redelivery string-compares the cached sig, no re-schnorr), invalid sig → drop + `RelayHealth::invalid_signature_count`; cache reads never re-verified. Makes ledger #5 honest. (2) FFI no longer panics on malformed `Literal` hex (typed error) and no longer silently drops malformed tags (`tags_from_ffi` returns `Result` — NMP can't sign a different event than the app composed). (3) `DescriptorHash`/`CoverageKey` widened FNV-64 → BLAKE3 256-bit (a network-controlled, durable-and-refcount key must be collision-resistant; a forged collision there would forge a `CompleteUpTo`). (4) `coalesce` never merges limited filters (relay-side truncation under-fetch), and a known-zero-write-relay author stops perpetual discovery.
 
 ## Security hardening deferred
 
-- **Secret zeroization not harvested (M3-A3, old-repo V-55).** `nmp-signer` holds `nostr::Keys` without the old repo's zeroize/raw-bytes secret-residency hardening. Reasonable to defer, but a real security property to restore before any v2 ship. Owner: post-M3 security pass.
+- **Secret zeroization and platform signer-provider boundary are not complete.** `nmp-signer` currently holds `nostr::Keys` without the old repo's zeroize/raw-bytes hardening. The promoted contract also requires the durable Rust event/outbox store to persist obligations rather than secrets and the Swift/Kotlin SDKs to offer standard secure-storage-backed signer providers. Both need falsification before v2 ships. Owner: security/signing workstream.
 
 ## Process / tooling
 

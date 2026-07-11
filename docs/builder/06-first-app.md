@@ -1,8 +1,13 @@
 # Your first app in 20 lines
 
-**Status: BUILT** for Swift and Rust — both examples below run against the real SDKs today. Kotlin and TypeScript are shown as **PLANNED-shape**: the intended idiom, clearly marked, not yet shipped (only Swift + Rust SDKs exist).
+**Status: BUILT** for Swift, direct Rust, and the minimal JVM Kotlin/Flow
+package. The Kotlin snippet below illustrates the promoted target spelling, not
+the current pre-promotion API. TypeScript remains uncommitted.
 
-After this chapter you'll have seen the *entire* shape of an NMP app — construct, identify, observe, render, publish — in under twenty lines on each platform, and you'll recognize the same five moves translated into each language's native reactive idiom.
+After this chapter you'll have seen the embedding shape — construct, set query
+inputs, observe, render, publish — translated into each language's native
+reactive idiom. The current examples use the Falsifier's NIP-02/kind:1 fixture;
+that fixture is not a core default.
 
 ---
 
@@ -13,7 +18,7 @@ The design rule this chapter demonstrates is *M4's kill condition*: **one constr
 The five moves are always the same, and every platform maps them onto its *canonical cold reactive primitive*:
 
 1. Construct the engine (once).
-2. State the active identity.
+2. Set the current-pubkey input when the query depends on it.
 3. Build a query **value** and observe it.
 4. Fold delivered rows into your own state and render raw tokens yourself.
 5. (Optionally) publish a write intent and watch its receipt.
@@ -25,16 +30,18 @@ Swift's dialect is `AsyncSequence`. Teardown rides ARC: drop the iterator, deman
 ```swift
 import NMP
 
-// 1. Construct once. `indexerRelays` is the only relay fact you ever supply.
+// 1. Construct once. `indexerRelays` is typed operator discovery policy;
+//    raw observe/publish has no app-expanded relay list.
 let engine = try NMPEngine(config: NMPConfig(
     storePath: nil,                                   // in-memory for a demo
     indexerRelays: ["wss://purplepag.es", "wss://relay.primal.net"]))
 
-// 2. Identity is an input. Read-only browsing needs no key at all.
+// 2. Current pubkey is an input. Read-only browsing needs no key at all.
 try engine.setActiveAccount(
     "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d")
 
-// 3. Build a query value: $myFollows notes (kind:1 by my kind:3 contacts).
+// 3. Current Falsifier fixture: caller-selected kind:1 events by the
+//    pubkeys projected from this current pubkey's NIP-02 contact list.
 let follows = NMPFilter(
     kinds: [1],
     authors: .derived(
@@ -105,7 +112,10 @@ while let Ok((deltas, _coverage)) = rows_rx.recv() {
 }
 ```
 
-To publish, register a signer first (the key lives engine-side) and hand `publish` a `WriteIntent`:
+To publish through the current Rust surface, register a local signer and hand
+`publish` a `WriteIntent`. The target facade defaults to the signer for
+`$currentPubkey`, permits an identity override, and persists the obligation but
+not raw secret material:
 
 ```rust
 handle.add_signer(nmp_signer::LocalKeySigner::new(keys));
@@ -118,9 +128,11 @@ while let Ok(status) = rx.recv() { println!("{status:?}"); }
 
 The Rust `Handle` is a `Clone + Send` value with exactly the two nouns plus identity, diagnostics, and `shutdown` — no `relays:` parameter, no open-a-REQ method. It's the fastest place to see the nouns with no UI framework in the way, which is why the manual leans on it.
 
-## Kotlin — the intended shape (PLANNED)
+## Kotlin — Flow is built; promoted target shape remains provisional
 
-> **PLANNED-shape.** The Kotlin/Android SDK is not built yet (M6). This is the *intended* idiom, per the cross-platform contract, so you can see how the same two nouns land in Kotlin. Do not expect this to compile today.
+> `Packages/NMPKotlin` is a built, live-proven desktop-JVM `Flow` projection.
+> It is not an Android AAR or Compose app. The names in this snippet are the
+> promoted target shape and do not compile until the governed migration lands.
 
 Kotlin's canonical cold reactive primitive is a cold `Flow`; teardown rides the collection scope. The nouns keep their names and shapes (modulo casing); only the wrapper changes. The caller applies `stateIn(WhileSubscribed)` themselves — the Room idiom verbatim — rather than NMP inventing an observer type.
 
@@ -130,10 +142,10 @@ val engine = NmpEngine(NmpConfig(
     storePath = null,
     indexerRelays = listOf("wss://purplepag.es", "wss://relay.primal.net")))
 
-engine.setActiveAccount("3bf0c63f…459d")   // identity is an input
+engine.setCurrentPubkey("3bf0c63f…459d")   // PLANNED target spelling
 
 val follows = NmpFilter(
-    kinds = listOf(1),
+    kinds = listOf(9999),                  // caller policy, not a blessed kind
     authors = Binding.Derived(
         inner = NmpFilter(kinds = listOf(3), authors = Binding.Reactive(ActivePubkey)),
         project = Selector.Tag('p')),
@@ -158,10 +170,10 @@ const engine = await NMPEngine.create({
   indexerRelays: ["wss://purplepag.es", "wss://relay.primal.net"],
 });
 
-engine.setActiveAccount("3bf0c63f…459d");   // identity is an input
+engine.setCurrentPubkey("3bf0c63f…459d");   // PLANNED target spelling
 
 const follows: NMPFilter = {
-  kinds: [1],
+  kinds: [9999],
   authors: { derived: {
     inner: { kinds: [3], authors: { reactive: "activePubkey" } },
     project: { tag: "p" } } },

@@ -5,6 +5,8 @@
   `docs/design/routing-and-ownership.md` (Parts A/B/C, §9 RESOLVED decisions
   authoritative) into dependency-ordered, fan-out-able build units. Writes no
   code; this is the artifact that gets fanned out to builders.
+- **Promotion status:** historical execution record. For unbuilt units, the promoted
+  contracts supersede kind-ownership and untyped-override assumptions here.
 - **Source of truth:** `docs/design/routing-and-ownership.md` §9 (owner-resolved
   decisions) overrides §8 (open list) wherever they conflict. Where §9 is silent
   and §8 is open, the sub-decision is surfaced in §7 below as an owner question —
@@ -26,7 +28,7 @@ kind-ownership boundary.
 **Thesis (what MR proves).** Every relay-bearing decision the engine makes — a
 read route, a write route, a private-inbox route, a group-host route, a
 discovery route, a fallback top-up — is **compiler output from lane-typed facts
-plus positive kind-ownership claims**, with (a) no `relays:` parameter anywhere
+plus positive schema-ownership claims or typed per-intent protocol context**, with (a) no untyped relay override on the default path
 (ledger #3 intact), (b) no per-kind `match` in core (the claim table *is* the
 per-kind knowledge), (c) core knowing **zero NIPs** beyond NIP-01/65 defaults
 (gift-wrap/group/draft routing all live in module crates), and (d) the
@@ -354,6 +356,8 @@ The override primitive. Per `routing-and-ownership.md §3`. Types + table-driven
 dispatch, provable now with a **test-only fixture module** (no real module crate
 exists yet).
 
+> **Promoted correction:** schema claims never authorize contextual mutation of a foreign draft; see `protocol-modules-and-composition.md`.
+
 **Scope / files:** `crates/nmp-router/src/` (new module, e.g. `policy.rs`, +
 `lib.rs` re-exports) for `RoutePolicy`/`RelaySource`/`AppLanes`/`FailMode`
 types and the claim-table routing split; `crates/nmp-engine/src/core/mod.rs`
@@ -386,6 +390,9 @@ generalization — see the concrete gap below.
 - **`Skip` + `OpenToAppLanes` compose and BOTH fields are required** (no
   defaulting): Skip = "app lanes are not additive routes"; open-on-empty = "app
   lanes are the last-resort route when the source is empty." Different questions.
+- Foreign-owned drafts are outside this table even when they are published in a
+  protocol context. Only the context contribution for that one intent may pin a
+  host; the foreign kind remains under its own/default schema policy.
 
 **Concrete code-reality gap to close (do not gloss):** `RelaySource::
 RelayListKind{kind}` (e.g. NIP-17's 10050, drafts' 10013) needs the *recipient's
@@ -459,6 +466,10 @@ Default` enum.
 ### Unit G — The kind-ownership boundary + `nmp-audit` (the load-bearing unit)
 
 Detailed in §4 of this plan (its own section — it is the K2 correctness piece).
+
+The audit enumerates exact schema claims. In particular, a future NIP-29 module
+must list only NIP-29-defined management/state schemas; a broad 90xx/3900x range
+that captures unrelated schemas is a failure, not convenient shorthand.
 
 **Dependencies:** E (RoutePolicy embeds in KindClaim). Parallel with F.
 
@@ -652,36 +663,16 @@ real module — the fixtures live in the audit crate's test tree.
 - **NIP-17 / NIP-29 module crates** — MR builds the seam (Parts B/C) and proves
   it with test fixtures; the real `nmp-mod-nip17`/`nmp-mod-nip29` crates are the
   forcing-function follow-ups that consume it (and are what turn ledger #14's
-  proof status from "fixture" to "real").
+  proof status from "fixture" to "real"). NIP-29's claim covers only its exact
+  schemas; its `h`/host contribution to foreign drafts uses the separate
+  per-intent composition seam described in the promoted canonical contract.
 
 ---
 
-## 6. Sequencing vs the retraction family (shared-file collision map)
+## 6. Sequencing vs the retraction family
 
-`docs/design/retraction-and-negative-deltas.md` is designed, build pending. Both
-families land in the same two hot files. **Coordinate ordering or share a
-worktree for the core touches** — do not fan them out blind against each other.
-
-| File | Retraction touches | MR touches | Collision severity |
-|---|---|---|---|
-| `crates/nmp-engine/src/core/mod.rs` **`on_relay_frame` Event arm (`:840`)** | adds `StoreCommit` removed-events handling to the ingest path | Unit H adds indexer write-back on newer event; Unit D-write reads seen-provenance | **HIGH** — same arm, same `ingest_observed` call site (`:862`) |
-| `core/mod.rs` **`EngineCore` struct (`:251`) + `new` (`:311`)** | adds `displaced` tracking, deadline state | Unit G changes `new` signature (claim registration); Unit A/E add directory/policy state | **HIGH** — same struct, same constructor; every call site (`facade.rs:58`, `nmp-demo:149`, `nmp-bdd:457`, 4 test harnesses) edited by both |
-| `core/mod.rs` **receipt terminals / `PendingWrite` (`:221`, `on_signed` `:540`)** | rejection → `store.remove` → `retract`; `displaced` stash field | Unit F changes `WriteStatus::Routed`; Unit C/D-write change route resolution | **MEDIUM** — adjacent fields + adjacent match arms |
-| `outbox/mod.rs` **`WriteStatus` (`:99`)** | rejection handling (no enum change) | Unit F changes `Routed` variant arity | **LOW** — MR owns the enum edit; retraction consumes it |
-| `crates/nmp-store` **insert door** | `InsertOutcome::Superseded{replaced}`/`Refused`; `remove`/`expire_due` | Unit H reads provenance/coverage (no door change) | **LOW** — different surfaces (write door vs read) |
-| `crates/nmp-engine/src/runtime/mod.rs` **`engine_loop` (`:311`, `:329`)** | `recv()` → `recv_timeout(next_deadline)` | **none** | **NONE** — retraction-only |
-
-**Recommended order:** (1) land the crate-local, low-collision routing units
-**A and B** (mostly `nmp-router`) and the retraction family's **store-door
-symmetry** (mostly `nmp-store`) **in parallel** — different crates. (2) Then
-**serialize the `core/mod.rs`-heavy work**: pick one family to land its
-`EngineCore::new` signature change and `on_relay_frame` restructure first, rebase
-the other on top — or run both in **one shared worktree** for the core touches
-(the repo's "cohesive change = one shared worktree" rule applies to the
-core/mod.rs seam specifically). Unit G's `EngineCore::new` change and the
-retraction family's struct-field additions are the single most likely merge
-conflict; whoever lands second rebases. **Do not let Unit H and the retraction
-`on_relay_frame` change proceed in independent worktrees simultaneously.**
+The shared-file collision map and landing order are in
+[`routing-retraction-collision-map.md`](routing-retraction-collision-map.md).
 
 ---
 
@@ -698,6 +689,10 @@ conflict; whoever lands second rebases. **Do not let Unit H and the retraction
 - Re-plan signature verification (landed, `9220f65`).
 - Change the two-noun app surface — publish still takes event + durability, read
   still takes a live query; no `relays:` parameter is added anywhere.
+
+The last bullet records the surface at the time this plan was written. It is not
+a compatibility freeze: promoted contextual publication may add provisional
+typed inputs while preserving live query + write intent as the only operations.
 
 **Open owner questions (surfaced, not resolved — §9 is silent or the code
 contradicts spec optimism):**
@@ -777,7 +772,8 @@ can fan out; recorded here for override.
 ## 8. Summary
 
 - **Milestone:** MR — Routing & Ownership. Thesis: every relay decision is
-  compiler output from lane facts + ownership claims, core is NIP-blind, and the
+  compiler output from lane facts + schema-ownership claims or typed per-intent
+  context, core is NIP-blind, and the
   ownership boundary is enforced by cargo-metadata + types, not a lint. Kills:
   K1 (override vocabulary not general / core goes NIP-aware), K2 (ownership
   can't be structural), K3 (composition-matrix leak cell).
@@ -793,7 +789,8 @@ can fan out; recorded here for override.
   first `nmp-mod-*`).
 - **Folds in:** DM inbox read-relay accessor + correct inbox fan-out (closes
   M3-D); authorless lane (→ app lane). **Stays separate:** decrypt path, AUTH,
-  the real nip17/nip29/drafts crates, the retraction time-driver.
+  the real nip17/nip29/drafts crates, the contextual-publication seam, the
+  retraction time-driver.
 - **Collision risk:** retraction family shares `core/mod.rs` (`on_relay_frame`
   Event arm, `EngineCore`/`new`, receipt terminals) — land crate-local units
   (A/B, store-door) in parallel, then serialize or share-worktree the

@@ -1,6 +1,8 @@
 # Adding NMP to an app you already own
 
-**Status: BUILT** — the coexistence patterns below use the real Swift SDK and the real Rust `Handle`, and are exactly how the Falsifier app embeds the engine. Kotlin/TS notes are marked PLANNED-shape.
+**Status: BUILT** — the coexistence patterns use the real Swift SDK and Rust
+surface. A desktop-JVM Kotlin `Flow` projection is also built; Android/AAR/
+Compose and TypeScript remain incomplete.
 
 After this chapter you'll know exactly where the engine object lives in an app that already has its own state, networking, and UI — and you'll have proof, from the SDK's own shape, that NMP demands no wrapper, no rewrite, and no surrender of your architecture.
 
@@ -90,16 +92,27 @@ If you're moving off NDK / Applesauce / a hand-rolled relay pool, you don't cut 
 
 1. **Add the engine beside your existing client.** Both can be live at once; they don't share state. Your old code keeps serving the screens you haven't migrated.
 2. **Migrate one query at a time.** Replace a hand-managed subscription with an `observe(NMPFilter)`. The classic thing you *delete* here is the machinery you used to hand-maintain: watching kind:3 and re-issuing REQs when follows changed is now a single `Derived` binding the engine re-resolves for you. That whole loop goes away.
-3. **Move writes to intents.** Swap your sign-then-send code for `publish(WriteIntent)` and consume the receipt stream. Signing moves engine-side (the key crosses `addAccount` once); your old signer code retires.
+3. **Move writes to intents.** Swap your sign-then-send code for
+   `publish(WriteIntent)` and consume the receipt stream. The current SDK can
+   register a local signer. The target ships standard platform secure providers
+   and also accepts custom remote/hardware providers; the durable event/outbox
+   store never becomes a raw-secret vault.
 4. **Verify each migrated screen on the diagnostics surface** before deleting the old path. The diagnostics screen shows the exact filters and per-kind event counts for the NMP-served screen, so you can confirm parity with the old client's behavior by *reading*, not by hoping. When the counts look right, delete the legacy path for that screen.
 
-Because the two libraries share nothing, a half-migrated app is a stable state you can ship, not a risky in-between. Identity is the one thing to keep coherent: once a screen is NMP-served, that account's key should live engine-side (via `addAccount`), and `setActiveAccount` is the single switch that re-roots every NMP query. Your old client's notion of "current user" and NMP's active account should agree — keep one source of truth in *your* code and push it into NMP with that one call.
+Because the two libraries share nothing, a half-migrated app can be a stable
+state. Keep one app-owned source for the current pubkey and feed that input to
+NMP. Only dependent NMP queries reroot. Signer registration/default/override is
+a separate write concern; an accepted write never follows a later pubkey
+change.
 
 ## Rust and other platforms
 
 Embedding the Rust `Handle` in an existing Rust app is the same story: `EngineThread::spawn(...)` returns a `Clone + Send` `Handle` you store wherever your app keeps services. It owns two interior threads and nothing of yours; `handle.shutdown()` + `engine.join()` is the clean teardown, and until then it's just a value you clone into whatever tasks need it.
 
-> **PLANNED-shape (Kotlin/TS).** The same placement rules are the *intended* shape on Android (the engine as a field on your own repository/`ViewModel`, collected as a cold `Flow`, no DI framework required) and on web (a module-level engine instance, consumed as an async iterator). Neither SDK is built yet; when they ship, the no-wrapper guarantee is contractual on every platform, because it's a property of the two-noun surface, not of any one language binding.
+> **Kotlin JVM built; Android/TS incomplete.** `Packages/NMPKotlin` proves cold
+> `Flow` and deterministic cancellation without an NMP container. Android still
+> needs AAR/Keystore/Compose falsification; TypeScript is not committed. The
+> no-wrapper boundary applies to every projection.
 
 The through-line: NMP is additive. You keep your architecture, your networking, and your other libraries; you gain two nouns and a diagnostics screen; and the SDK's shape means you can never accidentally invert that relationship and end up living inside NMP.
 

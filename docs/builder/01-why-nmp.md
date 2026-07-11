@@ -10,11 +10,13 @@ Nostr looks deceptively simple. Open a WebSocket, send a `REQ` with a filter, ge
 
 Then correctness arrives, and it never leaves. To keep a single timeline *right* — not just populated once, but continuously, correctly, offline and online — you have to implement:
 
-- **Outbox routing.** Events for a given author live on *that author's* write relays, which you learn from their kind:10002. There is no central relay. Get this wrong and you silently miss half your follows' posts.
+- **Outbox routing.** Events for a given author may live on *that author's* write relays, which you learn from their kind:10002. There is no central relay. Get this wrong and you silently miss matching events.
 - **Subscription lifecycle.** Every open `REQ` is a live resource. Open too many and relays drop you; leak them and you burn battery and bandwidth; close them at the wrong moment and your UI goes stale.
 - **Replaceable-event semantics.** kind:0 profiles, kind:3 follow lists, kind:10002 relay lists, and all of `30000`–`39999` are *replaceable*: a newer event supersedes an older one by `created_at`, with a lexicographic-id tiebreak. Store both and you'll show stale data half the time.
 - **Dedup and provenance.** The same event arrives from five relays. You want it once — but you also want to remember *which* relays had it, because that's how you route replies and prove coverage.
-- **Cache authority.** When your local store returns nothing, does that mean "there are no results" or "I haven't synced this yet"? These are different facts, and conflating them is how you show a user an empty screen that should be full.
+- **Acquisition evidence.** When your local store returns nothing, which planned
+  sources were actually asked, which replied, and which were unavailable? The
+  empty local replica is a fact; global Nostr completeness is unknowable.
 - **Relay fan-out discipline.** A naive client unions every follow's relay list and connects to 200 relays. A correct one solves for a minimal covering set with a fan-out cap.
 
 Every *correct* Nostr client re-implements all of this. Every *incorrect* one skips some of it and ships bugs users can't see until their timeline is quietly, invisibly wrong. The machinery is the same in every client, it is genuinely hard, and it is not the thing you set out to build.
@@ -41,23 +43,36 @@ The old design had a wide surface and *policed* it — a rulebook you had to fol
 
 NMP replaces the rulebook with a **bug-class ledger**: a concrete list of Nostr bugs the design makes *structurally impossible*, each naming the type or API mechanism that excludes it (see [`docs/bug-class-ledger.md`](../bug-class-ledger.md), and *[Patterns & anti-patterns](28-patterns.md)* for the builder's-eye retelling). To claim an entry holds, someone *attempts to write the bug* and records why it won't compile, can't reach the wire, or can't corrupt state. For you as a builder, this is the payoff: whole categories of Nostr bug are simply not expressible in the API you're handed.
 
-The clearest example is the one that motivates half of this manual.
+One representative example is reactive derived demand. It deliberately uses a
+caller-chosen outer kind: the core does not privilege notes or any other content
+type.
 
-## The canonical bug that has nothing to attach to
+## A reactive-demand bug with nothing to attach to
 
-Here is the single most common outbox-era Nostr bug, the one nearly every SDK reproduces:
+Suppose an app wants events of its own chosen kind from the pubkeys in the
+current user's NIP-02 contact list:
 
-> Your app wants "my follows' notes." So it subscribes to the current user's kind:3 (their follow list), reads the `p`-tags, and issues a `REQ` for `kinds:[1], authors:[...those pubkeys]`. Now the follow list is *app state*. When a new kind:3 arrives, your code has to notice it, re-read the tags, diff against what it had, and re-issue the right `REQ`s. Miss that, and a user who follows someone new never sees their posts. Botch the diff, and you tear down and reopen every subscription on every change. Handle account-switching, and you get to do it all again, correctly, with no leakage between accounts.
+> The app subscribes to the current user's kind:3 contact list, reads the
+> `p`-tags, and issues another `REQ` for `kinds:[9999]` from those authors. The
+> expanded author set becomes app state. When the contact list changes, app
+> code must diff it and repair the wire demand. Account changes add another
+> chance to leave stale demand behind.
 
 This bug lives in the *seam* between "the app owns the expanded follow set" and "the app re-issues subscriptions." Every SDK that hands you the follow list and lets you build the `REQ` yourself hands you this seam — and with it, this bug.
 
 In NMP, that seam does not exist. You declare the whole thing as one value:
 
 ```
-kinds:[1], authors := Derived(kinds:[3], authors:[$currentPubkey] → Tag(p))
+kinds:[9999], authors := Derived(kinds:[3], authors:[$currentPubkey] -> Tag(p))
 ```
 
-Read it as: *notes (kind:1) whose authors are the `p`-tags projected out of the current user's follow list (kind:3).* You hand that one declaration to the engine and observe the result. When the follow list changes, the engine re-evaluates the binding and surgically re-routes the wire subscriptions — closing exactly the departed author, opening exactly the new one, zero churn on the unchanged ones. When the active signer changes, the entire graph re-roots. **You write zero code for any of it.**
+Read it as: *kind:9999 events whose authors are the `p`-tags projected out of
+the current user's NIP-02 contact list.* You hand that declaration to the
+engine and observe the result. When the contact list changes, the engine
+re-evaluates the binding and surgically re-routes demand. When
+`$currentPubkey` changes, only graphs that reference that reactive input
+re-root. Literal multi-account queries remain live, and signer selection is a
+separate write concern. **You write zero subscription-repair code.**
 
 The bug has nothing to attach to because the app never sees the expanded author set, never holds it as state, and never issues a `REQ`. The expansion happens *inside* the engine, over a closed, introspectable vocabulary (bug-class ledger #11). There is no seam to get wrong. This binding grammar is NMP's crown jewel, and *[Live queries & the binding grammar](09-binding-grammar.md)* is where you'll learn to wield it.
 
@@ -65,9 +80,9 @@ The bug has nothing to attach to because the app never sees the expanded author 
 
 None of these are bad. They're the honest alternatives, and here's where each leaves you:
 
-- **NDK (and most JS/relay-pool SDKs).** These give you excellent primitives — relay pools, subscription helpers, signer abstractions, often outbox-model routing. What they *don't* give you is a place for the follows-expansion bug to not exist. They hand you the follow list and let you build subscriptions from it, because that's the honest shape of a relay-pool library. The correctness of "my follows, forever" is *your* code, living in *your* app state — which means the canonical bug above is yours to write and yours to get wrong. NDK helps you build the `REQ`; it can't hold the invariant that the `REQ` stays right, because the invariant lives on your side of its API.
+- **NDK (and most JS/relay-pool SDKs).** These give you excellent primitives — relay pools, subscription helpers, signer abstractions, often outbox-model routing. What they *don't* give you is a place for derived-demand repair to disappear. They hand you the inner result and let you build subscriptions from it. Keeping that second demand correct as the first changes is your app's invariant.
 - **Applesauce (and reactive-store Nostr SDKs).** Closer in spirit — reactive, store-centric. But the reactivity typically flows over *delivered events*, not over *demand*. You still assemble subscriptions, and the store reacts to what arrives; it doesn't re-route the wire when a follow list you depend on changes, because it has no closed grammar describing *why* you asked for those authors. Reactive delivery is not reactive demand. NMP's bindings are reactive on the demand side: the subscription itself is a function of live state, re-evaluated by the engine.
-- **Roll-your-own.** Entirely reasonable for a toy, and a career for anything real. You'll implement the brutal-machinery list one hard-won bug at a time. The reason NMP exists is that this work is *identical in every client* and genuinely hard — outbox routing, coverage watermarks, replaceable supersession, dedup with provenance. Writing it yourself means writing it correctly, offline and online, across reconnections and account switches, forever. That's the machinery NMP extracts.
+- **Roll-your-own.** Entirely reasonable for a toy, and a career for anything real. You'll implement the brutal-machinery list one hard-won bug at a time. The reason NMP exists is that this work is *identical in every client* and genuinely hard — outbox routing, scoped acquisition evidence, replaceable supersession, dedup with provenance. Writing it yourself means writing it correctly, offline and online, across reconnections and input changes, forever. That's the machinery NMP extracts.
 
 The distinction that ties all three together: **they route delivery; NMP routes demand.** In a roll-your-own or relay-pool world, your app decides which subscriptions exist and keeps them correct as state changes. In NMP, you declare *what you want* as a value, and keeping the subscriptions correct — as follow lists change, as accounts switch, as relays come and go — is the engine's job, structurally, with no seam handed back to you.
 

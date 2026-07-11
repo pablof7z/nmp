@@ -1,7 +1,12 @@
 # UI components across platforms — strategy design note
 
 - **Date:** 2026-07-11
-- **Status:** Ideation note for an owner decision. Nothing here is v2-blocking; VISION §3 already classifies the "optional UI component package" as north-star, not gate. This note decides what shape that north star may legally take — and names the parts of the ask that cannot be fully satisfied without breaking the thesis.
+- **Status:** Historical ideation note, **roadmap recommendation superseded** by
+  the v2 contract promotion. Its old-repo failure analysis remains useful. NMP
+  currently blesses no content kind, feed recipe, component family, or first UI
+  kit. Optional protocol/feature modules may expose exact-schema codecs,
+  builders, typed queries, and contextual operations; rendering remains app/UI-
+  framework territory.
 - **Anchors:** VISION P1 (library, not framework), §3 ownership table (rendering/layout/navigation belong to the UI framework), §10 ("values in, code after"; Collection observation mode), bug-ledger #11 (no app-owned expansion) and #12 (no presentation in core); README "Who owns what."
 - **Cautionary ground truth (old repo, `nostr-multi-platform`):** `crates/nmp-component-registry/` (122 files, 5 platform targets), `crates/nmp-content/src/{tokenizer,grouper}.rs`, `docs/recipes/content-rendering.md`, `docs/recipes/app-shapes.md`, `docs/cli.md` §"add component"; the three independent consumer-app forks of `NostrInlineVideoPlayer.swift` (evidence in §2.3).
 
@@ -9,12 +14,17 @@
 
 ## 1. The problem, honestly stated
 
-The owner wants NMP to offer UI components so that app builders don't re-implement the note card / thread view / profile header / compose box on every platform. That is a real product goal, and it is the single most framework-shaped thing this project could do. The old repo tried it, and its component story is one of the clearest specimens of how "just helpers" re-annexed the app: this note's first job is to extract *why* it crept, so the recommendation is grounded in mechanism, not vibes.
+This exploration began from a hypothetical NMP-owned component program intended
+to save apps from rebuilding common social UI. The promoted contract does not
+adopt that program: choosing those components would privilege one content model
+and pull NMP back toward an application framework. The old repo still provides
+valuable evidence about how "just helpers" re-annexed the app, so that analysis
+is retained below without treating its examples as a roadmap.
 
 The four constraints this design must hold simultaneously:
 
 1. **Library, not framework (P1).** The README assigns rendering, layout, navigation to the UI framework. A component story must not silently re-annex them.
-2. **Two nouns + "values in, code after."** Anything the engine uses to *decide* is a closed introspectable value; app closures may fold *delivered* rows into view state but never parameterize engine behavior. "Rendering a note" must land cleanly on one side of that line.
+2. **Two nouns + "values in, code after."** Anything the engine uses to *decide* is a closed introspectable value; app closures may fold *delivered* rows into view state but never parameterize engine behavior. Rendering any delivered protocol data must land cleanly on one side of that line.
 3. **Modularity.** A minimal app links zero of any component offering.
 4. **Multi-platform reality.** SwiftUI, Compose, and web are different rendering systems. Pixels do not port. The design must be honest about what is genuinely shareable.
 
@@ -69,24 +79,29 @@ Where "engine/data-owned content structure" ends and "app/UI-framework-owned ren
 | Layer | What it is | Sharing | Legality |
 |---|---|---|---|
 | **L0 — engine** | Events, rows, receipts, coverage, diagnostics. Raw tokens only: hex pubkeys, Unix timestamps, verbatim content (ledger #12). | The engine itself | Already settled. Nothing rendering-adjacent may ever live here. |
-| **L1 — protocol-semantic data** | Pure functions from delivered rows/content to *values* with closed vocabularies: content token tree (NIP-21/27/30), thread assembly (NIP-10 reply tree), zap-receipt parse (NIP-57). No I/O, no engine parameterization, off the demand path. | **Genuinely cross-platform** — one Rust implementation, values across FFI | Legal and squarely inside "values in, code after": these fold *delivered* rows; the engine never consults them. The vocabulary names protocol facts (`Mention(hex)`, `Hashtag`, `Url`, `EventRef(id)`), **never visual structure** (no card/row/column/gallery nodes — that's where a token tree quietly becomes a render-IR). |
-| **L2 — headless behavior (per platform)** | Thin observable view-models per concept — a composer model (draft state, mention autocomplete via an ordinary profile query, submit = write intent whose receipt stream it exposes), a thread model (a live query + L1 assembly). TanStack/Radix altitude. | Per-platform idiom (`@Observable` / `ViewModel`+`Flow`), but each is a ~200-line shim because **the hard behavior is already the engine**: liveness, pagination, ordering, windowing are the Collection observation mode (§10); durable submit is the write noun. | Legal *only if* built from the public SDK alone (rule R3 below). The moment one needs a private engine hook, the SDK surface is deficient — fix the surface, ledger-style. |
-| **L3 — reference views (per platform)** | Actual pixels: note card, profile header, compose box, thread view, in SwiftUI / Compose. | **Not shareable.** N implementations, one per platform, sharing only their L1/L2 substrate. | Legal only as ordinary consumers of the two nouns "exactly as any app would" (VISION §3), packaged and governed per §5. |
+| **L1 — protocol-semantic data** | Pure functions from delivered rows to typed values with closed vocabularies. Each opt-in module owns only its exact NIP/feature semantics; no generic social-content taxonomy is privileged. No I/O, no engine parameterization, off the demand path. | **Genuinely cross-platform** — one Rust implementation, values across FFI | Legal and squarely inside "values in, code after": these fold delivered rows or build immutable drafts; the engine never consults presentation structure. Vocabulary names protocol facts, never card/row/column/gallery nodes. |
+| **L2 — headless behavior (per platform)** | A possible future thin observable adapter around an opt-in protocol/feature module's public values and the ordinary query/write APIs. | Per-platform idiom (`@Observable` / `ViewModel`+`Flow`). | Not on the current roadmap. Legal only if public-surface-only and if it does not establish an NMP-prescribed app architecture. |
+| **L3 — reference views (per platform)** | Possible future pixels consuming public SDK/module values. | **Not shareable.** N implementations, one per platform. | Not on the current roadmap. If revisited, they must remain ordinary optional consumers, never the default path or a kind-dispatch system. |
 | **App** | Screen composition, navigation, theming decisions, resource-lifecycle policy (media playback, prefetch), anything it replaces. | — | — |
 
 The pivotal distinction, inherited from the old repo's late realization (its #3113: *codec vs formatting*): **codec** — mapping between protocol representations (hex↔npub, content→token tree, rows→reply tree) — is shared, reusable, one-implementation work. **Formatting** — truncation, locale dates, "2h ago", display-name fallback chains — is app-owned presentation and appears in *no* NMP layer, not even L3's reference views except as trivially replaceable view code. L1 is all codec; the engine stays all-raw; formatting never gets a shared home.
 
 ## 4. The design space
 
-### Option A — Content tokenization as data (L1 only; "the tokenizer, nothing downstream of it")
+### Historical Option A — protocol-semantic values (not a selected first artifact)
 
-Ship `nmp-content` v2: opt-in crate, `tokenize(content, tags, kind) -> ContentTree` of raw-token segments, exposed through the SDK as a plain value (and as a pure Swift/Kotlin function call — it doesn't even need to touch the engine handle). Rewrite through the import gate; the old tokenizer is a legitimate harvest candidate, its downstream registry is not. Media *grouping* stays out of the core vocabulary (the old grouper's own header justifies this) — emit individual media tokens; a platform kit may group.
+The old tokenizer remains a possible harvest candidate, but it is not a blessed
+`nmp-content` roadmap or the default semantic layer. The general legal shape is
+an opt-in protocol/feature crate exposing closed typed values or immutable draft
+builders through Rust and platform projections. A candidate earns a module by
+owning exact protocol semantics and proving cross-platform value; popularity of
+one content kind is not sufficient.
 
 - **Shared:** everything — one Rust implementation is the whole point; identical NIP-21/27/30 semantics on every platform is a correctness property, not a convenience.
 - **Constraints:** honors all four. Opt-in crate = zero weight (C3). Values with closed vocabularies (C2). No rendering opinion whatsoever (C1). Fully portable because it's data (C4).
 - **Failure mode:** vocabulary creep — segments that describe *appearance* (gallery, card, collapsed-run) rather than protocol facts. The tripwire is nameable: any variant whose meaning you'd explain by describing pixels is a render-IR node. Second failure: an `EventRef` token tempts a "resolver" abstraction back into existence (the old `refs.event.envelopes` chain). v2 answer: an event ref resolves by *the app running another live query* — the engine already dedups and caches; there is no third resolution machinery to build.
 
-### Option B — Headless/behavior components (L2)
+### Historical Option B — Headless/behavior components (L2)
 
 Per-platform packages of concept view-models. Honest inventory of what behavior actually remains once the engine exists: **less than TanStack's, by design.** Query lifecycle, caching, pagination, ordering, deltas, receipt state machines — all engine. What's left: draft/composition state, autocomplete orchestration, L1 folding, and platform-reactive packaging. Each headless component is thin — which is the *proof the engine's surface is right*, and the first place a gap would show (dogfooding, VISION §3's "second job").
 
@@ -94,9 +109,12 @@ Per-platform packages of concept view-models. Honest inventory of what behavior 
 - **Constraints:** honors C1 iff zero-scaffold (drop into a bare view, no host/provider) and public-surface-only. C2: legal by construction — folds delivered rows, submits intents. C3: separate packages, trivially zero-weight. C4: honest — behavior semantics port, code doesn't.
 - **Failure mode:** the soft framework. A family of `Nmp*Model` types becomes "the NMP way to build screens," and docs start assuming them. Mitigation is structural (§5 R3/R4) plus a docs rule: every L2 component's documentation *shows the raw two-noun equivalent first*, the component second.
 
-### Option C — Per-platform reference component kits (L3, opt-in, outside the engine contract)
+### Historical Option C — Per-platform reference component kits (L3, opt-in, outside the engine contract)
 
-SwiftUI package + Compose artifact of actual note-card/thread/profile-header/compose views, consuming L1+L2. This is the part the owner is actually asking for, and the part the old repo demonstrated is dangerous. It is *legal* under the constraints only with the §5 rules; without them it re-runs §2 beat for beat.
+SwiftUI package + Compose artifact of actual views consuming L1+L2. This was the
+most framework-shaped part of the hypothetical component program, and the part
+the old repo demonstrated is dangerous. It would be legal only with the §5
+rules; it is not selected by the promoted direction.
 
 - **Shared:** nothing at the pixel layer. What's shared is that both kits sit on the same L1 values and the same public SDK — so their *correctness* is shared even though their code isn't.
 - **Constraints:** C1 is the knife-edge — held only by the structural rules below. C2: fine (render side). C3: separate packages. C4: honest — this option openly commits NMP to N parallel UI codebases (the old registry's 122 files across 5 targets is the price tag from last time; budget for 2 targets max, ever).
@@ -107,9 +125,17 @@ SwiftUI package + Compose artifact of actual note-card/thread/profile-header/com
 
 A Rust-side declarative UI description (nodes like card/column/text-style) that platform interpreters render. Rejected on all four constraints at once: it *is* a UI framework (C1 — rendering and layout re-annexed wholesale); its node vocabulary is exactly the "visual structure" a closed value must not encode (C2 in spirit); it is mandatory weight for anything rendered through it (C3); and it lands on lowest-common-denominator or grows per-platform escape hatches, the two classic ends of every write-once-render-anywhere attempt (C4). The old repo's `ContentTreeWire` was only a *mild* IR — semantic tokens, no layout nodes — and even it pulled kind-registries, dispatchers, and hosts into existence around it. A real IR is that gravitational field squared. The one thing to keep from considering it: the discipline it clarifies — **the shareable cross-platform artifact is what content *is*, never what it *looks like*.**
 
-## 5. Recommended direction
+## 5. Promoted direction
 
-**A layered offering: Option A now, Option B thin, Option C later and governed — bound by six structural rules.** NMP's answer to "don't make every app rebuild the note card" is: share 100% of the semantics (L1), share the behavior shape (L2), and offer per-platform reference pixels (L3) as ordinary, replaceable consumers — while the engine remains provably ignorant that any of it exists.
+**No blessed content/component roadmap in v2.** NMP first proves the generic live
+query and write-intent engine across kind-diverse applications. Reusable
+semantics enter through opt-in protocol/feature modules that own exact schemas
+or contribute typed context to immutable drafts. NMP does not select a note
+card, thread view, social feed, content tokenizer, or platform kit as the next
+canonical layer.
+
+The six rules below remain useful **conditional gates if UI packages are ever
+revisited**. They are not a commitment to build L2/L3.
 
 The rules — stated ledger-style, structural and falsifiable, not lints:
 
@@ -124,26 +150,44 @@ The rules — stated ledger-style, structural and falsifiable, not lints:
 
 | Owns (engine, always) | Offers optionally (opt-in, replaceable) | Leaves to the app |
 |---|---|---|
-| Rows, receipts, coverage, ordering/windowing (Collection), diagnostics — raw tokens only | L1 `nmp-content` token tree + thread/zap folds (crate/feature) | Screen composition, navigation |
-| The correctness underneath every component | L2 headless concept models (per-platform package) | Formatting: truncation, locale, relative time, name-fallback chains |
-| — | L3 reference view kits (per-platform, sibling-packaged, slot-composed) | Resource policy (what fills the slots); theming; every component it swaps out |
+| Rows, receipts, acquisition evidence, diagnostics — raw protocol values only | Exact-schema NIP/feature modules; immutable builders; typed protocol queries/context operations | Screen composition, navigation |
+| Generic store, routing, signing, retry, and query correctness | Pure protocol-semantic helpers when a module justifies them | Formatting, content taxonomy, display-name policy |
+| — | No official L2/L3 package currently planned | Resource policy, theming, rendering, and component selection |
 
 ## 6. Staging
 
-1. **Now / independent of M5:** nothing ships, but the L1 spec (token vocabulary, closed, protocol-facts-only) can be written and adversarially reviewed cheaply — it's a grammar question, the kind this repo is good at gating (Tier-A style propose/refute on the vocabulary).
-2. **First shipped artifact — `nmp-content` v2 (L1).** Cheap, obviously legal, immediately useful, and the falsifier is its natural first consumer *after* the M5 verdict is rendered (don't add NMP-provided machinery to the falsifier while it's still the specimen under judgment).
-3. **Gated on M5's verdict — L2, then L3.** The component question is strictly downstream of "is the library thesis true": reference components built on an unjudged SDK would contaminate the judgment (they'd *be* the scaffolding M5 exists to detect), and if M5's kill fires, there is no surface worth componentizing. First L3 target: SwiftUI note card + thread view, sibling repo, R1–R6 from day one, with the one-file R2 sample apps as its CI.
-4. **Never:** copy/lock/update component tooling; kind registries; component hosts; a web/TUI/desktop kit before two platforms have proven the model (the old registry's five simultaneous targets were maintenance, not leverage).
+1. **Now:** ship no component or generic content package. Use kind-diverse
+   falsifiers to prove the core and provisional SDK surface.
+2. **As protocols demand it:** add opt-in modules around exact NIP/feature
+   semantics. Schema builders, typed queries, and contextual operations must
+   remain introspectable and must not privilege unrelated content kinds.
+3. **After diverse evidence:** consider pure semantic helpers only when at least
+   two materially different applications demonstrate the same protocol-owned
+   need. Popularity of kind:1/social-feed UI is not an architectural argument.
+4. **Revisit UI kits later, explicitly:** there is no first platform, first card,
+   or component distribution decision today. Any future proposal starts from
+   R1–R6 and must survive a fresh thesis review.
+5. **Never:** copy/lock/update component tooling; kind registries; component
+   hosts; a render IR in core.
 
 ## 7. Honesty — what cannot be reconciled, and the owner decisions
 
-**The ask, taken literally, is not fully satisfiable.** "Offer UI components so builders don't re-implement per platform" implies shared component *code*. There is no such thing across SwiftUI/Compose/web without building the render-IR (Option D), which is the framework this rebuild exists to escape. What is actually on offer: NMP removes the *hard* 80% (parsing, threading, ordering, liveness, correctness — L0/L1/L2) once, cross-platform; the remaining pixels are re-implemented per platform *by NMP instead of by each app*. That is a **maintenance transfer, not a deduplication** — real product value (each app builder writes zero of it), but a permanent N-platform UI-maintenance business for this project, with a support surface (consumers filing visual bugs against the kit) and a soft-power risk (the reference kit becomes the de-facto "Nostr look," and its choices start reading as NMP policy). The old repo's 122-file, five-target registry is what that business costs when unbudgeted.
+**The original hypothetical ask, taken literally, was not fully satisfiable.**
+"Offer UI components so builders don't re-implement per platform" implies shared
+component *code*. There is no such thing across SwiftUI/Compose/web without
+building the render-IR (Option D), which is the framework this rebuild exists to
+escape. The old repo's 122-file, five-target registry records what that business
+costs when unbudgeted; the promoted direction declines to start it.
 
 **The residual thesis tension that never fully dissolves:** any official component kit, however governed, exerts gravity — examples get written against it, new users conflate it with NMP, and its convenience quietly competes with the two-noun surface for attention. R3 (rederivability) and the docs rule (raw surface first, component second) are mitigations, not cures. If at some point the kit's needs start driving SDK changes that no plain app asked for, that is the §4 tripwire ("a second mechanism appearing") wearing UI clothes — stop and re-read this note.
 
-**Owner decisions surfaced:**
+**Promotion decisions:**
 
-1. **Fund the L3 business at all?** L1+L2 deliver most of the correctness value at a fraction of the maintenance. L3 is the visible product ask — but it's the expensive, risky layer. If yes: which platform first, and accept a hard budget of two platforms.
-2. **Sibling repos vs `Packages/` in-repo for L2/L3?** Recommend sibling repos: it makes R1/R4 physically true (components *cannot* see internals) rather than review-enforced, at the cost of release-coordination friction.
-3. **Gate L2/L3 on the M5 verdict?** Recommended yes (§6); confirming makes it policy.
-4. **Distribution: linked packages with slots (recommended, per the three-fork evidence) vs shadcn-style copy-in.** If the owner has a strong copy-in preference, the compromise is: copy-in only for leaf-simple stateless components, linked for anything composite — but no copy/lock tooling either way.
+1. Do not fund or sequence an official L2/L3 component business in the current
+   v2 frame.
+2. Do not choose sibling-repo/in-repo distribution, a first platform, or a first
+   component before a later explicit review.
+3. Let exact-schema protocol/feature modules prove reusable semantics without
+   turning one content family into NMP's default product model.
+4. Keep the old-repo evidence and R1–R6 as rejection tests for any future
+   proposal, not as a latent implementation queue.

@@ -1,14 +1,20 @@
-# Relays: outbox, indexers, and roles — you never pick relays
+# Relays: compiled routes and typed protocol context
 
-**Status: BUILT** — the coverage router, lane vocabulary, and the self-bootstrapping outbox are live and headlessly proven end-to-end (`nmp-engine/tests/self_bootstrap_outbox.rs`, `nmp-router/src/{route,solver,facts}.rs`).
+**Status: CURRENT + TARGET.** The coverage router, lane vocabulary, and
+self-bootstrapping author outbox are built. Module-owned contextual publication
+authority, including the governed NIP-29 composition path, remains target work.
 
-After this chapter you will understand why there is no `relays:` parameter anywhere in NMP, how one relay can play several roles at once, and how the engine navigates the entire outbox model from just two indexer relays you configure at startup.
+After this chapter you will understand why generic observe/publish calls accept
+no app-expanded relay list, how typed facts contribute routes, and why a
+protocol host relay is not a generic override.
 
-## There is no `relays:` parameter
+## Generic calls have no `relays:` parameter
 
-Search the public surface for a way to say "fetch this from wss://relay.example.com." There isn't one. `observe(_ filter:)` takes a filter; `publish(_ intent:)` takes an intent; the Rust `Handle` has exactly five verbs plus `shutdown`, and none of them accepts a relay list. This is **bug-class ledger #3 (wrong-relay routing / manual relay lists)** as a property of the types: relay choice is *compiler output*, not caller input. You declare *what* you want; the engine decides *where* to get it.
+`observe(_:)` takes demand and generic `publish(_:)` takes an intent; neither
+takes an app-computed relay array. This is ledger #3: routing is compiler output
+from typed facts, not a caller bypass.
 
-The only relay fact you ever supply is a set of **indexer relays** at construction:
+One current operator input is a typed set of **indexer relays** at construction:
 
 ```swift
 let nmp = try NMPEngine(config: .init(
@@ -17,7 +23,15 @@ let nmp = try NMPEngine(config: .init(
 ))
 ```
 
-Two is plenty. From here the engine bootstraps every other relay decision itself. Note what `indexerRelays` is *not*: it is not "the relays your content comes from." It is a discovery starting point — the seed from which the engine learns everyone's actual outboxes.
+These are discovery policy, not "the relays content comes from." The engine
+uses them to learn author outboxes. Their configured count is operator policy,
+not a proof that every requested author can be covered.
+
+A typed protocol operation may also contribute a relay fact when the protocol
+defines that authority. For example, publishing through a NIP-29 group may add
+`HostRelay(group, relay)` alongside the required `h` tag. That contribution is
+validated, inspectable, and visible in diagnostics. It does not create a raw
+route-list parameter or give NIP-29 ownership of the foreign event kind.
 
 ## Lanes: the closed vocabulary of "why this relay"
 
@@ -33,13 +47,20 @@ Every relay the engine considers carries a **lane** — a typed reason it is a c
 | `GroupHost` | A NIP-29 group host relay for a non-author (pinned) atom |
 | `DmInbox` | A kind:10050 DM inbox (pinned) |
 
-Two things to notice. First, `UserConfigured` is a lane, not an escape hatch: an operator can add relays, but they enter as *policy facts the compiler weighs*, never as a "send this query here" override. Second, `IndexerDiscovery` is fenced — an indexer is eligible only for discovery-kind atoms, and is *never* a content fallback. If an author's content relay is unknown, their notes route nowhere until the engine discovers the real one; the engine never dumps content REQs onto your indexers.
+Two things to notice. First, `UserConfigured` and protocol context are typed
+facts, not route callbacks. Second, `IndexerDiscovery` is fenced: it is eligible
+only for discovery-kind atoms and is never a generic content fallback. If an
+author's outbox is unknown, that author demand remains explicitly uncovered
+until discovery supplies a valid candidate.
 
 ## Roles are additive
 
 The single most important thing to internalize: **a relay's roles stack.** A relay is not "an indexer" *or* "a write relay." The same URL can be both, and when it is, it does both jobs.
 
-Discovery kinds are `{0, 3}` plus the whole NIP-01 replaceable range `10000..=19999` (`DiscoveryKinds::default`). An atom whose kinds are all discovery kinds *may* use the `IndexerDiscovery` lane. A content atom (kind:1, say) never may. But the two eligibilities are computed **independently and unioned**:
+Discovery kinds are `{0, 3}` plus the whole NIP-01 replaceable range
+`10000..=19999` (`DiscoveryKinds::default`). An atom whose kinds are all
+discovery kinds *may* use `IndexerDiscovery`. An arbitrary non-discovery kind,
+such as `9999`, may not. Eligibilities are computed independently and unioned:
 
 ```rust
 // route::build_candidates, paraphrased:
@@ -53,7 +74,8 @@ if is_discovery {                             // AND, only for discovery atoms:
 So if `wss://purplepag.es` is one of your configured indexers **and** it also appears in author A's kind:10002 write list, then:
 
 - A's kind:3 / kind:0 discovery atom routes there via the `IndexerDiscovery` lane, *and*
-- A's kind:1 content atom *also* routes there — via the `Nip65Write` lane, because it is genuinely A's outbox.
+- A's kind:9999 atom *also* routes there — via `Nip65Write`, because it is
+  genuinely A's outbox.
 
 The relay carries `0/3/1xxxx` because it is an indexer, and it *additionally* carries A's content because it is in A's mailbox. Nothing about being an indexer excludes it from also being a content relay. The router's own `additive_relay_role_*` tests pin this exact property.
 
@@ -70,10 +92,13 @@ The internal loop (`EngineCore::sync_discovery`, run on every recompile):
 
 The headline falsifier test walks this exactly. Configure a single indexer, follow author A, then:
 
-- **Before A's kind:10002 arrives:** the engine has already opened its own kind:10002 discovery REQ for A against the indexer, and A's kind:1 content atom is routed **nowhere** — the test asserts it is *not* on the indexer, because indexers are never a content fallback.
-- **After A's kind:10002 lands** (declaring write relay R): A's kind:1 atom re-routes to **R**, and the test asserts it is on R and still not on the indexer.
+- **Before A's kind:10002 arrives:** the engine opens its internal discovery
+  demand and A's arbitrary non-discovery atom is routed nowhere.
+- **After A's kind:10002 lands** (declaring write relay R): that atom routes to
+  R and still not to the indexer merely because it is an indexer.
 
-That is the whole outbox model, self-navigated from your two seed relays. You declared "I follow A and want A's notes"; the engine discovered where A actually writes and went there.
+That is the author-outbox path: the app declared a selection; the engine
+discovered where A writes and compiled the route.
 
 The discovery subscription is deliberately **widen-only**: once an author is in it, they stay in it even after resolving, and it only tears down when *no* author needs discovering. This is not sloppiness — reopening a narrower subscription on every author-resolves-one-at-a-time event caused a real triangular-number over-fetch (7112 kind:10002 events for a 39-author set) because a NIP-01 relay treats an overwriting REQ as a fresh EOSE replay. Leaving a resolved author in the filter a little longer is widen-safe and costs at most a few already-known deliveries. (The full reasoning lives in `sync_discovery`'s doc comment and connects to the coalescing story in *"Where did my query go?" Tracing demand through the compiler*.)
 
@@ -83,13 +108,15 @@ Publishing uses the same lane facts, no relay parameter:
 
 ```swift
 let intent = WriteIntent(
-    pubkey: alice, createdAt: now, kind: 1, content: "gm",
+    pubkey: alice, createdAt: now, kind: 9999, content: "protocol payload",
     durability: .durable, routing: .authorOutbox   // ← routing CLASS, not relays
 )
 let receipt = try await nmp.publish(intent)
 ```
 
-`routing: .authorOutbox` means "fan out to my write relays" — the engine resolves those from the same kind:10002 facts the read path uses. You choose a routing *class* (`authorOutbox` / `toInboxes` / `privateNarrow`), never a relay set. Private routing is fail-closed and covered in *Provenance, and why private events can't be republished*.
+The current routing class selects an engine policy, not a relay set. The target
+module path additionally accepts validated typed context contributions. Private
+or narrow context cannot be widened by another contribution.
 
 ## Operator config is policy, not routing override
 

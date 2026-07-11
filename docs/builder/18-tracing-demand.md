@@ -1,6 +1,8 @@
 # "Where did my query go?" Tracing demand through the compiler
 
-**Status: BUILT** — the compiler is a pure function of `(demand set, relay facts)`; every stage below is real code in `nmp-router/src/*` and every number it produces is readable on the diagnostics surface (`nmp-router/src/{route,solver,coalesce,plan,deliver}.rs`).
+**Status: CURRENT + TARGET.** The current filter-demand compiler is built. The
+target descriptor adds source authority and access context to identity, sharing,
+and evidence.
 
 After this chapter you can trace a single `observe` call all the way to the wire — through binding resolution, coverage-solving, coalescing, and per-relay REQ emission — and read each stage's output off the diagnostics screen. Invisible-by-design routing becomes falsifiable.
 
@@ -11,7 +13,7 @@ You hand the engine a live query. Between that call and a REQ landing on a socke
 ```
 observe(filter)
    │
-   ▼  resolve bindings           $myFollows → concrete pubkey set
+   ▼  resolve bindings           closed Derived graph -> concrete pubkey set
    ▼  active_demand              a BTreeSet<ConcreteFilter> of narrow atoms
    ▼  classify                   each atom: outbox (has authors) | pinned (no authors)
    ▼  build_candidates           per author: write_relays ∪ extras ∪ (indexers if discovery)
@@ -26,7 +28,11 @@ The compiler is *pure*: `Router::compile(&demand, directory, cap) -> WireDelta`.
 
 ## Stage 1 — demand: bindings become concrete atoms
 
-Your filter's fields are `Binding`s (see *Live queries and the binding grammar*). The resolver evaluates them against the active identity and the store, producing the **demand set**: a `BTreeSet<ConcreteFilter>` of fully-concrete atoms. `$myFollows` on a kind:1 note query becomes something like `{ kinds:[1], authors:{<300 hex pubkeys>} }`. You can read this set directly in tests via `core.active_demand()`.
+The resolver evaluates bindings against the current-pubkey input and canonical
+store, producing concrete selection atoms. A NIP-02-derived query with a
+caller-selected outer kind might become
+`{ kinds:[9999], authors:{<300 hex pubkeys>} }`. This is selection only; the
+target semantic descriptor also retains source authority and access context.
 
 ## Stage 2 — classify: outbox vs pinned
 
@@ -39,11 +45,14 @@ The skeleton matters downstream: two atoms with the same skeleton (identical but
 
 ## Stage 3 — coverage-solve: 2-relay-min, capped
 
-For each skeleton's authors, `build_candidates` assembles a per-author candidate relay list (write relays first, then extras, then indexers *only* if the skeleton is a discovery kind — see *Relays: outbox, indexers, and roles*). Then the solver runs.
+For each skeleton's authors, `build_candidates` assembles typed candidates.
+Protocol-owned contextual authority is a separate target contribution, not an
+app relay array.
 
 The solver (`solver::solve`) is a **greedy, deterministic, capped k-cover**. Its contract, from `CoverageInput`:
 
-- `k` — the coverage floor. The default is **2 relays minimum** per author: NMP wants each followed author covered by at least two of their write relays, so one flaky relay does not silently drop them.
+- `k` — the routing objective. The current default asks for two relays per
+  author when candidates and cap permit it.
 - `cap` — a **required** global fan-out ceiling. This is **bug-class ledger #4 (uncapped fan-out)** as a type: the relay set is the solver's output, bounded by `cap`, never an accumulated union of everyone's mailboxes. `|selected| <= cap` always.
 
 Set-cover is NP-hard, so the solver is greedy with a lexicographic tiebreak (determinism → reproducible plans → stable diffs), not an optimizer. When it can't reach `k` for an author, it says *why* via a typed `Shortfall`:
@@ -112,7 +121,10 @@ for await snap in nmp.observeDiagnostics() {
 }
 ```
 
-`uncoveredAuthorCount > 0` is the `CapExhausted`/`NoCandidates` shortfall made visible. The `filters` array is the *exact* JSON sent — you can see the `AuthorUnion` merge as a single filter with many authors, and confirm no filter names a pubkey you never asked for. This is why "where did my query go?" is a question you *read the answer to*, not one you guess at with print statements. Every number is computed from real engine state, never estimated — the diagnostics surface is off the data path and cannot itself perturb routing.
+`uncoveredAuthorCount > 0` is current shortfall evidence. The target expands
+this to graph, wire, relay, result, connection, and AUTH shortfalls while
+retaining exact filter JSON and plan revision. Diagnostics explains the plan;
+it never upgrades it into a global completeness claim.
 
 ## Gaps to know
 
