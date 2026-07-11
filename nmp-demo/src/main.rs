@@ -26,9 +26,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp_engine::core::RowDelta;
+use nmp_engine::core::{DiagnosticsSnapshot, RowDelta};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_engine::runtime::EngineThread;
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, TagName};
@@ -102,7 +104,7 @@ fn print_usage() {
          given pubkey's kind:3 contact list currently names) via the NMP\n\
          engine against real relays. The engine self-navigates outbox\n\
          routing from two operator indexer relays alone (wss://purplepag.es,\n\
-         wss://relay.nostr.band) -- this app never resolves a relay itself.\n\
+         wss://relay.primal.net) -- this app never resolves a relay itself.\n\
          Read-only unless --nsec is given. Runs for --secs then exits."
     );
 }
@@ -125,7 +127,7 @@ fn main() {
     println!("target pubkey : {}", target.to_hex());
     println!("run duration  : {}s", args.secs);
 
-    let indexers: Vec<RelayUrl> = ["wss://purplepag.es", "wss://relay.nostr.band"]
+    let indexers: Vec<RelayUrl> = ["wss://purplepag.es", "wss://relay.primal.net"]
         .iter()
         .map(|u| RelayUrl::parse(u).expect("hardcoded indexer URL must parse"))
         .collect();
@@ -170,7 +172,12 @@ fn main() {
         }
     };
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    // `_engine_thread`: this process exits directly once its report is
+    // printed rather than joining the engine thread's own clean shutdown
+    // (see the note at the end of `main` -- a popular account's backlog can
+    // keep it busy well past `--secs`, for reasons unrelated to what this
+    // demo is falsifying); the OS reclaims the detached thread on exit.
+    let (_engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
         directory,
         ROUTER_CAP,
@@ -192,6 +199,28 @@ fn main() {
 
     println!("\n-- subscribing to the follow-feed (kind:1 by target's kind:3 contacts) --\n");
     let (_query_handle, rows_rx) = handle.subscribe(my_follows);
+
+    // Live diagnostics (M5 plan §1): the engine-owned, read-only surface
+    // exposing exactly what's on the wire -- per-relay wire-sub count, the
+    // EXACT filter JSON currently sent, and events actually received per
+    // (relay, kind). A dedicated thread drains `observe_diagnostics`'s
+    // "latest value wins" receiver (never a poll loop, D8) into a shared
+    // slot this app reads from once the timed run ends, so the final
+    // printed snapshot reflects the run's steady state, not just whatever
+    // happened to be current at subscribe time.
+    let (diag_handle, diag_rx) = handle.observe_diagnostics();
+    let latest_diag: Arc<Mutex<Option<DiagnosticsSnapshot>>> = Arc::new(Mutex::new(None));
+    let latest_diag_writer = Arc::clone(&latest_diag);
+    // `_diag_thread`: not joined -- this process reads `latest_diag`'s
+    // current value directly and exits (see the note at the end of `main`),
+    // so there is nothing to wait on here either.
+    let _diag_thread = thread::spawn(move || {
+        while let Some(snapshot) = diag_rx.recv() {
+            *latest_diag_writer
+                .lock()
+                .expect("diag snapshot mutex poisoned") = Some(snapshot);
+        }
+    });
 
     // Optional publish demo: only if the caller gave us a real key to sign
     // with AND that key's own pubkey (so the OK/receipt has somewhere real
@@ -318,18 +347,76 @@ fn main() {
              ~1x with incremental delivery -- was 635-1294x before the fix)."
         );
     }
-    println!(
-        "per-relay / per-relay-kind diagnostic: NOT AVAILABLE from Handle -- \
-         nmp_engine::core::RowDelta's Added variant carries only the raw \
-         `nostr::Event` (no relay provenance), and Handle exposes no \
-         relay-connection or per-relay-count accessor at all \
-         (PoolEvent::Health is dropped before it ever reaches EngineMsg). \
-         See the run report for what a Handle accessor would need to expose."
-    );
+    // Read whatever diagnostics snapshot the drain thread has captured so
+    // far -- deliberately BEFORE cancelling/joining it. `--secs` bounds how
+    // long this app waits for ROWS, not how long the engine thread takes to
+    // finish draining its own inbox of already-in-flight relay frames (a
+    // popular account's backlog can keep the engine busy well past the
+    // nominal deadline -- a separate, pre-existing per-event recompile cost,
+    // NOT the kind:10002 discovery-churn bug this snapshot is here to
+    // falsify). Reading the "latest value wins" slot directly reports the
+    // ground truth as of NOW rather than blocking this report on that
+    // unrelated drain.
+    let final_diag = latest_diag
+        .lock()
+        .expect("diag snapshot mutex poisoned")
+        .clone();
+    println!("\n-- diagnostics (snapshot as of the --secs deadline) --");
+    match final_diag {
+        Some(snapshot) => {
+            println!("relays                  : {}", snapshot.relays.len());
+            println!(
+                "uncovered authors        : {}",
+                snapshot.uncovered_author_count
+            );
+            if !snapshot.dropped_merge_rules.is_empty() {
+                println!(
+                    "dropped merge rules      : {:?}",
+                    snapshot.dropped_merge_rules
+                );
+            }
+            for relay in &snapshot.relays {
+                println!("\nrelay: {}", relay.relay);
+                println!("  wire_sub_count  : {}", relay.wire_sub_count);
+                println!("  authors_served  : {}", relay.authors_served);
+                println!("  by_lane         : {:?}", relay.by_lane);
+                println!("  exact filters   :");
+                for f in &relay.filters {
+                    println!("    {f}");
+                }
+                println!("  events_by_kind  : {:?}", relay.events_by_kind);
+                if let Some((_, kind10002_count)) =
+                    relay.events_by_kind.iter().find(|(k, _)| *k == 10_002)
+                {
+                    let ratio = *kind10002_count as f64 / relay.authors_served.max(1) as f64;
+                    println!(
+                        "  kind:10002 events={kind10002_count} vs authors_served={} (ratio {ratio:.1}x)",
+                        relay.authors_served
+                    );
+                    if ratio > 3.0 {
+                        println!(
+                            "  WARNING: kind:10002 event volume is {ratio:.1}x the resolved \
+                             author count -- see docs/known-gaps.md's discovery over-fetch \
+                             finding."
+                        );
+                    }
+                }
+            }
+        }
+        None => println!("no diagnostics snapshot was ever received during this run"),
+    }
 
+    // Best-effort teardown: `Cmd::Shutdown` is enqueued behind whatever the
+    // engine thread's own inbox still has backlogged (see the note above --
+    // a popular account's already-in-flight relay frames can take a while
+    // to fully drain), so waiting on `engine_thread.join()` here would block
+    // this report on that same unrelated drain. The report above is this
+    // run's actual deliverable; once it's printed there is nothing further
+    // this process needs to wait on, so it exits directly rather than
+    // joining a shutdown that may be queued behind a long backlog.
+    diag_handle.cancel();
     handle.shutdown();
-    engine_thread.join();
-    println!("\nengine shut down cleanly.");
+    std::process::exit(0);
 }
 
 /// Only treat the signer as "real" (worth using as a publish author) if the

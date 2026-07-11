@@ -23,7 +23,7 @@ final class LiveRelayTests: XCTestCase {
     /// re-root reads onto an account this process holds no key for (read-
     /// only browsing is legal; see `NMPEngine.setActiveAccount`'s doc).
     static let fiatjafHex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
-    static let indexerRelays = ["wss://purplepag.es", "wss://relay.nostr.band"]
+    static let indexerRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
 
     /// THE headline live proof: construct the engine from ONLY the two
     /// operator indexer relays (no write-relay map -- there is no such

@@ -34,7 +34,7 @@ final class AppModel {
     /// EXACTLY two indexer relays (VISION/M5 plan §3/§0): the app supplies
     /// no other relay fact. The engine self-discovers every author's real
     /// write relays from these two alone.
-    static let indexerRelays = ["wss://purplepag.es", "wss://relay.nostr.band"]
+    static let indexerRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
 
     private(set) var accounts: [Account] = []
     private(set) var activePubkey: String?
