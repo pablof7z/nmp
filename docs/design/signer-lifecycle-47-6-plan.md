@@ -397,3 +397,224 @@ surface; do not add a second public publish entry point.
   deadline-scheduler fold — the **#2/#3 retry-owner follow-up** (Fable R2).
 - `nmp-signer` secret zeroization hardening — companion cleanup under known-gaps
   "Secret zeroization"; flagged, coordinate, not owned here.
+
+---
+
+## Fable checkpoint (verdict)
+
+- **Date:** 2026-07-11. Reviewer: Fable (delegated design checkpoint; decisions
+  below are final calls, not questions back to the owner).
+- **Verdict: GO, with required changes** (R1–R5 below). No load-bearing flaw.
+  Both grounding gaps in §0 were re-verified against the working tree, and the
+  plan's structural moves (pin-at-acceptance, select-by-pinned-pubkey,
+  `AwaitingSigner` resting state, event-driven reattach) each close a confirmed
+  gap without new machinery.
+
+### Grounding re-verified in code
+
+- **Gap (a) — selection reads the mutable global at sign time: CONFIRMED.**
+  `SignerRegistry.active_signer()` returns `signers.get(&self.active?)`
+  (`runtime/mod.rs:193-197`); the `Effect::RequestSign` dispatch arm looks it up
+  *fresh at dispatch* with an explicit comment that this is so "a
+  `set_active_account` switch is observed by the very next publish"
+  (`runtime/mod.rs:~555`); `Cmd::Engine(EngineMsg::SetActivePubkey)` moves
+  `registry.set_active(pk)` together with the read root ("move TOGETHER",
+  `runtime/mod.rs:~467`). An account switch between accept and sign therefore
+  retargets a pending write today — exactly the coupling #43/#47 forbid.
+- **Gap (b) — `AwaitingCapability` has zero producers; no-signer collapses to
+  `Failed`: CONFIRMED.** Workspace grep finds `AwaitingCapability` only at its
+  definition (`outbox/mod.rs:101`) and the FFI mirror
+  (`nmp-ffi/types.rs:298`, `convert.rs:319`) — no engine site ever emits it. The
+  no-signer dispatch arm synthesizes `SignerCompleted(id,
+  Err(SignerError::Unavailable))` (`runtime/mod.rs:~573`), and
+  `on_signer_completed`'s `Err` arm removes the pending write and emits
+  `WriteStatus::Failed` for **every** `SignerError` (`core/mod.rs:~605`).
+- **Select-by-pinned-pubkey genuinely closes (a):** `expected_pubkey` is pinned
+  in the one crash-atomic accept commit (#2/#3 §2.1), `RequestSign` carries the
+  target, dispatch selects `registry.by_pubkey(&target)`. `active` is never
+  consulted for selection; a later `SetActivePubkey` moves only the read root +
+  the *default* for future accepts. Closed.
+- **Reattach is event-driven, no R2 spin:** the rescan is caused by
+  `Cmd::AddSigner → SignerAttached(pk)` (plus one boot rescan in
+  `recover_outbox` replay). No timer is armed, `AwaitingSigner` never enters
+  `next_deadline()` — the R2 hazard (a fired deadline nothing consumes re-arms
+  as already-past → busy spin in the `recv_timeout` driver) is impossible here
+  *by absence of any deadline*, not by careful clearing. D8-clean.
+- **Journal never holds secrets:** `OUTBOX_INTENTS` carries `expected_pubkey` +
+  opaque `signing_identity_ref` only; live capabilities exist solely in the
+  in-memory registry; registry is empty at boot → everything recovers as
+  `AwaitingSigner` until the app re-attaches. Consistent with crashsafe-plan
+  Fable-Q5. (See R2 for the one opacity rule this needs.)
+- **NIP-46 `Pending` reuses the existing thread:** the runtime's Pending arm
+  (`runtime/mod.rs:~560`) already spawns one blocking-recv thread per op and
+  forwards exactly one `SignerCompleted`. `Nip46Signer::sign` returning
+  `SignerOp::Pending(rx)` plugs in verbatim — no new thread model, no poll.
+
+### The five decisions
+
+**Q1 — `IdentityRef` = a thin pubkey-resolving selector: CONFIRMED.** Apps
+never hand a signer object to `publish`. Grounds: capabilities are *attached*
+(`add_signer`) and live only in the registry; a per-write signer object would
+create a second attach path and an unjournalable obligation (a live object
+cannot be persisted; the pinned pubkey can). The author pubkey on the NIP-01
+`UnsignedEvent` is the natural, already-pinned key. Shape: a closed enum,
+initially `IdentityRef::Pubkey(PublicKey)` — resolved to a concrete pubkey at
+acceptance, journal stores only the resolved `expected_pubkey` + ref. Extending
+the enum later (e.g. a provider-scoped selector) is additive and stays closed.
+
+**Q2 — selection stays by-pubkey; `signing_identity_ref` is diagnostic-only:
+CONFIRMED, with a structural observation that settles it.** The registry is
+**one capability per pubkey by construction** — `signers:
+HashMap<PublicKey, Box<dyn SigningCapability>>`, and `add` *replaces* any prior
+capability for the same key (`runtime/mod.rs:~168-180`). So "two distinct
+arrangements for the same pubkey, selected between at acceptance" is not a
+state the engine can even hold; the *app* chooses which arrangement is attached,
+and NMP never substitutes one arrangement for another on its own. Cryptographic
+equivalence is exactly pubkey equivalence: promotion validates the frozen
+body/id/pubkey and `verify`s — arrangement-blind by design (#47's "equivalent
+signer = same pubkey" disposable clause). Codex's channel caution ("do not
+silently switch hardware/remote/approval arrangements") is honored precisely
+because switching requires an explicit app `add_signer` act; per R3 that act is
+recorded against the ref in diagnostics, never performed by NMP. `provider`
+remains a diagnostic + provider-targeted reattach hint, not a second selector.
+
+**Q3 — no bounded "give up waiting for a signer" timeout: CONFIRMED.** Absence
+is the resting state. This cannot strand intents: the pending row is
+query-visible from acceptance (#2/#3), the receipt is reattachable across
+restart, and `EngineMsg::CancelWrite` (#2/#3 U3) is the explicit exit — the app
+always holds the cancel verb, so "waits indefinitely" means "waits until the
+*user's* decision", which is #6's contract verbatim ("until a matching provider
+reconnects or the app cancels it"). The only time-based terminal that can touch
+a waiting intent is NIP-40 protocol expiry, which is already owned by the
+existing expiry deadline and is a property of the event body, not of signer
+availability. Consequence stands: **no signer op ever enters the deadline
+scheduler** — the R2 spin class is structurally unreachable. (Codex concurs:
+"a timer would turn capability absence into policy and add wake churn.")
+
+**Q4 — NIP-46 connection ownership + rust-nostr surface: DECIDED — the adapter
+owns an independent connection, built on `nmp-transport::Pool` + the `nostr`
+crate's `nip46` feature. Do NOT use the `nostr-connect` client crate.**
+- **Not `nostr-connect`:** it is tokio/async (nostr-relay-pool underneath).
+  This workspace's production graph is deliberately runtime-free — the pool is
+  mio + tungstenite worker threads, and tokio appears **only** in
+  dev-dependencies with an explicit D8 comment (`nmp-transport/Cargo.toml`).
+  Pulling `nostr-connect` into `nmp-signer` would impose tokio on every
+  embedder — a doctrine break, not a convenience.
+- **Not the engine's pool *instance*:** the engine pool's `PoolEventSink`
+  feeds `EngineMsg`/ingest — kind:24133 signer traffic must never enter the
+  store/resolver path, and the signer relay's lifecycle (connect on demand,
+  AUTH as the *client* key, drop when idle) is the adapter's, not the content
+  router's. #6 says the adapter "owns its signer-relay connection" — that is an
+  ownership statement about instance + lifecycle, and it holds.
+- **Yes to reusing the pool *type*:** `Pool::new(cfg, sink)` is a cheap,
+  self-contained facade (`Arc<Mutex<PoolInner>>` + per-relay worker thread);
+  `ensure_open`/`send`/`close`/`shutdown` and the sink's `PoolEvent::Frame`
+  push-model are exactly the shape one correlated request/response needs. Two
+  free wins verified in code: the pool **pre-classifies NIP-42 `AUTH` frames**
+  (`RelayFrame::Auth`) — the adapter's required AUTH handling hangs off that —
+  and the ingest verify gate (`pool/verify.rs`) is kind-blind schnorr
+  verification, which bunker-signed kind:24133 responses pass. So: `nmp-signer`
+  gains a `nmp-transport` dependency (a lower-layer dep, no cycle) and owns its
+  own `Pool` instance per bunker connection. No hand-rolled socket.
+- **Exact protocol surface (verified present in `nostr` 0.44.4 behind feature
+  `nip46`):** `nostr::nips::nip46::{NostrConnectURI, NostrConnectRequest,
+  NostrConnectMethod, NostrConnectMessage, NostrConnectResponse,
+  ResponseResult}` — bunker/nostrconnect URI parsing (`relays()`,
+  `remote_signer_public_key()`, `secret()`), request-id correlation
+  (`NostrConnectMessage::request` / `.id()` / `.to_response(method)`),
+  `ResponseResult::to_sign_event`, and `is_auth_url` for the NIP-46 AUTH-URL
+  challenge. Payload encryption is NIP-44 via the already-enabled `nip44`
+  feature. `nmp-signer/Cargo.toml`: add `"nip46"` to the existing `nostr`
+  features — no new crate.
+
+**Q5 — `SignerError` closed taxonomy: RATIFIED.** Final set:
+`Rejected(String)` + `InvalidResponse(String)` = **terminal** (compensation
+door, `Failed`); `Unavailable` + `Timeout` + `Disconnected` = **retryable**
+(revert to `AwaitingSigner`, emit `AwaitingCapability`, intent not consumed).
+**Keep `Timeout`**: the engine never times a signer (Q3), but the variant is
+produced by `SignerOp::wait`'s `RecvTimeoutError::Timeout` mapping (a public
+utility for direct embedders/tests) and is the honest word for an adapter that
+bounds its *own* RPC internally. Its classification is what matters: retryable,
+identical to `Unavailable` — a self-timing-out adapter can never fail a write,
+only return it to rest. Update `SignerOp::wait`'s and the enum's doc comments
+so no embedder mistakes `Timeout` for a terminal (folded into R4). The set
+stays closed; `op.rs`'s "A3 may extend this closed set" note is superseded by
+this ratified taxonomy.
+
+### Required changes (builder must incorporate; none needs a redesign)
+
+1. **R1 — pubkey-less capabilities must be a typed attach error, not a silent
+   drop.** `SignerRegistry::add` currently *silently discards* a capability
+   whose `public_key()` is `None` (returns `None`, nothing registered,
+   `runtime/mod.rs:~176-180`). Under by-pubkey selection that becomes a
+   footgun: the app believes it attached a signer; every matching intent waits
+   forever. `Handle::add_signer` must surface a typed error for a pubkey-less
+   capability, and the NIP-46 provider must resolve the user pubkey (from the
+   `bunker://` descriptor, or by completing the connect handshake /
+   `get_public_key` for `nostrconnect://` flows) **before** attaching.
+2. **R2 — `ProviderRef` opacity rule.** The journal's provider string must
+   never embed the bunker connection URI or token — `NostrConnectURI` can carry
+   a `secret`, and the client transport key is a secret. `ProviderRef` is a
+   vault/SDK lookup key only (e.g. `"nip46:<uuid>"`); the descriptor itself
+   lives in the platform vault. State this on the `SigningIdentityRef` type.
+3. **R3 — record arrangement changes in diagnostics.** When a signer attaches
+   for a pubkey whose waiting intents carry a `signing_identity_ref.provider`
+   that names a *different* provider, proceed (Q2: same pubkey = equivalent)
+   but record the provider mismatch in the diagnostics stream (#51 owns the
+   permanence). This is the cheap honesty codex's caution asks for, without
+   making `provider` a selector.
+4. **R4 — doc the taxonomy at the type.** The terminal-vs-retryable split
+   (§2.2) must live as doc comments on `SignerError` and `SignerOp::wait`, not
+   only in this plan — direct embedders see the type, not the plan.
+5. **R5 — `Signed` payload + identity override conflict is a typed acceptance
+   rejection.** `publish(signedEvent, as: X)` where `event.pubkey !=
+   resolve(X)` must fail at acceptance (before `accept_write`, no journal
+   residue) — never silently prefer either. The default (`as` absent) keeps
+   §1.2's `expected_pubkey = event.pubkey`.
+
+### Sequencing (my call — sets the build order)
+
+- **S1/S2 land strictly after #2/#3 U3 and U4 respectively; no co-owned
+  worktree.** S1 edits `on_publish` + the `RequestSign` shape and consumes the
+  `expected_pubkey` journal field U3 creates → **S1 starts after U3 is on
+  master**. S2 edits `on_signer_completed`, consumes the compensation door
+  (U3) and the `AwaitingSigner` persistence + boot-recovery rescan stubs (U4)
+  → **S2 starts after U4 is on master**. The crashsafe checkpoint already
+  ruled U3/U4 the sole `core/mod.rs` writers of that frame; this frame's S1/S2
+  become the sole `core/mod.rs` writers *after* it. Serial chain, no sharing.
+- **S3 may start immediately** — it touches only `nmp-signer` (new trait +
+  ref types), no core files. Its facade re-export waits for #52 Unit A.
+- **S4 after S1/S2** (needs the extended `SignerError` and the selection
+  path); its `nmp-signer`-internal protocol scaffolding (correlation,
+  NIP-44 framing, URI parsing) may be developed in parallel but lands behind
+  S2.
+- **`WriteIntent.identity` + `publish(draft, as:)` is #52 surface work.** The
+  facade overload, FFI projection, and Swift/Kotlin parity go through #52's
+  serialized surface lane with synchronized falsifiers (#43 governance:
+  cross-surface impact review, one publish entry point — no second publish
+  verb). S1 lands the core `WriteIntent` field; the public projection ships
+  with #52's surface PR, and S5's cross-surface proofs run last.
+- **Full order:** #2/#3 U1/U2 → U3 → U4 → **S1 → S2** → {S3 (early-startable)
+  ∥ S4} → S5 (after #52 surface). #52 A remains parallel-safe throughout
+  (disjoint files) except the S3 facade re-export and the S1-adjacent publish
+  overload noted above.
+
+### Residual risk
+
+- **Capability replace during an in-flight `Pending` op:** `add` replaces the
+  registered capability while the old op's recv thread still lives; the old
+  thread's eventual `SignerCompleted` still resolves the intent (id-stable,
+  validated before promote) — harmless, but a duplicate approval prompt can
+  reach a human at the bunker (already flagged in the crashsafe checkpoint's
+  residuals; #47's provider correlation is the eventual home).
+- **Unbounded `AwaitingSigner` accumulation** if an app never attaches or
+  cancels: deliberate (the rows are visible, cancellable, and GC-claimed per
+  crashsafe R5), but SDK providers should surface "N writes waiting for
+  signer X" so the wait is never invisible. S5's providers own that surfacing.
+- **`nostr` 0.44.4's nip46 module is client-complete** for this adapter's needs
+  (verified above), but the NIP-46 AUTH-URL flow (`is_auth_url`) requires an
+  app-facing hook to open the URL — an SDK-provider concern; keep it out of
+  core.
+- The interim state between S1 and S2 (selection fixed, but no-signer still
+  `Failed`) is briefly *worse-looking* than S2's end state but no worse than
+  today; acceptable inside one frame, do not release-cut between S1 and S2.
