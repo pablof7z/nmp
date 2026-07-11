@@ -8,16 +8,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::facts::{LanedRelay, PubkeyHex, RelayUrl};
 
 /// Input: authors, each with an ordered candidate relay list (lane-priority
-/// order, `build_candidates`); the required coverage floor `k`; the global
-/// fan-out cap; the discovery-eligible indexer relays (already folded into
-/// each author's candidate list by `build_candidates` when applicable — kept
-/// here too so the solver's own invariants can be asserted independent of
-/// how candidates were assembled).
+/// order, `build_candidates`) — the author's OWN relays only (`Nip65Write` ∪
+/// `Hint`/`Provenance` extras), per `routing-and-ownership.md` §9-decision-3.
+/// Indexer/app/fallback relays are never members of `candidates`: they are
+/// additive lanes applied OUTSIDE the solve, in `Router::compile`, and never
+/// count toward `k` (`routing-build-plan.md` Unit B).
 pub struct CoverageInput {
     pub candidates: BTreeMap<PubkeyHex, Vec<LanedRelay>>,
     pub k: usize,
     pub cap: usize,
-    pub indexer_eligible_relays: Vec<RelayUrl>,
 }
 
 /// Output: the covering relay set + per-author assignment + shortfall
@@ -191,7 +190,6 @@ mod tests {
             candidates,
             k: 2,
             cap: 10,
-            indexer_eligible_relays: vec![],
         });
         assert_eq!(cov.selected.len(), 2);
         assert!(cov.shortfall.is_empty());
@@ -213,7 +211,6 @@ mod tests {
             candidates,
             k: 2,
             cap: 6,
-            indexer_eligible_relays: vec![],
         });
         assert_eq!(cov.selected.len(), 6);
         assert!(!cov.shortfall.is_empty());
@@ -229,7 +226,6 @@ mod tests {
             candidates,
             k: 2,
             cap: 100,
-            indexer_eligible_relays: vec![],
         });
         assert_eq!(cov.selected.len(), 2);
         assert_eq!(cov.assignment[&pk('a')].len(), 2);
@@ -242,7 +238,6 @@ mod tests {
             candidates,
             k: 2,
             cap: 10,
-            indexer_eligible_relays: vec![],
         });
         assert_eq!(cov.assignment[&pk('a')].len(), 1);
         assert_eq!(
@@ -259,7 +254,6 @@ mod tests {
             candidates,
             k: 2,
             cap: 10,
-            indexer_eligible_relays: vec![],
         });
         assert!(cov.assignment[&pk('a')].is_empty());
         assert_eq!(
@@ -278,7 +272,6 @@ mod tests {
             candidates: candidates.clone(),
             k: 2,
             cap: 10,
-            indexer_eligible_relays: vec![],
         };
         let a = solve(&input());
         let b = solve(&input());

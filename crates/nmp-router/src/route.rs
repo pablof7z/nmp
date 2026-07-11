@@ -1,6 +1,8 @@
-//! Atom classification (outbox vs pinned), the [`Skeleton`] key, candidate
-//! relay-list assembly (lane-ordered, discovery-kind indexer eligibility),
-//! and pinned-route lookup (M2 plan §2.2, §3, §4.1 steps 1-2).
+//! Atom classification (outbox vs pinned), the [`Skeleton`] key, own-relay
+//! candidate assembly for the coverage solver, the additive indexer/app/
+//! fallback lane routes applied outside the solve (Unit B,
+//! `routing-and-ownership.md` §2.1/§2.2), and pinned-route lookup (M2 plan
+//! §2.2, §3, §4.1 steps 1-2).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,37 +95,116 @@ pub(crate) fn classify(atom: &ConcreteFilter) -> AtomClass {
     }
 }
 
-/// Build the per-author candidate relay list (lane-ordered: `write_relays`
-/// -- Nip65Write -- first, then `extra_relays`; indexer relays appended
-/// ONLY when `skeleton` is discovery-kind, never for content atoms).
+/// Build the per-author candidate relay list for the coverage solver — the
+/// author's OWN relays ONLY, the set that counts toward `k`
+/// (`routing-and-ownership.md` §2.1, owner-resolved §9-decision-3 /
+/// `routing-build-plan.md` §7.1 Q3): `write_relays` (`Nip65Write`) first,
+/// then `extra_relays` filtered to `Hint`/`Provenance` lanes (relay hints —
+/// both write- and read-side — count toward the minimum; `UserConfigured`
+/// extras do not). Indexer/app/fallback relays are NEVER folded in here —
+/// they are additive lanes applied OUTSIDE the solve, in `Router::compile`
+/// (`indexer_lane_routes`/`app_lane_routes`/`fallback_lane_routes` below).
 pub(crate) fn build_candidates(
     authors: &BTreeSet<PubkeyHex>,
     dir: &dyn RelayDirectory,
-    discovery: &DiscoveryKinds,
-    skeleton: &Skeleton,
-) -> (BTreeMap<PubkeyHex, Vec<LanedRelay>>, Vec<RelayUrl>) {
-    let is_discovery = discovery.is_discovery(skeleton.kinds());
-    let indexer_relays: Vec<RelayUrl> = if is_discovery {
-        dir.indexers()
-    } else {
-        Vec::new()
-    };
-
+) -> BTreeMap<PubkeyHex, Vec<LanedRelay>> {
     let mut candidates = BTreeMap::new();
     for author in authors {
         let mut list = dir.write_relays(author);
-        list.extend(dir.extra_relays(author));
-        if is_discovery {
-            list.extend(
-                indexer_relays
-                    .iter()
-                    .cloned()
-                    .map(|url| LanedRelay::new(url, Lane::IndexerDiscovery)),
-            );
-        }
+        list.extend(
+            dir.extra_relays(author)
+                .into_iter()
+                .filter(|lr| matches!(lr.lane, Lane::Hint | Lane::Provenance)),
+        );
         candidates.insert(author.clone(), list);
     }
-    (candidates, indexer_relays)
+    candidates
+}
+
+/// Additive indexer-lane routes for an outbox group: every `dir.indexers()`
+/// relay, unconditional, covering the group's FULL author set — but ONLY
+/// when `skeleton` is discovery-kind (indexers are never a content
+/// fallback). Applied OUTSIDE the solve; never counted toward `k`
+/// (`routing-and-ownership.md` §2.1/§2.2 item 1).
+pub(crate) fn indexer_lane_routes(
+    dir: &dyn RelayDirectory,
+    discovery: &DiscoveryKinds,
+    skeleton: &Skeleton,
+    authors: &BTreeSet<PubkeyHex>,
+) -> Vec<(RelayUrl, RouteProvenance)> {
+    if !discovery.is_discovery(skeleton.kinds()) {
+        return Vec::new();
+    }
+    dir.indexers()
+        .into_iter()
+        .map(|relay| {
+            (
+                relay.clone(),
+                RouteProvenance {
+                    relay,
+                    lane: Lane::IndexerDiscovery,
+                    covers_authors: authors.clone(),
+                    route_kind: RouteKind::Pinned,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Additive app-lane routes: every `dir.app_relays()` relay, unconditional,
+/// for ANY atom — author-bearing (`covers_authors` = the atom's authors) or
+/// authorless/pinned (`covers_authors` empty). Every kind, every author,
+/// always (this is what closes #7, the authorless-routing-lane gap).
+/// Applied OUTSIDE the solve; never counted toward `k`
+/// (`routing-and-ownership.md` §2.1/§2.2 item 2).
+pub(crate) fn app_lane_routes(
+    dir: &dyn RelayDirectory,
+    covers_authors: &BTreeSet<PubkeyHex>,
+) -> Vec<(RelayUrl, RouteProvenance)> {
+    dir.app_relays()
+        .into_iter()
+        .map(|relay| {
+            (
+                relay.clone(),
+                RouteProvenance {
+                    relay,
+                    lane: Lane::AppRelay,
+                    covers_authors: covers_authors.clone(),
+                    route_kind: RouteKind::Pinned,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Additive fallback-lane routes: every `dir.fallback_relays()` relay,
+/// routing exactly `shortfall_authors` (the outbox solve's own-relay
+/// coverage `< k` set, `Coverage.shortfall`) — fires ONLY when
+/// `shortfall_authors` is non-empty AND no `app_relays` are configured
+/// (an `AppRelay` suppresses fallback entirely). `Coverage.shortfall` stays
+/// REPORTED even when this lane tops an author up — fallback is a lane,
+/// not coverage (`routing-and-ownership.md` §2.1/§2.2 item 5).
+pub(crate) fn fallback_lane_routes(
+    dir: &dyn RelayDirectory,
+    shortfall_authors: &BTreeSet<PubkeyHex>,
+) -> Vec<(RelayUrl, RouteProvenance)> {
+    if shortfall_authors.is_empty() || !dir.app_relays().is_empty() {
+        return Vec::new();
+    }
+    dir.fallback_relays()
+        .into_iter()
+        .map(|relay| {
+            (
+                relay.clone(),
+                RouteProvenance {
+                    relay,
+                    lane: Lane::Fallback,
+                    covers_authors: shortfall_authors.clone(),
+                    route_kind: RouteKind::Pinned,
+                },
+            )
+        })
+        .collect()
 }
 
 /// The lane that supplied `relay` for `author`, per `candidates` (first
@@ -237,44 +318,76 @@ mod tests {
         assert!(matches!(classify(&cf_kind1(None)), AtomClass::Pinned));
     }
 
+    /// `build_candidates` no longer folds indexers into the per-author
+    /// candidate list at all (Unit B moved the indexer lane OUTSIDE the
+    /// solve, into `Router::compile` — see `indexer_lane_routes` and the
+    /// router-level `indexer_lane_still_discovery_only_never_content_fallback`
+    /// regression test, which re-asserts this invariant survives the move).
+    /// This test pins the narrower claim at this layer: candidates are the
+    /// author's OWN relays only, for both discovery- and content-kind atoms
+    /// alike — `build_candidates` doesn't even look at the skeleton anymore.
     #[test]
-    fn indexer_candidates_only_for_discovery_kinds() {
-        let dir = FixtureDirectory::new().with_indexer(test_relay(99));
-        let discovery = DiscoveryKinds::default();
+    fn build_candidates_never_includes_indexer_relays() {
+        let dir = FixtureDirectory::new()
+            .with_write(pk('a'), [test_relay(0)])
+            .with_indexer(test_relay(99));
 
         let content_atom = cf_kind1(Some(BTreeSet::from([pk('a')])));
-        let (content_skeleton, content_authors) = Skeleton::of(&content_atom);
-        let (content_candidates, content_indexers) =
-            build_candidates(&content_authors, &dir, &discovery, &content_skeleton);
-        assert!(content_indexers.is_empty());
-        assert!(content_candidates[&pk('a')].is_empty());
+        let (_, content_authors) = Skeleton::of(&content_atom);
+        let content_candidates = build_candidates(&content_authors, &dir);
+        assert!(!content_candidates[&pk('a')]
+            .iter()
+            .any(|lr| lr.lane == Lane::IndexerDiscovery));
 
         let discovery_atom = ConcreteFilter {
             kinds: Some(BTreeSet::from([3u16])),
             authors: Some(BTreeSet::from([pk('a')])),
             ..ConcreteFilter::default()
         };
-        let (discovery_skeleton, discovery_authors) = Skeleton::of(&discovery_atom);
-        let (discovery_candidates, discovery_indexers) =
-            build_candidates(&discovery_authors, &dir, &discovery, &discovery_skeleton);
-        assert_eq!(discovery_indexers, vec![test_relay(99)]);
-        assert!(discovery_candidates[&pk('a')]
+        let (_, discovery_authors) = Skeleton::of(&discovery_atom);
+        let discovery_candidates = build_candidates(&discovery_authors, &dir);
+        assert!(!discovery_candidates[&pk('a')]
             .iter()
             .any(|lr| lr.lane == Lane::IndexerDiscovery));
+        assert_eq!(
+            discovery_candidates[&pk('a')],
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)]
+        );
+    }
+
+    /// Own-relay hints (`Hint`/`Provenance` lanes) DO count toward `k`
+    /// (owner-resolved §9-decision-3); a `UserConfigured` extra does not —
+    /// only those two lanes survive `build_candidates`' filter.
+    #[test]
+    fn build_candidates_keeps_hint_and_provenance_extras_drops_user_configured() {
+        let dir = FixtureDirectory::new()
+            .with_write(pk('a'), [test_relay(0)])
+            .with_extra(pk('a'), Lane::Hint, [test_relay(1)])
+            .with_extra(pk('a'), Lane::Provenance, [test_relay(2)])
+            .with_extra(pk('a'), Lane::UserConfigured, [test_relay(3)]);
+
+        let candidates = build_candidates(&BTreeSet::from([pk('a')]), &dir);
+        let urls: BTreeSet<RelayUrl> = candidates[&pk('a')]
+            .iter()
+            .map(|lr| lr.url.clone())
+            .collect();
+        assert_eq!(
+            urls,
+            BTreeSet::from([test_relay(0), test_relay(1), test_relay(2)]),
+            "Hint/Provenance extras count toward k; UserConfigured does not"
+        );
     }
 
     #[test]
     fn provenance_for_outbox_yields_one_entry_per_author_relay_pair() {
         let dir = FixtureDirectory::new().with_write(pk('a'), [test_relay(0), test_relay(1)]);
-        let discovery = DiscoveryKinds::default();
         let atom = cf_kind1(Some(BTreeSet::from([pk('a')])));
-        let (skeleton, authors) = Skeleton::of(&atom);
-        let (candidates, indexer_relays) = build_candidates(&authors, &dir, &discovery, &skeleton);
+        let (_, authors) = Skeleton::of(&atom);
+        let candidates = build_candidates(&authors, &dir);
         let coverage = solve(&CoverageInput {
             candidates: candidates.clone(),
             k: 2,
             cap: 10,
-            indexer_eligible_relays: indexer_relays,
         });
         let provenance = provenance_for_outbox(&coverage, &candidates);
         assert_eq!(
