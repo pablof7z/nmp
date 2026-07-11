@@ -100,7 +100,7 @@ private final class RowBridge: RowObserver, @unchecked Sendable {
         self.continuation = continuation
     }
 
-    func onBatch(deltas: [FfiRowDelta], coverage: FfiCoverage) {
+    func onBatch(deltas: [FfiRowDelta], evidence: FfiAcquisitionEvidence) {
         lock.lock()
         for delta in deltas {
             switch delta {
@@ -118,7 +118,7 @@ private final class RowBridge: RowObserver, @unchecked Sendable {
         }
         let snapshot = order.compactMap { byId[$0] }
         lock.unlock()
-        coalescer.push(RowBatch(rows: snapshot, coverage: Coverage(coverage)))
+        coalescer.push(RowBatch(rows: snapshot, evidence: AcquisitionEvidence(evidence)))
     }
 
     func onClosed() {

@@ -162,19 +162,70 @@ pub enum FfiRowDelta {
     Removed { id: String },
 }
 
-/// `nmp::QueryCoverage` mirror (ruling §6 — ledger #7's variant).
+/// `nmp::SourceStatus` mirror (`docs/design/scoped-evidence-49-12-plan.md`
+/// §4) -- the closed, honest per-source link-status vocabulary for the
+/// scoped, per-query [`FfiAcquisitionEvidence`] surface. Ratified names,
+/// codex-nova-governed: no variant/field may be added beyond this list, and
+/// no completeness/sync/isComplete aggregate may ever be added anywhere on
+/// this surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub enum FfiCoverage {
-    CompleteUpTo { unix_seconds: u64 },
-    Unknown,
+pub enum FfiSourceStatus {
+    Requesting,
+    Connecting,
+    Disconnected,
+    AwaitingAuth { phase: FfiAuthPhase },
+    AuthDenied,
+    Error,
 }
 
-/// One delivered batch: raw row deltas + the query's aggregate coverage
-/// (mirrors `nmp::RowsMsg`).
+/// `nmp::AuthPhase` mirror -- the AUTH negotiation phases worth surfacing
+/// while awaiting proof (reserved for #8; see `nmp_engine::core::evidence`'s
+/// own doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiAuthPhase {
+    AwaitingPolicy,
+    AwaitingSignature,
+}
+
+/// `nmp::SourceEvidence` mirror -- one relay's acquisition state for a
+/// query's subtree, as two deliberately orthogonal facts (see that type's
+/// own doc for why `reconciled_through`/`status` must never collapse into
+/// one enum).
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiSourceEvidence {
+    pub relay: String,
+    pub reconciled_through: Option<u64>,
+    pub status: FfiSourceStatus,
+}
+
+/// `nmp::ShortfallFact` mirror -- an explicit, never-silent shortfall in a
+/// query's subtree acquisition (never folded into `sources`).
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiShortfallFact {
+    NoPlannedSource { atom: String },
+    NoResolvedDemand,
+    LocalLimit { atom: String },
+}
+
+/// `nmp::AcquisitionEvidence` mirror (`docs/design/scoped-evidence-49-12-plan.md`
+/// §4, folding #12 into #49) -- per-SOURCE facts for a query's full subtree
+/// (interior `Derived` atoms included), plus an explicit shortfall list.
+/// Replaces the deleted `FfiCoverage::CompleteUpTo | Unknown` aggregate:
+/// NO field here is, or may ever become, a global completeness/sync/
+/// isComplete verdict -- an app rolls per-source facts into its own
+/// progress policy, NMP never does that rollup for it.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiAcquisitionEvidence {
+    pub sources: Vec<FfiSourceEvidence>,
+    pub shortfall: Vec<FfiShortfallFact>,
+}
+
+/// One delivered batch: raw row deltas + the query's scoped acquisition
+/// evidence (mirrors `nmp::RowsMsg`).
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiRowBatch {
     pub deltas: Vec<FfiRowDelta>,
-    pub coverage: FfiCoverage,
+    pub coverage: FfiAcquisitionEvidence,
 }
 
 /// `nmp::Durability` mirror (a typed PROPERTY of a write, not a routing
@@ -271,13 +322,26 @@ pub struct FfiLaneCount {
     pub count: u32,
 }
 
+/// `nmp::CoverageInterval` mirror -- a proven, retained `[from, through]`
+/// interval (`nmp_store::coverage::CoverageInterval`). This is the
+/// engine-global DIAGNOSTICS watermark, deliberately distinct from the
+/// scoped, per-query [`FfiAcquisitionEvidence`] surface above (M5 plan §1
+/// vs. `docs/design/scoped-evidence-49-12-plan.md` §4) -- never reused as a
+/// query-level verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Record)]
+pub struct FfiCoverageInterval {
+    pub from: u64,
+    pub through: u64,
+}
+
 /// One filter's proven coverage state at one relay (M5 plan §1.1). `filter`
 /// is the EXACT wire JSON -- the same rendering as the parallel entry in
-/// `FfiRelayDiagnostics.filters`.
+/// `FfiRelayDiagnostics.filters`. `coverage` is `None` -- "no row = not
+/// covered", unchanged from the store's own rule.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiFilterCoverage {
     pub filter: String,
-    pub coverage: FfiCoverage,
+    pub coverage: Option<FfiCoverageInterval>,
 }
 
 /// One relay's full diagnostics (M5 plan §1.1) -- per-relay wire-sub count,

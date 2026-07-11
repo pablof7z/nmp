@@ -11,22 +11,24 @@
 use std::collections::{BTreeMap, HashMap};
 
 use nmp::{
-    DiagnosticsSnapshot, Durability as GDurability, FilterCoverageEntry, Lane, QueryCoverage,
-    RelayDiagnosticsSnapshot, RowDelta, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
-    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
+    AcquisitionEvidence, AuthPhase, CoverageInterval, DiagnosticsSnapshot,
+    Durability as GDurability, FilterCoverageEntry, Lane, RelayDiagnosticsSnapshot, RowDelta,
+    ShortfallFact, SourceEvidence, SourceStatus, WriteIntent as GWriteIntent,
+    WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
     Binding as GBinding, Derived as GDerived, Filter as GFilter, IdentityField as GIdentityField,
     IndexedTagName, Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
 };
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 use crate::types::{
-    FfiBinding, FfiCoverage, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
-    FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting, FfiWriteStatus,
+    FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCoverageInterval, FfiDerived,
+    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiFilterCoverage, FfiIdentityField,
+    FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow, FfiRowDelta, FfiSelector,
+    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSourceEvidence, FfiSourceStatus,
+    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every way a value crossing this boundary can fail to parse -- typed
@@ -327,12 +329,74 @@ pub fn row_delta_to_ffi(d: &RowDelta) -> FfiRowDelta {
     }
 }
 
-pub fn coverage_to_ffi(c: QueryCoverage) -> FfiCoverage {
-    match c {
-        QueryCoverage::CompleteUpTo(ts) => FfiCoverage::CompleteUpTo {
-            unix_seconds: ts.as_secs(),
+fn auth_phase_to_ffi(p: AuthPhase) -> FfiAuthPhase {
+    match p {
+        AuthPhase::AwaitingPolicy => FfiAuthPhase::AwaitingPolicy,
+        AuthPhase::AwaitingSignature => FfiAuthPhase::AwaitingSignature,
+    }
+}
+
+fn source_status_to_ffi(s: SourceStatus) -> FfiSourceStatus {
+    match s {
+        SourceStatus::Requesting => FfiSourceStatus::Requesting,
+        SourceStatus::Connecting => FfiSourceStatus::Connecting,
+        SourceStatus::Disconnected => FfiSourceStatus::Disconnected,
+        SourceStatus::AwaitingAuth { phase } => FfiSourceStatus::AwaitingAuth {
+            phase: auth_phase_to_ffi(phase),
         },
-        QueryCoverage::Unknown => FfiCoverage::Unknown,
+        SourceStatus::AuthDenied => FfiSourceStatus::AuthDenied,
+        SourceStatus::Error => FfiSourceStatus::Error,
+    }
+}
+
+fn source_evidence_to_ffi(s: SourceEvidence) -> FfiSourceEvidence {
+    FfiSourceEvidence {
+        relay: s.relay.to_string(),
+        reconciled_through: s.reconciled_through.map(|ts| ts.as_secs()),
+        status: source_status_to_ffi(s.status),
+    }
+}
+
+/// `ShortfallFact`'s `atom: ConcreteFilter` renders to the EXACT wire JSON
+/// (`ConcreteFilter::to_nostr().as_json()`) -- the same rendering discipline
+/// `diagnostics_snapshot_to_ffi`/`relay_diagnostics_to_ffi` already use for
+/// every other `ConcreteFilter` crossing this boundary, never a fabricated
+/// summary.
+fn shortfall_fact_to_ffi(f: ShortfallFact) -> FfiShortfallFact {
+    match f {
+        ShortfallFact::NoPlannedSource { atom } => FfiShortfallFact::NoPlannedSource {
+            atom: atom.to_nostr().as_json(),
+        },
+        ShortfallFact::NoResolvedDemand => FfiShortfallFact::NoResolvedDemand,
+        ShortfallFact::LocalLimit { atom } => FfiShortfallFact::LocalLimit {
+            atom: atom.to_nostr().as_json(),
+        },
+    }
+}
+
+/// `nmp::AcquisitionEvidence -> FfiAcquisitionEvidence` (the scoped,
+/// per-query surface `RowsMsg`/`RowObserver::on_batch` carries -- ratified
+/// codex-nova names, see `types.rs`'s own doc). Replaces the deleted
+/// `coverage_to_ffi`/`QueryCoverage` collapse: every source's facts map
+/// faithfully, never rolled up into a verdict.
+pub fn evidence_to_ffi(e: AcquisitionEvidence) -> FfiAcquisitionEvidence {
+    FfiAcquisitionEvidence {
+        sources: e.sources.into_iter().map(source_evidence_to_ffi).collect(),
+        shortfall: e
+            .shortfall
+            .into_iter()
+            .map(shortfall_fact_to_ffi)
+            .collect(),
+    }
+}
+
+/// `nmp::CoverageInterval -> FfiCoverageInterval` -- the engine-global
+/// DIAGNOSTICS watermark mirror, deliberately distinct from
+/// [`evidence_to_ffi`]'s scoped query surface.
+fn coverage_interval_to_ffi(i: CoverageInterval) -> FfiCoverageInterval {
+    FfiCoverageInterval {
+        from: i.from.as_secs(),
+        through: i.through.as_secs(),
     }
 }
 
@@ -409,7 +473,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
             .into_iter()
             .map(|entry: FilterCoverageEntry| FfiFilterCoverage {
                 filter: entry.filter,
-                coverage: coverage_to_ffi(entry.coverage),
+                coverage: entry.coverage.map(coverage_interval_to_ffi),
             })
             .collect(),
     }
