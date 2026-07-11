@@ -18,6 +18,8 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidSecretKey
     case signerHasNoPublicKey
     case storeOpenFailed(String)
+    case invalidSignature(String)
+    case invalidSignedEvent(String)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -29,6 +31,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidSecretKey: self = .invalidSecretKey
         case .SignerHasNoPublicKey: self = .signerHasNoPublicKey
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
+        case .InvalidSignature(let got): self = .invalidSignature(got)
+        case .InvalidSignedEvent(let reason): self = .invalidSignedEvent(reason)
         }
     }
 }

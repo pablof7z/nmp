@@ -191,21 +191,43 @@ pub enum FfiWriteRouting {
     PrivateNarrow { relays: Vec<String> },
 }
 
+/// The event payload of a write intent (`nmp_engine::outbox::WritePayload`
+/// mirror). VISION P: signing and publishing are ORTHOGONAL stages --
+/// `Unsigned` is a template the engine signs internally ("the key lives in
+/// the engine", ledger #12); `Signed` (#32, the M5 unlock) is a caller that
+/// already holds a validly-signed event -- an external signer / NIP-46
+/// bunker, or a verbatim republish -- and hands its fields across as-is.
+/// `Signed`'s fields are field-for-field [`FfiRow`] (the read-side mirror of
+/// a signed `nostr::Event`) plus `sig`, deliberately: the write side stays
+/// symmetric with the read side rather than introducing a JSON-blob shape.
+/// Validated (`nostr::Event::verify`) at the FFI boundary before it ever
+/// reaches the engine -- see `convert::write_intent_from_ffi`; the engine
+/// itself never re-signs, mutates a tag, or recomputes an id for this
+/// variant.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiWritePayload {
+    Unsigned {
+        pubkey: String,
+        created_at: u64,
+        kind: u16,
+        tags: Vec<Vec<String>>,
+        content: String,
+    },
+    Signed {
+        id: String,
+        pubkey: String,
+        created_at: u64,
+        kind: u16,
+        tags: Vec<Vec<String>>,
+        content: String,
+        sig: String,
+    },
+}
+
 /// A caller's publish request (`nmp_engine::outbox::WriteIntent` mirror).
-/// M4 scope note: the payload is ALWAYS an unsigned template -- "the key
-/// lives in the engine" (VISION ledger #12; M4 plan §5's `addAccount`
-/// framing) means an app never holds a signed event to hand across this
-/// boundary in M4; a `Signed`-payload variant (republishing an
-/// already-signed event to a recomputed relay set) is an explicit
-/// non-goal-for-now, not an oversight -- see the plan's §10 non-goals list
-/// for the analogous remote-signer deferral.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiWriteIntent {
-    pub pubkey: String,
-    pub created_at: u64,
-    pub kind: u16,
-    pub tags: Vec<Vec<String>>,
-    pub content: String,
+    pub payload: FfiWritePayload,
     pub durability: FfiDurability,
     pub routing: FfiWriteRouting,
 }
