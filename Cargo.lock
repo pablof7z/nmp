@@ -1366,6 +1366,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-consumer-check"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+]
+
+[[package]]
 name = "nmp-demo"
 version = "0.1.0"
 dependencies = [

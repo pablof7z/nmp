@@ -7,7 +7,7 @@
 //! take, only one it may take early via [`Subscription::cancel`]/
 //! [`DiagnosticsSubscription::cancel`].
 
-use std::sync::mpsc::{RecvError, TryRecvError};
+use std::sync::mpsc::RecvError;
 
 use nmp_engine::core::DiagnosticsSnapshot;
 use nmp_engine::runtime::{DiagnosticsHandle, Handle, LatestReceiver, QueryHandle, RowsMsg};
@@ -40,11 +40,6 @@ impl Subscription {
     /// channel disconnects.
     pub fn recv(&self) -> Result<RowsMsg, RecvError> {
         self.rows.recv()
-    }
-
-    /// Non-blocking poll variant of [`Self::recv`].
-    pub fn try_recv(&self) -> Result<RowsMsg, TryRecvError> {
-        self.rows.try_recv()
     }
 
     /// Withdraw the subscription now, rather than waiting for `Drop`.
