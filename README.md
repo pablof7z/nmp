@@ -1,105 +1,125 @@
 # NMP
 
-**An embeddable Nostr sync-and-routing engine: a library an app uses, not a framework an app lives inside.**
+**The local-first Nostr engine for apps that want the network machinery, not a new application architecture.**
 
-> **Status:** M1-M4 are built and independently verified. The M5 SwiftUI falsifier and permanent diagnostics screen are built, but the human library-vs-framework verdict and final on-device performance recheck remain open. Routing/ownership (#22), retraction (#23), and the governed v2 product-contract work (#43) are active. Public shapes are intentionally provisional; behavioral invariants are stable, and public changes require evidence, cross-platform impact review, and human signoff.
+For Rust, Swift, and Kotlin developers, NMP packages storage, sync, relay routing, durable publication, and diagnostics behind two concepts: **live queries** and **write intents**. The app keeps its state model, UI, identity experience, and product policy.
 
-## Why
+[![CI](https://github.com/pablof7z/nmp/actions/workflows/ci.yml/badge.svg)](https://github.com/pablof7z/nmp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Correct Nostr clients repeatedly rebuild the same machinery: relay discovery and routing, subscription lifecycle, replaceable/delete/expiry semantics, dedup and provenance, offline persistence, fan-out discipline, and durable publication evidence. Incorrect clients omit part of it and silently show stale or incomplete state.
+<p align="center">
+  <img src="docs/screenshots/m5-02-feed.jpg" alt="A live feed in NMP's SwiftUI falsifier app" width="220">
+  <img src="docs/screenshots/m5-05-relays.jpg" alt="Relay evidence in NMP's SwiftUI falsifier app" width="220">
+</p>
 
-The previous NMP tried to solve that by owning the whole application architecture and policing a wide seam. The rewrite keeps the valuable Nostr machinery and removes the app framework. Correctness belongs in a small library surface and falsifiable invariants, not in an AppState/reducer/provider system or a doctrine-lint corpus.
+<p align="center"><sub>An ordinary SwiftUI falsifier app backed by NMP. The app owns the screens; NMP owns the live relay work behind them.</sub></p>
 
-## The two workload nouns
+## See it work
 
-1. **A live query** declares demand: a Nostr selection whose field values can be reactive `Binding`s, plus typed source authority and access context. Results arrive through the platform's native observation primitive. Swift `AsyncSequence` and the JVM Kotlin `Flow` projection are live-proven; full Android remains open.
-2. **A write intent** declares an exact publication obligation and durability policy. Durable acceptance is distinct from signing, routing, relay handoff, and relay acknowledgement; its receipt reports observed facts rather than claiming global delivery or convergence.
+With [Rust](https://www.rust-lang.org/tools/install) installed:
 
-The supporting control plane stays narrow: current-pubkey inputs, signer providers, operator configuration, and diagnostics. None is an application architecture.
-
-## Reactive demand
-
-The built selection grammar is closed and introspectable:
-
-```text
-Binding  := Literal(set)
-          | Reactive(ActivePubkey)
-          | Derived(inner: Filter, project: Selector)
-          | SetOp(Union | Intersect | Diff, [Binding])
-Selector := Authors | Ids | Tag(char) | AddressCoord
+```bash
+git clone https://github.com/pablof7z/nmp.git
+cd nmp
+cargo run -p nmp-demo -- --secs 20
 ```
 
-A reusable helper may construct a `Derived` graph, but the engine always receives the expanded value: no app closure enters acquisition or routing. An opt-in protocol module may expose a richer typed query when its result is a protocol resource rather than merely a value set. Whether arbitrary app-owned reactive inputs should extend the grammar remains an explicit decision (#48), not an accidental escape hatch.
+The read-only demo connects to two public indexers, discovers the relevant author relays, streams real events, and finishes with the relay plan and wire activity it observed. No Nostr key is required. This is a running falsifier, not the shape of the public API.
 
-Demand correctness is keyed by the complete descriptor: **selection + source authority + access context**. Identical selection subgraphs can share internally, while wire subscriptions and acquisition evidence share only when their relay and visibility contexts are equivalent.
+## Why NMP exists
 
-## Honest query evidence
+Nostr's wire protocol is small. A dependable local view is not.
 
-NMP persists rows and relay-scoped acquisition facts. It can say which planned relays answered, which exact filters were sent, what EOSE/watermark evidence was retained, and which sources were blocked or omitted. It cannot prove that no matching event exists on an unknown, offline, private, or user-operated relay.
+As a product moves beyond a single relay request, it can accumulate discovery, routing, subscription repair, deduplication, replaceable-event rules, deletion and expiry, offline persistence, retry, and the question of what the network actually proved. Those concerns are mostly independent of the product's screens and content model.
 
-The target snapshot contract is therefore rows plus small, scoped cache/acquisition evidence. Raw per-relay plan, connection, AUTH, error, retry, watermark, and limit facts remain available through permanent diagnostics. NMP does not publish an aggregate `syncHealth`, globally `synced`, `converged`, or authoritative-empty judgment. The current `Unknown | CompleteUpTo` API is built but scheduled for correction under #49.
+NMP concentrates that machinery in one embeddable engine. The result is a smaller boundary: the app describes what it needs or what it wants published; the engine owns the distributed work required to keep that intent honest.
 
-## Durable writes and signers
+## Two nouns
 
-The target durable-write contract is:
+### A live query
 
-- `Accepted` follows a crash-atomic commit of the frozen unsigned body, expected pubkey, receipt state, and one canonical pending store row.
-- The pending row participates in ordinary filters and store semantics. The write path never pushes query rows directly.
-- Signing promotes that same stable-id row from pending to signed after exact response verification.
-- Publishing uses the signer associated with the current pubkey by default; a write may override the identity for podcast, disposable, hardware, or other secondary keys. The chosen identity is pinned at acceptance.
-- An unavailable signer leaves the intent durably `AwaitingSigner(pubkey)` until a matching provider attaches or the app cancels it.
-- NMP persists the obligation, not raw secret material. Platform SDKs provide standard secure signer providers; apps own identity import/removal/backup policy and may attach custom providers.
-- Durable relay attempts use persisted logical backoff and per-relay evidence. A relay outcome after signing changes the receipt, not the canonical row.
+A live query describes the app's current demand, including the context needed to decide where and how that data may be acquired. NMP keeps the matching local view current and repairs the underlying relay work when an account, source, or derived input changes.
 
-The current engine has in-process receipts and signing, but crash-safe acceptance, pending rows, reattachment, and persisted retry are still open work (#2, #3, #6, #47).
+The app observes the result through its platform's native reactive model. It does not maintain the expanded author set, reopen subscriptions, or mirror a second authoritative cache.
 
-## Protocol modules, not content recipes
+### A write intent
 
-Core is content-agnostic and protocol-aware only where a Nostr standard requires engine behavior. Opt-in NIP/feature crates own the exact schemas, codecs, validation, state reconstruction, and semantic operations defined by that protocol. They do not gain ownership of unrelated event kinds that may participate in it.
+A write intent describes an exact publication obligation and how durable it should be. NMP carries it through local acceptance, signing, relay routing, retry, and per-relay outcomes while preserving one canonical local event state.
 
-Modules compose immutable unsigned drafts and typed context. For example, a NIP-29 group can add its `h` context and host-relay authority to a separately owned draft without claiming that draft's kind; core signs once after composition. Blossom upload, media-draft construction, and Nostr publication remain separate operations with separate failure evidence. No core package or acceptance story privileges kind:1 or one social-feed product shape (#45).
+The receipt reports observed facts. It does not collapse a distributed publication into a misleading global-success boolean.
 
-## Ownership
+### Diagnostics make both explainable
+
+Diagnostics expose the source plan, wire filters, connections, relay evidence, limits, and write attempts behind ordinary query results and receipts. They are a permanent, read-only proof surface—not a debug mode that changes how the engine behaves.
+
+## The ownership boundary
 
 | NMP owns | The app owns | The UI framework owns |
 |---|---|---|
-| Shared event cache, validation, dedup/provenance, replaceable/delete/expiry, persistence | Which queries exist; app state and architecture | Rendering, layout, navigation |
-| Binding resolution, demand compilation, source/access-context identity, REQ coalescing | Current-pubkey value and account UX | Observation scope |
-| Relay discovery/routing, capped fan-out, sync, acquisition evidence | Operator configuration and identity policy | View identity/recomposition |
-| Durable intents, signer orchestration, attempt journal, per-relay receipts | What/when to publish; optional identity override | Presentation of raw states |
-| Permanent raw diagnostics and explicit destructive reset | Whether logout also removes identities/credentials | - |
+| Canonical event and write-obligation storage | App state and architecture | Rendering and layout |
+| Relay discovery, routing, sync, and subscription lifecycle | Which queries and writes exist | Observation scope |
+| Deduplication, provenance, replacement, deletion, and expiry | Account and identity experience | Navigation and presentation lifecycle |
+| Durable publication work and per-relay evidence | Ordering, moderation, formatting, and product policy | Platform presentation details |
+| Permanent diagnostics over all of the above | How network evidence is explained to a person | — |
 
-One engine is one local trust/cache domain: rows acquired while using any account enter the same cache. Apps serving mutually untrusted sessions need the explicit destructive reset tracked by #53; ordinary account switching is not a cache wipe.
+This boundary is the product. NMP can sit inside a small existing app or a full Nostr client without becoming either app's container, reducer, navigation system, or UI policy layer.
 
-## Boundedness
+## What this unlocks
 
-Query and diagnostics observations are latest-complete-state streams: internal deltas accumulate correctly, while slow consumers may skip intermediate rendered snapshots. Durable receipt facts remain persisted and reattachable. Oversized demand is chunked where semantics remain exact; otherwise NMP keeps available cached rows visible and reports explicit local shortfall. It never silently takes the first N values and calls the result complete (#46, #20).
+- A view can follow a changing set of authors without app-owned subscription repair.
+- Account-dependent data can re-root while unrelated multi-account observations stay live.
+- Cached rows can render immediately while relay work continues behind them.
+- A pending publication can appear through the same local data path as relay-received events, without an optimistic mirror in app state.
+- Protocol-specific behavior can compose with the engine without turning core into a catalog of preferred content types.
+- When data is absent or a write stalls, diagnostics can show the scoped evidence instead of inventing a global sync judgment.
 
-## Where we are
+## One semantic engine, native platform fit
 
-**Built and verified:**
+NMP is built in Rust and projected into Swift and Kotlin so each platform keeps its ordinary observation, cancellation, and state-management patterns. The semantic boundary stays the same across platforms; the app-facing spelling does not need to.
 
-- M1: one reactive grammar handles bounded nested `Derived`/`SetOp` graphs and surgical demand changes without kind-specific resolver branches.
-- M2: routing and widen-only coalescing keep local re-filtering on the correctness path.
-- M3: store, transport, receipt streaming, coverage persistence, reconnect replay, and probed negentropy run end to end. Restart-durable writes and the public evidence wording remain incomplete.
-- M4: the Swift package exposes live queries, writes, receipts, and diagnostics without FFI types leaking into app code.
-- M5 implementation: an ordinary SwiftUI falsifier app and permanent diagnostics screen exist. The owner verdict is not yet recorded.
+```text
+YOUR APP
+  state · navigation · product rules · UI
+             │
+      live queries / write intents
+             ▼
+NMP
+  canonical store · sync · routing · outbox · diagnostics
+             │
+             ▼
+      Nostr relays and signers
+```
 
-**Active:**
+## Correctness is structural
 
-- Routing/ownership epic #22.
-- Retraction/negative-delta epic #23; its unified deadline driver landed in #42.
-- Product-contract epic #43 and promotion issue #44.
-- The minimal JVM Kotlin/Flow falsifier landed in #54; Android/AAR/Compose remains under #40 after the M5 verdict.
+NMP does not treat correctness as a checklist for downstream app code. The supported boundary is shaped so that classes of bad behavior—lost subscriptions, unscoped relay injection, stale replaceable events, signer drift, silent truncation, or false claims of global completeness—can be ruled out at the engine boundary and falsified in tests.
 
-**Known incomplete or deferred:** see [`docs/known-gaps.md`](docs/known-gaps.md). GitHub Issues are the one tactical queue.
+The [bug-class ledger](docs/bug-class-ledger.md) records the mechanism and real proof status for each claim.
 
-## Canonical surfaces
+## Current status
 
-- [`docs/VISION.md`](docs/VISION.md): stable behavioral invariants and milestone gates.
-- [`docs/design-record.md`](docs/design-record.md): exploration history and promoted decisions.
-- [`docs/design/`](docs/design/): focused normative designs for demand/evidence, durable writes, modules/composition, routing, retraction, and bounded delivery.
-- [`docs/bug-class-ledger.md`](docs/bug-class-ledger.md): structural exclusions and their actual proof status.
-- [`docs/known-gaps.md`](docs/known-gaps.md): honest built-versus-missing truth.
-- [GitHub epic #43](https://github.com/pablof7z/nmp/issues/43): cross-surface work organization.
-- [`AGENTS.md`](AGENTS.md): issue-first working discipline.
+This README describes the v2 north star. NMP is still pre-v2: the core store, resolver, router, transport, engine, Rust facade, Swift package, Kotlin/JVM package, and falsifier apps exist, while several promoted guarantees remain active work. Public names and shapes are intentionally provisional; the ownership boundary and behavioral invariants are the stable frame.
+
+- [`docs/known-gaps.md`](docs/known-gaps.md) is the honest built-versus-missing record.
+- [`docs/bug-class-ledger.md`](docs/bug-class-ledger.md) distinguishes target, partial, and structurally proven guarantees.
+- [GitHub Issues](https://github.com/pablof7z/nmp/issues) are the tactical queue.
+
+## Start here
+
+- [Builder guide](docs/builder/README.md) — the product model, examples, and platform guidance.
+- [Vision](docs/VISION.md) — the north star and settled behavioral invariants.
+- [Design record](docs/design-record.md) — the exploration and decisions behind the architecture.
+- [Focused designs](docs/design/) — the deeper contracts for demand, evidence, writes, composition, routing, and bounded delivery.
+- [Contributor guide](AGENTS.md) — issue-first workflow and verification discipline.
+
+## Security and trust boundary
+
+NMP runs in the host application and communicates with Nostr relays. It owns local cache and write-obligation state; the app owns identity import, backup, removal, and user-facing trust policy. Production readiness of key handling, secure signer providers, persistence, and reset behavior is tracked explicitly in [known gaps](docs/known-gaps.md)—the north-star description above is not a substitute for that status.
+
+## Contributing
+
+Every unit of work starts with a GitHub issue that captures why it matters and links the relevant invariant when one exists. Read [`AGENTS.md`](AGENTS.md), then choose from the [open issues](https://github.com/pablof7z/nmp/issues).
+
+## License
+
+[MIT](LICENSE)
