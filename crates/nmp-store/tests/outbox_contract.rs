@@ -525,6 +525,86 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
     );
 }
 
+/// The identical reuse-hazard falsifier as `intent_id_never_reused_after_
+/// all_intents_terminate_and_restart`, for `receipt_id` (team-lead
+/// correction: once receipts are durably RETAINED across restart, a
+/// caller-side receipt-id counter that resets on restart has the exact
+/// same collision hazard `IntentId` had — `receipt_id` is therefore
+/// ALSO store-allocated from `OUTBOX_META`'s durable high-water mark,
+/// bumped in the same `accept_write`/`accept_ephemeral` transaction,
+/// never inferred from "what's currently open" or "what's currently
+/// retained"). Unlike an intent's `OUTBOX_INTENTS` row, a receipt's
+/// `OUTBOX_RECEIPTS` row is NEVER deleted by this unit — so this test
+/// terminates every intent (closing its open-work row) while leaving the
+/// receipts themselves retained, then restarts and asserts the next
+/// receipt id was never used before, even against the surviving retained
+/// set, not just the open one.
+#[test]
+fn receipt_id_never_reused_after_terminal_and_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+
+    let (receipt1, receipt2, receipt3_ephemeral) = {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+
+        let (frozen1, _signed1) = compose(&k, Kind::TextNote, "one", 100);
+        let outcome1 = do_accept(&mut store, accept(frozen1, k.public_key(), 100));
+        let intent1 = outcome1.journaled_intent_id().expect("journaled");
+        let receipt1 = outcome1.journaled_receipt_id().expect("journaled");
+        store
+            .compensate_write(intent1)
+            .expect("compensate persistence");
+
+        let (frozen2, _signed2) = compose(&k, Kind::TextNote, "two", 200);
+        let outcome2 = do_accept(&mut store, accept(frozen2, k.public_key(), 200));
+        let intent2 = outcome2.journaled_intent_id().expect("journaled");
+        let receipt2 = outcome2.journaled_receipt_id().expect("journaled");
+        store
+            .compensate_write(intent2)
+            .expect("compensate persistence");
+
+        // An Ephemeral receipt — receipt-only, never backed by an intent
+        // at all — draws from the SAME durable counter.
+        let (frozen_eph, _signed_eph) = compose(&k, Kind::TextNote, "ephemeral", 250);
+        let receipt3 = store
+            .accept_ephemeral(frozen_eph.id, k.public_key())
+            .expect("accept_ephemeral persistence");
+
+        // Every intent's open-work row is gone, but all THREE receipts
+        // remain durably RETAINED — the exact surviving-retained-set trap
+        // a naive allocator could otherwise be seeded from.
+        assert!(store.recover_outbox().is_empty());
+        assert!(store.reattach_receipt(receipt1).is_some());
+        assert!(store.reattach_receipt(receipt2).is_some());
+        assert!(store.reattach_receipt(receipt3).is_some());
+
+        (receipt1, receipt2, receipt3)
+    };
+
+    // Restart — the retained receipts still answer, the open set is empty.
+    let mut store = RedbStore::open(&path).expect("reopen redb store");
+    assert!(store.recover_outbox().is_empty());
+    assert!(store.reattach_receipt(receipt1).is_some());
+    assert!(store.reattach_receipt(receipt2).is_some());
+    assert!(store.reattach_receipt(receipt3_ephemeral).is_some());
+
+    let (frozen4, _signed4) = compose(&k, Kind::TextNote, "four", 300);
+    let outcome4 = do_accept(&mut store, accept(frozen4, k.public_key(), 300));
+    let receipt4 = outcome4.journaled_receipt_id().expect("journaled");
+
+    assert_ne!(
+        receipt4, receipt1,
+        "a post-restart receipt id must never collide with a retained, terminated receipt"
+    );
+    assert_ne!(receipt4, receipt2);
+    assert_ne!(receipt4, receipt3_ephemeral);
+    assert!(
+        receipt4 > receipt1 && receipt4 > receipt2 && receipt4 > receipt3_ephemeral,
+        "the durable receipt high-water mark must strictly advance across restart: got {receipt4}, prior {receipt1}/{receipt2}/{receipt3_ephemeral}"
+    );
+}
+
 /// Architecture-review correction #2 falsifier: a receipt must stay
 /// reattachable via `reattach_receipt` after its intent's `OUTBOX_INTENTS`
 /// open-work row is gone — the case this unit can actually produce that
