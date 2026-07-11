@@ -44,7 +44,7 @@ sealed class NMPSelector {
 
     object Ids : NMPSelector()
 
-    /** Exactly one character from the closed M1 tag-name set (`p e a d E t q`). */
+    /** Exactly one character from the closed tag-name set (`p e a d E t q h`). */
     data class Tag(val name: Char) : NMPSelector()
 
     object AddressCoord : NMPSelector()

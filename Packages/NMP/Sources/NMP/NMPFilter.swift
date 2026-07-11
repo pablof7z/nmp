@@ -18,7 +18,7 @@ public enum NMPIdentityField: Sendable, Hashable {
 public enum NMPSelector: Sendable, Hashable {
     case authors
     case ids
-    /// Exactly one character from the closed M1 tag-name set (`p e a d E t q`).
+    /// Exactly one character from the closed tag-name set (`p e a d E t q h`).
     case tag(Character)
     case addressCoord
 }
