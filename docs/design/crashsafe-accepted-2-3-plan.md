@@ -440,3 +440,193 @@ the only lowering path).
    placeholder. Confirm the placeholder is acceptable until #47 defines the real
    reference (obligation, not secret).
 ```
+
+---
+
+## Fable checkpoint (verdict)
+
+- **Date:** 2026-07-11. Reviewer: Fable (delegated design checkpoint; decisions
+  below are final calls, not questions back to the owner).
+- **Verdict: GO, with required changes** (listed below). No load-bearing flaw
+  requiring redesign. All code citations in §0–§6 were re-verified against the
+  working tree (`on_publish`/`on_signed`/`PendingWrite` shapes, redb table set
+  and per-call `begin_write`, `next_deadline`/`recv_timeout` driver, widened
+  `Superseded { replaced: Box<StoredEvent> }`, `remove`/`RetractReason`) — the
+  plan is honestly grounded.
+
+### The five decisions
+
+**Q1 — Sentinel/zeroed-sig `nostr::Event` as the pending body: APPROVED.**
+Grep-verified there is **no** "every stored event is signature-verifiable"
+invariant anywhere: `nmp-store`'s own module doc scopes signature verification
+*out* of the crate (lib.rs:25-27, "Explicitly out of scope … signature
+verification"); the only verify gates in the workspace are the transport pool's
+relay-ingest gate (`nmp-transport/src/pool/verify.rs` — never sees engine-authored
+rows) and `nmp-ffi/convert.rs:472` for caller-supplied `Signed` payloads (moving
+under #52; see sequencing). Nothing re-verifies stored rows on query, decode, or
+re-serve. `Filter::match_event` ignores `sig`; `StoredEventRecord` round-trips a
+zeroed 64-byte sig through JSON without validation; schnorr `Signature` parsing is
+length-checked only. The sentinel approach keeps the single query/supersession
+path untouched, which is exactly the §4.1 "store citizen, not overlay" ruling.
+Two conditions: (a) the row's `SigState` must be projected to the app surface
+alongside the row (apps must never be given a sentinel-sig event without the
+means to know it is pending); (b) *recommended, non-blocking hardening*: the
+dedup-by-id arm may adopt a **verified** real signature into a row still in
+`SigState::Pending` (cross-device same-id echo is the only path; negligible but
+free to handle correctly).
+
+**Q2 — Outbox journal in `nmp-store`'s redb `Database`: APPROVED.** This is the
+load-bearing structural call. `docs/architecture/crate-boundaries.md` does not
+exist in this repository (that path belongs to a different workspace); the
+governing texts here are VISION §4 and bug-class ledger #1 (one mutating door, no
+public index/storage setter). Three grounds: (1) **redb atomicity is a
+per-`Database` property** — one `begin_write` spanning EVENTS/ADDR_INDEX/indexes
+*and* OUTBOX_* is the only way to satisfy #3's "one crash-atomic commit", so
+co-residency is forced, not chosen. (2) `nmp-store` is **already** the durable-
+facts boundary, not a bare event table: COVERAGE watermarks, permanent
+TOMBSTONES/ADDR_TOMBSTONES, and EXPIRATION_INDEX are all non-event durable facts
+living in the same `Database` behind typed doors. The outbox journal is the same
+shape of fact. (3) The alternatives are worse by this repo's own rules: an
+engine-owned `Database` inverts the layering (`nmp-engine` grows a redb dep and
+a second persistence door) and would force transaction-handle injection into the
+store — a back-door index setter, a ledger-#1 violation; a separate outbox crate
+cannot share one `Database` without one crate owning `begin_write`, which
+recreates the same question. **Constraints that keep this legitimate:** the store
+exposes only the typed doors (`accept_write`/`promote_signed`/compensation/
+`recover_outbox`) — never raw table or transaction access; every policy decision
+(retry ownership, scheduling, signer orchestration) stays in `nmp-engine`; the
+`nmp-store` module doc is updated to say "event **and** durable-outbox store" so
+the broadened remit is documented, not drifted into.
+
+**Q3 — OutcomeUnknown / at-most-once split: CONFIRMED, with one modification
+(required change R2).** Seeding the persisted attempt table, the write-through on
+each transition, and the never-blindly-retry-on-reload rule here, with the
+backoff/concurrency/policy engine as a follow-up issue, is the right cut. But do
+**not** fold `min(next_eligible_at)` into `next_deadline()` in this frame: a
+deadline that fires with no owner to consume/advance it re-arms as already-past on
+the next loop iteration → zero timeout → **busy-loop spin** in the `recv_timeout`
+driver. The fold is five lines whenever the retry owner lands (the
+`next_deadline` doc already anticipates it); it ships *with* the follow-up.
+Restart resend is covered without it — see R1's boot re-dispatch.
+
+**Q4 — MemoryStore crash-safety = no-op: CONFIRMED.** MemoryStore implements the
+same doors with the same atomic *semantics* in-memory (so U1a tests the door
+contract cheaply); `recover_outbox` returns empty by construction. No contract
+clause requires refusing durable writes on a volatile store — durability is a
+property of the backend, and MemoryStore is the test/ephemeral backend. Document
+this on the `EventStore` trait method, not just in the plan.
+
+**Q5 — Pinned signing-identity ref placeholder: CONFIRMED.** `expected_pubkey`
+is the *real* pinned identity and alone satisfies #43's "pins the chosen identity
+at acceptance"; the opaque `signing_identity_ref` placeholder is the persistence
+hook #47 will give meaning to. This frame must not grow provider/vault/selection
+logic.
+
+### Contract validation (the checks the checkpoint was asked to run)
+
+- **One canonical store/reactivity path — HOLDS.** Pending rows enter EVENTS via
+  `accept_write` (same supersession/tombstone logic), feed the resolver via
+  `accept_local → react(inserted, removed)` — the one recompute engine — and exit
+  through `refresh_all_handles`. No shadow tier, no second matcher, no overlay.
+- **Dedup vs relay echo — CORRECT.** NIP-01 id = sha256 of
+  `[0, pubkey, created_at, kind, tags, content]`; the signature is not an input,
+  so the id is final at acceptance. Promotion writes the real sig *before*
+  `Effect::PublishEvent`, so the echo always dedups by id against a row already
+  carrying the real signature. `Duplicate { provenance_grew }` merges relay
+  provenance; the "sending…" chip resolves off `seen`.
+- **Atomic boundary — GENUINELY ALL-OR-NOTHING**, given R7: `accept_write` is one
+  `begin_write` spanning event tables + OUTBOX_*, which requires the
+  `AcceptWrite` argument to carry the full journal payload (frozen body, expected
+  pubkey, identity ref, durability, routing, receipt id/state) so the *store*
+  writes the displaced stash and journal rows in the same transaction the
+  supersession happens in — not the engine after the fact.
+- **Boot `recover_outbox` reconstructs a consistent EngineCore** — yes, given
+  R1's corrected sig_state taxonomy: rows are already in the store (live from the
+  first subscription), `pending`/`event_to_receipt` rebuild from the journal,
+  `next_receipt` seeds past the max recovered id, recovered `PendingWrite.sink`
+  is `None` until a caller reattaches (the field is already `Option`).
+
+### Required changes (builder must incorporate; none needs a redesign)
+
+1. **R1 — Fix the §2.3 recovery sig_state taxonomy.** §1.1 defines
+   `Pending` = pre-signature, but §2.3 glosses `Pending` as
+   "signed-but-not-fully-acked" — an internal contradiction. Correct recovery
+   classes: `AwaitingSigner` **and** `Pending` (a sign request was in flight and
+   the response is lost with the process) → re-emit the `RequestSign` path when a
+   matching signer is attached (double-signing after a crash is harmless: same
+   id, either valid signature promotes); `Signed` with non-terminal lanes →
+   **boot-time re-dispatch**: re-emit `Effect::PublishEvent` (exact frozen bytes)
+   per non-terminal Durable lane, writing a new attempt ordinal. AtMostOnce lanes
+   that were `InFlight` at crash reload as `OutcomeUnknown` and are never resent.
+   Boot re-dispatch is what satisfies U4's "exact-byte resend after restart"
+   without a retry engine.
+2. **R2 — Drop the `next_deadline` fold from this frame** (spin hazard, Q3
+   above). Move the fold and U4's "persisted `next_eligible_at` fires via the
+   deadline driver" test into the retry-owner follow-up issue; file that issue as
+   part of this frame's landing.
+3. **R3 — Define `AcceptOutcome::Refused` handling.** `accept_write` runs the
+   door's tombstone/expiry refusal checks; a refused acceptance (e.g. composing
+   into a tombstoned address, or an already-expired NIP-40 body) is a terminal
+   typed failure to the caller with **no journal residue** — nothing to recover,
+   all in the same transaction.
+4. **R4 — Ephemeral bypasses everything new.** Per #3 "Ephemeral writes do not
+   enter the durable journal": `Durability::Ephemeral` keeps today's exact path —
+   no journal row, no pending store row, no receipt (ledger #9). Durable **and**
+   AtMostOnce go through `accept_write` (AtMostOnce needs the journal for
+   `OutcomeUnknown`). State this in §2.1.
+5. **R5 — GC claim per open intent.** `gc` evicts regular events matched by no
+   claim; an unsigned pending kind:1 row must not be GC-evictable before it ever
+   signs. The engine's `ClaimSet` construction adds a claim per open
+   `OUTBOX_INTENTS` row (retraction doc §4.1 already prescribes exactly this —
+   the plan omitted it).
+6. **R6 — `promote_signed` durably drops the stash.** §4.2's "on promotion: drop
+   the stash" must be durable: the `promote_signed` transaction also deletes the
+   `OUTBOX_DISPLACED` row (and `OUTBOX_INTENTS.sig_state → Signed`) so recovery
+   after a promote never sees a stale displaced stash.
+7. **R7 — `AcceptWrite` carries the full journal payload** (see atomic-boundary
+   check above) — make the struct explicit in U1 so the single-transaction
+   property is structural, not a calling convention.
+8. **R8 — Journal row lifecycle.** State when an `OUTBOX_INTENTS` row is deleted:
+   on compensation (§3.1, already specified), and on the intent reaching
+   all-lanes-terminal with at least the receipt evidence written through
+   (`OUTBOX_ATTEMPTS` rows may be retained as evidence per #3's append-only
+   spirit — builder's choice — but the *intent* row's terminal deletion must be
+   defined so `recover_outbox` has a bounded working set).
+
+### Sequencing vs #52 (my call — sets the build order)
+
+- **The single `Event::verify` for caller-supplied `Signed` payloads ultimately
+  lives at THIS frame's acceptance boundary** — `on_publish`'s `Signed` arm
+  verifies *before* `accept_write`/journal (U3). That is #52-Q2's "deeper-correct"
+  home: every entry point (facade, FFI, `nmp-demo`, direct `Handle` embedders,
+  in-crate tests) inherits it, and it composes with U3's existing obligation to
+  validate signer *results* before `promote_signed` — one acceptance boundary,
+  two verify sites (caller-supplied at accept; signer-result at promote), zero
+  path that reaches the wire unverified.
+- **Build order:** #52 Unit A (facade crate, *including* its interim facade-level
+  verify — do not leave the guarantee unheld while U3 is in flight) lands first
+  and in **parallel** with this frame's U1 (store) + U2 (resolver) — the file
+  sets are disjoint. #52 B (FFI rethread; coordinate with
+  `build-ffi-signed-publish`) and C follow A. **U3 lands after #52 A/B** and, in
+  the same PR, moves the authoritative verify to the acceptance boundary and
+  **deletes the facade/FFI duplicate**, threading the engine's typed rejection
+  outward (hard-break-in-one-PR, no parallel verify paths left behind). Then U4,
+  U5. #52 D (parity harness) runs last — its tampered-`Signed` parity test then
+  proves the *engine-level* gate, which is a stronger falsifier than the
+  facade-level one it was designed against.
+- U3/U4 remain the only `core/mod.rs` writers in either frame; no co-owned
+  worktree is needed if this order is kept — U3 is the serialization point.
+
+### Residual risk
+
+- The interim window where the verify lives in the facade (#52 A) while direct
+  `Handle` embedders remain unguarded persists until U3 — accepted; it is
+  today's status quo, shrunk to one frame.
+- Journal growth: OUTBOX_ATTEMPTS retained as evidence is unbounded over a
+  long-lived replica if never trimmed (same shape as the tombstone decision, but
+  attempts are per-write × per-relay, not rare). The retry-owner follow-up must
+  state a retention rule; flag it in that issue's body.
+- Double-sign on crash recovery (R1) is protocol-harmless but may surface as a
+  duplicate NIP-46 approval prompt to a human signer — cosmetic; #47's provider
+  model is the place to correlate/replay signer RPCs (already its charter under
+  #3's "one correlated signer RPC").
