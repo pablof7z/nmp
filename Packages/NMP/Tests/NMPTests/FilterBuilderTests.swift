@@ -40,6 +40,20 @@ final class FilterBuilderTests: XCTestCase {
         XCTAssertEqual(NMPFilter(ffi), filter)
     }
 
+    func testNIP29GroupTagRoundTrips() {
+        let filter = NMPFilter(
+            kinds: [9, 30_315],
+            tags: ["h": .literal(["group-id"])]
+        )
+        let ffi = filter.toFfi()
+
+        guard case .literal(let values) = ffi.tags["h"] else {
+            return XCTFail("expected a literal binding on tag 'h'")
+        }
+        XCTAssertEqual(values, ["group-id"])
+        XCTAssertEqual(NMPFilter(ffi), filter)
+    }
+
     /// The follows-derivation shape from the M4 plan §9 mapping: kind:1 from
     /// authors DERIVED from my kind:3 contact list's `p` tags, i.e. "my
     /// follows' notes" -- entirely a value, no closures, no comparator code.
