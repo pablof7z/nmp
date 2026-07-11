@@ -195,7 +195,9 @@ fn receipt_key(id: u64) -> String {
 /// mirrors `crate::RecoveredReceipt` field-for-field with no re-encoding.
 #[derive(Debug, Serialize, Deserialize)]
 struct OutboxReceiptRecord {
-    intent_id: IntentId,
+    /// `None` for an `Ephemeral` receipt-only record — see
+    /// `crate::RecoveredReceipt::intent_id`'s doc.
+    intent_id: Option<IntentId>,
     frozen_id: EventId,
     expected_pubkey: PublicKey,
     state: ReceiptState,
@@ -223,6 +225,33 @@ fn update_outbox_receipt(
         outbox_receipts
             .insert(key.as_str(), encoded.as_str())
             .expect("redb: update outbox_receipts");
+    }
+}
+
+/// Boot-time reconciliation: every `Ephemeral` receipt-only record
+/// (`intent_id: None`) still `ReceiptState::Accepted` is flipped to
+/// `Abandoned` — see `ReceiptState::Abandoned`'s doc for why this is sound
+/// without any engine cooperation. Called from `RedbStore::open()`, inside
+/// the SAME write transaction that ensures every table exists (a fresh
+/// store's `OUTBOX_RECEIPTS` is empty, so this is a no-op there). Two
+/// passes (collect then mutate), mirroring `gc`'s victim-collection
+/// pattern: `redb` does not allow mutating a table while iterating it.
+fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &str, &str>) {
+    let mut to_abandon: Vec<(String, OutboxReceiptRecord)> = Vec::new();
+    for entry in outbox_receipts.iter().expect("redb: iter outbox_receipts") {
+        let (key, value) = entry.expect("redb: read outbox_receipts entry");
+        let record: OutboxReceiptRecord =
+            serde_json::from_str(value.value()).expect("redb: decode outbox receipt");
+        if record.intent_id.is_none() && record.state == ReceiptState::Accepted {
+            to_abandon.push((key.value().to_string(), record));
+        }
+    }
+    for (key, mut record) in to_abandon {
+        record.state = ReceiptState::Abandoned;
+        let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
+        outbox_receipts
+            .insert(key.as_str(), encoded.as_str())
+            .expect("redb: update outbox_receipts (ephemeral abandon)");
     }
 }
 
@@ -741,7 +770,14 @@ impl RedbStore {
             write_txn.open_table(OUTBOX_DISPLACED)?;
             write_txn.open_table(OUTBOX_ATTEMPTS)?;
             write_txn.open_table(OUTBOX_META)?;
-            write_txn.open_table(OUTBOX_RECEIPTS)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
+            // Boot-time reconciliation (VISION-ratified receipt contract,
+            // team-lead correction): any `Ephemeral` receipt-only record
+            // still `Accepted` at this point can only mean the process
+            // died before any further transition was ever recorded — see
+            // `ReceiptState::Abandoned`'s doc. A no-op on a fresh store
+            // (the table is empty) or a store with no ephemeral receipts.
+            reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts);
         }
         write_txn.commit()?;
         Ok(Self {
@@ -1654,7 +1690,7 @@ impl EventStore for RedbStore {
                 // Architecture review correction: the RETAINED receipt
                 // record, independent of `OUTBOX_INTENTS`'s open-work row.
                 let receipt_record = OutboxReceiptRecord {
-                    intent_id,
+                    intent_id: Some(intent_id),
                     frozen_id: frozen.id,
                     expected_pubkey,
                     state: ReceiptState::Accepted,
@@ -1944,6 +1980,33 @@ impl EventStore for RedbStore {
             expected_pubkey: record.expected_pubkey,
             state: record.state,
         })
+    }
+
+    fn accept_ephemeral(
+        &mut self,
+        receipt_id: u64,
+        frozen_id: EventId,
+        expected_pubkey: PublicKey,
+    ) {
+        // Receipt-ONLY: touches `OUTBOX_RECEIPTS` alone — no `EVENTS` row,
+        // no `OUTBOX_INTENTS` row, `intent_id: None` (nothing backs it).
+        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        {
+            let mut outbox_receipts = write_txn
+                .open_table(OUTBOX_RECEIPTS)
+                .expect("redb: open outbox_receipts");
+            let record = OutboxReceiptRecord {
+                intent_id: None,
+                frozen_id,
+                expected_pubkey,
+                state: ReceiptState::Accepted,
+            };
+            let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
+            outbox_receipts
+                .insert(receipt_key(receipt_id).as_str(), encoded.as_str())
+                .expect("redb: insert outbox_receipts (ephemeral)");
+        }
+        write_txn.commit().expect("redb: commit accept_ephemeral");
     }
 }
 

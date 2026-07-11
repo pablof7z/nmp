@@ -482,7 +482,8 @@ pub struct RecoveredIntent {
 /// of `OUTBOX_INTENTS` must never also delete receipt identity/state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiptState {
-    /// `accept_write` ran; nothing else has happened to this intent yet.
+    /// `accept_write` (durable/`AtMostOnce`) or `accept_ephemeral`
+    /// (`Ephemeral`) ran; nothing else has happened to this receipt yet.
     Accepted,
     /// `promote_signed` ran; the row carries a real signature. (Per-relay
     /// delivery evidence beyond this point is a later unit's job — the
@@ -492,6 +493,17 @@ pub enum ReceiptState {
     /// (retraction doc §4.2). Terminal — a compensated intent never
     /// promotes.
     Compensated,
+    /// An `Ephemeral` receipt (see [`EventStore::accept_ephemeral`]) that
+    /// was still `Accepted` when the store reopened after a restart.
+    /// `Ephemeral` writes are NEVER retried after process loss (R4), and
+    /// this unit builds no dispatch/ack tracking that could have advanced
+    /// it past `Accepted` before the crash — so an `Accepted` ephemeral
+    /// receipt surviving to the NEXT `RedbStore::open()` can only mean the
+    /// process died before any further transition was ever recorded.
+    /// `RedbStore::open()` reconciles every such row to `Abandoned` in the
+    /// same boot pass, mirroring how NIP-40 catches up expired-while-dead
+    /// events at boot (retraction-and-negative-deltas.md §3.3). Terminal.
+    Abandoned,
 }
 
 /// A durably-retained receipt record, independent of whether the intent's
@@ -503,7 +515,13 @@ pub enum ReceiptState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredReceipt {
     pub receipt_id: u64,
-    pub intent_id: IntentId,
+    /// `Some` for a durable/`AtMostOnce` receipt backed by a real (open or
+    /// since-closed) `accept_write` intent. `None` for an `Ephemeral`
+    /// receipt (`accept_ephemeral`): a receipt-ONLY record — VISION's
+    /// "durable OR explicitly non-durable write is still observed through
+    /// a reattachable receipt" promise, without ever entering the
+    /// delivery-retry journal or gaining a query-visible pending row.
+    pub intent_id: Option<IntentId>,
     pub frozen_id: EventId,
     pub expected_pubkey: PublicKey,
     pub state: ReceiptState,
@@ -637,4 +655,18 @@ pub trait EventStore {
     /// that carve-out is specifically about surviving a REAL crash, which
     /// this door never claims to do for a volatile backend).
     fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt>;
+
+    /// Persist a receipt-ONLY record for an `Ephemeral` write (VISION-
+    /// ratified contract clarification, team-lead correction, issue #3):
+    /// `Ephemeral` never enters the durable delivery-retry journal (no
+    /// `OUTBOX_INTENTS`/`OUTBOX_ATTEMPTS` row — R4 stays correct, it is
+    /// never retried after process loss) and never gains a query-visible
+    /// pending row (no `EVENTS`/`accept_write` call at all) — but a
+    /// durable OR explicitly non-durable write must still be observable
+    /// through a reattachable receipt, so THIS door writes just the
+    /// `OUTBOX_RECEIPTS` row: `RecoveredReceipt::intent_id` is `None`
+    /// (nothing backs it — no intent, no journal, no pending event row),
+    /// state starts `Accepted`. See [`ReceiptState::Abandoned`] for what
+    /// happens to it if the process dies before any further transition.
+    fn accept_ephemeral(&mut self, receipt_id: u64, frozen_id: EventId, expected_pubkey: PublicKey);
 }
