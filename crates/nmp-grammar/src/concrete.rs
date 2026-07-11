@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::tag_name::TagName;
+use crate::indexed_tag_name::IndexedTagName;
 
 /// A fully-resolved filter — NO bindings. The unit of the demand set and
 /// refcount/dedup key.
@@ -21,7 +21,7 @@ pub struct ConcreteFilter {
     /// Resolved event-id hex set.
     pub ids: Option<BTreeSet<String>>,
     /// Resolved per-tag value sets.
-    pub tags: BTreeMap<TagName, BTreeSet<String>>,
+    pub tags: BTreeMap<IndexedTagName, BTreeSet<String>>,
     /// Inclusive lower bound on `created_at`.
     pub since: Option<u64>,
     /// Inclusive upper bound on `created_at`.
@@ -74,7 +74,7 @@ impl std::fmt::Display for DescriptorHash {
 /// attacker could exploit to construct a collision at the FRAMING level
 /// even with a strong underlying hash — e.g. `authors:["ab"], ids:["c"]`
 /// colliding with `authors:["a"], ids:["bc"]`). Tag keys are rendered as
-/// single-character strings rather than via `TagName`'s own (non-`Serialize`)
+/// single-character strings rather than via `IndexedTagName`'s own (non-`Serialize`)
 /// type -- no derive needed on `ConcreteFilter` itself.
 fn canonical_encoding(f: &ConcreteFilter) -> Vec<u8> {
     let tags: BTreeMap<String, &BTreeSet<String>> = f
@@ -104,7 +104,7 @@ impl ConcreteFilter {
     /// the grammar's valid single-letter tags. Both are construction invariants of
     /// `ConcreteFilter` (its hex strings always originate from
     /// `PublicKey::to_hex`/`EventId::to_hex` round-trips, and its tag keys
-    /// are always `TagName`s, which are pre-validated) — a panic here means
+    /// are always `IndexedTagName`s, which are pre-validated) — a panic here means
     /// a genuine invariant violation upstream, not a reachable user input
     /// error, so it is not silently swallowed.
     pub fn to_nostr(&self) -> nostr::Filter {
@@ -138,7 +138,7 @@ impl ConcreteFilter {
 
         for (tag, values) in &self.tags {
             let single_letter = nostr::SingleLetterTag::from_char(tag.as_char())
-                .unwrap_or_else(|e| panic!("TagName {tag} invariant violated: {e}"));
+                .unwrap_or_else(|e| panic!("IndexedTagName {tag} invariant violated: {e}"));
             f = f.custom_tags(single_letter, values.iter().cloned());
         }
 
@@ -181,7 +181,7 @@ mod tests {
                 let mut m = BTreeMap::new();
                 if !tags_d.is_empty() {
                     m.insert(
-                        TagName::new('d').unwrap(),
+                        IndexedTagName::new('d').unwrap(),
                         tags_d.into_iter().map(String::from).collect(),
                     );
                 }
@@ -261,7 +261,7 @@ mod tests {
             tags: {
                 let mut m = BTreeMap::new();
                 m.insert(
-                    TagName::new('d').unwrap(),
+                    IndexedTagName::new('d').unwrap(),
                     BTreeSet::from(["g1".to_string()]),
                 );
                 m
@@ -300,7 +300,7 @@ mod tests {
         let cf = ConcreteFilter {
             kinds: Some(BTreeSet::from([9u16, 30_315u16])),
             tags: BTreeMap::from([(
-                TagName::new('h').expect("h is governed"),
+                IndexedTagName::new('h').expect("'h' is an ASCII letter"),
                 BTreeSet::from(["group-id".to_string()]),
             )]),
             ..ConcreteFilter::default()
@@ -312,6 +312,87 @@ mod tests {
             wire.generic_tags.get(&h_tag),
             Some(&BTreeSet::from(["group-id".to_string()]))
         );
+    }
+
+    /// The full indexed-filter path, not just construction/FFI round-trip
+    /// (#64 acceptance evidence / codex-nova review item 2): every `a-z`/
+    /// `A-Z` `IndexedTagName` (a) lowers to the EXACT case-preserving
+    /// `#<letter>` wire JSON key, and (b) matches an event carrying that
+    /// exact tag through the same local `nostr::Filter::match_event` path
+    /// the store uses. `x`/`Z` fall out of this loop -- NOT a hand-picked
+    /// subset, unlike the whitelist this replaced.
+    #[test]
+    fn to_nostr_lowers_and_matches_every_ascii_letter_indexed_tag() {
+        use nostr::filter::MatchEventOptions;
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+
+        for c in ('a'..='z').chain('A'..='Z') {
+            let cf = ConcreteFilter {
+                tags: BTreeMap::from([(
+                    IndexedTagName::new(c).unwrap(),
+                    BTreeSet::from(["v".to_string()]),
+                )]),
+                ..ConcreteFilter::default()
+            };
+            let wire = cf.to_nostr();
+
+            // (a) the wire JSON carries the EXACT case-preserving `#<letter>`
+            // key -- not folded to a canonical case, not dropped.
+            let json = wire.as_json();
+            assert!(
+                json.contains(&format!("\"#{c}\":[\"v\"]")),
+                "expected wire JSON for {c:?} to contain the exact key \"#{c}\", got: {json}"
+            );
+
+            // (b) the lowered filter matches an event carrying that exact
+            // tag, via the same `nostr::Filter::match_event` path the store
+            // uses to serve queries (never a hand-rolled matcher).
+            let keys = Keys::generate();
+            let event = EventBuilder::new(Kind::Custom(9999), "hi")
+                .tag(Tag::parse([c.to_string(), "v".to_string()]).unwrap())
+                .sign_with_keys(&keys)
+                .expect("test fixture must sign cleanly");
+            assert!(
+                wire.match_event(&event, MatchEventOptions::new()),
+                "filter for #{c} must match an event carrying that exact tag"
+            );
+        }
+    }
+
+    /// Lower/upper-case and distinct-letter indexed tag keys must never
+    /// cross-match: a filter built for `e` must not match an event tagged
+    /// `E`, and a filter for `x` must not match an event tagged `z` --
+    /// exercised through the real `to_nostr`/`match_event` path, not just
+    /// `IndexedTagName`'s own `PartialEq`.
+    #[test]
+    fn to_nostr_indexed_tag_match_is_case_and_letter_exact() {
+        use nostr::filter::MatchEventOptions;
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        fn filter_for(c: char) -> nostr::Filter {
+            ConcreteFilter {
+                tags: BTreeMap::from([(
+                    IndexedTagName::new(c).unwrap(),
+                    BTreeSet::from(["v".to_string()]),
+                )]),
+                ..ConcreteFilter::default()
+            }
+            .to_nostr()
+        }
+
+        fn event_with_tag(c: char) -> nostr::Event {
+            let keys = Keys::generate();
+            EventBuilder::new(Kind::Custom(9999), "hi")
+                .tag(Tag::parse([c.to_string(), "v".to_string()]).unwrap())
+                .sign_with_keys(&keys)
+                .expect("test fixture must sign cleanly")
+        }
+
+        let opts = MatchEventOptions::new();
+        assert!(!filter_for('e').match_event(&event_with_tag('E'), opts));
+        assert!(!filter_for('E').match_event(&event_with_tag('e'), opts));
+        assert!(!filter_for('x').match_event(&event_with_tag('z'), opts));
+        assert!(!filter_for('Z').match_event(&event_with_tag('z'), opts));
     }
 
     #[test]

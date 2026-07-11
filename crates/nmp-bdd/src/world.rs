@@ -23,7 +23,7 @@ use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 use nmp_engine::core::{DiagnosticsSnapshot, QueryCoverage, RowDelta};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsMsg};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, TagName};
+use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory, RelayUrl};
 use nmp_signer::LocalKeySigner;
@@ -58,7 +58,7 @@ pub fn my_follows_query() -> LiveQuery {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('p').expect("'p' is a valid tag name")),
+            project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     })
