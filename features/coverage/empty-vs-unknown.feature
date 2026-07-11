@@ -7,7 +7,7 @@ Feature: The current aggregate unknown state is not a row
     And I am logged in as an account that follows Alice
     When I open a feed of my follows' notes
     Then my feed is empty
-    And the query reports its results are unknown -- not empty
+    And the query does not claim its empty result is complete
 
   @ledger-7 @ledger-18 @wip
   Scenario: Planned sources report independent facts
