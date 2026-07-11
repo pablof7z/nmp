@@ -18,6 +18,12 @@ nmp-signer.workspace = true
 # wraps this external set-reconciliation crate. See
 # `src/negentropy/mod.rs` for a naming gotcha this introduces.
 negentropy = { version = "0.5", default-features = false, features = ["std"] }
+# NEG-OPEN/NEG-MSG wire payloads are lowercase hex (NIP-77) -- already a
+# transitive dependency (via `nostr`/`negentropy`'s own dependency graph);
+# named directly here because `negentropy/mod.rs` encodes/decodes reconcile
+# messages itself (the external `negentropy` crate is payload-agnostic: it
+# only deals in raw bytes, never hex text).
+hex = "0.4"
 
 [dev-dependencies]
 # In-process test relay for the runtime (C) integration tests: reconnection

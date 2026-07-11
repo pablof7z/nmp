@@ -35,16 +35,24 @@ use nostr::{
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
 use nmp_router::{
-    DiscoveryKinds, RelayDirectory, RelayLimits, Router, RuleRegistry, WireDelta, WireOp, WireReq,
+    DiscoveryKinds, RelayDirectory, RelayLimits, Router, RuleRegistry, SubId, WireDelta, WireOp,
+    WireReq,
 };
 use nmp_signer::SignerError;
-use nmp_store::{EventStore, RelayObserved};
+use nmp_store::{CoverageKey, EventStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
 
-use crate::negentropy::ProbedRelay;
+use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
 use crate::outbox::{
     Durability, ReceiptSink, WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
+
+/// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
+/// negentropy session with no reply is abandoned in favor of a plain REQ
+/// (never left to hang forever, and never silently re-tried as negentropy
+/// again on the same generation -- `tick`'s own staleness sweep is the only
+/// caller of this constant).
+const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
 
 use attribution::AttributionState;
 pub use coverage_query::QueryCoverage;
@@ -97,8 +105,23 @@ pub enum Effect {
     Wire(WireDelta),
     /// Reconnect: resend the current wire subs on the NEW generation.
     Replay(RelayUrl, Vec<WireReq>),
-    StartProbe(RelayUrl),
-    NegOpen(ProbedRelay, ConcreteFilter),
+    /// Place a capability-probing `NEG-OPEN` on the wire (`negentropy::
+    /// Prober::begin_probe`'s output, carried in full since the runtime has
+    /// no negentropy-protocol knowledge of its own): the sub-id, the
+    /// throwaway probe filter, and the hex initial message.
+    StartProbe(RelayUrl, SubId, ConcreteFilter, String),
+    /// Place a REAL negentropy-first `NEG-OPEN` for `filter` against a
+    /// PROVEN-supported relay (ledger #8's compile-fence: the first field
+    /// can only ever be a `ProbedRelay`), under `sub_id`, with the hex
+    /// initial message this reducer already built from its own store.
+    NegOpen(ProbedRelay, SubId, ConcreteFilter, String),
+    /// Continue an open reconciliation: place this hex payload as the next
+    /// outbound `NEG-MSG` for `sub_id` on `relay`.
+    NegMsg(RelayUrl, SubId, String),
+    /// Release `sub_id` on `relay` (`NEG-CLOSE`) -- reconciliation finished,
+    /// was abandoned (liveness deadline / `NEG-ERR`), or is being converted
+    /// back to a plain REQ.
+    NegClose(RelayUrl, SubId),
     /// One per attributed atom per EOSE/NEG-DONE (ruling §7): the narrow
     /// atom's `CoverageKey`, the relay that proved it, and the proven
     /// interval.
@@ -153,6 +176,20 @@ struct PendingWrite {
     pending_relays: BTreeSet<RelayUrl>,
 }
 
+/// A live, EngineCore-owned negentropy reconciliation in progress for
+/// `sub_id` (plan §6 E). `filter` is already window-erased (since/until/
+/// limit cleared) -- ruling §2: "NEG runs unfloored/unlimited"; recording an
+/// attribution snapshot straight off this field is therefore always the
+/// correct floor:None/until:None/limited:false snapshot the ruling
+/// requires, with no separate bookkeeping to keep in sync.
+struct NegSession {
+    relay: RelayUrl,
+    filter: ConcreteFilter,
+    absorbed: BTreeSet<CoverageKey>,
+    started_at: Timestamp,
+    reconciler: Reconciler,
+}
+
 /// The PURE synchronous reducer (§2 position 1). No I/O, no threads.
 pub struct EngineCore<S: EventStore> {
     resolver: ResolverEngine<S>,
@@ -173,6 +210,24 @@ pub struct EngineCore<S: EventStore> {
     /// `EventId` on the wire) find its receipt.
     pending: HashMap<ReceiptId, PendingWrite>,
     event_to_receipt: HashMap<EventId, ReceiptId>,
+    /// The negentropy capability-probe cache (plan §6 E).
+    prober: Prober,
+    /// Live reconciliation sessions, keyed by the SAME `SubId` a plain REQ
+    /// for this shape would have used (REQ and negentropy share one
+    /// subscription-id namespace on the wire, NIP-77) -- never more than one
+    /// entry per sub-id at a time.
+    neg_sessions: HashMap<SubId, NegSession>,
+    /// One-shot `ids`-filter REQs opened to backfill exactly what a
+    /// completed reconciliation proved we are missing (`finish_neg_session`)
+    /// -- tracked so this reducer closes them itself once their EOSE
+    /// arrives, rather than leaking a subscription the router's own
+    /// demand-diffing does not know about.
+    pending_backfills: BTreeSet<SubId>,
+    /// Backfill `SubId` -> the reconciled negentropy session's own `SubId`,
+    /// whose coverage credit is deferred until THIS backfill's EOSE proves
+    /// the missing events actually landed (ledger #7 -- see
+    /// `finish_neg_session`'s doc comment).
+    pending_neg_credit: HashMap<SubId, SubId>,
 }
 
 impl<S: EventStore> EngineCore<S> {
@@ -193,6 +248,10 @@ impl<S: EventStore> EngineCore<S> {
             next_receipt: 0,
             pending: HashMap::new(),
             event_to_receipt: HashMap::new(),
+            prober: Prober::new(),
+            neg_sessions: HashMap::new(),
+            pending_backfills: BTreeSet::new(),
+            pending_neg_credit: HashMap::new(),
         }
     }
 
@@ -216,11 +275,38 @@ impl<S: EventStore> EngineCore<S> {
             .get_coverage(nmp_store::coverage_key(atom), relay)
     }
 
+    /// A pure clock update PLUS the negentropy liveness-deadline sweep (plan
+    /// §6 E, harvest `nmp-nip77`'s "30s liveness-deadline REQ fallback"):
+    /// any reconciliation session open longer than
+    /// [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is abandoned in favor of
+    /// a plain REQ for the same (unfloored/unlimited) filter. Backoff/
+    /// keepalive scheduling stays D/A2 territory -- untouched here.
+    ///
+    /// Nothing in `runtime` currently drives `EngineMsg::Tick` on a
+    /// wall-clock cadence (D8 forbids a poll-loop timer thread, and no
+    /// caller-facing `Handle` verb exists for it either) -- this sweep is
+    /// real and unit-tested against a synthetic clock, but is not yet wired
+    /// to fire on its own in the live runtime. See the builder report's
+    /// scope note.
     pub fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
         self.clock = now;
-        // Backoff/keepalive/prober scheduling is D/E territory (depends on
-        // A2/A3, not built in B); B's tick is a pure clock update.
-        Vec::new()
+        let mut effects = Vec::new();
+
+        let stale: Vec<SubId> = self
+            .neg_sessions
+            .iter()
+            .filter(|(_, s)| {
+                now.as_secs().saturating_sub(s.started_at.as_secs()) > NEG_LIVENESS_DEADLINE_SECS
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for sub_id in stale {
+            if let Some(session) = self.neg_sessions.remove(&sub_id) {
+                self.neg_session_fallback_to_req(sub_id, session, &mut effects);
+            }
+        }
+
+        effects
     }
 
     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
@@ -603,8 +689,19 @@ impl<S: EventStore> EngineCore<S> {
                         req.absorbed.clone(),
                     );
                 }
-                effects.push(Effect::Replay(url, reqs));
+                effects.push(Effect::Replay(url.clone(), reqs));
             }
+        }
+        // Capability probe (plan §6 E): idempotent -- a relay whose verdict
+        // is already cached (`Supported`/`Unsupported`) from an earlier
+        // connection on this same `Prober` is never re-probed.
+        if let Some(probe) = self.prober.begin_probe(&url) {
+            effects.push(Effect::StartProbe(
+                url,
+                probe.sub_id,
+                probe.filter,
+                probe.initial_message_hex,
+            ));
         }
         effects
     }
@@ -614,6 +711,13 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(url) = self.slot_to_url.get(&slot).cloned() {
             self.attribution.clear_relay(&url);
             self.give_up_pending_writes(&url, &mut effects);
+            // Any reconciliation open against this relay dies with the
+            // connection -- there is nothing left to `NEG-CLOSE` (the socket
+            // is already gone), so this is a silent drop, not a fallback
+            // REQ: the relay's own `Supported` verdict stays cached, and the
+            // NEXT `recompile()`/reconnect naturally re-opens whatever
+            // demand still wants this shape.
+            self.neg_sessions.retain(|_, session| session.relay != url);
         }
         effects
     }
@@ -645,9 +749,8 @@ impl<S: EventStore> EngineCore<S> {
                 self.refresh_all_handles(&mut effects);
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
-                let attributed =
-                    self.attribution
-                        .attribute_eose(&relay, sub_id.as_str(), self.clock);
+                let wire_id = sub_id.as_str();
+                let attributed = self.attribution.attribute_eose(&relay, wire_id, self.clock);
                 for (key, interval) in attributed {
                     if let Some(shape) = self.attribution.shape_of(key) {
                         self.resolver
@@ -660,6 +763,25 @@ impl<S: EventStore> EngineCore<S> {
                 // (ruling §6) even with no new rows at all — refresh so
                 // that becomes observable via EmitRows, same as an ingest.
                 self.refresh_all_handles(&mut effects);
+
+                // A one-shot negentropy backfill REQ (`finish_neg_session`)
+                // has nothing further to prove once it EOSEs -- close it so
+                // it does not linger as a subscription the router's own
+                // demand-diffing never knew existed, and -- if it was
+                // deferring a reconciliation's coverage credit -- THIS is
+                // the moment the backfilled events are proven ingested
+                // (EVENT precedes EOSE, NIP-01), so it is now safe to credit
+                // (ledger #7: never before this point).
+                if let Some(resolved) = self.attribution.sub_id_for_wire(&relay, wire_id) {
+                    if self.pending_backfills.remove(&resolved) {
+                        effects.push(Effect::Wire(WireDelta {
+                            ops: vec![(relay.clone(), vec![WireOp::Close(resolved.clone())])],
+                        }));
+                    }
+                    if let Some(original_sub_id) = self.pending_neg_credit.remove(&resolved) {
+                        self.credit_neg_coverage(&original_sub_id, &relay, &mut effects);
+                    }
+                }
             }
             RelayMessage::Ok {
                 event_id,
@@ -668,8 +790,39 @@ impl<S: EventStore> EngineCore<S> {
             } => {
                 self.handle_write_ack(event_id, status, message.into_owned(), &relay, &mut effects);
             }
-            // Closed/Notice/Auth/Count/NegMsg/NegErr: E (negentropy) and
-            // AUTH-handshake territory, not built in D.
+            RelayMessage::NegMsg {
+                subscription_id,
+                message,
+            } => {
+                let wire_id = subscription_id.as_str();
+                if self.prober.on_neg_msg(&relay, wire_id).is_some() {
+                    // Capability probe succeeded -- the verdict is now
+                    // cached (`Prober::probed`). Nothing further to do here:
+                    // the NEXT `recompile()` (triggered by any future demand
+                    // change) is what actually routes a broad filter for
+                    // this relay onto negentropy -- see the builder report's
+                    // scoping note on already-open subs at probe time.
+                } else if let Some(sub_id) = self.attribution.sub_id_for_wire(&relay, wire_id) {
+                    self.step_neg_session(sub_id, relay.clone(), message.as_ref(), &mut effects);
+                }
+                // An unrecognized wire id is an untrusted-network fact
+                // (stale/foreign sub), never a panic -- silently ignored,
+                // same discipline as `handle_write_ack`'s unknown-OK case.
+            }
+            RelayMessage::NegErr {
+                subscription_id, ..
+            } => {
+                let wire_id = subscription_id.as_str();
+                if self.prober.on_neg_unsupported(&relay, wire_id) {
+                    // Probe classified Unsupported; cached, never re-probed.
+                } else if let Some(sub_id) = self.attribution.sub_id_for_wire(&relay, wire_id) {
+                    if let Some(session) = self.neg_sessions.remove(&sub_id) {
+                        self.neg_session_fallback_to_req(sub_id, session, &mut effects);
+                    }
+                }
+            }
+            // Closed/Notice/Auth/Count: AUTH-handshake territory, not built
+            // in D/E (plan §7 non-goal unless a falsifier test forces it).
             _ => {}
         }
         effects
@@ -678,8 +831,17 @@ impl<S: EventStore> EngineCore<S> {
     // ---- shared recompile + row-refresh plumbing -------------------------
 
     /// Recompile the router from the resolver's CURRENT demand, record any
-    /// newly-sent REQs' attribution snapshots, and push `Effect::Wire` if
-    /// anything actually changed on the wire.
+    /// newly-sent REQs' attribution snapshots, and push `Effect::Wire` for
+    /// whatever op actually changed on the wire -- EXCEPT a broad
+    /// (unlimited) `Req` for a relay this reducer has PROVEN supports
+    /// NIP-77 (`Prober::probed`), which is routed negentropy-first instead
+    /// (plan §6 E: "negentropy-FIRST for a probed relay + broad filter; REQ
+    /// fallback otherwise"). Ledger #8 is structural here, not a runtime
+    /// `if` bolted on top: `open_neg_session` is the ONLY call site that can
+    /// produce an `Effect::NegOpen`, and it can only be reached by first
+    /// obtaining a `ProbedRelay` from `Prober::probed` -- an unprobed relay
+    /// has no token to pass, so its `Req` arm always falls through to the
+    /// plain-REQ branch below, every time.
     fn recompile(&mut self, effects: &mut Vec<Effect>) {
         let demand = self.resolver.active_demand();
         self.attribution.observe_demand(demand.iter());
@@ -689,23 +851,266 @@ impl<S: EventStore> EngineCore<S> {
         if wire_delta.ops.is_empty() {
             return;
         }
+
+        let mut kept: Vec<(RelayUrl, Vec<WireOp>)> = Vec::new();
         for (relay, ops) in &wire_delta.ops {
+            let mut kept_ops: Vec<WireOp> = Vec::new();
             for op in ops {
-                if let WireOp::Req(sub_id, filter) = op {
-                    let absorbed = self
-                        .router
-                        .plan()
-                        .reqs
-                        .get(relay)
-                        .and_then(|reqs| reqs.iter().find(|r| &r.sub_id == sub_id))
-                        .map(|r| r.absorbed.clone())
-                        .unwrap_or_default();
-                    self.attribution
-                        .record_send(relay, sub_id, filter, absorbed);
+                match op {
+                    WireOp::Req(sub_id, filter) => {
+                        let absorbed = self
+                            .router
+                            .plan()
+                            .reqs
+                            .get(relay)
+                            .and_then(|reqs| reqs.iter().find(|r| &r.sub_id == sub_id))
+                            .map(|r| r.absorbed.clone())
+                            .unwrap_or_default();
+
+                        // "Small exact result" (a `limit`) always stays REQ
+                        // -- a bounded, terminating fetch is not what
+                        // negentropy set-reconciliation is for, and `limit`
+                        // poisons coverage attribution regardless (ruling
+                        // §3), so there is nothing negentropy-first would
+                        // buy it.
+                        let broad = filter.limit.is_none();
+                        match (broad, self.prober.probed(relay)) {
+                            (true, Some(probed)) => {
+                                self.open_neg_session(
+                                    probed,
+                                    sub_id.clone(),
+                                    filter.clone(),
+                                    absorbed,
+                                    effects,
+                                );
+                            }
+                            _ => {
+                                self.attribution
+                                    .record_send(relay, sub_id, filter, absorbed);
+                                kept_ops.push(op.clone());
+                            }
+                        }
+                    }
+                    WireOp::Close(sub_id) => {
+                        self.neg_sessions.remove(sub_id);
+                        kept_ops.push(op.clone());
+                    }
+                }
+            }
+            if !kept_ops.is_empty() {
+                kept.push((relay.clone(), kept_ops));
+            }
+        }
+
+        if !kept.is_empty() {
+            effects.push(Effect::Wire(WireDelta { ops: kept }));
+        }
+    }
+
+    /// Open a real negentropy reconciliation for `filter` against `probed`
+    /// (plan §6 E). Reads the local store's own current holdings for the
+    /// (window-erased) shape to seed the `Reconciler`, records the send-time
+    /// attribution snapshot exactly as a plain REQ would (ruling §2: NEG
+    /// runs unfloored/unlimited, so `neg_filter` below IS that snapshot's
+    /// filter, with no separate floor/until/limited fields to keep in
+    /// sync), and emits the `NegOpen` effect.
+    fn open_neg_session(
+        &mut self,
+        probed: ProbedRelay,
+        sub_id: SubId,
+        filter: ConcreteFilter,
+        absorbed: BTreeSet<CoverageKey>,
+        effects: &mut Vec<Effect>,
+    ) {
+        // REQ and NEG-OPEN share ONE subscription-id namespace on the wire
+        // (NIP-77): release whatever this `sub_id` may already mean to the
+        // relay (a live plain REQ from before this relay was known
+        // `Supported`, or nothing at all -- closing an id the relay never
+        // opened is a harmless no-op) before reopening it as a NEG session.
+        effects.push(Effect::Wire(WireDelta {
+            ops: vec![(probed.url().clone(), vec![WireOp::Close(sub_id.clone())])],
+        }));
+
+        let neg_filter = ConcreteFilter {
+            since: None,
+            until: None,
+            limit: None,
+            ..filter
+        };
+        let local_ids: Vec<(u64, EventId)> = self
+            .resolver
+            .store()
+            .query(&neg_filter.to_nostr())
+            .into_iter()
+            .map(|se| (se.event.created_at.as_secs(), se.event.id))
+            .collect();
+        let (reconciler, initial_hex) = Reconciler::open(&local_ids);
+
+        self.attribution
+            .record_send(probed.url(), &sub_id, &neg_filter, absorbed.clone());
+        self.neg_sessions.insert(
+            sub_id.clone(),
+            NegSession {
+                relay: probed.url().clone(),
+                filter: neg_filter.clone(),
+                absorbed,
+                started_at: self.clock,
+                reconciler,
+            },
+        );
+        effects.push(Effect::NegOpen(probed, sub_id, neg_filter, initial_hex));
+    }
+
+    /// Drive one inbound `NEG-MSG` round for `sub_id`'s live session, if any
+    /// (a frame for a sub this reducer isn't tracking is an untrusted-
+    /// network fact, silently ignored -- same discipline as
+    /// `handle_write_ack`'s unknown-`OK` case).
+    fn step_neg_session(
+        &mut self,
+        sub_id: SubId,
+        relay: RelayUrl,
+        message_hex: &str,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(session) = self.neg_sessions.get_mut(&sub_id) else {
+            return;
+        };
+        let step = session.reconciler.step(message_hex);
+        match step {
+            Ok(NegStep::Continue(next_hex)) => {
+                effects.push(Effect::NegMsg(relay, sub_id, next_hex));
+            }
+            Ok(NegStep::Done(need_ids)) => {
+                let session = self
+                    .neg_sessions
+                    .remove(&sub_id)
+                    .expect("just matched via get_mut above -- still present");
+                self.finish_neg_session(sub_id, relay, session, need_ids, effects);
+            }
+            Err(_) => {
+                // A malformed/unexpected reconcile payload from an
+                // untrusted relay: abandon this reconciliation and fall
+                // back to a plain REQ for the same filter -- the same
+                // recovery path as the liveness-deadline/NEG-ERR cases,
+                // never a silent read-gap.
+                if let Some(session) = self.neg_sessions.remove(&sub_id) {
+                    self.neg_session_fallback_to_req(sub_id, session, effects);
                 }
             }
         }
-        effects.push(Effect::Wire(wire_delta));
+    }
+
+    /// Reconciliation completed (plan §6 E, the ruling's "feed a NEG-DONE
+    /// the same way [as EOSE]"). Releases the session's sub-id, backfills
+    /// whatever ids negentropy proved we are missing through the ordinary
+    /// REQ/EOSE/ingest pipeline (never a separate ingest path), and reopens
+    /// the same sub-id as a plain, live REQ floored at "now" -- negentropy
+    /// is a point-in-time backlog sync, not a persistent subscription
+    /// (ruling §3), so the relay's ongoing live tail still needs an open
+    /// REQ once the backlog is settled.
+    ///
+    /// Coverage crediting (ledger #7) is NOT immediate when a backfill is
+    /// needed: recording "complete" before the backfilled events are
+    /// actually ingested would be exactly the "authoritative-empty that is
+    /// really a hole" failure the ruling exists to prevent (a reader could
+    /// observe `CompleteUpTo` on a store that is still, transiently,
+    /// missing precisely the events negentropy just proved are missing).
+    /// `pending_neg_credit` defers the credit to the backfill sub's OWN
+    /// EOSE (`on_relay_frame`), by which point the events are already
+    /// ingested (EVENT frames precede EOSE, NIP-01). An empty `need_ids`
+    /// has nothing to wait for, so it credits right away.
+    fn finish_neg_session(
+        &mut self,
+        sub_id: SubId,
+        relay: RelayUrl,
+        session: NegSession,
+        need_ids: BTreeSet<EventId>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let NegSession {
+            filter, absorbed, ..
+        } = session;
+        effects.push(Effect::NegClose(relay.clone(), sub_id.clone()));
+
+        if need_ids.is_empty() {
+            self.credit_neg_coverage(&sub_id, &relay, effects);
+        } else {
+            let backfill = ConcreteFilter {
+                ids: Some(need_ids.iter().map(|id| id.to_hex()).collect()),
+                ..ConcreteFilter::default()
+            };
+            let backfill_sub = SubId::for_filter(relay.clone(), &backfill);
+            self.pending_backfills.insert(backfill_sub.clone());
+            self.pending_neg_credit
+                .insert(backfill_sub.clone(), sub_id.clone());
+            // No coverage credit of its OWN for this one-shot id-set fetch
+            // -- `absorbed` is deliberately empty; it targets exactly the
+            // ids negentropy already proved, it is not itself a proof over
+            // any atom's shape (the credit it unlocks is `sub_id`'s, via
+            // `pending_neg_credit` above).
+            self.attribution
+                .record_send(&relay, &backfill_sub, &backfill, BTreeSet::new());
+            effects.push(Effect::Wire(WireDelta {
+                ops: vec![(relay.clone(), vec![WireOp::Req(backfill_sub, backfill)])],
+            }));
+        }
+
+        let live_tail = ConcreteFilter {
+            since: Some(self.clock.as_secs()),
+            ..filter
+        };
+        self.attribution
+            .record_send(&relay, &sub_id, &live_tail, absorbed);
+        effects.push(Effect::Wire(WireDelta {
+            ops: vec![(relay, vec![WireOp::Req(sub_id, live_tail)])],
+        }));
+    }
+
+    /// Attribute coverage for `sub_id` through the EXACT SAME
+    /// `AttributionState::attribute_eose` call the real EOSE path uses --
+    /// no second coverage mechanism, whether called directly (no backfill
+    /// needed) or from `on_relay_frame`'s EOSE arm once a deferred backfill
+    /// lands (`pending_neg_credit`).
+    fn credit_neg_coverage(&mut self, sub_id: &SubId, relay: &RelayUrl, effects: &mut Vec<Effect>) {
+        let attributed =
+            self.attribution
+                .attribute_eose(relay, &wire_sub_id_string(sub_id), self.clock);
+        for (key, interval) in attributed {
+            if let Some(shape) = self.attribution.shape_of(key) {
+                self.resolver
+                    .store_mut()
+                    .record_coverage(&shape, relay, interval);
+                effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
+            }
+        }
+        self.refresh_all_handles(effects);
+    }
+
+    /// Abandon a live reconciliation and fall back to a plain REQ for the
+    /// SAME (unfloored/unlimited) filter -- shared by the liveness-deadline
+    /// sweep (`tick`), an inbound `NEG-ERR`, and a malformed reconcile
+    /// payload (`step_neg_session`'s `Err` arm). The abandoned session's own
+    /// attribution snapshot is left outstanding rather than popped: the
+    /// fallback REQ's EOSE will credit it via the SAME intersection rule an
+    /// overwriting REQ already relies on (both snapshots carry the
+    /// identical `absorbed`/`floor`/`until`/`limited` fields, since both
+    /// derive from `session.filter`), so pop order does not matter here.
+    fn neg_session_fallback_to_req(
+        &mut self,
+        sub_id: SubId,
+        session: NegSession,
+        effects: &mut Vec<Effect>,
+    ) {
+        effects.push(Effect::NegClose(session.relay.clone(), sub_id.clone()));
+        self.attribution.record_send(
+            &session.relay,
+            &sub_id,
+            &session.filter,
+            session.absorbed.clone(),
+        );
+        effects.push(Effect::Wire(WireDelta {
+            ops: vec![(session.relay, vec![WireOp::Req(sub_id, session.filter)])],
+        }));
     }
 
     fn refresh_all_handles(&mut self, effects: &mut Vec<Effect>) {

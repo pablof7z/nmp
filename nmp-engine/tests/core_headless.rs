@@ -706,3 +706,270 @@ fn write_ack_per_relay() {
         .iter()
         .any(|s| matches!(s, WriteStatus::Rejected(r, _) if r == &relay_bad)));
 }
+
+// ---- negentropy (M3 plan §6 E): ledger #8 structural gate + REQ fallback
+// selection --------------------------------------------------------------
+
+fn neg_msg_frame(sub: &str, message_hex: &str) -> RelayFrame {
+    RelayFrame::Text(
+        RelayMessage::NegMsg {
+            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(sub)),
+            message: std::borrow::Cow::Owned(message_hex.to_string()),
+        }
+        .as_json(),
+    )
+}
+
+fn neg_err_frame(sub: &str) -> RelayFrame {
+    RelayFrame::Text(
+        RelayMessage::NegErr {
+            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(sub)),
+            message: std::borrow::Cow::Owned("blocked: unsupported".to_string()),
+        }
+        .as_json(),
+    )
+}
+
+/// Test 3 (ledger #8) first half: an unprobed relay (never even connected,
+/// so its `Prober` state stays `Unknown`) must never see `Effect::NegOpen`
+/// -- only a plain REQ.
+#[test]
+fn unprobed_relay_never_routes_to_negentropy() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
+        "an unprobed relay must never receive Effect::NegOpen -- only a plain REQ"
+    );
+    req_for(&effects, &relay0); // panics if there is no plain REQ.
+}
+
+/// Test 3 (ledger #8) second half + test 10's routing half: drives the
+/// Prober FSM to a real `Supported` verdict via a scripted NEG-MSG (exactly
+/// what a real relay's probe response looks like from `EngineCore`'s point
+/// of view), then proves a broad/unlimited demand change on that relay
+/// routes negentropy-first while a small/limited query on the SAME relay
+/// still stays on plain REQ.
+#[test]
+fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_req() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay0.clone()])
+        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+
+    // Bootstrap: a's kind:1 atom -- the relay is `Unknown` at this point
+    // (probing can only start once SOME demand causes a connection), so
+    // this is unavoidably a plain REQ.
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    req_for(&effects, &relay0);
+
+    let connect_effects = connect(&mut core, 0, &relay0);
+    let (probe_sub, ..) = connect_effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::StartProbe(url, sub_id, filter, hex) if url == &relay0 => {
+                Some((sub_id.clone(), filter.clone(), hex.clone()))
+            }
+            _ => None,
+        })
+        .expect("connecting a never-probed relay must start a capability probe");
+    let probe_wire = wire_sub_string(&probe_sub);
+
+    // The relay answers the probe with a NEG-MSG -- any valid response
+    // classifies NIP-77 support; the payload's content is never inspected
+    // by the prober.
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        neg_msg_frame(&probe_wire, "6100"),
+    ));
+
+    // b's kind:1 atom widens the SAME (kind:1) skeleton -- same sub-id,
+    // now the relay is Supported and the widened filter is broad
+    // (unlimited), so it routes through negentropy instead of a plain REQ.
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
+        "a probed relay's broad demand change must route negentropy-first"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Wire(d)
+            if d.ops.iter().any(|(r, ops)| r == &relay0
+                && ops.iter().any(|op| matches!(op, WireOp::Req(..)))))),
+        "the widened atom must NOT ALSO reach the relay as a plain REQ"
+    );
+
+    // A LIMITED (small-exact-result) query on the SAME relay stays on plain
+    // REQ even though the relay is Supported -- ledger #8's REQ-fallback
+    // selection rule (a different skeleton -- kind:7 -- so it is a brand
+    // new, independent sub-id, unaffected by kind:1's negentropy routing).
+    let limited = LiveQuery(Filter {
+        kinds: Some(BTreeSet::from([7u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+        limit: Some(1),
+        ..Filter::default()
+    });
+    let effects = core.handle(EngineMsg::Subscribe(
+        limited,
+        Box::new(CapturingSink::default()),
+    ));
+    req_for(&effects, &relay0); // must still be a plain REQ.
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
+        "a small/limited exact-result query must stay on REQ even for a Supported relay"
+    );
+}
+
+/// A relay that answers the capability probe with `NEG-ERR` is classified
+/// `Unsupported` and cached -- its demand stays on plain REQ forever after,
+/// same as an unprobed relay.
+#[test]
+fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    req_for(&effects, &relay0);
+
+    let connect_effects = connect(&mut core, 0, &relay0);
+    let (probe_sub, ..) = connect_effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::StartProbe(url, sub_id, filter, hex) if url == &relay0 => {
+                Some((sub_id.clone(), filter.clone(), hex.clone()))
+            }
+            _ => None,
+        })
+        .expect("connecting a never-probed relay must start a capability probe");
+    let probe_wire = wire_sub_string(&probe_sub);
+
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        neg_err_frame(&probe_wire),
+    ));
+
+    let b = Keys::generate();
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
+        "an Unsupported-classified relay must never route to negentropy"
+    );
+}
+
+/// Structural grep-guard (ledger #8, "not a runtime `if`"): the ONLY place
+/// in `core/mod.rs` that constructs a `ProbedRelay` value is inside
+/// `negentropy/mod.rs` (`Prober::probed`/`Prober::on_neg_msg`) -- reading
+/// `core/mod.rs`'s own source confirms it never spells the constructor
+/// itself, so the only way it can ever hold one is by receiving it back
+/// from `Prober`, exactly the compile-fence the plan asks for.
+#[test]
+fn core_never_constructs_a_probed_relay_directly() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core/mod.rs"))
+        .expect("read core/mod.rs");
+    let code_lines: Vec<&str> = src
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("//"))
+        .collect();
+    assert!(
+        !code_lines.iter().any(|l| l.contains("ProbedRelay(")),
+        "core/mod.rs must never construct a ProbedRelay literal itself -- only `negentropy::Prober` may"
+    );
+}
+
+/// Test 10's liveness half (bounded, headless): a reconciliation open past
+/// [`NEG_LIVENESS_DEADLINE_SECS`]'s worth of synthetic clock advance is
+/// abandoned and falls back to a plain REQ -- driven entirely via
+/// `EngineCore::tick`'s own clock parameter, never a real sleep.
+#[test]
+fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay0.clone()])
+        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    req_for(&effects, &relay0);
+
+    let connect_effects = connect(&mut core, 0, &relay0);
+    let (probe_sub, ..) = connect_effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::StartProbe(url, sub_id, filter, hex) if url == &relay0 => {
+                Some((sub_id.clone(), filter.clone(), hex.clone()))
+            }
+            _ => None,
+        })
+        .expect("connecting a never-probed relay must start a capability probe");
+    let probe_wire = wire_sub_string(&probe_sub);
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        neg_msg_frame(&probe_wire, "6100"),
+    ));
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let neg_sub_id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::NegOpen(_, sub_id, ..) => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("the widened broad demand must have opened a negentropy session");
+
+    // No reply ever arrives; advance the clock past the liveness deadline.
+    let effects = core.handle(EngineMsg::Tick(Timestamp::from(31u64)));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::NegClose(_, sub_id) if sub_id == &neg_sub_id)),
+        "a stale session past the liveness deadline must be closed"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Wire(d)
+            if d.ops.iter().any(|(r, ops)| r == &relay0
+                && ops.iter().any(|op| matches!(op, WireOp::Req(sid, _) if sid == &neg_sub_id))))),
+        "a stale session must fall back to a plain REQ for the same sub-id"
+    );
+}

@@ -397,10 +397,66 @@ fn dispatch_effect<Sig: SigningCapability>(
             // module doc's "two delivery channels" note) -- redelivering
             // here would just duplicate it.
         }
-        Effect::StartProbe(_) | Effect::NegOpen(_, _) => {
-            // E's stubs (negentropy prober) -- not built in this step.
+        Effect::StartProbe(url, sub_id, filter, initial_hex) => {
+            let handle = pool.ensure_open(&url);
+            let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
+            let _ = pool.send(handle, WireFrame::Text(text));
+        }
+        Effect::NegOpen(probed, sub_id, filter, initial_hex) => {
+            let relay = probed.url().clone();
+            let handle = pool.ensure_open(&relay);
+            let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
+            let _ = pool.send(handle, WireFrame::Text(text));
+        }
+        Effect::NegMsg(relay, sub_id, message_hex) => {
+            let handle = pool.ensure_open(&relay);
+            let text = neg_msg_frame_text(&sub_id, message_hex);
+            let _ = pool.send(handle, WireFrame::Text(text));
+        }
+        Effect::NegClose(relay, sub_id) => {
+            let handle = pool.ensure_open(&relay);
+            let text = neg_close_frame_text(&sub_id);
+            let _ = pool.send(handle, WireFrame::Text(text));
         }
     }
+}
+
+/// The wire `["NEG-OPEN", sub_id, filter, initial_message]` text for
+/// `sub_id`/`filter` -- the SAME wire subscription-id convention
+/// `req_frame_text`/`close_frame_text` use (`core::wire_sub_id_string`),
+/// since REQ and NEG-OPEN share one subscription-id namespace on the wire
+/// (NIP-77) and `core::mod`'s attribution/session bookkeeping looks either
+/// up by that identical literal string.
+fn neg_open_frame_text(
+    sub_id: &SubId,
+    filter: &ConcreteFilter,
+    initial_message_hex: String,
+) -> String {
+    let wire_id = SubscriptionId::new(core::wire_sub_id_string(sub_id));
+    ClientMessage::neg_open(wire_id, filter.to_nostr(), initial_message_hex).as_json()
+}
+
+/// The wire `["NEG-MSG", sub_id, message]` text for `sub_id` -- `nostr`
+/// 0.44.4 exposes no `ClientMessage::neg_msg` constructor helper (only
+/// `neg_open`/`req`/`close`/etc.), so the variant is built directly; its
+/// fields are public on the public `ClientMessage` enum.
+fn neg_msg_frame_text(sub_id: &SubId, message_hex: String) -> String {
+    let wire_id = SubscriptionId::new(core::wire_sub_id_string(sub_id));
+    ClientMessage::NegMsg {
+        subscription_id: std::borrow::Cow::Owned(wire_id),
+        message: std::borrow::Cow::Owned(message_hex),
+    }
+    .as_json()
+}
+
+/// The wire `["NEG-CLOSE", sub_id]` text for `sub_id` (same wire-id
+/// convention as [`neg_open_frame_text`]/[`neg_msg_frame_text`]).
+fn neg_close_frame_text(sub_id: &SubId) -> String {
+    let wire_id = SubscriptionId::new(core::wire_sub_id_string(sub_id));
+    ClientMessage::NegClose {
+        subscription_id: std::borrow::Cow::Owned(wire_id),
+    }
+    .as_json()
 }
 
 /// `Effect::Wire`'s per-relay ops -> wire frames + reconnect-preamble

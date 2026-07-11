@@ -792,6 +792,7 @@ checksum = "f0efe882e02d206d8d279c20eb40e03baf7cb5136a1476dc084a324fbc3ec42d"
 name = "nmp-engine"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "negentropy",
  "nmp-grammar",
  "nmp-resolver",

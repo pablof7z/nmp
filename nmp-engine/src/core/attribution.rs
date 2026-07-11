@@ -106,6 +106,19 @@ impl AttributionState {
             .insert((relay.clone(), wire_sub_id_string(sub_id)), sub_id.clone());
     }
 
+    /// Resolve a wire subscription-id string back to the `SubId`
+    /// `record_send` registered it under, if any (the same map
+    /// `attribute_eose` itself reads at EOSE time). Exposed so `EngineCore`
+    /// can route an inbound `NEG-MSG`/`NEG-ERR` (which only ever carries the
+    /// wire string, never a `SubId`) back to the right in-flight negentropy
+    /// session -- the identical lookup `attribute_eose` performs internally
+    /// for EOSE, reused rather than re-implemented (plan §6 E).
+    pub(crate) fn sub_id_for_wire(&self, relay: &RelayUrl, wire_sub_id: &str) -> Option<SubId> {
+        self.sub_id_by_wire
+            .get(&(relay.clone(), wire_sub_id.to_string()))
+            .cloned()
+    }
+
     /// Disconnect / pool generation bump (ruling §2 fail-safe): clear every
     /// outstanding snapshot and wire-id mapping for `relay`. A replayed sub
     /// on the new generation calls [`Self::record_send`] again and gets a
