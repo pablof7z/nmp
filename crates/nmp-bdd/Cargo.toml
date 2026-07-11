@@ -31,6 +31,7 @@ nmp-engine.workspace = true
 
 cucumber = "0.21"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde_json = "1"
 
 # The in-process scripted relay (§2.2/§2.3 of the approach doc): the SAME
 # `nostr-relay-builder` `LocalRelay` the engine's own `runtime_integration.rs`

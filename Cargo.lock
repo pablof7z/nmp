@@ -1362,6 +1362,7 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
+ "serde_json",
  "tokio",
 ]
 
@@ -1424,6 +1425,17 @@ dependencies = [
 [[package]]
 name = "nmp-ownership"
 version = "0.1.0"
+
+[[package]]
+name = "nmp-parity"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+ "nmp-bdd",
+ "nmp-ffi",
+ "nostr 0.44.4",
+ "tokio",
+]
 
 [[package]]
 name = "nmp-resolver"
