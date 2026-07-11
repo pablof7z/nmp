@@ -36,10 +36,22 @@ use crate::coverage::{
 };
 use crate::{
     AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
-    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PromoteOutcome,
-    Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason, RelayObserved,
-    RetractReason, SigState, StoredEvent, WriteDurability,
+    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError,
+    PromoteOutcome, Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason,
+    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
 };
+
+/// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
+/// review correction — see its doc). `accept_write`/`accept_ephemeral`/
+/// `promote_signed`/`compensate_write`, and every table-touching helper
+/// they call, propagate through this via `?`; the crate's OTHER,
+/// pre-existing doors (`insert`/`remove`/`expire_due`/`gc`) still
+/// `.expect()` these same `Result`s at their own call sites into the
+/// shared helpers below — unchanged behavior for them, just funneled
+/// through one typed error type instead of a bespoke panic message each.
+fn persist_err(e: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError(e.to_string())
+}
 
 const EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
 const ADDR_INDEX: TableDefinition<&str, &str> = TableDefinition::new("addr_index");
@@ -107,15 +119,18 @@ const OUTBOX_DISPLACED: TableDefinition<&str, &str> = TableDefinition::new("outb
 /// read it — it is created purely for forward schema compatibility.
 #[allow(dead_code)]
 const OUTBOX_ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
-/// Store-owned outbox metadata — currently one row, key `"next_intent_id"`,
-/// value the next [`IntentId`] to allocate (decimal `u64`, defaulting to 1
-/// if the row has never been written). Bumped inside the SAME transaction
-/// as the `OUTBOX_INTENTS`/`EVENTS` writes it accompanies, so the
-/// allocation and the intent it names commit or roll back together
-/// (architecture review correction: allocation is a durable fact the store
-/// itself owns — see [`IntentId`]'s doc for the reuse hazard this closes).
+/// Store-owned outbox metadata — two rows, `"next_intent_id"` and
+/// `"next_receipt_id"`, each the next id of its kind to allocate (decimal
+/// `u64`, defaulting to 1 if the row has never been written). Both are
+/// bumped inside the SAME transaction as the `OUTBOX_INTENTS`/`EVENTS`
+/// writes they accompany, so allocation and the intent/receipt it names
+/// commit or roll back together (architecture review correction:
+/// allocation of EITHER id is a durable fact the store itself owns — see
+/// [`IntentId`]'s doc for the reuse hazard this closes; the identical
+/// hazard applies to receipt ids once receipts are durably retained).
 const OUTBOX_META: TableDefinition<&str, &str> = TableDefinition::new("outbox_meta");
 const NEXT_INTENT_ID_KEY: &str = "next_intent_id";
+const NEXT_RECEIPT_ID_KEY: &str = "next_receipt_id";
 /// Durably-RETAINED receipt records, keyed by `receipt_id` (zero-padded
 /// decimal, mirroring [`intent_key`]'s convention) — independent of
 /// `OUTBOX_INTENTS`'s open-work rows (architecture review correction: see
@@ -132,6 +147,13 @@ const OUTBOX_RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbo
 struct StoredEventRecord {
     event_json: String,
     provenance: BTreeMap<RelayUrl, Timestamp>,
+    /// `#[serde(default)]`: a pre-this-PR `EVENTS` row's JSON has no
+    /// `local` key at all — without a default, `serde_json` treats a
+    /// missing `Option<T>` field as a hard decode error, not `None`, and
+    /// every such row would panic on first read after upgrading past this
+    /// PR (architecture review correction — backward-compat falsifier
+    /// covers this).
+    #[serde(default)]
     local: Option<LocalOrigin>,
 }
 
@@ -164,23 +186,48 @@ fn intent_key(id: IntentId) -> String {
 /// mark, bumping it in the SAME already-open write transaction the caller
 /// is about to journal the intent in (architecture review correction — see
 /// [`IntentId`]'s doc). Starts at 1 if the row has never been written.
-fn alloc_intent_id_in_txn(outbox_meta: &mut redb::Table<'_, &str, &str>) -> IntentId {
+fn alloc_intent_id_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+) -> Result<IntentId, PersistenceError> {
+    Ok(IntentId(alloc_counter_in_txn(
+        outbox_meta,
+        NEXT_INTENT_ID_KEY,
+    )?))
+}
+
+/// Allocate the next receipt id from `OUTBOX_META`'s durable high-water
+/// mark, same treatment as [`alloc_intent_id_in_txn`] (architecture review
+/// correction: receipt ids have the identical reuse hazard now that
+/// receipts are durably retained across restart).
+fn alloc_receipt_id_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+) -> Result<u64, PersistenceError> {
+    alloc_counter_in_txn(outbox_meta, NEXT_RECEIPT_ID_KEY)
+}
+
+/// Shared bump-and-return for one `OUTBOX_META` counter row, keyed by
+/// `meta_key` (either [`NEXT_INTENT_ID_KEY`] or [`NEXT_RECEIPT_ID_KEY`]).
+/// Starts at 1 if the row has never been written.
+fn alloc_counter_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+    meta_key: &str,
+) -> Result<u64, PersistenceError> {
     let current = outbox_meta
-        .get(NEXT_INTENT_ID_KEY)
-        .expect("redb: get outbox_meta")
+        .get(meta_key)
+        .map_err(persist_err)?
         .map(|guard| {
             guard
                 .value()
                 .parse::<u64>()
-                .expect("redb: parse next_intent_id")
+                .expect("redb: parse outbox_meta counter")
         })
         .unwrap_or(1);
     let next = current + 1;
     let encoded = next.to_string();
     outbox_meta
-        .insert(NEXT_INTENT_ID_KEY, encoded.as_str())
-        .expect("redb: bump next_intent_id");
-    IntentId(current)
+        .insert(meta_key, encoded.as_str())
+        .map_err(persist_err)?;
+    Ok(current)
 }
 
 /// [`OUTBOX_RECEIPTS`]'s key for `id` — same zero-padding convention as
@@ -211,21 +258,21 @@ fn update_outbox_receipt(
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
     receipt_id: u64,
     state: ReceiptState,
-) {
+) -> Result<(), PersistenceError> {
     let key = receipt_key(receipt_id);
-    if let Some(json) = outbox_receipts
-        .get(key.as_str())
-        .expect("redb: get outbox_receipts")
-        .map(|guard| guard.value().to_string())
-    {
+    // Two statements, not one chained expression — see `remove_row_in_txn`'s
+    // comment on the same `?`-temporary-lifetime-extension quirk.
+    let existing = outbox_receipts.get(key.as_str()).map_err(persist_err)?;
+    if let Some(json) = existing.map(|guard| guard.value().to_string()) {
         let mut record: OutboxReceiptRecord =
             serde_json::from_str(&json).expect("redb: decode outbox receipt");
         record.state = state;
         let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
         outbox_receipts
             .insert(key.as_str(), encoded.as_str())
-            .expect("redb: update outbox_receipts");
+            .map_err(persist_err)?;
     }
+    Ok(())
 }
 
 /// Boot-time reconciliation: every `Ephemeral` receipt-only record
@@ -362,29 +409,22 @@ fn tombstone_refuses(
     tombstones: &redb::Table<'_, &str, &str>,
     addr_tombstones: &redb::Table<'_, &str, &str>,
     event: &Event,
-) -> bool {
+) -> Result<bool, PersistenceError> {
     let key = id_tombstone_key(&event.id, &event.pubkey);
-    if tombstones
-        .get(key.as_str())
-        .expect("redb: get tombstone")
-        .is_some()
-    {
-        return true;
+    if tombstones.get(key.as_str()).map_err(persist_err)?.is_some() {
+        return Ok(true);
     }
     if let Some(key) = address_key_for(event) {
         let key_str = key.to_redb_key();
-        if let Some(guard) = addr_tombstones
-            .get(key_str.as_str())
-            .expect("redb: get addr tombstone")
-        {
+        if let Some(guard) = addr_tombstones.get(key_str.as_str()).map_err(persist_err)? {
             let rec: AddrTombstoneRecord =
                 serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
             if event.created_at.as_secs() <= rec.ceiling {
-                return true;
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
 }
 
 /// Remove `id`'s row within an already-open write transaction, iff
@@ -403,37 +443,44 @@ fn remove_row_in_txn(
     by_kind: &mut redb::Table<'_, &str, &str>,
     id: EventId,
     predicate: impl FnOnce(&StoredEvent) -> bool,
-) -> Option<StoredEvent> {
+) -> Result<Option<StoredEvent>, PersistenceError> {
     let id_hex = id.to_hex();
-    let json = events
-        .get(id_hex.as_str())
-        .expect("redb: get event")?
-        .value()
-        .to_string();
+    // A nested block, not a bare chained expression: the `AccessGuard`'s
+    // borrow of `events` must end at the closing `}`, strictly before the
+    // `events.remove(..)` mutation below — `?`'s hidden `ControlFlow`
+    // temporary otherwise extends it (a known rustc temporary-lifetime-
+    // extension quirk that a plain sequence of `let` statements does not
+    // reliably avoid here).
+    let json = {
+        let Some(guard) = events.get(id_hex.as_str()).map_err(persist_err)? else {
+            return Ok(None);
+        };
+        guard.value().to_string()
+    };
     let se = decode_stored_event(&json);
     if !predicate(&se) {
-        return None;
+        return Ok(None);
     }
 
-    events.remove(id_hex.as_str()).expect("redb: remove event");
+    events.remove(id_hex.as_str()).map_err(persist_err)?;
     by_author
         .remove(by_author_key(&se.event.pubkey, &id).as_str())
-        .expect("redb: remove by_author");
+        .map_err(persist_err)?;
     by_kind
         .remove(by_kind_key(se.event.kind, &id).as_str())
-        .expect("redb: remove by_kind");
+        .map_err(persist_err)?;
 
     if let Some(addr_key) = address_key_for(&se.event) {
         let addr_key_str = addr_key.to_redb_key();
         let still_points_here = addr_index
             .get(addr_key_str.as_str())
-            .expect("redb: get addr_index")
+            .map_err(persist_err)?
             .map(|guard| guard.value().to_string())
             == Some(id_hex.clone());
         if still_points_here {
             addr_index
                 .remove(addr_key_str.as_str())
-                .expect("redb: remove addr_index");
+                .map_err(persist_err)?;
         }
     }
 
@@ -441,10 +488,10 @@ fn remove_row_in_txn(
         let exp_key = expiration_key(ts, &id);
         expiration_index
             .remove(exp_key.as_str())
-            .expect("redb: remove expiration_index");
+            .map_err(persist_err)?;
     }
 
-    Some(se)
+    Ok(Some(se))
 }
 
 /// kind:5 processing (retraction-and-negative-deltas.md §2), run within the
@@ -464,7 +511,7 @@ fn process_kind5_deletions(
     by_author: &mut redb::Table<'_, &str, &str>,
     by_kind: &mut redb::Table<'_, &str, &str>,
     deleting: &Event,
-) -> Vec<StoredEvent> {
+) -> Result<Vec<StoredEvent>, PersistenceError> {
     let mut deleted = Vec::new();
     let deleting_id_hex = deleting.id.to_hex();
     let deleting_author_hex = deleting.pubkey.to_hex();
@@ -479,7 +526,7 @@ fn process_kind5_deletions(
             by_kind,
             target_id,
             |se| se.event.pubkey == deleting.pubkey,
-        ) {
+        )? {
             deleted.push(removed);
         }
         // Claim recorded regardless of hold state right now -- a target
@@ -490,7 +537,7 @@ fn process_kind5_deletions(
         let key = id_tombstone_key(&target_id, &deleting.pubkey);
         tombstones
             .insert(key.as_str(), deleting_id_hex.as_str())
-            .expect("redb: insert tombstone");
+            .map_err(persist_err)?;
     }
 
     let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
@@ -508,7 +555,7 @@ fn process_kind5_deletions(
 
         let existing_ceiling = addr_tombstones
             .get(key_str.as_str())
-            .expect("redb: get addr tombstone")
+            .map_err(persist_err)?
             .map(|guard| {
                 let rec: AddrTombstoneRecord =
                     serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
@@ -524,12 +571,12 @@ fn process_kind5_deletions(
             let encoded = serde_json::to_string(&record).expect("redb: encode addr tombstone");
             addr_tombstones
                 .insert(key_str.as_str(), encoded.as_str())
-                .expect("redb: insert addr tombstone");
+                .map_err(persist_err)?;
         }
 
         let current_id_hex = addr_index
             .get(key_str.as_str())
-            .expect("redb: get addr_index")
+            .map_err(persist_err)?
             .map(|guard| guard.value().to_string());
         if let Some(current_id_hex) = current_id_hex {
             let current_id =
@@ -542,13 +589,41 @@ fn process_kind5_deletions(
                 by_kind,
                 current_id,
                 |se| se.event.created_at <= deleting.created_at,
-            ) {
+            )? {
                 deleted.push(removed);
             }
         }
     }
 
-    deleted
+    Ok(deleted)
+}
+
+/// Scan `OUTBOX_DISPLACED` for the row (if any) whose stashed event's id is
+/// `frozen_id` — used by `promote_signed`/`compensate_write` for an intent
+/// that is not currently the live row at its own id: it may instead be
+/// sitting in some OTHER intent's displaced stash, having been superseded
+/// by a LATER local edit before it could sign or be cancelled
+/// (architecture review correction: a stashed predecessor "can later sign
+/// or cancel", so its copy must be kept in sync or invalidated, never left
+/// to resurrect stale or cancelled state). Returns the OWNING intent's
+/// `OUTBOX_DISPLACED` key, if found — at most one, by construction (a
+/// `StoredEvent` is only ever the CURRENT displaced stash of the one
+/// intent that most recently superseded it).
+fn find_displaced_key_by_event_id_in_txn(
+    outbox_displaced: &redb::Table<'_, &str, &str>,
+    frozen_id: EventId,
+) -> Result<Option<String>, PersistenceError> {
+    for entry in outbox_displaced.iter().map_err(persist_err)? {
+        let (key, value) = entry.map_err(persist_err)?;
+        let record: StoredEventRecord =
+            serde_json::from_str(value.value()).expect("redb: decode stored event");
+        if let Ok(event) = Event::from_json(&record.event_json) {
+            if event.id == frozen_id {
+                return Ok(Some(key.value().to_string()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Re-admit a durably-stashed predecessor `se` through the ordinary
@@ -572,12 +647,12 @@ fn reinsert_stashed_in_txn(
     by_author: &mut redb::Table<'_, &str, &str>,
     by_kind: &mut redb::Table<'_, &str, &str>,
     se: StoredEvent,
-) -> Option<StoredEvent> {
+) -> Result<Option<StoredEvent>, PersistenceError> {
     let id_hex = se.event.id.to_hex();
 
     let existing_json = events
         .get(id_hex.as_str())
-        .expect("redb: get event")
+        .map_err(persist_err)?
         .map(|guard| guard.value().to_string());
     if let Some(existing_json) = existing_json {
         // Extremely unlikely (a relay redelivered this exact id while it
@@ -597,38 +672,38 @@ fn reinsert_stashed_in_txn(
         let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
         events
             .insert(id_hex.as_str(), encoded.as_str())
-            .expect("redb: update event provenance");
+            .map_err(persist_err)?;
         let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-        return Some(StoredEvent { event, provenance });
+        return Ok(Some(StoredEvent { event, provenance }));
     }
-    if tombstone_refuses(tombstones, addr_tombstones, &se.event) {
-        return None;
+    if tombstone_refuses(tombstones, addr_tombstones, &se.event)? {
+        return Ok(None);
     }
 
     let encoded = encode_stored_event(&se);
 
-    match address_key_for(&se.event) {
+    let result = match address_key_for(&se.event) {
         None => {
             events
                 .insert(id_hex.as_str(), encoded.as_str())
-                .expect("redb: insert event");
+                .map_err(persist_err)?;
             by_author
                 .insert(
                     by_author_key(&se.event.pubkey, &se.event.id).as_str(),
                     id_hex.as_str(),
                 )
-                .expect("redb: insert by_author");
+                .map_err(persist_err)?;
             by_kind
                 .insert(
                     by_kind_key(se.event.kind, &se.event.id).as_str(),
                     id_hex.as_str(),
                 )
-                .expect("redb: insert by_kind");
+                .map_err(persist_err)?;
             if let Some(ts) = se.event.tags.expiration().copied() {
                 let exp_key = expiration_key(ts, &se.event.id);
                 expiration_index
                     .insert(exp_key.as_str(), id_hex.as_str())
-                    .expect("redb: insert expiration_index");
+                    .map_err(persist_err)?;
             }
             Some(se)
         }
@@ -636,41 +711,41 @@ fn reinsert_stashed_in_txn(
             let addr_key_str = addr_key.to_redb_key();
             let current_id_hex = addr_index
                 .get(addr_key_str.as_str())
-                .expect("redb: get addr_index")
+                .map_err(persist_err)?
                 .map(|guard| guard.value().to_string());
 
             match current_id_hex {
                 None => {
                     events
                         .insert(id_hex.as_str(), encoded.as_str())
-                        .expect("redb: insert event");
+                        .map_err(persist_err)?;
                     addr_index
                         .insert(addr_key_str.as_str(), id_hex.as_str())
-                        .expect("redb: insert addr_index");
+                        .map_err(persist_err)?;
                     by_author
                         .insert(
                             by_author_key(&se.event.pubkey, &se.event.id).as_str(),
                             id_hex.as_str(),
                         )
-                        .expect("redb: insert by_author");
+                        .map_err(persist_err)?;
                     by_kind
                         .insert(
                             by_kind_key(se.event.kind, &se.event.id).as_str(),
                             id_hex.as_str(),
                         )
-                        .expect("redb: insert by_kind");
+                        .map_err(persist_err)?;
                     if let Some(ts) = se.event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &se.event.id);
                         expiration_index
                             .insert(exp_key.as_str(), id_hex.as_str())
-                            .expect("redb: insert expiration_index");
+                            .map_err(persist_err)?;
                     }
                     Some(se)
                 }
                 Some(current_id_hex) => {
                     let current_json = events
                         .get(current_id_hex.as_str())
-                        .expect("redb: get current winner")
+                        .map_err(persist_err)?
                         .expect("addr_index must always point at a stored event")
                         .value()
                         .to_string();
@@ -687,32 +762,32 @@ fn reinsert_stashed_in_txn(
                             by_kind,
                             current_id,
                             |_| true,
-                        )
+                        )?
                         .expect("addr_index must always point at a stored event");
 
                         events
                             .insert(id_hex.as_str(), encoded.as_str())
-                            .expect("redb: insert winning event");
+                            .map_err(persist_err)?;
                         addr_index
                             .insert(addr_key_str.as_str(), id_hex.as_str())
-                            .expect("redb: update addr_index");
+                            .map_err(persist_err)?;
                         by_author
                             .insert(
                                 by_author_key(&se.event.pubkey, &se.event.id).as_str(),
                                 id_hex.as_str(),
                             )
-                            .expect("redb: insert by_author");
+                            .map_err(persist_err)?;
                         by_kind
                             .insert(
                                 by_kind_key(se.event.kind, &se.event.id).as_str(),
                                 id_hex.as_str(),
                             )
-                            .expect("redb: insert by_kind");
+                            .map_err(persist_err)?;
                         if let Some(ts) = se.event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &se.event.id);
                             expiration_index
                                 .insert(exp_key.as_str(), id_hex.as_str())
-                                .expect("redb: insert expiration_index");
+                                .map_err(persist_err)?;
                         }
                         Some(se)
                     } else {
@@ -722,7 +797,8 @@ fn reinsert_stashed_in_txn(
                 }
             }
         }
-    }
+    };
+    Ok(result)
 }
 
 /// The `coverage` table's JSON value: the window-erased shape the row was
@@ -935,7 +1011,9 @@ impl EventStore for RedbStore {
                 InsertOutcome::Duplicate {
                     provenance_grew: grew,
                 }
-            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event) {
+            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event)
+                .expect("redb: tombstone check")
+            {
                 // Tombstone check, AFTER dedup-by-id, BEFORE storage
                 // (retraction-and-negative-deltas.md §2).
                 InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -1104,7 +1182,8 @@ impl EventStore for RedbStore {
                             &mut by_author,
                             &mut by_kind,
                             &event,
-                        );
+                        )
+                        .expect("redb: kind5 processing");
                         InsertOutcome::Kind5Processed { deleted }
                     } else {
                         outcome
@@ -1201,6 +1280,7 @@ impl EventStore for RedbStore {
                 id,
                 |_| true,
             )
+            .expect("redb: remove row")
         };
         write_txn.commit().expect("redb: commit remove");
         removed
@@ -1243,6 +1323,7 @@ impl EventStore for RedbStore {
                         id,
                         |_| true,
                     )
+                    .expect("redb: remove due row")
                 })
                 .collect()
         };
@@ -1431,9 +1512,8 @@ impl EventStore for RedbStore {
         report
     }
 
-    fn accept_write(&mut self, accept: AcceptWrite) -> AcceptOutcome {
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         let AcceptWrite {
-            receipt_id,
             frozen,
             expected_pubkey,
             signing_identity_ref,
@@ -1444,68 +1524,58 @@ impl EventStore for RedbStore {
         } = accept;
 
         // Refused at the door FIRST, same as `insert`: never journaled,
-        // nothing to recover, and no `IntentId` is ever allocated (R3 +
-        // architecture review correction: a refusal can never burn an id).
+        // nothing to recover, and neither an `IntentId` nor a receipt id
+        // is ever allocated (R3 + architecture review correction: a
+        // refusal can never burn either).
         if frozen.is_expired_at(&accepted_at) {
-            return AcceptOutcome::Refused(RefuseReason::AlreadyExpired);
+            return Ok(AcceptOutcome::Refused(RefuseReason::AlreadyExpired));
         }
 
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         let outcome = {
-            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
-            let mut addr_index = write_txn
-                .open_table(ADDR_INDEX)
-                .expect("redb: open addr_index");
-            let tombstones = write_txn
-                .open_table(TOMBSTONES)
-                .expect("redb: open tombstones");
-            let addr_tombstones = write_txn
-                .open_table(ADDR_TOMBSTONES)
-                .expect("redb: open addr_tombstones");
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
-                .expect("redb: open expiration_index");
-            let mut by_author = write_txn
-                .open_table(BY_AUTHOR)
-                .expect("redb: open by_author");
-            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
-            let mut outbox_intents = write_txn
-                .open_table(OUTBOX_INTENTS)
-                .expect("redb: open outbox_intents");
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
             let mut outbox_displaced = write_txn
                 .open_table(OUTBOX_DISPLACED)
-                .expect("redb: open outbox_displaced");
-            let mut outbox_meta = write_txn
-                .open_table(OUTBOX_META)
-                .expect("redb: open outbox_meta");
-            let mut outbox_receipts = write_txn
-                .open_table(OUTBOX_RECEIPTS)
-                .expect("redb: open outbox_receipts");
+                .map_err(persist_err)?;
+            let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
 
             let id_hex = frozen.id.to_hex();
-            let existing_json = events
-                .get(id_hex.as_str())
-                .expect("redb: get event")
-                .map(|guard| guard.value().to_string());
+            let existing = events.get(id_hex.as_str()).map_err(persist_err)?;
+            let existing_json = existing.map(|guard| guard.value().to_string());
+            let is_deletion = frozen.kind == Kind::EventDeletion;
 
             // Same tombstone-refusal + dedup-by-id + replaceable/addressable
             // supersession rules `insert` runs — see this fn's own doc and
             // `AcceptOutcome`'s. `Refused` is the ONLY branch that skips
-            // both the journal write below AND `IntentId` allocation.
+            // both the journal write below AND `IntentId`/receipt-id
+            // allocation.
             let (result, displaced): (AcceptOutcome, Option<StoredEvent>) =
                 if let Some(existing_json) = existing_json {
-                    let intent_id = alloc_intent_id_in_txn(&mut outbox_meta);
+                    let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
+                    let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
                     (
                         AcceptOutcome::Duplicate {
                             intent_id,
+                            receipt_id,
                             row: decode_stored_event(&existing_json),
                         },
                         None,
                     )
-                } else if tombstone_refuses(&tombstones, &addr_tombstones, &frozen) {
+                } else if tombstone_refuses(&tombstones, &addr_tombstones, &frozen)? {
                     (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
                 } else {
-                    let intent_id = alloc_intent_id_in_txn(&mut outbox_meta);
+                    let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
+                    let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
                     let local = LocalOrigin {
                         intent_id,
                         sig_state: SigState::Pending,
@@ -1524,81 +1594,115 @@ impl EventStore for RedbStore {
                         None => {
                             events
                                 .insert(id_hex.as_str(), encoded.as_str())
-                                .expect("redb: insert event");
+                                .map_err(persist_err)?;
                             by_author
                                 .insert(
                                     by_author_key(&frozen.pubkey, &frozen.id).as_str(),
                                     id_hex.as_str(),
                                 )
-                                .expect("redb: insert by_author");
+                                .map_err(persist_err)?;
                             by_kind
                                 .insert(
                                     by_kind_key(frozen.kind, &frozen.id).as_str(),
                                     id_hex.as_str(),
                                 )
-                                .expect("redb: insert by_kind");
+                                .map_err(persist_err)?;
                             if let Some(ts) = frozen.tags.expiration().copied() {
                                 let exp_key = expiration_key(ts, &frozen.id);
                                 expiration_index
                                     .insert(exp_key.as_str(), id_hex.as_str())
-                                    .expect("redb: insert expiration_index");
+                                    .map_err(persist_err)?;
                             }
-                            (
-                                AcceptOutcome::Inserted {
-                                    intent_id,
-                                    row: stored,
-                                },
-                                None,
-                            )
+                            // Architecture review correction: a
+                            // locally-composed kind:5 draft runs the SAME
+                            // author-verified tombstone-write processing
+                            // `insert` runs for a relay-observed kind:5,
+                            // immediately, in this same transaction —
+                            // issue #2's "no app optimistic mirror"
+                            // promise extends to local deletions too.
+                            // Kind:5 has no replaceable/addressable
+                            // address, so this branch is the only one it
+                            // can ever reach (mirrors `insert`'s own
+                            // kind:5 invariant).
+                            if is_deletion {
+                                let deleted = process_kind5_deletions(
+                                    &mut events,
+                                    &mut addr_index,
+                                    &mut tombstones,
+                                    &mut addr_tombstones,
+                                    &mut expiration_index,
+                                    &mut by_author,
+                                    &mut by_kind,
+                                    &frozen,
+                                )?;
+                                (
+                                    AcceptOutcome::Kind5Processed {
+                                        intent_id,
+                                        receipt_id,
+                                        row: stored,
+                                        deleted,
+                                    },
+                                    None,
+                                )
+                            } else {
+                                (
+                                    AcceptOutcome::Inserted {
+                                        intent_id,
+                                        receipt_id,
+                                        row: stored,
+                                    },
+                                    None,
+                                )
+                            }
                         }
                         Some(addr_key) => {
                             let addr_key_str = addr_key.to_redb_key();
-                            let current_id_hex = addr_index
-                                .get(addr_key_str.as_str())
-                                .expect("redb: get addr_index")
-                                .map(|guard| guard.value().to_string());
+                            let current =
+                                addr_index.get(addr_key_str.as_str()).map_err(persist_err)?;
+                            let current_id_hex = current.map(|guard| guard.value().to_string());
 
                             match current_id_hex {
                                 None => {
                                     events
                                         .insert(id_hex.as_str(), encoded.as_str())
-                                        .expect("redb: insert event");
+                                        .map_err(persist_err)?;
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
-                                        .expect("redb: insert addr_index");
+                                        .map_err(persist_err)?;
                                     by_author
                                         .insert(
                                             by_author_key(&frozen.pubkey, &frozen.id).as_str(),
                                             id_hex.as_str(),
                                         )
-                                        .expect("redb: insert by_author");
+                                        .map_err(persist_err)?;
                                     by_kind
                                         .insert(
                                             by_kind_key(frozen.kind, &frozen.id).as_str(),
                                             id_hex.as_str(),
                                         )
-                                        .expect("redb: insert by_kind");
+                                        .map_err(persist_err)?;
                                     if let Some(ts) = frozen.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &frozen.id);
                                         expiration_index
                                             .insert(exp_key.as_str(), id_hex.as_str())
-                                            .expect("redb: insert expiration_index");
+                                            .map_err(persist_err)?;
                                     }
                                     (
                                         AcceptOutcome::Inserted {
                                             intent_id,
+                                            receipt_id,
                                             row: stored,
                                         },
                                         None,
                                     )
                                 }
                                 Some(current_id_hex) => {
-                                    let current_json = events
+                                    let current_guard = events
                                         .get(current_id_hex.as_str())
-                                        .expect("redb: get current winner")
-                                        .expect("addr_index must always point at a stored event")
-                                        .value()
-                                        .to_string();
+                                        .map_err(persist_err)?
+                                        .expect("addr_index must always point at a stored event");
+                                    let current_json = current_guard.value().to_string();
+                                    drop(current_guard);
                                     let current_event = decode_stored_event(&current_json).event;
 
                                     if candidate_wins(&frozen, &current_event) {
@@ -1612,43 +1716,50 @@ impl EventStore for RedbStore {
                                             &mut by_kind,
                                             current_id,
                                             |_| true,
-                                        )
+                                        )?
                                         .expect("addr_index must always point at a stored event");
 
                                         events
                                             .insert(id_hex.as_str(), encoded.as_str())
-                                            .expect("redb: insert winning event");
+                                            .map_err(persist_err)?;
                                         addr_index
                                             .insert(addr_key_str.as_str(), id_hex.as_str())
-                                            .expect("redb: update addr_index");
+                                            .map_err(persist_err)?;
                                         by_author
                                             .insert(
                                                 by_author_key(&frozen.pubkey, &frozen.id).as_str(),
                                                 id_hex.as_str(),
                                             )
-                                            .expect("redb: insert by_author");
+                                            .map_err(persist_err)?;
                                         by_kind
                                             .insert(
                                                 by_kind_key(frozen.kind, &frozen.id).as_str(),
                                                 id_hex.as_str(),
                                             )
-                                            .expect("redb: insert by_kind");
+                                            .map_err(persist_err)?;
                                         if let Some(ts) = frozen.tags.expiration().copied() {
                                             let exp_key = expiration_key(ts, &frozen.id);
                                             expiration_index
                                                 .insert(exp_key.as_str(), id_hex.as_str())
-                                                .expect("redb: insert expiration_index");
+                                                .map_err(persist_err)?;
                                         }
                                         (
                                             AcceptOutcome::Superseded {
                                                 intent_id,
+                                                receipt_id,
                                                 row: stored,
                                                 replaced: Box::new(replaced.clone()),
                                             },
                                             Some(replaced),
                                         )
                                     } else {
-                                        (AcceptOutcome::Stale { intent_id }, None)
+                                        (
+                                            AcceptOutcome::Stale {
+                                                intent_id,
+                                                receipt_id,
+                                            },
+                                            None,
+                                        )
                                     }
                                 }
                             }
@@ -1658,11 +1769,13 @@ impl EventStore for RedbStore {
 
             // R7: the intent's full journal payload AND the retained
             // receipt record commit in this SAME transaction as the
-            // event-table mutation (and the `IntentId` allocation) above —
-            // a crash here leaves either nothing or a fully
-            // `recover_outbox`-able `Accepted`. R3: `Refused` is the one
-            // outcome that journals nothing at all.
-            if let Some(intent_id) = result.journaled_intent_id() {
+            // event-table mutation (and the `IntentId`/receipt-id
+            // allocation) above — a crash here leaves either nothing or a
+            // fully `recover_outbox`-able `Accepted`. R3: `Refused` is the
+            // one outcome that journals nothing at all.
+            if let (Some(intent_id), Some(receipt_id)) =
+                (result.journaled_intent_id(), result.journaled_receipt_id())
+            {
                 let key = intent_key(intent_id);
                 let intent_record = OutboxIntentRecord {
                     receipt_id,
@@ -1678,13 +1791,13 @@ impl EventStore for RedbStore {
                     serde_json::to_string(&intent_record).expect("redb: encode outbox intent");
                 outbox_intents
                     .insert(key.as_str(), encoded_intent.as_str())
-                    .expect("redb: insert outbox_intents");
+                    .map_err(persist_err)?;
 
                 if let Some(displaced) = &displaced {
                     let encoded_displaced = encode_stored_event(displaced);
                     outbox_displaced
                         .insert(key.as_str(), encoded_displaced.as_str())
-                        .expect("redb: insert outbox_displaced");
+                        .map_err(persist_err)?;
                 }
 
                 // Architecture review correction: the RETAINED receipt
@@ -1699,203 +1812,256 @@ impl EventStore for RedbStore {
                     serde_json::to_string(&receipt_record).expect("redb: encode outbox receipt");
                 outbox_receipts
                     .insert(receipt_key(receipt_id).as_str(), encoded_receipt.as_str())
-                    .expect("redb: insert outbox_receipts");
+                    .map_err(persist_err)?;
             }
 
             result
         };
-        write_txn.commit().expect("redb: commit accept_write");
-        outcome
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcome)
     }
 
-    fn promote_signed(&mut self, id: EventId, sig: Signature) -> PromoteOutcome {
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+    fn promote_signed(
+        &mut self,
+        intent_id: IntentId,
+        sig: Signature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         let outcome = {
-            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
-            let mut outbox_intents = write_txn
-                .open_table(OUTBOX_INTENTS)
-                .expect("redb: open outbox_intents");
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
             let mut outbox_displaced = write_txn
                 .open_table(OUTBOX_DISPLACED)
-                .expect("redb: open outbox_displaced");
-            let mut outbox_receipts = write_txn
-                .open_table(OUTBOX_RECEIPTS)
-                .expect("redb: open outbox_receipts");
+                .map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
 
-            let id_hex = id.to_hex();
-            let existing_json = events
-                .get(id_hex.as_str())
-                .expect("redb: get event")
+            let key = intent_key(intent_id);
+            let intent_json = outbox_intents
+                .get(key.as_str())
+                .map_err(persist_err)?
                 .map(|guard| guard.value().to_string());
 
-            match existing_json {
+            let outcome = match intent_json {
                 None => PromoteOutcome::NotFound,
-                Some(json) => {
-                    let mut record: StoredEventRecord =
-                        serde_json::from_str(&json).expect("redb: decode stored event");
-                    match record.local {
-                        None => PromoteOutcome::NotFound,
-                        Some(mut local) => {
-                            let key = intent_key(local.intent_id);
-                            local.sig_state = SigState::Signed;
-                            record.local = Some(local);
+                Some(intent_json) => {
+                    let mut intent_record: OutboxIntentRecord =
+                        serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
+                    let mut frozen_event = Event::from_json(&intent_record.frozen_json)
+                        .expect("redb: decode frozen event json");
+                    let frozen_id = frozen_event.id;
+                    let frozen_id_hex = frozen_id.to_hex();
 
-                            // Swap the sentinel for the real signature —
-                            // same id (a NIP-01 id never depends on `sig`),
-                            // so this is purely a value update: no
-                            // EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND key ever
-                            // changes.
-                            let mut event = Event::from_json(&record.event_json)
-                                .expect("redb: decode event json");
-                            event.sig = sig;
-                            record.event_json = event.as_json();
+                    // Architecture review correction (load-bearing): is
+                    // this intent still the LIVE row at its own frozen id?
+                    // A `Duplicate`/`Stale` intent never had one; a
+                    // once-live row can since have been superseded
+                    // (locally or by a relay), kind:5-deleted, or expired.
+                    let live_json = events
+                        .get(frozen_id_hex.as_str())
+                        .map_err(persist_err)?
+                        .map(|guard| guard.value().to_string());
+                    let live_record: Option<StoredEventRecord> = live_json
+                        .as_ref()
+                        .map(|j| serde_json::from_str(j).expect("redb: decode stored event"));
+                    let is_live = live_record.as_ref().is_some_and(|r| {
+                        r.local.as_ref().is_some_and(|l| l.intent_id == intent_id)
+                    });
 
-                            let encoded =
-                                serde_json::to_string(&record).expect("redb: encode stored event");
-                            events
-                                .insert(id_hex.as_str(), encoded.as_str())
-                                .expect("redb: update promoted event");
+                    frozen_event.sig = sig;
+                    let new_frozen_json = frozen_event.as_json();
 
-                            // R6, same transaction: durably drop the
-                            // displaced stash and flip the journal's
-                            // sig_state so recovery after a promote never
-                            // sees a stale stash or a pre-promotion state.
-                            outbox_displaced
-                                .remove(key.as_str())
-                                .expect("redb: remove outbox_displaced");
-                            if let Some(intent_json) = outbox_intents
-                                .get(key.as_str())
-                                .expect("redb: get outbox_intents")
-                                .map(|guard| guard.value().to_string())
-                            {
-                                let mut intent_record: OutboxIntentRecord =
-                                    serde_json::from_str(&intent_json)
-                                        .expect("redb: decode outbox intent");
-                                intent_record.sig_state = IntentSigState::Signed;
-                                intent_record.frozen_json = event.as_json();
-                                let encoded_intent = serde_json::to_string(&intent_record)
-                                    .expect("redb: encode outbox intent");
-                                outbox_intents
-                                    .insert(key.as_str(), encoded_intent.as_str())
-                                    .expect("redb: update outbox_intents");
-
-                                // Architecture review correction: the
-                                // RETAINED receipt record (keyed by
-                                // `receipt_id`, independent of
-                                // `OUTBOX_INTENTS`'s open-work row) tracks
-                                // the same transition.
-                                update_outbox_receipt(
-                                    &mut outbox_receipts,
-                                    intent_record.receipt_id,
-                                    ReceiptState::Signed,
-                                );
-                            }
-
-                            let row = StoredEvent {
-                                event,
-                                provenance: Provenance {
-                                    seen: record.provenance,
-                                    local: record.local,
-                                },
-                            };
-                            PromoteOutcome::Promoted { row: Box::new(row) }
+                    let row = if is_live {
+                        // Swap the sentinel for the real signature — same
+                        // id (a NIP-01 id never depends on `sig`), so this
+                        // is purely a value update: no EVENTS/ADDR_INDEX/
+                        // BY_AUTHOR/BY_KIND key ever changes.
+                        let mut record = live_record.expect("checked is_live above");
+                        let mut local = record.local.expect("checked is_live above");
+                        local.sig_state = SigState::Signed;
+                        record.local = Some(local);
+                        record.event_json = new_frozen_json.clone();
+                        let encoded =
+                            serde_json::to_string(&record).expect("redb: encode stored event");
+                        events
+                            .insert(frozen_id_hex.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
+                        StoredEvent {
+                            event: frozen_event.clone(),
+                            provenance: Provenance {
+                                seen: record.provenance,
+                                local: record.local,
+                            },
                         }
-                    }
+                    } else {
+                        // Not live. If this intent's exact frozen bytes
+                        // are sitting in some OTHER intent's displaced
+                        // stash (it was superseded by a later local edit
+                        // before it could sign), sync the real signature
+                        // into that stash entry too — otherwise a future
+                        // restore of it would resurrect a stale sentinel
+                        // copy of an intent that actually did sign.
+                        if let Some(other_key) =
+                            find_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen_id)?
+                        {
+                            let other_json = outbox_displaced
+                                .get(other_key.as_str())
+                                .map_err(persist_err)?
+                                .expect("just found this key")
+                                .value()
+                                .to_string();
+                            let mut other_record: StoredEventRecord =
+                                serde_json::from_str(&other_json)
+                                    .expect("redb: decode stored event");
+                            other_record.event_json = new_frozen_json.clone();
+                            if let Some(local) = other_record.local.as_mut() {
+                                local.sig_state = SigState::Signed;
+                            }
+                            let encoded_other = serde_json::to_string(&other_record)
+                                .expect("redb: encode stored event");
+                            outbox_displaced
+                                .insert(other_key.as_str(), encoded_other.as_str())
+                                .map_err(persist_err)?;
+                        }
+                        // Either way, no live row exists to mutate —
+                        // synthesize the resulting signed bytes from the
+                        // journal's own copy. The engine can still
+                        // publish these even though this intent does not
+                        // (or no longer) win any local address.
+                        StoredEvent {
+                            event: frozen_event.clone(),
+                            provenance: Provenance {
+                                seen: BTreeMap::new(),
+                                local: Some(LocalOrigin {
+                                    intent_id,
+                                    sig_state: SigState::Signed,
+                                    accepted_at: intent_record.accepted_at,
+                                }),
+                            },
+                        }
+                    };
+
+                    // Always: update the durable intent/receipt journal +
+                    // drop THIS intent's own displaced stash (R6) —
+                    // unrelated to whether IT is currently displaced
+                    // elsewhere.
+                    outbox_displaced.remove(key.as_str()).map_err(persist_err)?;
+                    intent_record.sig_state = IntentSigState::Signed;
+                    intent_record.frozen_json = new_frozen_json;
+                    let encoded_intent =
+                        serde_json::to_string(&intent_record).expect("redb: encode outbox intent");
+                    outbox_intents
+                        .insert(key.as_str(), encoded_intent.as_str())
+                        .map_err(persist_err)?;
+
+                    update_outbox_receipt(
+                        &mut outbox_receipts,
+                        intent_record.receipt_id,
+                        ReceiptState::Signed,
+                    )?;
+
+                    PromoteOutcome::Promoted { row: Box::new(row) }
                 }
-            }
+            };
+            outcome
         };
-        write_txn.commit().expect("redb: commit promote_signed");
-        outcome
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcome)
     }
 
-    fn compensate_write(&mut self, id: EventId) -> CompensateOutcome {
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+    fn compensate_write(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         let outcome = {
-            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
-            let mut addr_index = write_txn
-                .open_table(ADDR_INDEX)
-                .expect("redb: open addr_index");
-            let tombstones = write_txn
-                .open_table(TOMBSTONES)
-                .expect("redb: open tombstones");
-            let addr_tombstones = write_txn
-                .open_table(ADDR_TOMBSTONES)
-                .expect("redb: open addr_tombstones");
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+            let tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
-                .expect("redb: open expiration_index");
-            let mut by_author = write_txn
-                .open_table(BY_AUTHOR)
-                .expect("redb: open by_author");
-            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
-            let mut outbox_intents = write_txn
-                .open_table(OUTBOX_INTENTS)
-                .expect("redb: open outbox_intents");
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
             let mut outbox_displaced = write_txn
                 .open_table(OUTBOX_DISPLACED)
-                .expect("redb: open outbox_displaced");
-            let mut outbox_receipts = write_txn
-                .open_table(OUTBOX_RECEIPTS)
-                .expect("redb: open outbox_receipts");
+                .map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
 
-            let id_hex = id.to_hex();
-            let intent_id = events
-                .get(id_hex.as_str())
-                .expect("redb: get event")
-                .and_then(|guard| {
-                    let record: StoredEventRecord =
-                        serde_json::from_str(guard.value()).expect("redb: decode stored event");
-                    record
-                        .local
-                        .filter(|local| local.sig_state == SigState::Pending)
-                        .map(|local| local.intent_id)
-                });
+            let key = intent_key(intent_id);
+            let intent_json = outbox_intents
+                .get(key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string());
 
-            match intent_id {
+            let outcome = match intent_json {
                 None => CompensateOutcome::NotFound,
-                Some(intent_id) => {
-                    // §4.2: `remove(id, Rejected)` writes no tombstone
-                    // (only kind:5 processing ever does), then re-insert
-                    // the stashed predecessor through the SAME one door —
-                    // ordinary supersession, never an un-supersede
-                    // operation.
-                    remove_row_in_txn(
-                        &mut events,
-                        &mut addr_index,
-                        &mut expiration_index,
-                        &mut by_author,
-                        &mut by_kind,
-                        id,
-                        |_| true,
-                    );
+                Some(intent_json) => {
+                    let intent_record: OutboxIntentRecord =
+                        serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
+                    if intent_record.sig_state == IntentSigState::Signed {
+                        // Pre-signature only (retraction doc §4.2's
+                        // "Promotion correction").
+                        CompensateOutcome::NotFound
+                    } else {
+                        let frozen_event = Event::from_json(&intent_record.frozen_json)
+                            .expect("redb: decode frozen event json");
+                        let frozen_id = frozen_event.id;
+                        let frozen_id_hex = frozen_id.to_hex();
 
-                    let key = intent_key(intent_id);
-                    let removed_intent_json = outbox_intents
-                        .remove(key.as_str())
-                        .expect("redb: remove outbox_intents")
-                        .map(|guard| guard.value().to_string());
-                    let displaced_json = outbox_displaced
-                        .remove(key.as_str())
-                        .expect("redb: remove outbox_displaced")
-                        .map(|guard| guard.value().to_string());
+                        let live_json = events
+                            .get(frozen_id_hex.as_str())
+                            .map_err(persist_err)?
+                            .map(|guard| guard.value().to_string());
+                        let is_live = live_json.as_ref().is_some_and(|j| {
+                            let r: StoredEventRecord =
+                                serde_json::from_str(j).expect("redb: decode stored event");
+                            r.local.as_ref().is_some_and(|l| l.intent_id == intent_id)
+                        });
 
-                    // Architecture review correction: `OUTBOX_INTENTS`'s
-                    // open-work row is gone (line above), but the RETAINED
-                    // receipt record survives — `reattach_receipt` must
-                    // still answer `Compensated`, not `None`.
-                    if let Some(intent_json) = &removed_intent_json {
-                        let removed_intent: OutboxIntentRecord =
-                            serde_json::from_str(intent_json).expect("redb: decode outbox intent");
-                        update_outbox_receipt(
-                            &mut outbox_receipts,
-                            removed_intent.receipt_id,
-                            ReceiptState::Compensated,
-                        );
-                    }
+                        if is_live {
+                            // §4.2: `remove(id, Rejected)` writes no
+                            // tombstone (only kind:5 processing ever
+                            // does).
+                            remove_row_in_txn(
+                                &mut events,
+                                &mut addr_index,
+                                &mut expiration_index,
+                                &mut by_author,
+                                &mut by_kind,
+                                frozen_id,
+                                |_| true,
+                            )?;
+                        } else if let Some(other_key) =
+                            find_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen_id)?
+                        {
+                            // Not live, but sitting in someone else's
+                            // displaced stash (chained local supersession
+                            // before this intent could sign) — invalidate
+                            // it for good: this intent is being
+                            // permanently rejected, so the intent that
+                            // displaced it must never later resurrect it
+                            // via ITS OWN compensation.
+                            outbox_displaced
+                                .remove(other_key.as_str())
+                                .map_err(persist_err)?;
+                        }
 
-                    let restored = displaced_json
-                        .and_then(|json| {
-                            reinsert_stashed_in_txn(
+                        outbox_intents.remove(key.as_str()).map_err(persist_err)?;
+                        // THIS intent's OWN displaced predecessor (if any)
+                        // is restored through the same one door regardless
+                        // of whether its row was live or already gone for
+                        // some other reason (kind:5/expiry/relay
+                        // supersession) — `reinsert_stashed_in_txn`'s own
+                        // tombstone check makes this safe even if the
+                        // predecessor was itself since deleted or expired.
+                        let displaced_json = outbox_displaced
+                            .remove(key.as_str())
+                            .map_err(persist_err)?
+                            .map(|guard| guard.value().to_string());
+                        let restored = match displaced_json {
+                            Some(json) => reinsert_stashed_in_txn(
                                 &mut events,
                                 &mut addr_index,
                                 &tombstones,
@@ -1904,16 +2070,25 @@ impl EventStore for RedbStore {
                                 &mut by_author,
                                 &mut by_kind,
                                 decode_stored_event(&json),
-                            )
-                        })
-                        .map(Box::new);
+                            )?
+                            .map(Box::new),
+                            None => None,
+                        };
 
-                    CompensateOutcome::Compensated { restored }
+                        update_outbox_receipt(
+                            &mut outbox_receipts,
+                            intent_record.receipt_id,
+                            ReceiptState::Compensated,
+                        )?;
+
+                        CompensateOutcome::Compensated { restored }
+                    }
                 }
-            }
+            };
+            outcome
         };
-        write_txn.commit().expect("redb: commit compensate_write");
-        outcome
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcome)
     }
 
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
@@ -1984,17 +2159,17 @@ impl EventStore for RedbStore {
 
     fn accept_ephemeral(
         &mut self,
-        receipt_id: u64,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
-    ) {
-        // Receipt-ONLY: touches `OUTBOX_RECEIPTS` alone — no `EVENTS` row,
-        // no `OUTBOX_INTENTS` row, `intent_id: None` (nothing backs it).
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
-        {
-            let mut outbox_receipts = write_txn
-                .open_table(OUTBOX_RECEIPTS)
-                .expect("redb: open outbox_receipts");
+    ) -> Result<u64, PersistenceError> {
+        // Receipt-ONLY: touches `OUTBOX_RECEIPTS` (+ `OUTBOX_META` for the
+        // id allocation) alone — no `EVENTS` row, no `OUTBOX_INTENTS` row,
+        // `intent_id: None` (nothing backs it).
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let receipt_id = {
+            let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
             let record = OutboxReceiptRecord {
                 intent_id: None,
                 frozen_id,
@@ -2004,9 +2179,11 @@ impl EventStore for RedbStore {
             let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
             outbox_receipts
                 .insert(receipt_key(receipt_id).as_str(), encoded.as_str())
-                .expect("redb: insert outbox_receipts (ephemeral)");
-        }
-        write_txn.commit().expect("redb: commit accept_ephemeral");
+                .map_err(persist_err)?;
+            receipt_id
+        };
+        write_txn.commit().map_err(persist_err)?;
+        Ok(receipt_id)
     }
 }
 
