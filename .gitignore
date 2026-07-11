@@ -36,3 +36,19 @@ xcuserdata/
 /apps/Falsifier/Generated-Info.plist
 /apps/Falsifier/build/
 /apps/Falsifier/DerivedData/
+
+# #40 Kotlin/Flow falsifier packaging outputs
+# (scripts/build-kotlin-jvm.sh) -- same discipline as the Swift block above:
+# /gen-kotlin holds the raw uniffi-bindgen dump, and
+# Packages/NMPKotlin/src/main/kotlin/uniffi + src/main/resources are its
+# split (Kotlin-source vs native-lib) outputs. build.gradle.kts/
+# settings.gradle.kts + src/main/kotlin/com/nmp/sdk (the hand-written
+# ergonomic layer) + src/test ARE committed -- only the generated/compiled
+# pieces are ignored here. A clean clone must run the build script once
+# before `./gradlew test` works; see Packages/NMPKotlin/README.md and the
+# `kotlin-package` CI job.
+/gen-kotlin
+/Packages/NMPKotlin/src/main/kotlin/uniffi
+/Packages/NMPKotlin/src/main/resources
+/Packages/NMPKotlin/build/
+/Packages/NMPKotlin/.gradle/
