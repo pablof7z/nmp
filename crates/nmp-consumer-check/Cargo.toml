@@ -1,0 +1,16 @@
+[package]
+name = "nmp-consumer-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The point of this crate: it depends on `nmp` and NOTHING else -- not even
+# `nostr` directly, since every value type an app needs (including the
+# unsigned-write path and every `DiagnosticsSnapshot` field type) must be
+# reachable through `nmp`'s own re-exports. If a caller ever needs a second
+# `use` line naming a mechanism crate or `nostr` itself, the facade's
+# re-export inventory has a gap -- this crate existing and compiling IS the
+# acceptance proof for #52's "an app's Cargo.toml names `nmp` alone".
+[dependencies]
+nmp.workspace = true
