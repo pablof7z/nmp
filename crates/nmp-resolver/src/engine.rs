@@ -401,39 +401,83 @@ impl<S: EventStore> Engine<S> {
     /// launder that real provenance through `ingest`'s fixture. `ingest`
     /// above is a thin wrapper over this for the resolver-only contract
     /// tests, which have no relay concept of their own.
+    ///
+    /// Sorts each event's store outcome into `inserted` (what now matches
+    /// queries that didn't before) and `removed` (what no longer matches
+    /// anything, as full events — retraction-and-negative-deltas.md §1.1/
+    /// §1.4's "ingest commit" feeders): `Superseded { replaced }` and
+    /// `Kind5Processed { deleted }` BOTH contribute their evicted rows to
+    /// `removed` alongside pushing the arriving event itself to `inserted`
+    /// — a superseding kind:39002 that drops my `#p` tag no longer matches
+    /// the SAME inner filter its predecessor did, so without `replaced`
+    /// feeding `removed` too, the dirty-seed would miss it exactly the way
+    /// a kind:5/expiry retraction would (§0's "by luck of shape overlap"
+    /// finding).
     pub fn ingest_observed(&mut self, events: Vec<(nostr::Event, RelayObserved)>) -> DemandDelta {
-        let drop_delta = self.drain_pending_drops();
-
-        let mut changed: Vec<nostr::Event> = Vec::new();
+        let mut inserted: Vec<nostr::Event> = Vec::new();
+        let mut removed: Vec<nostr::Event> = Vec::new();
         for (event, from) in events {
             match self.store.insert(event.clone(), from) {
-                InsertOutcome::Inserted
-                | InsertOutcome::Superseded { .. }
-                // A kind:5 event is itself a fresh, durably stored event
-                // like any `Inserted` one; the targets it additionally
-                // dropped (`deleted`) are not yet fed into the dirty-seed
-                // here -- that wiring is a separate #23 child (store
-                // door only, issue #28).
-                | InsertOutcome::Kind5Processed { .. } => changed.push(event),
-                // Never stored -- neither is "changed": a duplicate/stale
-                // event was already reflected in the store, and a refused
-                // event (already-expired, or tombstoned) never entered it
-                // at all.
+                InsertOutcome::Inserted => inserted.push(event),
+                InsertOutcome::Superseded { replaced } => {
+                    inserted.push(event);
+                    removed.push(replaced.event);
+                }
+                InsertOutcome::Kind5Processed { deleted } => {
+                    inserted.push(event);
+                    removed.extend(deleted.into_iter().map(|se| se.event));
+                }
+                // Never stored -- neither inserted nor removed: a
+                // duplicate/stale event was already reflected in the store,
+                // and a refused event (already-expired, or tombstoned)
+                // never entered it at all.
                 InsertOutcome::Duplicate { .. }
                 | InsertOutcome::Stale
                 | InsertOutcome::Refused(_) => {}
             }
         }
-        if changed.is_empty() {
+        self.react(inserted, removed)
+    }
+
+    /// Seed dirty-marks from removals that arrive with NO inbound event at
+    /// all (retraction-and-negative-deltas.md §1.2/§1.4: NIP-40 expiry,
+    /// optimistic-write rejection) — feeds `removed` into the SAME `react`
+    /// `ingest_observed` uses, on the removed side only. The caller (M3's
+    /// `EngineCore`) is responsible for having already removed these rows
+    /// from the store itself (`EventStore::expire_due`/`remove`) before
+    /// calling this: `retract` only re-evaluates the graph, it never
+    /// touches the store door.
+    pub fn retract(&mut self, removed: Vec<nostr::Event>) -> DemandDelta {
+        self.react(Vec::new(), removed)
+    }
+
+    /// The one recompute engine (retraction-and-negative-deltas.md §1.2):
+    /// seeds dirty-marks from events that newly match (`inserted`) OR
+    /// events that no longer match anything because they left the store
+    /// (`removed`), running the IDENTICAL `match_event` test over both —
+    /// symmetric by construction, not by luck of shape overlap. A `Derived`
+    /// node is seeded if its inner filter matches an inserted OR a removed
+    /// event; `recompute_node` already re-queries the store fresh (the
+    /// store no longer holds a removed row by the time this runs), so the
+    /// recomputed `ResolvedSet` shrinks by exactly the retracted members
+    /// and the parent `FilterNode`'s atom diff closes exactly their atoms —
+    /// replace-not-rebuild extends unchanged to retraction, and the
+    /// `Metrics` witness (`atoms_opened + atoms_closed ==
+    /// |symmetric diff|`) holds with zero new bookkeeping.
+    /// `ingest_observed`/`retract` are both thin callers of this; the four
+    /// §1.4 feeders differ only in who populates `removed`.
+    fn react(&mut self, inserted: Vec<nostr::Event>, removed: Vec<nostr::Event>) -> DemandDelta {
+        let drop_delta = self.drain_pending_drops();
+        if inserted.is_empty() && removed.is_empty() {
             return drop_delta;
         }
         self.metrics.recompute_passes += 1;
 
         // Dirty-mark phase (GENERIC — the kill guard, M1 plan §3.3 step 2 /
-        // test 10). The ONLY thing that decides whether a changed event
-        // affects a Derived BindingNode is `match_event` against that
-        // node's own inner FilterNode's concrete filter. No kind literal,
-        // no per-shape branch, anywhere in this decision.
+        // test 10). The ONLY thing that decides whether an event affects a
+        // Derived BindingNode is `match_event` against that node's own
+        // inner FilterNode's concrete filter. No kind literal, no
+        // per-shape branch, anywhere in this decision.
         let mut seed: BTreeSet<NodeId> = BTreeSet::new();
         for derived_id in self.graph.derived_node_ids() {
             let Node::Derived(d) = self.graph.node(derived_id) else {
@@ -441,8 +485,9 @@ impl<S: EventStore> Engine<S> {
             };
             if let Some(cf) = self.graph.wide_concrete(d.inner) {
                 let nf = cf.to_nostr();
-                if changed
+                if inserted
                     .iter()
+                    .chain(removed.iter())
                     .any(|e| nf.match_event(e, MatchEventOptions::new()))
                 {
                     seed.insert(derived_id);
