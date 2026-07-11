@@ -14,6 +14,7 @@ members = [
     "crates/nmp-demo",
     "crates/nmp-ffi",
     "crates/nmp-bdd",
+    "crates/nmp-parity",
 ]
 
 [workspace.package]
@@ -40,5 +41,7 @@ nmp-transport = { path = "crates/nmp-transport" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-engine = { path = "crates/nmp-engine" }
 nmp = { path = "crates/nmp" }
+nmp-ffi = { path = "crates/nmp-ffi" }
+nmp-bdd = { path = "crates/nmp-bdd" }
 proptest = "1"
 uniffi = "0.29"
