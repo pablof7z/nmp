@@ -2,13 +2,10 @@
 
 Honest running list of things built-but-incomplete or deliberately deferred, so nothing hides. Each says who flagged it, why it's deferred, and when it must be closed. This is a truth-anchor companion to the bug-class ledger.
 
-## P0 — found by dogfooding the Rust demo against real relays (fix before M4/M5)
-
-- **Row redelivery blow-up (likely O(n²)).** `Handle::subscribe`'s row channel redelivered already-known rows **635–1294× more than the distinct-note count** under a realistic feed (61 authors / 302 relays: ~3.35M raw row deliveries for ~2,587 distinct notes in 20s). `EngineCore::refresh_handle`'s "suppress when row-id set + coverage unchanged" does not hold under load — almost certainly because `EmitRows` re-emits the *full* current row set on every ingested event instead of an incremental added/removed delta. The 170 tests missed it (synthetic workloads too small). **Fix:** make row delivery incremental (emit only added/removed rows) or suppress at the row level, with a load test that asserts deliveries are ~O(distinct rows), not O(events²). An iOS feed cannot ship on the full-set-re-emit behavior. **Status: fix in progress.**
-
-- **`RelayDirectory` has no reactive update path.** It is boxed into `EngineCore` at `spawn` with no way to update it afterward, and no live (non-fixture) implementation exists — an app must pre-resolve all NIP-65 relays before spawn (as `nmp-demo/src/bootstrap.rs` does). The falsifier's "pick relays from your follows' kind:10002" mode needs relay facts to update *reactively* as follows and their 10002s change. **Fix:** a live, updatable `RelayDirectory` fed by the engine's own kind:10002 ingestion (itself expressible as a `Derived` binding). Needed for M5's relay-picker mode.
-
 ## Load-bearing for M5 (the falsifier app) — must close before M5 claims pass
+
+- **`RelayDirectory` has no reactive update path (found dogfooding the Rust demo).** It is boxed into `EngineCore` at `spawn` with no way to update it afterward, and no live (non-fixture) implementation exists — an app must pre-resolve all NIP-65 relays before spawn (as `nmp-demo/src/bootstrap.rs` does). The falsifier's "pick relays from your follows' kind:10002" mode needs relay facts to update *reactively* as follows and their 10002s change. **Fix:** a live, updatable `RelayDirectory` fed by the engine's own kind:10002 ingestion (itself expressible as a `Derived` binding). Needed for M5's relay-picker mode.
+
 
 - **Multi-account signer switching is NOT wired (M3-C).** `set_active_pubkey` re-roots the *read* graph (M1-proven identity re-root), but the signer is a fixed constructor argument to `EngineThread::spawn`. So publishing *as a different account* after a switch has no path. The falsifier's #1 requirement is multi-nsec login + switch, which includes writing as the switched-to account. **Fix:** the engine must hold a signer per account (or a signer registry) and `set_active_signer`/account-switch must select both the reactive pubkey and the active signing capability. Owner: M4/M5 boundary work. Until then, "account switching" is proven for reads only.
 
