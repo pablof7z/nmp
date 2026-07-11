@@ -7,18 +7,80 @@
 //! take, only one it may take early via [`Subscription::cancel`]/
 //! [`DiagnosticsSubscription::cancel`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvError;
+use std::sync::Arc;
 
 use nmp_engine::core::DiagnosticsSnapshot;
 use nmp_engine::runtime::{DiagnosticsHandle, Handle, LatestReceiver, QueryHandle, RowsMsg};
+
+/// The facade's single opaque cancellation capability (#52; codex-nova's
+/// ratified shape), shared by both [`Subscription`] and
+/// [`DiagnosticsSubscription`]. Exposes only [`Self::cancel`] -- no
+/// `Handle`/`QueryHandle`/`DiagnosticsHandle` (the raw mechanism-capability
+/// types `nmp-ffi` used to hold directly) ever appears in a stable facade
+/// signature; only this opaque, `Clone + Send + Sync` token does. `recv()`
+/// blocks, so a dedicated drain loop (e.g. `nmp-ffi`'s `NmpQueryHandle`)
+/// must own the whole `Subscription`/`DiagnosticsSubscription` outright;
+/// this token is what lets a SEPARATE handle still trigger withdrawal
+/// immediately from elsewhere, rather than waiting for the drain loop's
+/// next `recv()` to notice the disconnect.
+///
+/// Cancellation is idempotent across every clone AND the owning
+/// subscription's own `Drop`: exactly ONE withdrawal (`Handle::
+/// unsubscribe`/`DiagnosticsHandle::cancel`) ever fires, no matter how many
+/// clones call [`Self::cancel`] or whether `Drop` also runs -- an
+/// `AtomicBool` guard shared through the `Arc` makes the first caller (in
+/// either role) win and every other call a no-op. `Subscription`/
+/// `DiagnosticsSubscription` each hold one of these (built in their own
+/// `new`) and route their own `Drop` through that SAME instance's
+/// [`Self::cancel`], so a caller holding a clone and the owning value's own
+/// teardown converge on one guarded action -- never a double-withdrawal.
+#[derive(Clone)]
+pub struct ObservationCancel {
+    inner: Arc<CancelState>,
+}
+
+struct CancelState {
+    done: AtomicBool,
+    // A boxed closure rather than an enum over `Query`/`Diagnostics`
+    // variants: it captures exactly the one withdrawal action each
+    // constructor below needs (`Handle::unsubscribe`/`DiagnosticsHandle::
+    // cancel`) with no further vocabulary added here, and it is what makes
+    // the guard itself trivially provable in isolation (see this module's
+    // tests) without spinning up a real engine just to count calls.
+    action: Box<dyn Fn() + Send + Sync>,
+}
+
+impl ObservationCancel {
+    fn new(action: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            inner: Arc::new(CancelState {
+                done: AtomicBool::new(false),
+                action: Box::new(action),
+            }),
+        }
+    }
+
+    /// Withdraw the underlying subscription/diagnostics stream now. Safe to
+    /// call from any clone, any number of times, and safe to race the
+    /// owning value's own `Drop` -- the first call (from whichever clone,
+    /// or `Drop`) wins the guard; every other call, including a
+    /// post-`shutdown` one, is a safe no-op.
+    pub fn cancel(&self) {
+        if self.inner.done.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        (self.inner.action)();
+    }
+}
 
 /// A live query subscription. `Drop` withdraws it -- an app never needs a
 /// second container or lifecycle hook to make that happen; call
 /// [`Self::cancel`] instead of `drop`ping the value for an explicit early
 /// teardown that reads as intent rather than scope exit.
 pub struct Subscription {
-    handle: Handle,
-    query_handle: QueryHandle,
+    cancel: ObservationCancel,
     rows: std::sync::mpsc::Receiver<RowsMsg>,
 }
 
@@ -29,8 +91,7 @@ impl Subscription {
         rows: std::sync::mpsc::Receiver<RowsMsg>,
     ) -> Self {
         Self {
-            handle,
-            query_handle,
+            cancel: ObservationCancel::new(move || handle.unsubscribe(query_handle)),
             rows,
         }
     }
@@ -48,28 +109,25 @@ impl Subscription {
     /// a scope exit.
     pub fn cancel(self) {}
 
-    /// A cheap, independently-clonable capability to withdraw this
-    /// subscription's demand from elsewhere, decoupled from `recv()`'s
-    /// ownership of the row channel -- exactly the `(Handle, QueryHandle)`
-    /// pair `Drop` itself uses. `recv()` blocks, so a dedicated drain loop
-    /// (e.g. `nmp-ffi`'s `NmpQueryHandle`) must own the whole `Subscription`
-    /// outright; this lets a separate, `Send`-able capability still trigger
-    /// withdrawal immediately, rather than waiting for the drain loop's next
-    /// `recv()` to notice the disconnect.
-    pub fn cancel_handle(&self) -> (Handle, QueryHandle) {
-        (self.handle.clone(), self.query_handle)
+    /// The facade's opaque cancellation capability for this subscription --
+    /// see [`ObservationCancel`]'s doc. A clone lets a caller trigger
+    /// withdrawal from elsewhere (e.g. a dedicated drain thread that owns
+    /// `recv()`, since it blocks) while this value's own `Drop` still
+    /// converges on the same one-withdrawal guard.
+    pub fn cancel_handle(&self) -> ObservationCancel {
+        self.cancel.clone()
     }
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        self.handle.unsubscribe(self.query_handle);
+        self.cancel.cancel();
     }
 }
 
 /// A live diagnostics stream. Same `Drop` discipline as [`Subscription`].
 pub struct DiagnosticsSubscription {
-    diag_handle: DiagnosticsHandle,
+    cancel: ObservationCancel,
     snapshots: LatestReceiver<DiagnosticsSnapshot>,
 }
 
@@ -79,7 +137,7 @@ impl DiagnosticsSubscription {
         snapshots: LatestReceiver<DiagnosticsSnapshot>,
     ) -> Self {
         Self {
-            diag_handle,
+            cancel: ObservationCancel::new(move || diag_handle.cancel()),
             snapshots,
         }
     }
@@ -96,16 +154,72 @@ impl DiagnosticsSubscription {
     /// `Drop`.
     pub fn cancel(self) {}
 
-    /// Same rationale as [`Subscription::cancel_handle`] -- `DiagnosticsHandle`
-    /// is already cheaply `Clone` with a non-consuming `cancel(&self)`, so
-    /// this is a plain accessor.
-    pub fn cancel_handle(&self) -> DiagnosticsHandle {
-        self.diag_handle.clone()
+    /// Same rationale as [`Subscription::cancel_handle`] -- returns the
+    /// SAME [`ObservationCancel`] type (the one facade-owned cancel token,
+    /// shared by both subscription kinds).
+    pub fn cancel_handle(&self) -> ObservationCancel {
+        self.cancel.clone()
     }
 }
 
 impl Drop for DiagnosticsSubscription {
     fn drop(&mut self) {
-        self.diag_handle.cancel();
+        self.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// codex-nova's non-negotiable proof #2, isolated from any real engine:
+    /// repeated `cancel()` calls across clones, PLUS the guard firing again
+    /// (standing in for the owning value's `Drop`, which routes through the
+    /// same `ObservationCancel::cancel()` call), must trigger the
+    /// underlying withdrawal action EXACTLY ONCE.
+    #[test]
+    fn cancels_exactly_once_across_clones_and_a_drop_equivalent_call() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&count);
+        let cancel = ObservationCancel::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let clone_a = cancel.clone();
+        let clone_b = cancel.clone();
+
+        cancel.cancel();
+        clone_a.cancel();
+        clone_b.cancel();
+        cancel.cancel(); // simulates `Drop` firing after callers already cancelled
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the underlying withdrawal action must fire exactly once, no matter how many \
+             clones (or a subsequent Drop) call cancel()"
+        );
+    }
+
+    /// The reverse ordering: the guard fires first (standing in for
+    /// `Drop`), and every clone's later `cancel()` call must still be a
+    /// no-op rather than double-firing.
+    #[test]
+    fn a_drop_equivalent_call_before_clones_still_cancels_exactly_once() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&count);
+        let cancel = ObservationCancel::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let clone_a = cancel.clone();
+        let clone_b = cancel.clone();
+
+        cancel.cancel(); // simulates `Drop` firing first
+        clone_a.cancel();
+        clone_b.cancel();
+
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

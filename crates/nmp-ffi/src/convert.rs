@@ -1,17 +1,18 @@
 //! `FfiFilter -> nmp_grammar::Filter` (and back, for the round-trip test)
-//! plus `nostr::Event -> FfiRow`/`nmp_engine` value mirrors (M4 plan §2 step
-//! A). Every parse of a foreign-supplied string (hex ids/keys, a tag-name
-//! character, a relay URL) returns a typed [`FfiError`], never a panic --
-//! errors are values across this boundary (plan §2/§6).
+//! plus `nostr::Event -> FfiRow`/`nmp` value mirrors (M4 plan §2 step A).
+//! Every value mirrored from the engine side (`Durability`/`WriteIntent`/
+//! `DiagnosticsSnapshot`/etc.) is sourced through the `nmp` facade's
+//! re-exports, never `nmp-engine` directly (#52 Unit B) -- `nmp-ffi` has no
+//! dependency on `nmp-engine` at all. Every parse of a foreign-supplied
+//! string (hex ids/keys, a tag-name character, a relay URL) returns a typed
+//! [`FfiError`], never a panic -- errors are values across this boundary
+//! (plan §2/§6).
 
 use std::collections::{BTreeMap, HashMap};
 
-use nmp::Lane;
-use nmp_engine::core::{
-    DiagnosticsSnapshot, FilterCoverageEntry, QueryCoverage, RelayDiagnosticsSnapshot, RowDelta,
-};
-use nmp_engine::outbox::{
-    Durability as GDurability, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
+use nmp::{
+    DiagnosticsSnapshot, Durability as GDurability, FilterCoverageEntry, Lane, QueryCoverage,
+    RelayDiagnosticsSnapshot, RowDelta, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
     WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
@@ -546,6 +547,11 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         FfiDurability::AtMostOnce => GDurability::AtMostOnce,
     };
 
+    // NOTE: there is deliberately no `FfiWriteRouting::PrivateNarrow` arm
+    // here -- see that (deleted) variant's removal note in `types.rs`. A
+    // `WriteRouting::PrivateNarrow` intent is still constructible from
+    // direct Rust (`nmp::WriteRouting::PrivateNarrow`), just not from raw
+    // FFI-supplied relay-URL strings.
     let routing = match intent.routing {
         FfiWriteRouting::AuthorOutbox => GWriteRouting::AuthorOutbox,
         FfiWriteRouting::ToInboxes { recipients } => {
@@ -554,15 +560,6 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
                 .map(|hex| parse_pubkey(hex))
                 .collect::<Result<Vec<_>, _>>()?;
             GWriteRouting::ToInboxes(pks)
-        }
-        FfiWriteRouting::PrivateNarrow { relays } => {
-            let urls = relays
-                .iter()
-                .map(|u| parse_relay_url(u))
-                .collect::<Result<Vec<_>, _>>()?;
-            GWriteRouting::PrivateNarrow(nmp_engine::outbox::PrivateRoute {
-                relays: nmp_engine::outbox::NarrowOnly::new(urls),
-            })
         }
     };
 

@@ -26,8 +26,6 @@
 use std::sync::Arc;
 use std::thread;
 
-use nmp_engine::runtime::{DiagnosticsHandle, Handle, QueryHandle};
-
 use crate::convert::{
     coverage_to_ffi, diagnostics_snapshot_to_ffi, filter_from_ffi, parse_pubkey, row_delta_to_ffi,
     write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
@@ -119,7 +117,7 @@ impl NmpEngine {
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let filter = filter_from_ffi(query)?;
         let subscription = self.engine.observe(nmp::LiveQuery(filter))?;
-        let (handle, query_handle) = subscription.cancel_handle();
+        let cancel = subscription.cancel_handle();
 
         thread::spawn(move || {
             while let Ok((deltas, coverage)) = subscription.recv() {
@@ -129,10 +127,7 @@ impl NmpEngine {
             observer.on_closed();
         });
 
-        Ok(Arc::new(NmpQueryHandle {
-            handle,
-            query_handle,
-        }))
+        Ok(Arc::new(NmpQueryHandle { cancel }))
     }
 
     /// Enqueue a write. `observer` streams every `WriteStatus` this intent
@@ -174,7 +169,7 @@ impl NmpEngine {
         observer: Box<dyn DiagnosticsObserver>,
     ) -> Result<Arc<NmpDiagnosticsHandle>, FfiError> {
         let subscription = self.engine.observe_diagnostics()?;
-        let diag_handle = subscription.cancel_handle();
+        let cancel = subscription.cancel_handle();
 
         thread::spawn(move || {
             while let Some(snapshot) = subscription.recv() {
@@ -183,7 +178,7 @@ impl NmpEngine {
             observer.on_closed();
         });
 
-        Ok(Arc::new(NmpDiagnosticsHandle { diag_handle }))
+        Ok(Arc::new(NmpDiagnosticsHandle { cancel }))
     }
 
     /// Stop the engine. Idempotent: a second call is a no-op (`nmp::Engine`'s
@@ -196,14 +191,16 @@ impl NmpEngine {
 /// The app-facing handle to a live subscription (returned by
 /// [`NmpEngine::observe`]). `Drop` withdraws the subscription -- the SDK
 /// never requires an app-owned container or lifecycle hook to make this
-/// happen (plan §7's kill test). Holds only the cheap `(Handle,
-/// QueryHandle)` cancel capability (`nmp::Subscription::cancel_handle`) --
-/// the receiving half of the subscription is owned entirely by
-/// [`NmpEngine::observe`]'s drain thread, since `recv()` blocks.
+/// happen (plan §7's kill test). Holds ONLY the opaque
+/// [`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) -- no
+/// `Handle`/`QueryHandle` (the raw imperative engine-control capability)
+/// ever reaches this crate. The receiving half of the subscription is owned
+/// entirely by [`NmpEngine::observe`]'s drain thread, since `recv()`
+/// blocks; `cancel()`/`Drop` here and the drain thread's own teardown
+/// converge on the token's single withdrawal guard (see that type's doc).
 #[derive(uniffi::Object)]
 pub struct NmpQueryHandle {
-    handle: Handle,
-    query_handle: QueryHandle,
+    cancel: nmp::ObservationCancel,
 }
 
 #[uniffi::export]
@@ -213,24 +210,24 @@ impl NmpQueryHandle {
     /// preempt explicitly). Safe to call more than once, and safe to never
     /// call at all (in which case `Drop` is what withdraws it).
     pub fn cancel(&self) {
-        self.handle.unsubscribe(self.query_handle);
+        self.cancel.cancel();
     }
 }
 
 impl Drop for NmpQueryHandle {
     fn drop(&mut self) {
-        self.handle.unsubscribe(self.query_handle);
+        self.cancel.cancel();
     }
 }
 
 /// The app-facing handle to a live diagnostics stream (returned by
 /// [`NmpEngine::observe_diagnostics`]). Same discipline as [`NmpQueryHandle`]
-/// -- holds only the cheap `DiagnosticsHandle` cancel capability
-/// (`nmp::DiagnosticsSubscription::cancel_handle`), already non-consuming
-/// and idempotent on its own.
+/// -- holds ONLY the opaque [`nmp::ObservationCancel`] token
+/// (`DiagnosticsSubscription::cancel_handle`), the SAME type
+/// [`NmpQueryHandle`] holds.
 #[derive(uniffi::Object)]
 pub struct NmpDiagnosticsHandle {
-    diag_handle: DiagnosticsHandle,
+    cancel: nmp::ObservationCancel,
 }
 
 #[uniffi::export]
@@ -238,13 +235,13 @@ impl NmpDiagnosticsHandle {
     /// Withdraw this diagnostics observer now, rather than waiting for
     /// `Drop`. Safe to call more than once; safe to never call at all.
     pub fn cancel(&self) {
-        self.diag_handle.cancel();
+        self.cancel.cancel();
     }
 }
 
 impl Drop for NmpDiagnosticsHandle {
     fn drop(&mut self) {
-        self.diag_handle.cancel();
+        self.cancel.cancel();
     }
 }
 
@@ -317,6 +314,69 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_secs(1)).is_err(),
             "Failed must be the sole terminal status -- no Accepted, nothing further"
+        );
+
+        engine.shutdown();
+    }
+
+    struct ClosedCountingRowObserver {
+        closed_tx: Mutex<mpsc::Sender<()>>,
+    }
+
+    impl RowObserver for ClosedCountingRowObserver {
+        fn on_batch(
+            &self,
+            _deltas: Vec<crate::types::FfiRowDelta>,
+            _coverage: crate::types::FfiCoverage,
+        ) {
+        }
+
+        fn on_closed(&self) {
+            let _ = self.closed_tx.lock().unwrap().send(());
+        }
+    }
+
+    /// codex-nova's non-negotiable proof #2, wired all the way through the
+    /// real FFI drain thread (the isolated `ObservationCancel` guard proof
+    /// lives in `nmp::subscription::tests`): calling `cancel()` on the SAME
+    /// `NmpQueryHandle` from two different `Arc` owners, then dropping
+    /// both, must still withdraw exactly once and deliver the drain
+    /// thread's `RowObserver::on_closed` exactly once -- never zero (a
+    /// hang), never more than once.
+    #[test]
+    fn ffi_repeated_cancel_across_arc_owners_and_drop_yields_exactly_one_on_closed() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let observer = Box::new(ClosedCountingRowObserver {
+            closed_tx: Mutex::new(closed_tx),
+        });
+
+        let filter = FfiFilter {
+            kinds: Some(vec![9999]),
+            ..FfiFilter::default()
+        };
+        let handle = engine
+            .observe(filter, observer)
+            .expect("a well-formed filter must be accepted");
+
+        // Two independent `Arc` owners of the SAME `NmpQueryHandle` -- both
+        // call `cancel()`, then both are dropped, mirroring a caller that
+        // cancels explicitly and also lets its last reference go out of
+        // scope.
+        let handle_other_owner = Arc::clone(&handle);
+        handle.cancel();
+        handle_other_owner.cancel();
+        handle.cancel();
+        drop(handle);
+        drop(handle_other_owner);
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("on_closed must fire once the subscription is withdrawn, not hang");
+        assert!(
+            closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "on_closed must fire EXACTLY once, not once per cancel() call/Arc owner/Drop"
         );
 
         engine.shutdown();

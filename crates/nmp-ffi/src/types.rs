@@ -187,15 +187,23 @@ pub enum FfiDurability {
     AtMostOnce,
 }
 
-/// `nmp_engine::outbox::WriteRouting` mirror. `PrivateNarrow`'s `relays` is
-/// the fixed, fail-closed set itself (ledger #6) -- an empty `Vec` here is
-/// exactly how "unroutable" is expressed; there is no widen operation on
-/// the wire, matching `NarrowOnly`'s own construction discipline.
+/// `nmp_engine::outbox::WriteRouting` mirror -- `PrivateNarrow` deliberately
+/// has NO wire form here (#22/#52). `nmp_engine::outbox::NarrowOnly::new`'s
+/// own doc requires "the caller must already have resolved and narrowed
+/// this itself" -- i.e. a trusted protocol module's own logic, not a raw
+/// relay-URL string handed across the FFI boundary by an app with no way to
+/// prove those URLs are actually private. Minting `PrivateRoute` from
+/// FFI-supplied strings would be exactly the "raw app-provided expanded
+/// relay set"/"route escape hatch" #22's canonical design rules out; the
+/// `nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`
+/// for the identical reason (see `crates/nmp/src/lib.rs`'s doc). A
+/// validated, opaque private-route mint belongs in a protocol module built
+/// on direct Rust, not this FFI surface -- `AuthorOutbox`/`ToInboxes`
+/// remain the only FFI-constructible routing choices for now.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteRouting {
     AuthorOutbox,
     ToInboxes { recipients: Vec<String> },
-    PrivateNarrow { relays: Vec<String> },
 }
 
 /// The event payload of a write intent (`nmp_engine::outbox::WritePayload`
