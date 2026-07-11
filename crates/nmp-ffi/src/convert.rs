@@ -33,7 +33,7 @@ use crate::types::{
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiError {
     /// A `FfiSelector::Tag`/`FfiFilter.tags` key was not exactly one
-    /// character from the closed M1 set (`p, e, a, d, E, t, q`).
+    /// character from the closed set (`p, e, a, d, E, t, q, h`).
     InvalidTagName {
         got: String,
     },
@@ -585,6 +585,25 @@ mod tests {
         let grammar = filter_from_ffi(ffi.clone()).expect("valid filter");
         let back = filter_to_ffi(grammar);
         assert_eq!(ffi, back);
+    }
+
+    #[test]
+    fn nip29_h_tag_binding_round_trips() {
+        let mut tags = HashMap::new();
+        tags.insert(
+            "h".to_string(),
+            FfiBinding::Literal {
+                values: vec!["group-id".to_string()],
+            },
+        );
+        let ffi = FfiFilter {
+            kinds: Some(vec![9, 30_315]),
+            tags,
+            ..FfiFilter::default()
+        };
+
+        let grammar = filter_from_ffi(ffi.clone()).expect("h is a governed tag name");
+        assert_eq!(filter_to_ffi(grammar), ffi);
     }
 
     #[test]

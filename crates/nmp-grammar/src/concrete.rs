@@ -101,7 +101,7 @@ impl ConcreteFilter {
     /// # Panics
     /// Panics if `authors`/`ids` contain a string that isn't a valid
     /// 32-byte-hex pubkey/event-id, or if a tag key somehow isn't one of
-    /// M1's valid single-letter tags. Both are construction invariants of
+    /// the grammar's valid single-letter tags. Both are construction invariants of
     /// `ConcreteFilter` (its hex strings always originate from
     /// `PublicKey::to_hex`/`EventId::to_hex` round-trips, and its tag keys
     /// are always `TagName`s, which are pre-validated) — a panic here means
@@ -292,6 +292,25 @@ mod tests {
         assert_eq!(
             nf.generic_tags.get(&d_tag),
             Some(&BTreeSet::from(["g1".to_string()]))
+        );
+    }
+
+    #[test]
+    fn to_nostr_lowers_nip29_h_tag_to_wire_filter() {
+        let cf = ConcreteFilter {
+            kinds: Some(BTreeSet::from([9u16, 30_315u16])),
+            tags: BTreeMap::from([(
+                TagName::new('h').expect("h is governed"),
+                BTreeSet::from(["group-id".to_string()]),
+            )]),
+            ..ConcreteFilter::default()
+        };
+
+        let wire = cf.to_nostr();
+        let h_tag = nostr::SingleLetterTag::from_char('h').unwrap();
+        assert_eq!(
+            wire.generic_tags.get(&h_tag),
+            Some(&BTreeSet::from(["group-id".to_string()]))
         );
     }
 
