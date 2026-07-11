@@ -8,6 +8,7 @@ members = [
     "nmp-transport",
     "nmp-signer",
     "nmp-engine",
+    "nmp-demo",
 ]
 
 [workspace.package]
@@ -24,4 +25,5 @@ nmp-resolver = { path = "nmp-resolver" }
 nmp-router = { path = "nmp-router" }
 nmp-transport = { path = "nmp-transport" }
 nmp-signer = { path = "nmp-signer" }
+nmp-engine = { path = "nmp-engine" }
 proptest = "1"
