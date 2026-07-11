@@ -138,8 +138,10 @@ let demand = NMPDemand(
 )
 ```
 
-The protocol module mints `group.sourceAuthority` from validated group state;
-the app cannot grant protocol-host authority to an arbitrary relay URL.
+The protocol module mints `group.sourceAuthority` from typed NIP-29 group
+context. The app may supply the public group host through that semantic
+constructor, but cannot convert a relay URL into generic authority for unrelated
+demand.
 
 Evidence from one AUTH identity cannot prove acquisition for another. The app
 still owns whether and when that identity is acceptable for product policy.

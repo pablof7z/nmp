@@ -36,6 +36,10 @@ timeline, follows, profiles, or any other content family is the center of NMP.
 - Protocol examples name their owner, such as NIP-02, NIP-29, or NIP-68.
 - A reusable helper expands to the closed public grammar and is never a hidden
   subscription lifecycle.
+- Every nested `Derived` query names its own source/access context; it never
+  inherits the outer demand's context implicitly.
+- Indexed filter tag keys are one ASCII letter, while event/projection tag
+  names are arbitrary strings. Never introduce a blessed tag whitelist.
 - A protocol module owns only the exact schemas and semantics its protocol
   defines.
 
@@ -58,7 +62,8 @@ Use the snapshot vocabulary consistently:
 - canonical rows from the local cache;
 - cache revision/provenance evidence;
 - acquisition facts for currently planned sources and access contexts; and
-- explicit shortfall when a source or local limit prevented intended work.
+- explicit shortfall when demand has no routable candidate or a local limit
+  prevented intended work.
 
 Do not write `syncHealth`, `globally synced`, `authoritative empty`, or any
 equivalent promise. EOSE and watermarks are scoped source facts.
@@ -70,9 +75,9 @@ body, signer identity, receipt, obligation, and canonical pending row. Matching
 queries see that row through ordinary store invalidation. The write path never
 pushes an optimistic row directly to an observer.
 
-Every durability class has observable receipt status. A non-durable write may
-forgo persistence and restart reattachment, but it is not a silent `void`
-operation.
+Every durability class has observable, reattachable receipt status. A
+non-durable write may forgo resuming its publication obligation after process
+loss, but its minimal receipt does not silently disappear.
 
 ## 7. Separate current pubkey from signer identity
 
@@ -93,6 +98,10 @@ subscription manager, or app framework.
 Composition is immutable. A NIP-29 group operation may add an `h` tag and host
 relay context to a NIP-68 photo draft without claiming ownership of the photo
 kind. Core freezes and signs the final value once.
+
+Cross-module dependency does not transfer ownership. NIP-51 owns kind `10009`;
+NIP-29 may compose its typed values into remembered group/host operations but
+claims neither `10009` nor generic kind `30002` relay sets.
 
 ## 9. Use native platform idioms
 

@@ -64,15 +64,15 @@ Some protocols make a relay part of the operation itself. That context comes
 from the protocol module:
 
 ```swift
-let group = try await nip29.resolveGroup(groupPointer, using: engine)
+let group = Nip29.group(id: groupId, host: groupRelay)
 let receipt = try group.publish(photoDraft, using: engine)
 ```
 
-The returned group reference carries opaque module-minted authority. There is no
-public `Group(id:host:)` constructor that turns an arbitrary relay URL into that
-proof. NIP-29 validates and contributes the group `h` tag plus host authority.
-It does not own the photo kind, select the signer, open its own relay connection,
-or publish outside the core outbox.
+The public host is a semantic NIP-29 parameter. The module turns that pair into
+opaque context usable only for that group operation; it does not grant a generic
+relay override. NIP-29 contributes the group `h` tag plus host constraint. It
+does not own the photo kind, select the signer, open its own relay connection, or
+publish outside the core outbox.
 
 ## Routing reasons are typed and inspectable
 

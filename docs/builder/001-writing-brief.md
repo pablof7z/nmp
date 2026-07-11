@@ -56,7 +56,8 @@ Use an immutable unsigned draft for a caller-owned kind. Show:
 - `Accepted` before signing when the durable obligation is committed;
 - the same pending row becoming signed without changing id;
 - per-relay receipt facts; and
-- explicitly non-durable status without persistence claims.
+- explicitly non-durable publication that does not resume after process loss,
+  while its minimal receipt remains reattachable.
 
 ### Protocol composition
 
@@ -101,9 +102,13 @@ only group context (`h` plus host authority), and core signs once.
 - Is core still useful with no protocol module enabled?
 - Did a social/content example accidentally become a core default?
 - Can every engine decision be printed and explained?
+- Does every nested derived demand state its own source/access context?
+- Are arbitrary event tag names distinct from indexed single-letter filter
+  keys, with no whitelist?
 - Are query facts scoped to known sources instead of global truth?
 - Does every write have observable status without equating acceptance and ack?
 - Is current pubkey separate from optional signer override?
 - Does protocol composition preserve exact ownership and immutable drafts?
+- Does a module dependency preserve the schema owner's boundary?
 - Is app architecture still plainly app-owned?
 - Are target spelling and current availability separated honestly?

@@ -49,7 +49,7 @@ supported ABIs, generated Kotlin bindings, and the hand-written `Flow`
 projection:
 
 ```kotlin
-val engine = NMPEngine(configuration)
+val engine = NmpEngine(configuration)
 engine.observe(demand).collect { snapshot ->
     appState = appState.withSnapshot(snapshot)
 }
@@ -76,7 +76,7 @@ purpose, and excluded from the normal compatibility promise.
 ## Optional protocol modules
 
 Core remains content-neutral. Protocol behavior is packaged as opt-in modules
-that depend on the canonical facade:
+composed with the canonical facade:
 
 ```text
 nmp core
@@ -93,9 +93,21 @@ operations, and protocol authority. Enabling NIP-29 may add group operations and
 group-host context. It must not pull a preferred timeline into core or own a
 foreign NIP-68 photo schema merely because a group can publish one.
 
-Platform distribution should preserve opt-in composition where practical. It
-must not require app-side module registration, callbacks, or a second engine
-container.
+Dependencies do not transfer ownership. For example, an NIP-29 package may
+depend on NIP-51 to compose typed kind `10009` Simple groups into remembered
+NIP-29 group/host references. NIP-51 still exclusively owns the `10009` codec;
+NIP-29 claims neither `10009` nor generic kind `30002` relay sets.
+
+The composition root links the facade and each enabled module, then passes the
+modules' immutable static claims into engine construction. In Rust this may be
+an explicit list of `ModuleRegistration` values from the linked crates. A Swift
+or Kotlin product may project the same choice as a closed configuration or
+precomposed package.
+
+This is construction data, not a registration framework: modules install no
+callbacks, perform no startup side effects, and own no lifecycle or second
+engine. An app enabling zero modules supplies an empty claim set and retains the
+raw two-noun engine.
 
 ## Binary and binding versions move together
 

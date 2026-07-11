@@ -1,14 +1,14 @@
 # Guarantees and the bugs they exclude
 
-**Status: CURRENT + TARGET.** This chapter is the builder-facing map of the
-[bug-class ledger](../bug-class-ledger.md). `BUILT`, `PARTIAL`, and `TARGET`
-matter: do not rely on a target mechanism as if it already ships.
+This chapter is the builder-facing map of the provisional v2 guarantees. The
+[bug-class ledger](../bug-class-ledger.md) and
+[current implementation status](03-status-map.md) record which proofs ship.
 
 The old NMP relied on broad doctrine and lints. The rewrite closes a bug class
 only when the supported facade makes the bad path unreachable and a falsifier
 proves it.
 
-## Built or partially built guarantees
+## Core structural guarantees
 
 ### #1: one canonical store mutation path
 
@@ -39,9 +39,8 @@ closure.
 
 **Excludes:** unioning every discovered relay into an unbounded connection set.
 
-Current solver caps are partial proof. The target makes every whole-demand cap
-and uncovered portion explicit; a two-relay objective is never presented as
-met when available facts or the cap prevented it.
+Every whole-demand cap and uncovered portion is explicit; a two-relay objective
+is never presented as met when available facts or the cap prevented it.
 
 ### #5: dedup with provenance
 
@@ -59,14 +58,13 @@ relays.
 Narrow route types have no widen operation. A protocol module that cannot
 resolve a required private route fails closed with typed evidence.
 
-### #7: source evidence cannot claim global truth (target)
+### #7: source evidence cannot claim global truth
 
 **Excludes:** treating an empty cache or one relay's EOSE as proof that no
 matching event exists anywhere.
 
-The current aggregate `Unknown | CompleteUpTo` API overstates what watermarks
-prove. The target snapshot carries rows plus compact per-planned-source
-acquisition and shortfall facts. Apps interpret those facts; NMP exposes no
+The snapshot carries rows plus compact per-planned-source acquisition and
+shortfall facts. Apps interpret those facts; NMP exposes no
 `synced`, `syncHealth`, global `complete`, or `authoritativeEmpty` state.
 
 ### #8: negentropy requires a proved capability
@@ -76,16 +74,15 @@ acquisition and shortfall facts. Apps interpret those facts; NMP exposes no
 Only the prober can mint `ProbedRelay`; the negentropy effect requires that
 token. Other relays use REQ.
 
-### #9: durable acceptance is not convergence (partial)
+### #9: durable acceptance is not convergence
 
 **Excludes:** a publish return value being mistaken for relay success.
 
-Per-relay receipts exist today. The target strengthens `Accepted`: it is emitted
-only after atomic persistence of the frozen body, expected author, intent,
-receipt, and canonical pending row. ACK, rejection, and retry remain separate
-facts.
+`Accepted` is emitted only after atomic persistence of the frozen body, expected
+author, intent, receipt, and canonical pending row. ACK, rejection, and retry
+remain separate facts.
 
-### #10: accepted writes cannot drift to another signer (target)
+### #10: accepted writes cannot drift to another signer
 
 **Excludes:** an account/current-pubkey change reassigning an already accepted
 unsigned write.
@@ -113,14 +110,15 @@ policy becoming shared infrastructure.
 Core and modules emit raw protocol-semantic values. Crypto providers may
 decrypt protocol data, but presentation remains downstream in the app/UI.
 
-## Promoted target guarantees
+## Extended v2 guarantees
 
 ### #13: acquisition and presentation cursors stay distinct
 
 **Excludes:** a late-arriving old-timestamped event being skipped because a UI
 pagination cursor already passed it.
 
-This remains a Collection-mode target, not a shipped guarantee.
+The exact windowed/collection API remains unsettled; the cursor-ownership rule
+is the requirement.
 
 ### #14: schema ownership is not contextual authority
 
@@ -136,7 +134,7 @@ validates the immutable composition and signs once.
 **Excludes:** an optimistic overlay or direct write-to-observer lane diverging
 from the store.
 
-The target canonical row carries `Pending(intentId) | Signed(signature)` and
+The canonical row carries `Pending(intentId) | Signed(signature)` and
 participates in normal filters, derived bindings, replacement, delete, expiry,
 persistence, and invalidation.
 
@@ -155,17 +153,18 @@ owns time and concurrency.
 
 Every graph, wire, relay, observer, and result limit must preserve exact
 semantics, return explicit shortfall, reject with a type, or backpressure with a
-diagnostic reason. Swift newest-frame buffering is built; end-to-end proof is
-not.
+diagnostic reason. Every projection and interior queue must prove the bound end
+to end.
 
 ### #18: source/access contexts cannot borrow evidence incorrectly
 
 **Excludes:** equal filters under different AUTH or source authority sharing a
 watermark as though they were the same request.
 
-Target descriptor identity is `Selection + SourceAuthority + AccessContext`.
+Descriptor identity is `Selection + SourceAuthority + AccessContext`.
 Selection work may share; wire demand and evidence share only after a
-compatibility proof.
+compatibility proof. Every nested `Derived` demand carries its own explicit
+source/access context; it cannot inherit or borrow the outer demand's evidence.
 
 ### #19: event/outbox persistence cannot become a secret vault
 
@@ -177,10 +176,10 @@ providers.
 
 ## Builder rule
 
-Build directly on `BUILT` proofs. For `PARTIAL` and `TARGET`, use the documented
-current API only with its stated limits and track the owning issue. A design doc
-or passing adjacent test does not promote a guarantee; the supported Rust
-facade and platform projection must be falsified end to end.
+Treat this list as the North Star, not evidence that every mechanism ships. A
+design doc or passing adjacent test does not promote a guarantee; the supported
+Rust facade and platform projections must be falsified end to end. Check the
+status appendix and owning issue before relying on one in a shipping app.
 
 ---
 

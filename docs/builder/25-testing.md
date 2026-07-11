@@ -18,14 +18,19 @@ sequence without knowing how the engine produced it:
 let first = QuerySnapshot(
     rows: [row(id: "a", kind: 9999)],
     cache: .persistent,
-    acquisition: [.connecting(relayA)],
+    acquisition: [
+        .init(relay: relayA, reconciledThrough: nil, status: .connecting)
+    ],
     shortfall: [])
 
 let second = QuerySnapshot(
     rows: [row(id: "a", kind: 9999), row(id: "b", kind: 9999)],
     cache: .persistent,
-    acquisition: [.reconciled(relayA, through: timestamp)],
-    shortfall: [.sourceUnavailable(relayB)])
+    acquisition: [
+        .init(relay: relayA, reconciledThrough: timestamp, status: .requesting),
+        .init(relay: relayB, reconciledThrough: nil, status: .disconnected)
+    ],
+    shortfall: [])
 
 model.apply(first)
 model.apply(second)
@@ -96,6 +101,22 @@ challenges, and clock advances without importing FFI records or constructing an
 Until this target surface lands, treat internal SDK fakes as repository tests,
 not a stable consumer contract. The honest shipping state is tracked in
 [Current implementation status](03-status-map.md).
+
+## Prove grammar and module boundaries
+
+Engine-level contract tests must show that:
+
+- a nested `Derived` demand uses its own source/access context even when the
+  outer demand names a different protocol host or AUTH identity;
+- changing inner or outer context recompiles only dependent work and never
+  aliases their acquisition evidence;
+- every ASCII letter `A-Z` and `a-z` is accepted as an indexed filter tag key;
+- arbitrary event tag names such as `alt`, `-`, and application-defined strings
+  round-trip and can be projected without becoming generic filter keys;
+- no whitelist grants one protocol tag special treatment; and
+- the NIP-29 remembered-groups surface consumes NIP-51's typed kind `10009`
+  values without claiming `10009` or kind `30002`, and the underlying list
+  demand never runs through the selected group host.
 
 ## Diagnostics make good golden evidence
 

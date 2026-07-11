@@ -36,9 +36,13 @@ own an observation:
 
 ```swift
 func observeLibrary() async throws {
-    let demand = NMPDemand(selection: .filter(kinds: [9999]))
+    let demand = NMPDemand(
+        selection: .filter(kinds: [9999]),
+        source: .authorOutboxes,
+        access: .public
+    )
 
-    for try await snapshot in nmp.observe(demand) {
+    for await snapshot in try nmp.observe(demand) {
         rows = snapshot.rows
         sourceEvidence = snapshot.acquisition
     }

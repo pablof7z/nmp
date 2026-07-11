@@ -93,11 +93,17 @@ silently prove acquisition for another.
 
 Shortfall records the intended work NMP could not perform:
 
-- uncovered authors because relay discovery produced no route;
-- planned relay unavailable or AUTH-blocked;
-- fan-out cap prevented an otherwise known source;
-- derived set or wire filter exceeded an exact limit; or
-- result/cache bound was engine-imposed rather than requested by the app.
+- a subtree atom or resolved demand with no covering source candidate;
+- a zero-atom or zero-planned-source result that would otherwise look
+  vacuously settled;
+- a fan-out, graph, derived-set, wire-filter, or result bound that prevented
+  intended acquisition; or
+- another explicit engine-imposed local limit, distinct from a caller-requested
+  result bound.
+
+A planned relay that is disconnected, awaiting AUTH, denied, or in error remains
+present in `SourceAcquisition.status`; it is not moved into shortfall. Its
+persisted `reconciledThrough` evidence may coexist with that current status.
 
 NMP may chunk or coalesce only when semantics remain exact. It never takes the
 first N values and presents them as the whole result.

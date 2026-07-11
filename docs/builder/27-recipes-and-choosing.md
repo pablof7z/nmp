@@ -43,22 +43,31 @@ or any other feed policy to it.
 Apps and third-party packages may publish similar constructors over public
 values. A helper is not a new reactive primitive or hidden subscription.
 
-## Typed protocol queries
+## Composed typed protocol queries
 
 Some protocols reconstruct more than one raw event. A module may expose a
 typed live result while using ordinary demands underneath:
 
 ```swift
-for await snapshot in nip29.observeMyGroups(using: engine) {
+for await snapshot in nip29.observeRememberedGroups(using: engine) {
     groups = snapshot.values
     sourceFacts = snapshot.acquisition
     shortfall = snapshot.shortfall
 }
 ```
 
-Each group reference may contain validated protocol identity and an opaque
-module-minted source authority. The module does not maintain a parallel cache or
-subscription lifecycle.
+This surface composes two exact owners:
+
+- NIP-51 owns kind `10009` Simple groups, including its public/private list
+  codec, replacement construction, and typed list entries.
+- NIP-29 consumes those typed entries and adds NIP-29-facing group references
+  and host-scoped operations. It claims neither kind `10009` nor kind `30002`.
+
+The underlying kind `10009` demand is rooted at current pubkey and acquired
+through user-list authority, never through the currently selected group host.
+The selected group remains app state. Enabling the NIP-29 package may bring the
+NIP-51 codec transitively; that dependency does not transfer schema ownership.
+Neither module maintains a parallel cache or subscription lifecycle.
 
 ## Semantic operations
 

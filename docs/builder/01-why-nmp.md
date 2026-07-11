@@ -70,7 +70,11 @@ NMP represents the dependency as data instead:
 ```text
 kinds: [9999]
 authors: Derived(
-  inner: Filter(kinds: [3], authors: Reactive(CurrentPubkey)),
+  inner: Demand(
+    selection: Filter(kinds: [3], authors: Reactive(CurrentPubkey)),
+    source: AuthorOutboxes,
+    access: Public
+  ),
   project: Tag(p)
 )
 ```
@@ -79,6 +83,10 @@ The app declares the graph and observes its snapshot. The engine owns the
 expanded set, route repair, reference counts, and exact REQ changes. Changing
 the current pubkey reroots only graphs that reference that input; literal
 multi-account queries remain unchanged.
+
+The nested contact-list demand carries its own source and access context. It
+does not inherit context from the outer kind:9999 observation, so both demands
+remain independently hashable, routable, and explainable.
 
 NIP-02 meaning in this example belongs in an opt-in protocol module or an
 app-authored reusable declaration. The outer kind remains the caller's choice.
