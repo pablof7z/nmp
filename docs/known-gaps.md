@@ -22,6 +22,10 @@ Honest running list of things built-but-incomplete or deliberately deferred, so 
 
 - **No time driver for liveness/timeout sweeps (M3-E).** The 30s liveness-deadline sweep (`tick()`) is real and unit-tested against a synthetic clock, but nothing drives it periodically in the live runtime — D8 forbids a fixed-rate poll-loop timer thread, and `Handle` has no `tick` verb. A **D8-compliant** driver is needed (event-driven: a sleep-until-next-deadline that wakes on the real deadline, or a mio timeout on the engine loop — NOT fixed-rate polling). The falsifier's feed path works without it; needs a design decision at M4.
 
+## Design-level (validated from external feedback — see docs/reviews/2026-07-11-external-feedback-triage.md)
+
+- **Supersession retraction blindness (the negative-delta family).** The resolver dirty-marks only the *newly arrived* event; when a new event supersedes an old winner that matched a `Derived` inner filter, the derived set is never re-evaluated to *remove* the stale member — it stays indefinitely (`crates/nmp-engine/src/core/mod.rs` ~engine.rs:410). Kind:5 delete, NIP-40 expiry, and optimistic-write rejection all hit this same shape. This is the "negative-delta / retraction" family flagged as the top at-risk kernel responsibility (issue #10, Brainstorm's UNDO probe) — the resolver has only ever *grown or superseded*, never *retracted*. **Architecture item, not a quick fix** — wants a design pass (does supersede/delete/expire emit a `Removed` down every `Derived` set that referenced the old winner?). The four bounded correctness fixes from the same triage (sig-verification gate, FFI panic/tag-drop, FNV→strong hash, coalesce-limit) are handled separately.
+
 ## Security hardening deferred
 
 - **Secret zeroization not harvested (M3-A3, old-repo V-55).** `nmp-signer` holds `nostr::Keys` without the old repo's zeroize/raw-bytes secret-residency hardening. Reasonable to defer, but a real security property to restore before any v2 ship. Owner: post-M3 security pass.
