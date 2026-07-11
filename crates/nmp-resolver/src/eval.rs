@@ -163,9 +163,15 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
+    /// An arbitrary caller-owned kind, not `Kind::TextNote`/any other
+    /// NIP-01 core schema -- `Selector::Tag`'s local projection is
+    /// protocol-neutral grammar mechanics, and a `kind:1`-flavored fixture
+    /// would reintroduce exactly the kind bias the v2 docs reject.
+    const ARBITRARY_CALLER_KIND: u16 = 9999;
+
     fn note_with_tags(tags: Vec<Tag>) -> nostr::Event {
         let keys = Keys::generate();
-        EventBuilder::new(Kind::TextNote, "hi")
+        EventBuilder::new(Kind::Custom(ARBITRARY_CALLER_KIND), "hi")
             .tags(tags)
             .sign_with_keys(&keys)
             .expect("test fixture must sign cleanly")

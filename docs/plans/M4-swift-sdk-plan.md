@@ -201,6 +201,13 @@ public struct NMPCollection: AsyncSequence {        // element = CollectionDelta
 }
 
 // value descriptors (UniFFI records/enums, all Hashable/Sendable):
+//
+// Superseded by #64: the shipped `NMPFilter`/`NMPSelector` (Packages/NMP/
+// Sources/NMP/NMPFilter.swift) key `tags` by `Character` (the wire/local
+// indexed-filter alphabet, all 52 ASCII letters, no whitelist) and give
+// `Selector.tag` a `String` (an arbitrary already-acquired event-tag key,
+// never restricted to one character) -- NOT the single conflated `TagName`
+// sketched below, which this plan pre-dated the split by.
 public struct Filter { var kinds: [UInt16]?; var authors: Binding?; var ids: Binding?
                        var tags: [TagName: Binding]; var since: UInt64?; var until: UInt64?; var limit: UInt32? }
 public indirect enum Binding { case literal(Set<String>); case reactive(IdentityField)

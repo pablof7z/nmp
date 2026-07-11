@@ -40,6 +40,16 @@ nostr (external crate)
 
 ### 2.1 `nmp-grammar`
 
+> **Superseded by [#64](https://github.com/pablof7z/nmp/issues/64):** the
+> `TagName`/whitelist sketch below is the M1-era shape this plan originally
+> shipped. #64 split it in two: `IndexedTagName` (any of the 52 ASCII
+> letters, no whitelist) for `Filter.tags`/`ConcreteFilter.tags` — the
+> wire/local indexed-filter alphabet only — and a plain `String` for
+> `Selector::Tag`, an arbitrary already-acquired event-tag key that never
+> inherits the wire filter's single-letter restriction. The sketch is left
+> as-is below as a historical record of the M1 milestone's original design,
+> not a currently-authoritative type.
+
 ```rust
 /// A single-letter Nostr tag name, PARAMETERIZED — never per-tag enum variants.
 /// Valid single-letter set: p, e, a, d, E, t, q, h (validated at construction).

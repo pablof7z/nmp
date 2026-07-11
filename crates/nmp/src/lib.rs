@@ -56,7 +56,7 @@ pub use subscription::{DiagnosticsSubscription, Subscription};
 
 // The grammar an app builds a `LiveQuery`'s `Filter` out of.
 pub use nmp_grammar::{
-    Binding, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp, TagName,
+    Binding, Derived, Filter, IdentityField, IndexedTagName, Selector, SetAlgebra, SetOp,
 };
 pub use nmp_resolver::LiveQuery;
 

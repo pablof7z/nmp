@@ -841,6 +841,41 @@ mod tests {
         }
     }
 
+    /// Arbitrary event tags survive the write boundary UNCHANGED and are
+    /// never routed through indexed-key validation (#64 acceptance
+    /// evidence / codex-nova review item 3): `"-"`/`"poop"`/`"alt"` are
+    /// multi-character/punctuation tag NAMES that would fail
+    /// `indexed_tag_name_from_ffi` (they are not filter keys at all here),
+    /// yet `write_intent_from_ffi` must accept them verbatim -- raw tag
+    /// arrays go through `tags_from_ffi`/`Tag::parse`, never
+    /// `indexed_tag_name_from_ffi`.
+    #[test]
+    fn arbitrary_event_tags_survive_write_intent_from_ffi_unchanged() {
+        let mut intent = valid_write_intent();
+        let FfiWritePayload::Unsigned { tags, .. } = &mut intent.payload else {
+            unreachable!("valid_write_intent always builds Unsigned")
+        };
+        *tags = vec![
+            vec!["-".to_string()],
+            vec!["poop".to_string(), "value".to_string()],
+            vec!["alt".to_string(), "a human-readable summary".to_string()],
+        ];
+        let expected = tags.clone();
+
+        let parsed = write_intent_from_ffi(intent)
+            .expect("multi-character/punctuation event-tag names must not be rejected");
+        let GWritePayload::Unsigned(unsigned) = parsed.payload else {
+            unreachable!("valid_write_intent always builds Unsigned")
+        };
+        let round_tripped: Vec<Vec<String>> =
+            unsigned.tags.iter().map(|t| t.clone().to_vec()).collect();
+        assert_eq!(
+            round_tripped, expected,
+            "raw tag arrays must survive write_intent_from_ffi byte-for-byte, \
+             never normalized/rejected as unknown"
+        );
+    }
+
     /// The tag-integrity regression test: a malformed raw tag (here, an
     /// empty array -- `Tag::parse` rejects it) used to be silently DROPPED
     /// by `tags_from_ffi`'s `filter_map(...).ok()`, so the signed event

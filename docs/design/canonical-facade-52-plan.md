@@ -115,11 +115,15 @@ list *is* the product surface — a feature, not a cost.
 - **`EngineError`** — the *semantic* error subset (see §2): `InvalidSecretKey`,
   `StoreOpenFailed`, `InvalidSignedEvent`, `InvalidSignature`.
 - **Re-exports** so an app depends on `nmp` alone: the grammar
-  (`Filter`/`Binding`/`Derived`/`Selector`/`SetOp`/`IdentityField`/`TagName`,
-  `LiveQuery`), the write plane (`WriteIntent`/`WritePayload`/`Durability`/
-  `WriteRouting`), read outputs (`RowDelta`/`QueryCoverage`/`RowsMsg`/
-  `WriteStatus`/`DiagnosticsSnapshot`), and `nostr::{PublicKey, Event, ...}` as
-  needed.
+  (`Filter`/`Binding`/`Derived`/`Selector`/`SetOp`/`IdentityField`/
+  `IndexedTagName`, `LiveQuery`), the write plane (`WriteIntent`/`WritePayload`/
+  `Durability`/`WriteRouting`), read outputs (`RowDelta`/`QueryCoverage`/
+  `RowsMsg`/`WriteStatus`/`DiagnosticsSnapshot`), and `nostr::{PublicKey, Event,
+  ...}` as needed. `TagName` was renamed `IndexedTagName` and its whitelist
+  removed (#64) — it is the wire/local INDEXED filter key only (`Filter.tags`,
+  one ASCII letter, all 52 valid). `Selector::Tag` carries a separate,
+  unconstrained `String` for arbitrary already-acquired event-tag names and
+  needs no re-export of its own (`String` is already in scope).
 
 ### 1.1 The one semantic guarantee that must move into the facade
 
