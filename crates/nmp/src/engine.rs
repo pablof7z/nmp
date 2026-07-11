@@ -473,6 +473,16 @@ mod tests {
     /// fire-and-forget (`let _ = self.inbox.send(...)`), so this pins that
     /// tolerance holds end-to-end through a real `Drop`, not only in
     /// isolation.
+    ///
+    /// The bound in (a) is enforced by dropping `engine` on a WORKER
+    /// thread and awaiting its completion signal via
+    /// `Receiver::recv_timeout` on THIS thread -- not by dropping inline
+    /// and checking elapsed time afterward. A synchronous inline `drop`
+    /// that deadlocked inside `shutdown`+`join` would never reach an
+    /// elapsed-time check at all, so that shape is not a real liveness
+    /// bound (it only hangs until the outer test-runner's own timeout);
+    /// `recv_timeout` is what turns a `Drop` deadlock into an ordinary
+    /// assertion failure here instead.
     #[test]
     fn drop_with_live_observers_tears_down_within_bound_and_disconnects_cleanly() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
@@ -492,14 +502,23 @@ mod tests {
             .recv()
             .expect("observe_diagnostics delivers the current snapshot immediately");
 
-        let start = std::time::Instant::now();
-        drop(engine);
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "Drop must tear EngineThread down within a bounded wait, not hang \
-             (took {elapsed:?})"
-        );
+        // Drop `engine` on a WORKER thread and signal completion over a
+        // channel, rather than dropping it inline on this thread and
+        // checking elapsed time afterward -- a synchronous `drop` that
+        // deadlocked inside `shutdown`+`join` would never reach an
+        // `elapsed` check at all, so that shape isn't a real liveness
+        // bound (it just hangs until the outer test-runner's own
+        // timeout). `recv_timeout` on THIS thread is what makes a `Drop`
+        // deadlock trip the bound as an ordinary assertion failure
+        // instead of a hang.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(engine);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("Drop must tear EngineThread down within a bounded wait, not hang");
 
         match subscription.recv() {
             Err(_) => {}
