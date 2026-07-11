@@ -63,6 +63,29 @@ pub trait RelayDirectory {
     /// Empty => unroutable.
     fn pinned_relays(&self, atom: &ConcreteFilter) -> Vec<LanedRelay>;
 
+    /// True iff this directory has ever recorded a write-relay FACT for
+    /// `author` — "known, possibly zero" vs "never resolved". Distinguishes
+    /// what `write_relays`'s collapsed `Vec` (empty either way) cannot: an
+    /// author whose current kind:10002 declares ZERO write relays is KNOWN
+    /// (this returns `true`), not the same as an author never ingested at
+    /// all (`false`). `EngineCore::sync_discovery` uses this to stop
+    /// discovery for a known-empty author instead of keeping its discovery
+    /// subscription open for the rest of the session — without this, an
+    /// author who genuinely declares no write relays looks IDENTICAL to one
+    /// still awaiting its first kind:10002, and never leaves the "needed"
+    /// set.
+    ///
+    /// Default: `!self.write_relays(author).is_empty()` — preserves
+    /// today's collapsed behavior for any directory that hasn't opted into
+    /// tracking the distinction (a static/fixture snapshot has no
+    /// "not yet resolved" state to begin with: everything it will ever know
+    /// is injected upfront). Only [`LiveDirectory`] — the one directory
+    /// that actually ingests facts over time — overrides this with the
+    /// real per-author ingestion record.
+    fn knows_write_relays(&self, author: &PubkeyHex) -> bool {
+        !self.write_relays(author).is_empty()
+    }
+
     /// Feed a freshly-ingested NIP-65 write-relay fact for `author` into
     /// this directory, REPLACING whatever it previously held for them
     /// (kind:10002 is a NIP-01 replaceable event -- the caller is expected
@@ -319,6 +342,15 @@ impl RelayDirectory for LiveDirectory {
         // would have silently gotten the wrong answer.
         self.write.insert(author, relays);
     }
+
+    /// The real distinguishing signal `write_relays` alone cannot express:
+    /// key PRESENCE in `self.write`, not emptiness of the value. An author
+    /// whose kind:10002 declared zero write relays has an entry (inserted
+    /// above, even when `relays` is empty); an author never ingested has no
+    /// entry at all.
+    fn knows_write_relays(&self, author: &PubkeyHex) -> bool {
+        self.write.contains_key(author)
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +423,47 @@ mod tests {
             vec![LanedRelay::new(test_relay(1), Lane::Nip65Write)],
             "a fresh kind:10002 REPLACES the prior write-relay set, never merges"
         );
+    }
+
+    /// The load-bearing regression test for the known-empty fix (ledger
+    /// #20): `write_relays` alone cannot distinguish "known, declares
+    /// zero relays" from "never resolved" (both are an empty `Vec`).
+    /// `knows_write_relays` must -- an author whose kind:10002 explicitly
+    /// declared zero write relays is KNOWN, so `EngineCore::sync_discovery`
+    /// can stop discovering them; an author never ingested at all is not.
+    #[test]
+    fn live_directory_distinguishes_known_empty_from_never_resolved() {
+        let mut dir = LiveDirectory::new(Vec::new());
+        assert!(
+            !dir.knows_write_relays(&pk('a')),
+            "never ingested -- must NOT be considered known"
+        );
+
+        dir.ingest_write_relays(pk('a'), Vec::new());
+        assert!(
+            dir.knows_write_relays(&pk('a')),
+            "a kind:10002 declaring zero write relays is still a KNOWN fact"
+        );
+        assert!(
+            dir.write_relays(&pk('a')).is_empty(),
+            "write_relays itself still reports empty -- knows_write_relays is the \
+             distinguishing signal, not a change to write_relays' own contract"
+        );
+
+        // An author who genuinely never got a fact at all stays unknown,
+        // even after some OTHER author has been ingested.
+        assert!(!dir.knows_write_relays(&pk('z')));
+    }
+
+    /// `FixtureDirectory`'s default `knows_write_relays` impl (no override)
+    /// collapses back to `!write_relays(..).is_empty()` -- preserving
+    /// today's behavior for a static snapshot, which has no "not yet
+    /// resolved" state to begin with.
+    #[test]
+    fn fixture_directory_default_knows_write_relays_matches_non_empty() {
+        let dir = FixtureDirectory::new().with_write(pk('a'), [test_relay(0)]);
+        assert!(dir.knows_write_relays(&pk('a')));
+        assert!(!dir.knows_write_relays(&pk('z')));
     }
 
     #[test]

@@ -57,8 +57,22 @@ fn same_except_authors(a: &ConcreteFilter, b: &ConcreteFilter) -> bool {
         && a.tags == b.tags
         && a.since == b.since
         && a.until == b.until
-        && a.limit == b.limit
+        && neither_limited(a, b)
         && a.authors != b.authors
+}
+
+/// Both `a` and `b` carry NO `limit` at all -- NOT merely `a.limit ==
+/// b.limit`. A relay-side `limit` caps the RESULT COUNT, not a predicate:
+/// two `limit:200` REQs for disjoint author sets each promise up to 200
+/// rows (400 total), but a merged `{authors: a∪b, limit:200}` REQ still
+/// only promises 200 -- the relay truncates the union, and the union
+/// silently under-fetches relative to what the two original REQs would
+/// have delivered. `matches(try_merge(a,b)) ⊇ matches(a) ∪ matches(b)`
+/// only holds for a bounded-COUNT filter when neither side is bounded at
+/// all; requiring equal (rather than absent) limits looked like a safety
+/// guard but did not actually save the widening property.
+fn neither_limited(a: &ConcreteFilter, b: &ConcreteFilter) -> bool {
+    a.limit.is_none() && b.limit.is_none()
 }
 
 /// `KindUnion` — an optional, droppable rule. Applies when `a` and `b` are
@@ -79,7 +93,7 @@ impl MergeRule for KindUnion {
             && a.tags == b.tags
             && a.since == b.since
             && a.until == b.until
-            && a.limit == b.limit
+            && neither_limited(a, b)
             && a.kinds != b.kinds;
         if !same_rest {
             return None;
@@ -287,6 +301,60 @@ mod tests {
         let a = cf(&[1], &["aa"]);
         let b = cf(&[2], &["bb"]);
         assert!(AuthorUnion.try_merge(&a, &b).is_none());
+    }
+
+    /// The load-bearing regression test for this fix: two SAME-limit
+    /// filters for disjoint author sets must NOT be merged. Before this
+    /// fix, `same_except_authors` accepted `a.limit == b.limit` as a
+    /// "safety guard" and merged them anyway into one filter that still
+    /// carries the same limit -- a relay serving `{authors:{aa,bb},
+    /// limit:200}` truncates at 200 total rows, silently under-fetching
+    /// relative to the two original `limit:200` REQs (up to 400 rows
+    /// between them). Excluding ANY limited filter from the union rules
+    /// entirely is what actually preserves
+    /// `matches(try_merge(a,b)) ⊇ matches(a) ∪ matches(b)`.
+    #[test]
+    fn author_union_refuses_to_merge_same_limit_filters() {
+        let mut a = cf(&[1], &["aa"]);
+        a.limit = Some(200);
+        let mut b = cf(&[1], &["bb"]);
+        b.limit = Some(200);
+        assert!(
+            AuthorUnion.try_merge(&a, &b).is_none(),
+            "a limited filter must never be merged, even with an identical limit"
+        );
+    }
+
+    /// Same falsifier, `KindUnion`'s domain.
+    #[test]
+    fn kind_union_refuses_to_merge_same_limit_filters() {
+        let mut a = cf(&[1], &["aa"]);
+        a.limit = Some(50);
+        let mut b = cf(&[2], &["aa"]);
+        b.limit = Some(50);
+        assert!(
+            KindUnion.try_merge(&a, &b).is_none(),
+            "a limited filter must never be merged, even with an identical limit"
+        );
+    }
+
+    /// End-to-end through the registry: two limited, otherwise-mergeable
+    /// filters ship as TWO separate REQs (each keeping its own `limit`),
+    /// never coalesced into one truncating REQ.
+    #[test]
+    fn coalesce_never_merges_limited_filters_even_with_matching_limits() {
+        let mut a = cf(&[1], &["aa"]);
+        a.limit = Some(10);
+        let mut b = cf(&[1], &["bb"]);
+        b.limit = Some(10);
+        let filters = Set::from([a, b]);
+        let out = RuleRegistry::default_widen_only().coalesce(filters);
+        assert_eq!(
+            out.len(),
+            2,
+            "limited filters must ship as separate REQs, never merged"
+        );
+        assert!(out.iter().all(|f| f.limit == Some(10)));
     }
 
     #[test]
