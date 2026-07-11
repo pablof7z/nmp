@@ -1,0 +1,78 @@
+name: Surface governance
+
+# Security boundary: pull_request_target loads this workflow from the default
+# branch, never from the proposed head. The job also extracts every executable
+# governance script from the base commit. The untrusted head is git data only:
+# this workflow never compiles it or invokes any file from it.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  surface-governance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out proposed head as data
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Extract trusted governance program from base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TRUSTED_DIR: ${{ runner.temp }}/nmp-surface-governance
+        run: |
+          mkdir -p \
+            "$TRUSTED_DIR/scripts" \
+            "$TRUSTED_DIR/tools/component-interface-snapshot/src"
+          for path in \
+            scripts/check-surface-governance.sh \
+            scripts/install-surface-tools.sh \
+            scripts/regenerate-surface-snapshots.sh \
+            scripts/test-install-surface-tools.sh \
+            scripts/test-surface-governance.sh \
+            tools/surface-toolchain.env \
+            tools/component-interface-snapshot/Cargo.toml \
+            tools/component-interface-snapshot/Cargo.lock \
+            tools/component-interface-snapshot/src/main.rs; do
+            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
+          done
+          chmod +x "$TRUSTED_DIR/scripts/"*.sh
+
+      - name: Install checksum-pinned surface tool through trusted base script
+        env:
+          SURFACE_ROOT: ${{ github.workspace }}
+          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-governance/tools/surface-toolchain.env
+        working-directory: ${{ runner.temp }}/nmp-surface-governance
+        run: ${{ runner.temp }}/nmp-surface-governance/scripts/install-surface-tools.sh
+
+      - name: Falsify trusted governance and installer
+        run: |
+          ${{ runner.temp }}/nmp-surface-governance/scripts/test-surface-governance.sh
+          ${{ runner.temp }}/nmp-surface-governance/scripts/test-install-surface-tools.sh
+
+      - name: Compute changed projection context with trusted base checker
+        id: projections
+        env:
+          SURFACE_ROOT: ${{ github.workspace }}
+          SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+        run: |
+          value=$(${{ runner.temp }}/nmp-surface-governance/scripts/check-surface-governance.sh --print-projections)
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: Verify proposed head with trusted base program
+        env:
+          SURFACE_ROOT: ${{ github.workspace }}
+          SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          SURFACE_PR_NUMBER: ${{ github.event.pull_request.number }}
+          SURFACE_PR_URL: ${{ github.event.pull_request.html_url }}
+          SURFACE_CHANGED_PROJECTIONS: ${{ steps.projections.outputs.value }}
+          SURFACE_SKIP_REGEN: 1
+        run: ${{ runner.temp }}/nmp-surface-governance/scripts/check-surface-governance.sh

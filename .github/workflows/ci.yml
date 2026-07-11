@@ -6,6 +6,83 @@ on:
   pull_request:
 
 jobs:
+  # Deterministic regeneration runs in the ordinary pull_request trust domain,
+  # never in pull_request_target. The separate trusted-base governance check
+  # protects this workflow and every script it invokes from PR modification.
+  surface-regeneration:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare base-trusted surface program (bootstrap uses proposed copy)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TRUSTED_DIR: ${{ runner.temp }}/nmp-surface-regeneration
+        run: |
+          mkdir -p \
+            "$TRUSTED_DIR/scripts" \
+            "$TRUSTED_DIR/tools/component-interface-snapshot/src"
+          paths=(
+            scripts/check-surface-governance.sh
+            scripts/install-surface-tools.sh
+            scripts/regenerate-surface-snapshots.sh
+            scripts/test-install-surface-tools.sh
+            scripts/test-surface-governance.sh
+            tools/surface-toolchain.env
+            tools/component-interface-snapshot/Cargo.toml
+            tools/component-interface-snapshot/Cargo.lock
+            tools/component-interface-snapshot/src/main.rs
+          )
+          if git cat-file -e "$BASE_SHA:scripts/check-surface-governance.sh" 2>/dev/null; then
+            for path in "${paths[@]}"; do
+              git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
+            done
+          else
+            for path in "${paths[@]}"; do
+              cp "$path" "$TRUSTED_DIR/$path"
+            done
+          fi
+          chmod +x "$TRUSTED_DIR/scripts/"*.sh
+
+      - name: Install checksum-pinned surface tool
+        env:
+          SURFACE_ROOT: ${{ github.workspace }}
+          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
+        working-directory: ${{ runner.temp }}/nmp-surface-regeneration
+        run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
+
+      - name: Falsify governance and installer
+        run: |
+          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-surface-governance.sh
+          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-install-surface-tools.sh
+
+      - name: Compute changed projection context
+        id: projections
+        env:
+          SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+        run: |
+          value=$(${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh --print-projections)
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate and verify proposed surfaces
+        env:
+          SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          SURFACE_PR_NUMBER: ${{ github.event.pull_request.number }}
+          SURFACE_PR_URL: ${{ github.event.pull_request.html_url }}
+          SURFACE_CHANGED_PROJECTIONS: ${{ steps.projections.outputs.value }}
+          SURFACE_REGEN_CMD: ${{ runner.temp }}/nmp-surface-regeneration/scripts/regenerate-surface-snapshots.sh
+          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
+          SURFACE_COMPONENT_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/component-interface-snapshot
+          # Only effective while the base genuinely lacks the trusted program.
+          SURFACE_BOOTSTRAP: 1
+        run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh
+
   test:
     runs-on: ubuntu-latest
     steps:

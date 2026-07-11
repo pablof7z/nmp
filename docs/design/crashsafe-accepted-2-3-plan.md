@@ -1,9 +1,9 @@
 # Crash-safe durable `Accepted` + canonical pending row — implementation plan (#2 + #3)
 
 - **Date:** 2026-07-11
-- **Status:** Active implementation plan. U1 store doors landed in #58 and U2
-  resolver integration landed in #74; U3 engine lifecycle is the current unit.
-  Governs GitHub issues
+- **Status:** Active implementation plan. U1 store doors landed in #58, U2
+  resolver integration landed in #74, and U3 engine lifecycle merged in #78.
+  U4 restart recovery/reattachment is the current unit. Governs GitHub issues
   **#2** (canonical pending-signature row, no app optimistic mirror) and **#3**
   (crash-safe durable `Accepted`). Epic #23's sequencing note treats these as
   **one atomic persistence seam**; this plan designs them together.
@@ -20,9 +20,13 @@
 
 ---
 
-## 0. The gap, precisely (grounded in current code)
+## 0. The pre-U3 gap, precisely (historical grounding)
 
-The write path today **never inserts a local row into the store**. `on_publish`
+The description below records the state U3 replaced. As of #78, local durable
+acceptance, pending-row visibility, signing/promotion, and compensation are
+built; U4 owns restart recovery and reattachment.
+
+Before U3, the write path **never inserted a local row into the store**. `on_publish`
 (`crates/nmp-engine/src/core/mod.rs:530`) allocs a `ReceiptId`, emits
 `WriteStatus::Accepted`, stores a `PendingWrite` in the **in-memory**
 `self.pending: HashMap<ReceiptId, PendingWrite>` (`:269`), and either requests a
