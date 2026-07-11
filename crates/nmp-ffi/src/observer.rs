@@ -4,7 +4,7 @@
 //! blocking-`recv`s the M3 channel, D8: blocking recv, never poll) which a
 //! thin Swift layer (a later builder) adapts into `AsyncStream`.
 
-use crate::types::{FfiCoverage, FfiDiagnosticsSnapshot, FfiRowDelta, FfiWriteStatus};
+use crate::types::{FfiAcquisitionEvidence, FfiDiagnosticsSnapshot, FfiRowDelta, FfiWriteStatus};
 
 /// Drains a live subscription's `Receiver<RowsMsg>` (M4 §4b). `on_batch` is
 /// called once per delivered batch, in order, on a dedicated drain thread —
@@ -12,10 +12,13 @@ use crate::types::{FfiCoverage, FfiDiagnosticsSnapshot, FfiRowDelta, FfiWriteSta
 /// stall `EngineCore`'s own recv loop. `on_closed` fires exactly once, when
 /// the engine has torn the subscription down (cancel, or the row channel's
 /// `Sender` was dropped for any other reason) — after which no further
-/// `on_batch` call will ever occur.
+/// `on_batch` call will ever occur. `evidence` is the query's scoped
+/// per-source acquisition evidence for this batch
+/// (`docs/design/scoped-evidence-49-12-plan.md` §4) -- never a collapsed
+/// completeness verdict.
 #[uniffi::export(callback_interface)]
 pub trait RowObserver: Send + Sync {
-    fn on_batch(&self, deltas: Vec<FfiRowDelta>, coverage: FfiCoverage);
+    fn on_batch(&self, deltas: Vec<FfiRowDelta>, evidence: FfiAcquisitionEvidence);
     fn on_closed(&self);
 }
 

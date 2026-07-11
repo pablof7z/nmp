@@ -10,7 +10,7 @@ import Observation
 @Observable
 public final class NMPQuerySnapshot {
     public private(set) var rows: [Row] = []
-    public private(set) var coverage: Coverage = .unknown
+    public private(set) var evidence: AcquisitionEvidence = AcquisitionEvidence(sources: [], shortfall: [])
 
     private var consumeTask: Task<Void, Never>?
 
@@ -19,7 +19,7 @@ public final class NMPQuerySnapshot {
             for await batch in query {
                 guard !Task.isCancelled else { return }
                 self?.rows = batch.rows
-                self?.coverage = batch.coverage
+                self?.evidence = batch.evidence
             }
         }
     }

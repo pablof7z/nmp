@@ -72,11 +72,22 @@ pub use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,
 // or an app cannot even print what it read.
+//
+// Two distinct coverage surfaces live here, deliberately not conflated
+// (`docs/design/scoped-evidence-49-12-plan.md` §4): `AcquisitionEvidence`
+// (+ `SourceEvidence`/`SourceStatus`/`AuthPhase`/`ShortfallFact`) is the
+// scoped, per-query acquisition evidence delivered alongside every
+// `RowsMsg` -- per-source facts, never a collapsed completeness verdict.
+// `FilterCoverageEntry.coverage` (an `Option<CoverageInterval>`) is the
+// engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
+// design, and never reused as a query-level verdict either.
 pub use nmp_engine::core::{
-    DiagnosticsSnapshot, FilterCoverageEntry, QueryCoverage, RelayDiagnosticsSnapshot, RowDelta,
+    AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry,
+    RelayDiagnosticsSnapshot, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
 };
 pub use nmp_engine::runtime::RowsMsg;
 pub use nmp_router::Lane;
+pub use nmp_store::CoverageInterval;
 
 // Value types every verb above is expressed in terms of, including what an
 // app needs to build the `WritePayload::Unsigned` template `Engine::publish`
