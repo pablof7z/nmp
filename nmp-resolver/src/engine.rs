@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::{Rc, Weak};
 
 use nmp_grammar::{Binding, ConcreteFilter, DemandDelta, DemandOp, DescriptorHash, Filter};
-use nmp_store::{EventStore, InsertOutcome};
+use nmp_store::{EventStore, InsertOutcome, RelayObserved};
 use nostr::filter::MatchEventOptions;
+use nostr::RelayUrl;
 
 use crate::eval::{project_events, resolve_reactive, resolve_setop};
 use crate::graph::{
@@ -333,14 +334,35 @@ impl<S: EventStore> Engine<S> {
 
     // ---- ingest: the real path (M1 plan §3.3) ---------------------------
 
+    /// `Engine::ingest` predates per-relay provenance (M1) and has no relay
+    /// identity of its own to attribute an insert to — real attribution is
+    /// `EngineCore`'s job (M3 step B), which calls `store.insert` directly
+    /// with the actual `RelayObserved` for the relay a frame arrived on.
+    /// This resolver-level path is exercised by the M1 contract-test harness
+    /// (`testkit::Harness::deliver`, which has no relay concept either), so
+    /// it attributes every ingested event to a single fixture relay identity
+    /// at the event's own `created_at` — sufficient to satisfy the new
+    /// `EventStore::insert` door without inventing resolver-owned routing.
+    fn ingest_fixture_observation(at: nostr::Timestamp) -> RelayObserved {
+        RelayObserved::new(
+            RelayUrl::parse("wss://resolver-ingest.fixture.invalid")
+                .expect("fixture relay URL must parse"),
+            at,
+        )
+    }
+
     pub fn ingest(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
         let drop_delta = self.drain_pending_drops();
 
         let mut changed: Vec<nostr::Event> = Vec::new();
         for event in events {
-            match self.store.insert(event.clone()) {
+            let observed_at = event.created_at;
+            match self
+                .store
+                .insert(event.clone(), Self::ingest_fixture_observation(observed_at))
+            {
                 InsertOutcome::Inserted | InsertOutcome::Superseded { .. } => changed.push(event),
-                InsertOutcome::Duplicate | InsertOutcome::Stale => {}
+                InsertOutcome::Duplicate { .. } | InsertOutcome::Stale => {}
             }
         }
         if changed.is_empty() {
@@ -428,7 +450,15 @@ impl<S: EventStore> Engine<S> {
             }
             Node::Derived(n) => {
                 let new = match self.graph.wide_concrete(n.inner) {
-                    Some(cf) => project_events(&self.store.query(&cf.to_nostr()), &n.project),
+                    Some(cf) => {
+                        let events: Vec<nostr::Event> = self
+                            .store
+                            .query(&cf.to_nostr())
+                            .into_iter()
+                            .map(|se| se.event)
+                            .collect();
+                        project_events(&events, &n.project)
+                    }
                     None => ResolvedSet::new(),
                 };
                 self.graph.set_derived_cached(id, new)
@@ -547,7 +577,15 @@ impl<S: EventStore> Engine<S> {
                 let inner =
                     self.build_filter_node(&d.inner, ParentLink::DerivedInner(id), depth + 1);
                 let cached = match self.graph.wide_concrete(inner) {
-                    Some(cf) => project_events(&self.store.query(&cf.to_nostr()), &d.project),
+                    Some(cf) => {
+                        let events: Vec<nostr::Event> = self
+                            .store
+                            .query(&cf.to_nostr())
+                            .into_iter()
+                            .map(|se| se.event)
+                            .collect();
+                        project_events(&events, &d.project)
+                    }
                     None => ResolvedSet::new(),
                 };
                 self.graph.insert(
