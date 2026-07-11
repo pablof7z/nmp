@@ -1,0 +1,88 @@
+// $myFollows at depth-1 through the real reducer (M5 plan §3 table row 2,
+// the flagship screen). The ONLY NMP call this view makes is
+// `engine.observe(FeedFilters.follows(kinds:))` -- everything else
+// (formatting pubkeys/timestamps, list rendering) is presentation, which is
+// this app's job, never the engine's (`Row` carries raw tokens only).
+
+import SwiftUI
+import NMP
+
+struct FeedView: View {
+    let model: AppModel
+
+    @State private var rows: [Row] = []
+    @State private var coverage: Coverage = .unknown
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    LabeledContent("Coverage", value: coverageText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(rows) { row in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(shortHex(row.pubkey))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                        Text(row.content)
+                            .font(.body)
+                        Text(formatted(row.createdAt))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .navigationTitle("$myFollows")
+            .overlay {
+                if rows.isEmpty {
+                    ContentUnavailableView(
+                        "No rows yet",
+                        systemImage: "hourglass",
+                        description: Text(
+                            "Waiting on relays — pick an active account on the Accounts tab."
+                        )
+                    )
+                }
+            }
+            // Re-observing on `model.kinds` change proves the SDK's filter
+            // is a plain value: editing kinds builds a NEW `NMPFilter` and
+            // `.task(id:)` tears down the old query / opens a fresh one --
+            // no NMP-side "edit a running query" verb exists or is needed.
+            .task(id: model.kinds) {
+                await observe()
+            }
+        }
+    }
+
+    private var coverageText: String {
+        switch coverage {
+        case .unknown: return "unknown"
+        case .completeUpTo(let ts): return "complete up to \(formatted(ts))"
+        }
+    }
+
+    private func observe() async {
+        rows = []
+        coverage = .unknown
+        guard let query = try? model.engine.observe(FeedFilters.follows(kinds: model.kinds)) else {
+            return
+        }
+        for await batch in query {
+            rows = batch.rows.sorted { $0.createdAt > $1.createdAt }
+            coverage = batch.coverage
+        }
+    }
+
+    private func shortHex(_ hex: String) -> String {
+        guard hex.count > 16 else { return hex }
+        return "\(hex.prefix(8))…\(hex.suffix(8))"
+    }
+
+    private func formatted(_ unixSeconds: UInt64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(unixSeconds))
+            .formatted(date: .abbreviated, time: .shortened)
+    }
+}
