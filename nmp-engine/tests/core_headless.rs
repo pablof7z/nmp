@@ -10,12 +10,18 @@
 use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, QueryCoverage, RowDelta, RowSink};
+use nmp_engine::outbox::{
+    Durability, NarrowOnly, PrivateRoute, ReceiptSink, WriteIntent, WritePayload, WriteRouting,
+    WriteStatus,
+};
 use nmp_grammar::{Binding, ConcreteFilter, Filter};
 use nmp_resolver::LiveQuery;
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};
-use nostr::{JsonUtil, Keys, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
+use nostr::{
+    JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent,
+};
 
 use std::collections::BTreeSet;
 
@@ -27,6 +33,27 @@ impl RowSink for CapturingSink {
     fn on_rows(&self, rows: Vec<RowDelta>) {
         self.0.lock().unwrap().push(rows);
     }
+}
+
+/// A `ReceiptSink` that just records every status it is handed, for
+/// assertions (mirrors `CapturingSink` on the write side).
+#[derive(Clone, Default)]
+struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
+
+impl ReceiptSink for CapturingReceiptSink {
+    fn on_status(&self, status: WriteStatus) {
+        self.0.lock().unwrap().push(status);
+    }
+}
+
+fn unsigned(author: &Keys, seq: u64, content: &str) -> UnsignedEvent {
+    UnsignedEvent::new(
+        author.public_key(),
+        Timestamp::from(seq),
+        Kind::TextNote,
+        Vec::new(),
+        content,
+    )
 }
 
 fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
@@ -449,4 +476,233 @@ fn set_active_pubkey_reroots_and_recompiles() {
     });
     assert!(closed_a, "re-root must close a's demand");
     req_for(&effects, &relay_b); // and open b's.
+}
+
+// ---- write outbox (M3 plan §5 tests 4, 5, 11) ---------------------------
+
+fn find_sign_request(effects: &[Effect]) -> (nmp_engine::core::ReceiptId, UnsignedEvent) {
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::RequestSign(id, u) => Some((*id, u.clone())),
+            _ => None,
+        })
+        .expect("expected a RequestSign effect")
+}
+
+/// Test 4 analog: `enqueue_is_not_converged` (ledger #9). A durable
+/// publish's FIRST status is `Accepted`, never a terminal; an `Ephemeral`
+/// intent never gets a receipt at all (still fires onto the wire once
+/// signed); an `AtMostOnce` intent sends exactly once and a relay dropping
+/// before it acks never produces a retry `PublishEvent`.
+#[test]
+fn enqueue_is_not_converged() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    // -- Durable: first status is Accepted, never a bool/terminal. --
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 1, "durable write")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(sink.clone()),
+    ));
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
+        ),
+        "the first emitted status for a durable publish must be Accepted, never a terminal"
+    );
+    assert_eq!(sink.0.lock().unwrap().first(), Some(&WriteStatus::Accepted));
+
+    // -- Ephemeral: NO receipt, ever -- but it still reaches the wire. --
+    let eph_sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 2, "ephemeral write")),
+            durability: Durability::Ephemeral,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(eph_sink.clone()),
+    ));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::EmitReceipt(..))),
+        "an ephemeral intent must never emit a receipt"
+    );
+    assert!(
+        eph_sink.0.lock().unwrap().is_empty(),
+        "an ephemeral intent's sink must never be called"
+    );
+    let (eph_id, eph_unsigned) = find_sign_request(&effects);
+    let eph_signed = eph_unsigned.sign_with_keys(&a).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(eph_id, Ok(eph_signed)));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PublishEvent(r, _) if r == &relay0)),
+        "an ephemeral write is fire-and-forget -- it still reaches the wire"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::EmitReceipt(..))),
+        "an ephemeral intent must never emit a receipt, even after signing"
+    );
+
+    // -- AtMostOnce: sends exactly once; a dropped relay never retries. --
+    let amo_sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 3, "at most once write")),
+            durability: Durability::AtMostOnce,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(amo_sink.clone()),
+    ));
+    let (amo_id, amo_unsigned) = find_sign_request(&effects);
+    let amo_signed = amo_unsigned.sign_with_keys(&a).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(amo_id, Ok(amo_signed)));
+    let publish_count = effects
+        .iter()
+        .filter(|e| matches!(e, Effect::PublishEvent(r, _) if r == &relay0))
+        .count();
+    assert_eq!(publish_count, 1, "at-most-once sends exactly once");
+
+    let effects = core.handle(EngineMsg::RelayDisconnected(0));
+    assert!(
+        effects.iter().any(
+            |e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::GaveUp(r)) if *rid == amo_id && r == &relay0)
+        ),
+        "a relay dropping before it acks must surface as a terminal GaveUp"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PublishEvent(..))),
+        "no retry Effect::PublishEvent after a failure -- no blind retry"
+    );
+}
+
+/// Test 5 analog: `private_route_fails_closed` (ledger #6). A
+/// `PrivateNarrow` route whose relay set is empty (unroutable) fails CLOSED
+/// with a typed `WriteStatus::Failed` -- it never reaches a public relay.
+/// `NarrowOnly` exposes no widen/insert method by construction (compile-
+/// level: there is no method this test -- or any caller -- could call to
+/// grow the set after `NarrowOnly::new`).
+#[test]
+fn private_route_fails_closed() {
+    let a = Keys::generate();
+    // Deliberately empty directory: even if `PrivateNarrow` DID consult it
+    // (it must not), there would be no public write relay to fall back to.
+    let dir = FixtureDirectory::new();
+    let mut core = new_core(dir);
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 1, "private dm")),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new(std::iter::empty::<RelayUrl>()),
+            }),
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, u) = find_sign_request(&effects);
+    let signed = u.sign_with_keys(&a).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, Ok(signed)));
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PublishEvent(..))),
+        "an unroutable private recipient must never reach ANY relay, public or otherwise"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id)),
+        "must fail CLOSED with a typed error, not silently drop the write"
+    );
+    assert!(matches!(
+        sink.0.lock().unwrap().last(),
+        Some(WriteStatus::Failed(_))
+    ));
+}
+
+/// Test 11 analog: `write_ack_per_relay`. A durable publish to two relays,
+/// one OKs and one NACKs -- the receipt stream reaches `Acked(R_ok)` and
+/// `Rejected(R_bad, reason)` independently; "is it sent?" is only readable
+/// from the stream, never a single bool.
+#[test]
+fn write_ack_per_relay() {
+    let a = Keys::generate();
+    let relay_ok = RelayUrl::parse("wss://relay-ok.example.com").unwrap();
+    let relay_bad = RelayUrl::parse("wss://relay-bad.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(
+        a.public_key().to_hex(),
+        [relay_ok.clone(), relay_bad.clone()],
+    );
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay_ok);
+    connect(&mut core, 1, &relay_bad);
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 1, "durable ack test")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, u) = find_sign_request(&effects);
+    let signed = u.sign_with_keys(&a).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, Ok(signed.clone())));
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::PublishEvent(..)))
+            .count(),
+        2,
+        "a durable AuthorOutbox write reaches both of the author's write relays"
+    );
+
+    let ok_frame = RelayFrame::Text(RelayMessage::ok(signed.id, true, "").as_json());
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        ok_frame,
+    ));
+    assert!(effects.iter().any(
+        |e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Acked(r)) if *rid == id && r == &relay_ok)
+    ));
+
+    let nack_frame =
+        RelayFrame::Text(RelayMessage::ok(signed.id, false, "blocked: spam").as_json());
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        nack_frame,
+    ));
+    assert!(effects.iter().any(
+        |e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Rejected(r, msg)) if *rid == id && r == &relay_bad && msg.contains("blocked"))
+    ));
+
+    let statuses = sink.0.lock().unwrap();
+    assert!(statuses
+        .iter()
+        .any(|s| matches!(s, WriteStatus::Acked(r) if r == &relay_ok)));
+    assert!(statuses
+        .iter()
+        .any(|s| matches!(s, WriteStatus::Rejected(r, _) if r == &relay_bad)));
 }

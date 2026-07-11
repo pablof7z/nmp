@@ -8,12 +8,14 @@
 //! action-ledger/correlation-id machinery from the old repo's app
 //! framework is NOT carried over.
 //!
-//! Step 0 declares the vocabulary only. D (depends on B + A3) wires
-//! enqueue/route/sign-orchestration/per-relay-ack.
+//! Step D wires enqueue/route/sign-orchestration/per-relay-ack; the reducer
+//! logic itself lives in `core::EngineCore` (`on_publish`/`on_signed`/
+//! `on_signer_completed`/write-ack handling) — this module is the typed
+//! vocabulary + the structural mechanisms (§3.4, VISION §7 ledger #6/#9).
 
 use std::collections::BTreeSet;
 
-use nostr::{EventId, PublicKey, RelayUrl, UnsignedEvent};
+use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, UnsignedEvent};
 
 use crate::core::ReceiptId;
 
@@ -25,9 +27,21 @@ pub enum Durability {
     AtMostOnce,
 }
 
+/// The event payload of a write intent. VISION P states signing and
+/// publishing are ORTHOGONAL stages, not one linear lifecycle: a caller
+/// that already holds a validly-signed event (e.g. republishing a
+/// previously-signed private event to a recomputed narrow relay set,
+/// ledger #6) supplies `Signed` and skips `Effect::RequestSign` entirely,
+/// going straight to routing; a caller with a template supplies `Unsigned`
+/// and the reducer requests the signer capability.
+pub enum WritePayload {
+    Unsigned(UnsignedEvent),
+    Signed(SignedEvent),
+}
+
 /// A caller's publish request.
 pub struct WriteIntent {
-    pub unsigned: UnsignedEvent,
+    pub payload: WritePayload,
     pub durability: Durability,
     pub routing: WriteRouting,
 }
@@ -43,15 +57,36 @@ pub enum WriteRouting {
 }
 
 /// Fail-closed narrow relay set (ledger #6). By construction this type
-/// exposes no widen/insert-arbitrary operation — D must not add one; a
-/// `PrivateNarrow` intent whose route is unresolvable fails closed
-/// (`Rejected`), it never falls back to a public write relay.
-///
-/// Step 0 leaves the field private and unread (no constructor yet) — that
-/// opacity is the point, not an oversight.
-#[allow(dead_code)]
+/// exposes no widen/insert-arbitrary operation: `new` is the ONLY way to
+/// populate it (a one-shot, fixed set at construction time — the caller
+/// must already have resolved and narrowed this itself), and no
+/// insert/extend/union method exists afterward. A `PrivateNarrow` intent
+/// whose set is empty is exactly how an unroutable private recipient is
+/// expressed structurally — the reducer fails it CLOSED (`WriteStatus::
+/// Failed`), it never falls back to a public write relay, because there is
+/// no operation that could hand it one.
+#[derive(Debug, Clone, Default)]
 pub struct NarrowOnly<T> {
     items: BTreeSet<T>,
+}
+
+impl<T: Ord> NarrowOnly<T> {
+    /// Construct a narrow, FIXED relay set. No widen operation exists on
+    /// this type — an empty set is legal and is how "unroutable" is
+    /// expressed.
+    pub fn new(items: impl IntoIterator<Item = T>) -> Self {
+        Self {
+            items: items.into_iter().collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn iter(&self) -> std::collections::btree_set::Iter<'_, T> {
+        self.items.iter()
+    }
 }
 
 pub struct PrivateRoute {
@@ -70,6 +105,11 @@ pub enum WriteStatus {
     Acked(RelayUrl),
     Rejected(RelayUrl, String),
     GaveUp(RelayUrl),
+    /// Whole-intent terminal reached BEFORE any relay was ever contacted —
+    /// a signer rejection, or (ledger #6) an unroutable `PrivateNarrow`
+    /// route. Distinct from the per-relay `Rejected`: no `RelayUrl` exists
+    /// here because none was ever reached.
+    Failed(String),
 }
 
 /// What `Handle::publish` returns: an id correlating to the status stream
