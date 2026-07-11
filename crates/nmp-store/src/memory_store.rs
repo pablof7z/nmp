@@ -2,7 +2,7 @@
 //! `RedbStore` is diffed against for every shared contract test
 //! (`nmp-store/tests/store_contract.rs`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
@@ -56,16 +56,22 @@ struct OutboxIntentRecord {
 /// A claim names EITHER an e-tag id target (keyed exactly like
 /// `deleted_ids`: `(target id, claiming author)`, so a future arrival at
 /// that id is only ever suppressed if its real author — fixed by the id's
-/// hash — matches) OR an a-tag address target (keyed like `deleted_addrs`:
-/// the address alone, since `AddressKey` already encodes the pubkey and
-/// authorization was checked immediately at claim-creation time, exactly
-/// as `process_kind5_deletions` already does for the permanent case).
-/// NEVER moves or removes the row it names — see `MemoryStore::
-/// suppress_by_id`/`suppress_by_addr`'s doc for how visibility is decided.
+/// hash — matches) OR an a-tag address target (issue #61 P0 correction:
+/// MUST carry the same NIP-09 `created_at` ceiling the permanent
+/// `deleted_addrs` mechanism uses — a claim with no ceiling would hide
+/// every future winner at that address forever, including one created
+/// AFTER the deletion, which is not what NIP-09 authorizes even
+/// provisionally). `deleting_author` is carried for diagnostic parity with
+/// `TombstoneRecord` — authorization for an address claim is already
+/// checked immediately at claim-creation time (`coord.public_key ==
+/// deleting.pubkey`), so the address alone is enough to enforce it; the
+/// ceiling is what makes visibility correct. NEVER moves or removes the
+/// row it names — see `MemoryStore::suppress_by_id`/`suppress_by_addr`'s
+/// doc for how visibility is decided.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SuppressClaim {
     Id(EventId, PublicKey),
-    Addr(AddressKey),
+    Addr(AddressKey, Timestamp, PublicKey),
 }
 
 /// An address-tombstone's durable fact: which kind:5 event set the
@@ -159,9 +165,13 @@ pub struct MemoryStore {
     /// signs or cancels) — hidden while ANY claim applies, visible again
     /// only once EVERY claim on it is gone.
     suppress_by_id: HashMap<(EventId, PublicKey), HashSet<IntentId>>,
-    /// Reverse index for address claims, same treatment as
-    /// [`Self::suppress_by_id`].
-    suppress_by_addr: HashMap<AddressKey, HashSet<IntentId>>,
+    /// Reverse index for address claims: every currently-claiming intent
+    /// AND the `created_at` ceiling ITS OWN deletion staged (issue #61 P0
+    /// correction) — a candidate at this address is hidden iff its OWN
+    /// `created_at` is at-or-before AT LEAST ONE claimant's ceiling, not
+    /// merely "some claim exists" (that would incorrectly hide a winner
+    /// created AFTER every pending deletion targeting this address).
+    suppress_by_addr: HashMap<AddressKey, HashMap<IntentId, Timestamp>>,
 }
 
 impl MemoryStore {
@@ -433,35 +443,62 @@ impl MemoryStore {
     /// suppression claim over every e-tag id target and a-tag address
     /// target this draft names, hiding whatever row currently lives there
     /// from `query` — via `is_suppressed`, consulted at read time — WITHOUT
-    /// moving or removing it from `by_id`/`addr_index`. `promote_signed`
-    /// later drops these claims and runs the FULL, permanent
+    /// moving or removing it from `by_id`/`addr_index`. Called for EVERY
+    /// accepted pending kind:5 intent, including an exact `Duplicate`
+    /// (issue #61 P0 correction: a duplicate that returned before staging
+    /// its own claim left it with no independent suppression, so
+    /// cancelling the canonical original could reveal a target the
+    /// duplicate was still obligated to delete). `promote_signed` later
+    /// drops these claims and runs the FULL, permanent
     /// `process_kind5_deletions`; `compensate_write` just drops them (the
     /// target reappears immediately — nothing to re-insert, it never
-    /// left). Returns the rows that just became hidden (for
-    /// `AcceptOutcome::Kind5Processed`).
+    /// left). Returns the rows that ACTUALLY became newly hidden as a
+    /// result of THIS call — a true visibility delta (issue #61 P1
+    /// correction), computed from before/after suppression state and
+    /// deduped by event id, so a target some OTHER overlapping claim
+    /// already hid is never re-reported, and a target named by both an
+    /// e-tag and an a-tag is never double-counted.
     fn process_kind5_deletions_provisional(
         &mut self,
         intent_id: IntentId,
         deleting: &Event,
     ) -> Vec<StoredEvent> {
-        let mut hidden = Vec::new();
-        let mut claims = Vec::new();
-
         let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
+        let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
+
+        let mut candidate_ids: Vec<EventId> = Vec::new();
+        let mut seen_candidates: HashSet<EventId> = HashSet::new();
+        for target_id in &target_ids {
+            if seen_candidates.insert(*target_id) {
+                candidate_ids.push(*target_id);
+            }
+        }
+        for coord in &coords {
+            if coord.public_key != deleting.pubkey {
+                continue;
+            }
+            if let Some(key) = address_key_for_coordinate(coord) {
+                if let Some(current_id) = self.addr_index.get(&key).copied() {
+                    if seen_candidates.insert(current_id) {
+                        candidate_ids.push(current_id);
+                    }
+                }
+            }
+        }
+        let mut visible_before: HashMap<EventId, bool> = HashMap::new();
+        for id in &candidate_ids {
+            let visible = self.by_id.get(id).is_some_and(|se| !self.is_suppressed(se));
+            visible_before.insert(*id, visible);
+        }
+
+        let mut claims = Vec::new();
         for target_id in target_ids {
             self.suppress_by_id
                 .entry((target_id, deleting.pubkey))
                 .or_default()
                 .insert(intent_id);
             claims.push(SuppressClaim::Id(target_id, deleting.pubkey));
-            if let Some(se) = self.by_id.get(&target_id) {
-                if se.event.pubkey == deleting.pubkey {
-                    hidden.push(se.clone());
-                }
-            }
         }
-
-        let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
         for coord in coords {
             if coord.public_key != deleting.pubkey {
                 // NIP-09 author-only: a coordinate naming a pubkey other
@@ -475,23 +512,37 @@ impl MemoryStore {
             self.suppress_by_addr
                 .entry(key.clone())
                 .or_default()
-                .insert(intent_id);
-            claims.push(SuppressClaim::Addr(key.clone()));
-            if let Some(current_id) = self.addr_index.get(&key).copied() {
-                if let Some(se) = self.by_id.get(&current_id) {
+                .insert(intent_id, deleting.created_at);
+            claims.push(SuppressClaim::Addr(
+                key,
+                deleting.created_at,
+                deleting.pubkey,
+            ));
+        }
+        self.outbox_kind5_claims.insert(intent_id, claims);
+
+        let mut hidden = Vec::new();
+        for id in candidate_ids {
+            if !visible_before.get(&id).copied().unwrap_or(false) {
+                continue;
+            }
+            if let Some(se) = self.by_id.get(&id) {
+                if self.is_suppressed(se) {
                     hidden.push(se.clone());
                 }
             }
         }
-
-        self.outbox_kind5_claims.insert(intent_id, claims);
         hidden
     }
 
     /// `true` iff `se` is currently hidden by ANY still-open kind:5
     /// suppression claim — consulted by `query` and `gc`. Never affects
     /// `by_id`/`addr_index` themselves: a suppressed row is fully present,
-    /// just filtered out of read results (see [`SuppressClaim`]'s doc).
+    /// just filtered out of read results (see [`SuppressClaim`]'s doc). An
+    /// address claim only hides a candidate whose OWN `created_at` is
+    /// at-or-before at least one claimant's ceiling (issue #61 P0
+    /// correction) — mirrors the permanent `deleted_addrs` ceiling check
+    /// exactly, just per-claimant instead of one shared ceiling.
     fn is_suppressed(&self, se: &StoredEvent) -> bool {
         if self
             .suppress_by_id
@@ -501,12 +552,13 @@ impl MemoryStore {
             return true;
         }
         if let Some(key) = address_key_for(&se.event) {
-            if self
-                .suppress_by_addr
-                .get(&key)
-                .is_some_and(|claimants| !claimants.is_empty())
-            {
-                return true;
+            if let Some(claimants) = self.suppress_by_addr.get(&key) {
+                if claimants
+                    .values()
+                    .any(|ceiling| se.event.created_at <= *ceiling)
+                {
+                    return true;
+                }
             }
         }
         false
@@ -528,7 +580,7 @@ impl MemoryStore {
                         }
                     }
                 }
-                SuppressClaim::Addr(key) => {
+                SuppressClaim::Addr(key, _, _) => {
                     if let Some(claimants) = self.suppress_by_addr.get_mut(key) {
                         claimants.remove(&intent_id);
                         if claimants.is_empty() {
@@ -543,15 +595,18 @@ impl MemoryStore {
 
 /// True iff `se` is a locally-authored row still awaiting a signature —
 /// the GC-exclusion predicate (Fable checkpoint R5), shared by `gc`'s
-/// candidacy filter.
+/// candidacy filter. Requires a NON-EMPTY `owners` set too (architecture
+/// review correction, issue #2's ownership-set model): once every owning
+/// intent has been compensated away, `local` can survive with an empty
+/// `owners` set (kept standing by relay provenance or an already-signed
+/// state — see `LocalOrigin`'s doc), and such a row is no longer an OPEN
+/// local intent at all — it must become an ordinary GC candidate again,
+/// not pinned forever for an obligation nothing still holds.
 fn is_open_local_intent(se: &StoredEvent) -> bool {
-    matches!(
-        se.provenance.local,
-        Some(LocalOrigin {
-            sig_state: SigState::Pending,
-            ..
-        })
-    )
+    se.provenance
+        .local
+        .as_ref()
+        .is_some_and(|l| !l.owners.is_empty() && l.sig_state == SigState::Pending)
 }
 
 impl EventStore for MemoryStore {
@@ -801,9 +856,8 @@ impl EventStore for MemoryStore {
         let intent_id = self.alloc_intent_id();
         let receipt_id = self.alloc_receipt_id();
         let local = LocalOrigin {
-            intent_id,
+            owners: BTreeSet::from([intent_id]),
             sig_state: SigState::Pending,
-            accepted_at,
         };
 
         // Dedup-by-id: an edge case (a fresh intent's frozen id colliding
@@ -811,10 +865,44 @@ impl EventStore for MemoryStore {
         // (that always arrives through `insert`, after this row's real
         // signature already replaced the sentinel — see `promote_signed`'s
         // doc). The intent is still journaled: it still gets signed and
-        // delivered even though it does not (re)claim the row here.
-        if let Some(existing) = self.by_id.get(&frozen.id) {
-            let row = existing.clone();
+        // delivered even though it does not WIN a fresh row here.
+        if self.by_id.contains_key(&frozen.id) {
             let frozen_id = frozen.id;
+            // Architecture review correction (issue #2, team-lead
+            // decision): if the existing row is ITSELF locally owned, this
+            // new intent joins its owner set — an exact `Duplicate` must
+            // retain INDEPENDENT ownership rather than being silently
+            // coalesced into whichever intent already backs the row (see
+            // `LocalOrigin`'s doc for why coalescing was rejected).
+            let existing_local = self
+                .by_id
+                .get(&frozen_id)
+                .expect("just checked this id exists")
+                .provenance
+                .local
+                .clone();
+            if let Some(mut local) = existing_local {
+                local.owners.insert(intent_id);
+                self.by_id
+                    .get_mut(&frozen_id)
+                    .expect("just checked this id exists")
+                    .provenance
+                    .local = Some(local);
+            }
+            // Issue #61 P0 correction: an exact-duplicate kind:5 intent
+            // must own an INDEPENDENT suppression claim too — otherwise
+            // cancelling the canonical original while this duplicate
+            // remains pending would incorrectly reveal a target it is
+            // still obligated to delete (see `process_kind5_deletions_
+            // provisional`'s doc).
+            if frozen.kind == Kind::EventDeletion {
+                self.process_kind5_deletions_provisional(intent_id, &frozen);
+            }
+            let row = self
+                .by_id
+                .get(&frozen_id)
+                .expect("just checked this id exists")
+                .clone();
             self.journal_intent(
                 intent_id,
                 receipt_id,
@@ -970,19 +1058,48 @@ impl EventStore for MemoryStore {
             return Ok(PromoteOutcome::NotFound);
         }
         let frozen_id = intent_record.frozen.id;
-        let accepted_at = intent_record.accepted_at;
         let is_deletion = intent_record.frozen.kind == Kind::EventDeletion;
 
         // Architecture review correction (load-bearing): is this intent
-        // still the LIVE row at its own frozen id? A `Duplicate`/`Stale`
-        // intent never had one; a once-live row can since have been
-        // superseded (locally or by a relay), kind:5-deleted, or expired.
+        // AMONG the owners of the LIVE row at its own frozen id? A
+        // `Duplicate`/`Stale` intent never had one of its own; a once-live
+        // row can since have been superseded (locally or by a relay),
+        // kind:5-deleted, or expired. Ownership is a SET (issue #2,
+        // team-lead decision): an exact `Duplicate` is a CO-OWNER of the
+        // SAME canonical row, not a second row of its own — see
+        // `LocalOrigin`'s doc.
         let live = self.by_id.get(&frozen_id).is_some_and(|se| {
             se.provenance
                 .local
                 .as_ref()
-                .is_some_and(|l| l.intent_id == intent_id)
+                .is_some_and(|l| l.owners.contains(&intent_id))
         });
+
+        // Row-level no-second-transition guard (architecture review
+        // correction, issue #2's ownership-set model): the per-intent
+        // guard above only catches THIS intent re-promoting itself. Under
+        // co-ownership, a DIFFERENT owner (e.g. a `Duplicate`) can reach
+        // this call for the FIRST time on ITS OWN journal even though the
+        // shared canonical row (live or still sitting in someone else's
+        // displaced stash) was already signed by some OTHER owner — that
+        // must be refused too, never silently overwrite the row's one
+        // real signature with a second, different one.
+        let already_signed = if live {
+            self.by_id
+                .get(&frozen_id)
+                .and_then(|se| se.provenance.local.as_ref())
+                .is_some_and(|l| l.sig_state == SigState::Signed)
+        } else {
+            self.outbox_displaced.values().any(|se| {
+                se.event.id == frozen_id
+                    && se.provenance.local.as_ref().is_some_and(|l| {
+                        l.owners.contains(&intent_id) && l.sig_state == SigState::Signed
+                    })
+            })
+        };
+        if already_signed {
+            return Ok(PromoteOutcome::NotFound);
+        }
 
         let row = if live {
             let se = self
@@ -1002,19 +1119,19 @@ impl EventStore for MemoryStore {
             // later local edit before it could sign), sync the real
             // signature there too — otherwise a future restore of that
             // stash entry would resurrect a stale sentinel copy of an
-            // intent that actually did sign. Matched by OWNING intent_id,
-            // NOT bare event id (codex-nova finding): two different
-            // intents (e.g. a real one and its byte-identical `Duplicate`)
-            // can share the same frozen event id, and only the entry whose
-            // OWN `LocalOrigin::intent_id` equals `intent_id` may ever be
-            // touched here.
+            // intent that actually did sign. Matched by OWNING intent_id
+            // membership, NOT bare event id (codex-nova finding): two
+            // different intents (e.g. a real one and its byte-identical
+            // `Duplicate`) can share the same frozen event id, and only a
+            // stash entry whose OWN `LocalOrigin::owners` set CONTAINS
+            // `intent_id` may ever be touched here.
             if let Some(other) = self.outbox_displaced.values_mut().find(|se| {
                 se.event.id == frozen_id
                     && se
                         .provenance
                         .local
                         .as_ref()
-                        .is_some_and(|l| l.intent_id == intent_id)
+                        .is_some_and(|l| l.owners.contains(&intent_id))
             }) {
                 other.event.sig = sig;
                 if let Some(local) = other.provenance.local.as_mut() {
@@ -1037,9 +1154,8 @@ impl EventStore for MemoryStore {
                 provenance: Provenance {
                     seen: BTreeMap::new(),
                     local: Some(LocalOrigin {
-                        intent_id,
+                        owners: BTreeSet::from([intent_id]),
                         sig_state: SigState::Signed,
-                        accepted_at,
                     }),
                 },
             }
@@ -1099,22 +1215,47 @@ impl EventStore for MemoryStore {
             se.provenance
                 .local
                 .as_ref()
-                .is_some_and(|l| l.intent_id == intent_id)
+                .is_some_and(|l| l.owners.contains(&intent_id))
         });
 
         if live {
-            // §4.2: `remove(id, Rejected)` writes no tombstone (`remove`
-            // never writes one — only kind:5 processing does).
-            self.remove(frozen_id, RetractReason::Rejected);
+            // Architecture review correction (issue #2, team-lead
+            // decision): removing THIS intent from the row's owner set
+            // only actually retracts the canonical row once the set is
+            // EMPTY, `sig_state` is still `Pending`, AND no relay has
+            // independently confirmed it — an exact-`Duplicate`'s still-
+            // open obligation, an already-`Signed` state some OTHER owner
+            // committed, or independent relay provenance, must all
+            // survive this one intent's cancellation (see `LocalOrigin`'s
+            // doc). §4.2: `remove(id, Rejected)` writes no tombstone
+            // (`remove` never writes one — only kind:5 processing does).
+            let se = self
+                .by_id
+                .get_mut(&frozen_id)
+                .expect("just checked this row is live for this intent");
+            let local = se
+                .provenance
+                .local
+                .as_mut()
+                .expect("just checked this row carries local provenance");
+            local.owners.remove(&intent_id);
+            let should_retract = local.owners.is_empty()
+                && local.sig_state == SigState::Pending
+                && se.provenance.seen.is_empty();
+            if should_retract {
+                self.remove(frozen_id, RetractReason::Rejected);
+            }
         } else {
             // Not live. If sitting in someone else's displaced stash
             // (chained local supersession before this intent could sign),
-            // that stash entry must be invalidated for good: this intent
-            // is being permanently rejected, so the intent that displaced
-            // it must never later resurrect it via ITS OWN compensation.
-            // Matched by OWNING intent_id, not bare event id — see
-            // `promote_signed`'s identical fix for why (a `Duplicate` can
-            // share an event id with an unrelated, real intent).
+            // remove THIS intent from THAT stash entry's owner set, same
+            // conditional-retraction rule as the live case above — an
+            // exact-`Duplicate` co-owner (or a signed/relay-confirmed
+            // state) sitting in the SAME stash slot must survive this
+            // intent's cancellation too. Matched by OWNING intent_id
+            // SET-membership, not bare event id — see `promote_signed`'s
+            // identical fix for why (a `Duplicate` can share an event id
+            // with an unrelated, real intent).
             let other_key = self
                 .outbox_displaced
                 .iter()
@@ -1124,11 +1265,26 @@ impl EventStore for MemoryStore {
                             .provenance
                             .local
                             .as_ref()
-                            .is_some_and(|l| l.intent_id == intent_id)
+                            .is_some_and(|l| l.owners.contains(&intent_id))
                 })
                 .map(|(k, _)| *k);
             if let Some(other_key) = other_key {
-                self.outbox_displaced.remove(&other_key);
+                let se = self
+                    .outbox_displaced
+                    .get_mut(&other_key)
+                    .expect("just found this key");
+                let local = se
+                    .provenance
+                    .local
+                    .as_mut()
+                    .expect("just checked this entry carries local provenance");
+                local.owners.remove(&intent_id);
+                let should_drop = local.owners.is_empty()
+                    && local.sig_state == SigState::Pending
+                    && se.provenance.seen.is_empty();
+                if should_drop {
+                    self.outbox_displaced.remove(&other_key);
+                }
             }
         }
 
@@ -1148,30 +1304,45 @@ impl EventStore for MemoryStore {
         // Architecture review requirement (kind:5 suppression-claim
         // reversal): if this was a still-pending kind:5 draft, drop its
         // OWN claims outright — nothing was ever moved or removed, so
-        // there is nothing to re-insert; the target reappears in `query`
-        // the instant no claim names it anymore. `revealed` names every
-        // target that ACTUALLY became visible again, excluding one still
-        // hidden by some OTHER intent's overlapping claim, or already
+        // there is nothing to re-insert. `revealed` is a true visibility
+        // DELTA (issue #61 P1 correction), computed from before/after
+        // suppression state and deduped by event id — so a target still
+        // hidden by some OTHER intent's overlapping claim, one already
         // gone for good because a different intent already promoted its
-        // own deletion of the same target (see `AcceptOutcome::
-        // Kind5Processed`'s doc on why that stays sound even for an
-        // exact-`Duplicate` intent that never staged a claim of its own).
+        // own deletion of the same target, or one this claim's own
+        // (author/ceiling) component never actually covered in the first
+        // place (e.g. a wrong-author e-tag claim on a row some OTHER
+        // author holds), is correctly excluded.
         let mut revealed = Vec::new();
         if let Some(claims) = self.outbox_kind5_claims.remove(&intent_id) {
-            self.drop_kind5_claims(intent_id, &claims);
-            let mut seen_targets = HashSet::new();
+            let mut candidate_ids: Vec<EventId> = Vec::new();
+            let mut seen_candidates: HashSet<EventId> = HashSet::new();
             for claim in &claims {
                 let target_id = match claim {
                     SuppressClaim::Id(target_id, _) => Some(*target_id),
-                    SuppressClaim::Addr(key) => self.addr_index.get(key).copied(),
+                    SuppressClaim::Addr(key, _, _) => self.addr_index.get(key).copied(),
                 };
                 if let Some(target_id) = target_id {
-                    if seen_targets.insert(target_id) {
-                        if let Some(se) = self.by_id.get(&target_id) {
-                            if !self.is_suppressed(se) {
-                                revealed.push(se.clone());
-                            }
-                        }
+                    if seen_candidates.insert(target_id) {
+                        candidate_ids.push(target_id);
+                    }
+                }
+            }
+            let mut visible_before: HashMap<EventId, bool> = HashMap::new();
+            for id in &candidate_ids {
+                let visible = self.by_id.get(id).is_some_and(|se| !self.is_suppressed(se));
+                visible_before.insert(*id, visible);
+            }
+
+            self.drop_kind5_claims(intent_id, &claims);
+
+            for id in candidate_ids {
+                if visible_before.get(&id).copied().unwrap_or(false) {
+                    continue;
+                }
+                if let Some(se) = self.by_id.get(&id) {
+                    if !self.is_suppressed(se) {
+                        revealed.push(se.clone());
                     }
                 }
             }
