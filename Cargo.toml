@@ -9,6 +9,7 @@ members = [
     "nmp-signer",
     "nmp-engine",
     "nmp-demo",
+    "nmp-ffi",
 ]
 
 [workspace.package]
@@ -27,3 +28,4 @@ nmp-transport = { path = "nmp-transport" }
 nmp-signer = { path = "nmp-signer" }
 nmp-engine = { path = "nmp-engine" }
 proptest = "1"
+uniffi = "0.29"

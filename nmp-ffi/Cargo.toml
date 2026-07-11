@@ -1,0 +1,30 @@
+[package]
+name = "nmp-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# M4 plan §2: staticlib for the iOS xcframework, plain lib for the round-trip
+# unit tests / the `uniffi-bindgen` bin target below to link against.
+[lib]
+crate-type = ["staticlib", "lib"]
+name = "nmp_ffi"
+
+# `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \
+#   --language swift --out-dir gen/` (M4 plan §3 step 3, library mode -- reads
+# exported metadata straight from the compiled staticlib, no .udl file).
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+nostr.workspace = true
+nmp-grammar.workspace = true
+nmp-engine.workspace = true
+nmp-signer.workspace = true
+nmp-store.workspace = true
+nmp-router.workspace = true
+nmp-resolver.workspace = true
+nmp-transport.workspace = true
+uniffi = { workspace = true, features = ["cli"] }
