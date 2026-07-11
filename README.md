@@ -76,7 +76,7 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 | M2 — Compiler/router + coalescing | **PROVED** — 91 tests green; kill did not fire; independently verified honest |
 | M3 — Store + transport + write outbox | **PROVED** — 170 tests green; runs end-to-end vs a real relay; offline authority verified honest |
 | M4 — Swift SDK boundary | **PROVED** — Swift `AsyncSequence` SDK; `swift test` sees real notes live; reads like a native library |
-| M5 — iOS falsifier app | next (after reactive-outbox engine work) |
+| M5 — iOS falsifier app | planning — engine self-bootstraps outbox from 2 indexers (live-proven through Swift); diagnostic surface + app next |
 | M6 — Android | not started |
 
 **Proved so far (running code, each independently verified by a separate Opus review — detail in [`docs/reviews/`](docs/reviews/)):**
@@ -87,8 +87,8 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 
 A **Rust demo CLI** (`nmp-demo`) runs the engine against the *live* Nostr network — discovered a real user's 193 follows + their NIP-65 relays and streamed ~1,200–2,600 real notes via outbox, no fixtures. Dogfooding it found and **fixed** a P0 the 170 tests missed (full-set row re-emit, O(n²) → incremental deltas, 1.0× confirmed live).
 
-**Next, before M5:** the engine must self-bootstrap outbox from 2 indexers (discover follows' write relays from kind:10002, reactively) so an app never resolves relays itself. Tracked in [`docs/known-gaps.md`](docs/known-gaps.md).
+**Self-bootstrapping outbox works** (the MVP's core promise): given only two indexer relays, the engine discovers each follow's write relays from their kind:10002 reactively and routes content there — the app resolves *no* relays. Live-proven both through `nmp-demo` (2,491 real notes from 2 indexers) and the Swift SDK's live tests. So the entire engine + SDK is proven end-to-end against the real network.
 
-**Not yet proved:** the falsifier app (M5 — the second and final thesis-gate: does a normal iOS dev experience this as a library, not a framework?); Android (M6). **Disproved so far:** nothing.
+**Not yet built:** the diagnostic surface the MVP requires (per-relay/per-kind subs + events on the Handle/FFI); the falsifier app (M5 — the second and final thesis-gate: does a normal iOS dev experience this as a library, not a framework?); Android (M6). **Disproved so far:** nothing.
 
 This section is the truth anchor. It always says exactly where we are, including what has failed. Earlier gate detail (M0's amendments) is in [`docs/VISION.md`](docs/VISION.md) §9.
