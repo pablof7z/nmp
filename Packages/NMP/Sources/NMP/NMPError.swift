@@ -16,6 +16,12 @@ import NMPFFI
 /// `nmp-engine`'s acceptance boundary so it holds for every entry point, not
 /// only this one). It surfaces on `Receipt.status` instead, as
 /// `WriteStatus.failed`, the first and only status delivered.
+///
+/// Also no `.signerHasNoPublicKey` case: `addAccount` goes through
+/// `nmp::Engine::add_account`, whose built-in `LocalKeySigner` path always
+/// reports a public key -- there is no reachable "signer has no public key"
+/// state through this entry point, so an impossible error case is not kept
+/// on the public surface just in case.
 public enum NMPError: Error, Sendable, Equatable {
     case nonIndexableFilterTag(String)
     case invalidPublicKey(String)
@@ -23,7 +29,6 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidRelayUrl(String)
     case invalidTag([String])
     case invalidSecretKey
-    case signerHasNoPublicKey
     case storeOpenFailed(String)
     case invalidSignature(String)
     case engineClosed
@@ -36,7 +41,6 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
         case .InvalidTag(let got): self = .invalidTag(got)
         case .InvalidSecretKey: self = .invalidSecretKey
-        case .SignerHasNoPublicKey: self = .signerHasNoPublicKey
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed

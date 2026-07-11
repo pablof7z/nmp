@@ -64,11 +64,6 @@ pub enum FfiError {
     /// `add_account`'s secret key did not parse as a valid nostr key (hex or
     /// bech32 `nsec`).
     InvalidSecretKey,
-    /// A registered signing capability reported no public key at all --
-    /// never true for `LocalKeySigner`, but the registry's own contract
-    /// (`nmp_signer::SigningCapability::public_key() -> Option<PublicKey>`)
-    /// allows it, so this stays a typed state rather than an assumption.
-    SignerHasNoPublicKey,
     /// `NmpEngine::new`'s `store_path` pointed at a file `RedbStore::open`
     /// could not open.
     StoreOpenFailed {
@@ -113,7 +108,6 @@ impl std::fmt::Display for FfiError {
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
-            Self::SignerHasNoPublicKey => write!(f, "signer reported no public key"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
@@ -421,9 +415,9 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     }
 }
 
-/// `nmp_engine::core::DiagnosticsSnapshot -> FfiDiagnosticsSnapshot` (M5 plan
-/// §1.2 step 5) -- the engine-global diagnostics projection, rendered whole
-/// for the FFI boundary. Every number/string here is copied straight off the
+/// `nmp::DiagnosticsSnapshot -> FfiDiagnosticsSnapshot` (M5 plan §1.2 step
+/// 5) -- the engine-global diagnostics projection, rendered whole for the
+/// FFI boundary. Every number/string here is copied straight off the
 /// engine-owned snapshot, never recomputed/estimated at this layer.
 pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnapshot {
     FfiDiagnosticsSnapshot {
@@ -503,7 +497,7 @@ fn signed_event_from_ffi(
     ))
 }
 
-/// `FfiWriteIntent -> nmp_engine::outbox::WriteIntent`. `Unsigned` builds an
+/// `FfiWriteIntent -> nmp::WriteIntent`. `Unsigned` builds an
 /// `UnsignedEvent` template the engine signs internally; `Signed` (#32)
 /// parses the caller-supplied event's fields and passes it through
 /// verbatim -- see `signed_event_from_ffi`'s doc for where the verify now

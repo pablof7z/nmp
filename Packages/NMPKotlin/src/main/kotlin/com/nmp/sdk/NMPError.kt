@@ -19,7 +19,13 @@ import uniffi.nmp_ffi.FfiException
  * rejected synchronously here (#52 Unit B: the guarantee moved to
  * `nmp-engine`'s acceptance boundary so it holds for every entry point, not
  * only this one). It surfaces on the `publish` `Flow<WriteStatus>` instead,
- * as `WriteStatus.Failed`, the first and only status delivered. */
+ * as `WriteStatus.Failed`, the first and only status delivered.
+ *
+ * Also no `SignerHasNoPublicKey` case: `addAccount` goes through
+ * `nmp::Engine::add_account`, whose built-in `LocalKeySigner` path always
+ * reports a public key -- there is no reachable "signer has no public key"
+ * state through this entry point, so an impossible error case is not kept
+ * on the public surface just in case. */
 sealed class NMPError(message: String) : Exception(message) {
     data class NonIndexableFilterTag(val got: String) :
         NMPError("not indexable as a filter key: $got")
@@ -28,7 +34,6 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
-    object SignerHasNoPublicKey : NMPError("signer has no public key")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
@@ -42,7 +47,6 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
                 is FfiException.InvalidSecretKey -> InvalidSecretKey
-                is FfiException.SignerHasNoPublicKey -> SignerHasNoPublicKey
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed
