@@ -2,10 +2,17 @@
 //! OS threads:
 //!
 //! - the **engine thread**, which owns `core::EngineCore` and runs a
-//!   blocking `mpsc::Receiver<Cmd>::recv()` loop (D8: blocking recv, never
-//!   poll) — for every command it calls `EngineCore::handle`/`::tick` and
-//!   dispatches the returned `core::Effect`s to `nmp_transport::Pool::send`,
-//!   the `nmp_signer` capability, and the app-facing channels;
+//!   deadline-armed blocking recv loop (D8: the existing blocking
+//!   `mpsc::Receiver<Cmd>::recv()` grows a timeout, never a poll-loop timer
+//!   thread — see `engine_loop`'s doc and
+//!   `docs/design/retraction-and-negative-deltas.md` §3.3, #39): with no
+//!   deadline pending it blocks on plain `recv()`; with one pending it
+//!   `recv_timeout`s exactly until `core::EngineCore::next_deadline()`, and a
+//!   timeout dispatches `EngineMsg::Tick` (NIP-40 expiry + the neg-liveness
+//!   sweep) before re-arming from the freshly-recomputed deadline — for
+//!   every command it calls `EngineCore::handle`/`::tick` and dispatches the
+//!   returned `core::Effect`s to `nmp_transport::Pool::send`, the
+//!   `nmp_signer` capability, and the app-facing channels;
 //! - the **pool-bridge thread**, a tiny translator that blocking-`recv`s
 //!   `nmp_transport::PoolEvent`s (the pool's OWN `mio` worker threads push
 //!   these) and forwards each as a `core::EngineMsg` onto the engine
@@ -52,15 +59,16 @@
 mod diagnostics_channel;
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
 use nmp_signer::{SignerError, SignerOp, SigningCapability};
 use nmp_store::EventStore;
-use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId};
+use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp};
 
 use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
@@ -263,6 +271,22 @@ impl EngineThread {
     }
 }
 
+/// Wall-clock `Duration` from `now` until `deadline` (§3.3's `recv_timeout`
+/// argument), floored at zero for a deadline already past -- the "a past-due
+/// deadline yields a zero timeout -> immediate tick" case (boot-time
+/// catch-up on a persisted expiration index, or simply losing a race with
+/// the wall clock between `next_deadline()` and this call). `Timestamp` is
+/// second-resolution (NIP-40's own unit -- every deadline source
+/// `EngineCore::next_deadline` folds in is that same resolution), so this
+/// loop's wake precision is bounded by a second, never finer.
+fn duration_until(deadline: Timestamp, now: Timestamp) -> Duration {
+    if deadline <= now {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(deadline.as_secs().saturating_sub(now.as_secs()))
+    }
+}
+
 /// Blocking translator loop (D8): `PoolEvent` -> `EngineMsg` -> the engine
 /// thread's inbox. Exits as soon as `pool_evt_rx` disconnects, which only
 /// happens once every clone of the pool's sink is gone (see `EngineThread::
@@ -308,6 +332,24 @@ type Preambles = HashMap<RelayUrl, HashMap<SubId, String>>;
 /// The engine thread's body: construct `EngineCore` (this is the ONLY place
 /// it is ever built — it never leaves this stack frame), then block on
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
+///
+/// The deadline-armed driver (§3.3, #39): every iteration re-reads
+/// `core.next_deadline()` fresh, so a command that just introduced an
+/// earlier deadline (e.g. ingesting an event that expires sooner than
+/// whatever this loop was previously armed for) re-arms naturally on the
+/// very next `recv`/`recv_timeout` call — the command itself is the wakeup,
+/// with no separate "interrupt the sleep" machinery. `None` (no deadline
+/// pending anywhere) blocks on plain `recv()`: a light embedder with no
+/// expiring content and no open negentropy session pays nothing beyond the
+/// ordinary command loop. `Some(deadline)` arms `recv_timeout` for exactly
+/// the remaining wall-clock distance to it (zero if already past, e.g. a
+/// persisted deadline that elapsed while the process was down — the very
+/// first iteration catches that up through the identical `Tick` path). A
+/// timeout dispatches `EngineMsg::Tick(wall_now())`, which runs the
+/// mechanism `core::EngineCore::tick` already implements (NIP-40 expiry +
+/// neg-liveness sweep -- unchanged by this driver), then `continue`s
+/// straight back to the top so the timeout is recomputed from the deadline
+/// set `tick` just changed, rather than re-arming from a stale value.
 fn engine_loop<S, D>(
     store: S,
     directory: D,
@@ -326,7 +368,35 @@ fn engine_loop<S, D>(
     let mut preambles: Preambles = Preambles::new();
     let mut registry = SignerRegistry::default();
 
-    while let Ok(cmd) = cmd_rx.recv() {
+    loop {
+        let cmd = match core.next_deadline() {
+            None => match cmd_rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => break, // every `Sender` (incl. `self_inbox`) is gone.
+            },
+            Some(deadline) => match cmd_rx.recv_timeout(duration_until(deadline, Timestamp::now()))
+            {
+                Ok(cmd) => cmd,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Woke EXACTLY at the deadline (or it was already past,
+                    // e.g. boot-time catch-up on a persisted index) -- fire
+                    // the mechanism, then re-arm from the NEW next_deadline
+                    // rather than acting on the one that just fired.
+                    let effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                    dispatch_effects(
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        self_inbox,
+                    );
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+        };
         match cmd {
             Cmd::Shutdown => break,
             Cmd::AddSigner { signer, reply } => {

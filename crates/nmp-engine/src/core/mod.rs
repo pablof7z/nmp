@@ -7,6 +7,7 @@
 //! impl<S: EventStore> EngineCore<S> {
 //!     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect>;
 //!     pub fn tick(&mut self, now: nostr::Timestamp) -> Vec<Effect>;
+//!     pub fn next_deadline(&self) -> Option<nostr::Timestamp>;
 //! }
 //! ```
 //!
@@ -382,14 +383,13 @@ impl<S: EventStore> EngineCore<S> {
     /// filter. Backoff/keepalive scheduling stays D/A2 territory --
     /// untouched here.
     ///
-    /// Nothing in `runtime` currently drives `EngineMsg::Tick` on a
-    /// wall-clock cadence (D8 forbids a poll-loop timer thread, and no
-    /// caller-facing `Handle` verb exists for it either) -- both sweeps are
-    /// real and unit-tested against a synthetic clock, but neither is yet
-    /// wired to fire on its own in the live runtime; the `recv_timeout`
-    /// deadline-armed driver that would do that is a separate #23 child
-    /// (retraction-and-negative-deltas.md §3.3). See the builder report's
-    /// scope note.
+    /// `runtime::engine_loop` (§3.3, #39) is what actually drives this on
+    /// its own now: it arms `cmd_rx.recv_timeout` off [`Self::next_deadline`]
+    /// and dispatches `EngineMsg::Tick(wall_now())` exactly when that
+    /// timeout elapses (D8: the existing blocking recv grows a timeout,
+    /// never a poll-loop timer thread). Both sweeps stay real and unit-
+    /// tested here against a synthetic clock regardless of who calls this
+    /// -- the runtime driver is a caller, not part of the mechanism.
     pub fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
         self.clock = now;
         let mut effects = Vec::new();
@@ -428,6 +428,32 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         effects
+    }
+
+    /// The earliest wall-clock instant at which [`Self::tick`] must run for
+    /// something to actually happen (retraction-and-negative-deltas.md
+    /// §3.2): the min over every deadline source this reducer currently
+    /// tracks -- NIP-40 expiry (`store.next_expiration()`, index-backed) and
+    /// open negentropy sessions' liveness deadlines (`started_at +
+    /// NEG_LIVENESS_DEADLINE_SECS`). `None` means no timer needs to fire at
+    /// all right now: `runtime::engine_loop`'s `recv_timeout` driver (§3.3)
+    /// sleeps forever on the plain `recv()` in that case, exactly matching
+    /// the doc's "a light embedder with no deadlines pays nothing".
+    /// Extensible to future timers (backoff, drop-grace debounce) by folding
+    /// another `.min()` term in here -- the runtime driver itself never
+    /// needs to change to pick up a new deadline source.
+    pub fn next_deadline(&self) -> Option<Timestamp> {
+        let expiry = self.resolver.store().next_expiration();
+        let neg_liveness = self
+            .neg_sessions
+            .values()
+            .map(|session| session.started_at + NEG_LIVENESS_DEADLINE_SECS)
+            .min();
+        match (expiry, neg_liveness) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
     }
 
     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
