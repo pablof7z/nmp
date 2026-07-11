@@ -122,7 +122,7 @@ fn accept_write_inserts_pending_row_and_journal_in_one_txn() {
                     .provenance
                     .local
                     .expect("locally-accepted row carries local provenance");
-                assert_eq!(local.intent_id, intent_id);
+                assert!(local.owners.contains(&intent_id));
                 assert_eq!(local.sig_state, SigState::Pending);
             }
             other => panic!("expected Inserted, got {other:?}"),
@@ -155,9 +155,10 @@ fn pending_row_projects_sig_state_and_is_queryable_like_any_row() {
         let local = row
             .provenance
             .local
+            .as_ref()
             .expect("app surface must be able to tell this row is pending");
         assert_eq!(local.sig_state, SigState::Pending);
-        assert_eq!(local.intent_id, intent_id);
+        assert!(local.owners.contains(&intent_id));
     });
 }
 
@@ -1569,37 +1570,506 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
     });
 }
 
+/// Issue #61 P0 required falsifier: a candidate created AFTER a pending
+/// kind:5's own `created_at` must remain visible while that deletion is
+/// still open — an address claim with no ceiling would incorrectly hide
+/// every future winner at that address forever, which even a PERMANENT
+/// tombstone does not do (retraction-and-negative-deltas.md §2's ceiling
+/// rule: "a fresh post-deletion event at the same address wins normally").
+#[test]
+fn address_claim_ceiling_does_not_hide_post_ceiling_winner() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_r1, _signed_r1) = compose(&k, Kind::ContactList, "v1", 50);
+        do_accept(store, accept(frozen_r1, k.public_key(), 50));
+
+        let coord = Coordinate::new(Kind::ContactList, k.public_key());
+        let signed_deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::coordinate(coord, None))
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&k)
+            .expect("sign a-tag deletion");
+        let frozen_deletion = Event::new(
+            signed_deletion.id,
+            signed_deletion.pubkey,
+            signed_deletion.created_at,
+            signed_deletion.kind,
+            signed_deletion.tags.clone(),
+            signed_deletion.content.clone(),
+            sentinel_signature(),
+        );
+        let outcome_d = do_accept(store, accept(frozen_deletion, k.public_key(), 100));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
+        assert!(store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .is_empty());
+
+        // A NEW winner, created AFTER the pending deletion's own
+        // timestamp, must NOT be hidden by D's claim — the provisional
+        // ceiling must match the permanent one exactly. `v1` was only
+        // ever HIDDEN, never removed, so it is still the current
+        // `addr_index` winner ordinary supersession competes against —
+        // `v2` (created later) correctly supersedes it.
+        let (frozen_r2, _signed_r2) = compose(&k, Kind::ContactList, "v2 post-ceiling", 200);
+        let r2_id = frozen_r2.id;
+        let outcome_r2 = do_accept(store, accept(frozen_r2, k.public_key(), 200));
+        assert!(matches!(outcome_r2, AcceptOutcome::Superseded { .. }));
+
+        let rows = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+        assert_eq!(
+            rows.len(),
+            1,
+            "a post-ceiling winner must remain visible while an EARLIER pending delete is still open"
+        );
+        assert_eq!(rows[0].event.id, r2_id);
+
+        // Cancelling D must not disturb the post-ceiling winner either.
+        let compensated_d = store
+            .compensate_write(intent_d)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_d,
+            CompensateOutcome::Compensated { .. }
+        ));
+        assert_eq!(
+            store
+                .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+                .len(),
+            1
+        );
+    });
+}
+
+/// Issue #61 P0 required falsifier: two overlapping address claims with
+/// DIFFERENT ceilings must compose correctly — a candidate stays hidden
+/// while ANY covering claim remains, and becomes visible only once every
+/// claim that covers it has cleared.
+#[test]
+fn overlapping_address_claims_with_different_ceilings_compose_correctly() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_r, _signed_r) = compose(&k, Kind::ContactList, "v1", 50);
+        do_accept(store, accept(frozen_r, k.public_key(), 50));
+
+        let coord = Coordinate::new(Kind::ContactList, k.public_key());
+
+        // D1: an EARLIER-ceiling pending delete (created_at=80) -- covers
+        // v1 (created_at=50) but would NOT cover anything created after 80.
+        let signed_d1 = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::coordinate(coord.clone(), None))
+            .custom_created_at(Timestamp::from(80))
+            .sign_with_keys(&k)
+            .expect("sign d1");
+        let frozen_d1 = Event::new(
+            signed_d1.id,
+            signed_d1.pubkey,
+            signed_d1.created_at,
+            signed_d1.kind,
+            signed_d1.tags.clone(),
+            signed_d1.content.clone(),
+            sentinel_signature(),
+        );
+        let outcome_d1 = do_accept(store, accept(frozen_d1, k.public_key(), 80));
+        let intent_d1 = outcome_d1.journaled_intent_id().expect("journaled");
+
+        // D2: a LATER-ceiling pending delete (created_at=150) -- also
+        // covers v1.
+        let signed_d2 = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::coordinate(coord, None))
+            .custom_created_at(Timestamp::from(150))
+            .sign_with_keys(&k)
+            .expect("sign d2");
+        let frozen_d2 = Event::new(
+            signed_d2.id,
+            signed_d2.pubkey,
+            signed_d2.created_at,
+            signed_d2.kind,
+            signed_d2.tags.clone(),
+            signed_d2.content.clone(),
+            sentinel_signature(),
+        );
+        let outcome_d2 = do_accept(store, accept(frozen_d2, k.public_key(), 150));
+        let intent_d2 = outcome_d2.journaled_intent_id().expect("journaled");
+
+        assert!(store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .is_empty());
+
+        // Cancel D1 (the earlier ceiling) -- D2's LATER ceiling still
+        // covers v1 (50 <= 150), so it must stay hidden.
+        let compensated_d1 = store
+            .compensate_write(intent_d1)
+            .expect("compensate persistence");
+        match compensated_d1 {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert!(
+                    revealed.is_empty(),
+                    "D2's later ceiling must keep v1 hidden after D1 alone clears"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert!(store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .is_empty());
+
+        // Cancel D2 too -- now nothing covers v1, it reappears.
+        let compensated_d2 = store
+            .compensate_write(intent_d2)
+            .expect("compensate persistence");
+        match compensated_d2 {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert_eq!(revealed.len(), 1);
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert_eq!(
+            store
+                .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+                .len(),
+            1
+        );
+    });
+}
+
+/// Issue #61 P0 required falsifier: the address-claim ceiling's
+/// correctness (post-ceiling winners stay visible; cancel still reverses
+/// it) must survive a durable restart — `RedbStore`-only.
+#[test]
+fn address_claim_ceiling_survives_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+    let (frozen_r, _signed_r) = compose(&k, Kind::ContactList, "v1", 50);
+
+    let intent_d = {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        do_accept(&mut store, accept(frozen_r, k.public_key(), 50));
+
+        let coord = Coordinate::new(Kind::ContactList, k.public_key());
+        let signed_deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::coordinate(coord, None))
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&k)
+            .expect("sign a-tag deletion");
+        let frozen_deletion = Event::new(
+            signed_deletion.id,
+            signed_deletion.pubkey,
+            signed_deletion.created_at,
+            signed_deletion.kind,
+            signed_deletion.tags.clone(),
+            signed_deletion.content.clone(),
+            sentinel_signature(),
+        );
+        let outcome_d = do_accept(&mut store, accept(frozen_deletion, k.public_key(), 100));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
+        assert!(store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .is_empty());
+        intent_d
+    };
+
+    let mut store = RedbStore::open(&path).expect("reopen redb store");
+    // Still hidden after reopen.
+    assert!(store
+        .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+        .is_empty());
+
+    // A post-ceiling winner still isn't hidden after reopen.
+    let (frozen_r2, _signed_r2) = compose(&k, Kind::ContactList, "v2 post-ceiling", 200);
+    let r2_id = frozen_r2.id;
+    do_accept(&mut store, accept(frozen_r2, k.public_key(), 200));
+    let rows = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event.id, r2_id);
+
+    // Cancelling D after reopen still works correctly.
+    let compensated = store
+        .compensate_write(intent_d)
+        .expect("compensate persistence");
+    assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
+}
+
+/// Issue #2 required falsifier #1 (team-lead decision, canonical-row
+/// ownership for byte-identical intents): a pending `Duplicate` B's still-
+/// open obligation must keep the canonical row alive when the canonical
+/// original A is cancelled — the row is owned by a SET, not coalesced
+/// into whichever intent happened to accept first (see `LocalOrigin`'s
+/// doc). Only once EVERY owner cancels does the row actually retract.
+#[test]
+fn duplicate_pending_b_survives_cancel_of_canonical_a() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
+        let frozen_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
+
+        let outcome_b = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+
+        // Cancel the CANONICAL original -- B's still-open obligation must
+        // keep the canonical row alive.
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_a,
+            CompensateOutcome::Compensated { restored: None, .. }
+        ));
+
+        let rows = store.query(&Filter::new().id(frozen_id));
+        assert_eq!(
+            rows.len(),
+            1,
+            "B's still-open duplicate obligation must keep the canonical row alive"
+        );
+        let local = rows[0]
+            .provenance
+            .local
+            .as_ref()
+            .expect("still locally owned");
+        assert_eq!(local.sig_state, SigState::Pending);
+        assert!(local.owners.contains(&intent_b));
+        assert!(
+            !local.owners.contains(&intent_a),
+            "A must be removed from the owner set once cancelled"
+        );
+
+        // Cancelling B afterward retracts it for real -- nothing sustains
+        // it anymore.
+        let compensated_b = store
+            .compensate_write(intent_b)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_b,
+            CompensateOutcome::Compensated { restored: None, .. }
+        ));
+        assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
+    });
+}
+
+/// Issue #2 required falsifier #2: if the `Duplicate` B signs first, its
+/// promotion sets the canonical row's signature in place; cancelling the
+/// OTHER co-owner A afterward must leave the row signed and queryable —
+/// the whole point of "signature state is canonical to the row, not
+/// per-owner" (see `LocalOrigin`'s doc).
+#[test]
+fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
+        let frozen_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let outcome_b = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+
+        // A real signature over the exact same frozen bytes (same
+        // pubkey/created_at/kind/content — the NIP-01 id never depends on
+        // `sig`).
+        let signed = EventBuilder::new(Kind::TextNote, "shared body")
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&k)
+            .expect("sign matching event");
+        assert_eq!(signed.id, frozen_id);
+
+        let promoted_b = store
+            .promote_signed(intent_b, signed.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_b, PromoteOutcome::Promoted { .. }));
+
+        // Cancel A -- B's promotion must survive; the row stays signed
+        // and queryable.
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_a,
+            CompensateOutcome::Compensated { restored: None, .. }
+        ));
+
+        let rows = store.query(&Filter::new().id(frozen_id));
+        assert_eq!(
+            rows.len(),
+            1,
+            "a signed row must survive an unrelated co-owner's cancellation"
+        );
+        assert_eq!(rows[0].event.sig, signed.sig);
+        let local = rows[0]
+            .provenance
+            .local
+            .as_ref()
+            .expect("still locally tracked");
+        assert_eq!(local.sig_state, SigState::Signed);
+    });
+}
+
+/// Issue #2 required falsifier #3: neither sequence above may leave an
+/// open obligation without its canonical row after a durable restart —
+/// `RedbStore`-only, since `MemoryStore` never survives a real process
+/// crash (Fable checkpoint Q4).
+#[test]
+fn duplicate_ownership_survives_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+    let (frozen_a, _signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
+    let frozen_id = frozen_a.id;
+
+    let (intent_a, intent_b) = {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let outcome_a = do_accept(&mut store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+        let outcome_b = do_accept(&mut store, accept(frozen_a, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+        // Cancel A before ever reopening -- only B's obligation should
+        // survive.
+        store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        (intent_a, intent_b)
+    };
+
+    let store = RedbStore::open(&path).expect("reopen redb store");
+    let rows = store.query(&Filter::new().id(frozen_id));
+    assert_eq!(
+        rows.len(),
+        1,
+        "no open obligation may survive restart without its canonical row"
+    );
+    let local = rows[0]
+        .provenance
+        .local
+        .as_ref()
+        .expect("still locally owned");
+    assert!(local.owners.contains(&intent_b));
+    assert!(!local.owners.contains(&intent_a));
+
+    let recovered = store.recover_outbox();
+    assert!(recovered.iter().any(|r| r.intent_id == intent_b));
+    assert!(
+        !recovered.iter().any(|r| r.intent_id == intent_a),
+        "A's compensated journal row must be gone"
+    );
+}
+
+/// Issue #2 required falsifier #4 (kind:5 variant): an exact-`Duplicate`
+/// kind:5 intent's OWN independent suppression claim (issue #61 P0
+/// correction) must keep a target hidden after the canonical original is
+/// cancelled — the ownership-set model and the suppression-claim model
+/// reinforce each other here.
+#[test]
+fn duplicate_kind5_intent_b_keeps_target_hidden_after_canonical_a_cancels() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+
+        let signed_deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let frozen_deletion = Event::new(
+            signed_deletion.id,
+            signed_deletion.pubkey,
+            signed_deletion.created_at,
+            signed_deletion.kind,
+            signed_deletion.tags.clone(),
+            signed_deletion.content.clone(),
+            sentinel_signature(),
+        );
+
+        let outcome_a = do_accept(store, accept(frozen_deletion.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_a, AcceptOutcome::Kind5Processed { .. }));
+
+        let outcome_b = do_accept(store, accept(frozen_deletion, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Cancel the CANONICAL original A -- B's own independent claim
+        // must keep the target hidden.
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        match compensated_a {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert!(
+                    revealed.is_empty(),
+                    "B's independent claim must keep the target hidden"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Cancel B too -- now nothing claims it, the target reappears.
+        let compensated_b = store
+            .compensate_write(intent_b)
+            .expect("compensate persistence");
+        match compensated_b {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert_eq!(revealed.len(), 1);
+                assert_eq!(revealed[0].event.id, target_id);
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+    });
+}
+
 /// codex-nova finding: the displaced-stash lookup `promote_signed`/
 /// `compensate_write` use for a non-live intent must match on the STASH
-/// ENTRY'S OWN `intent_id`, not merely on frozen event id — two DIFFERENT
-/// intents can share the same frozen event id (a real intent and a
-/// byte-identical `Duplicate` of it). Falsifier: accept A for event E;
-/// accept B as a `Duplicate` of the identical E; accept C (a newer
-/// replaceable) so A's row is stashed under C; compensate B — this must
-/// NOT touch A's stash entry (a later cancel of C must still restore A).
+/// ENTRY'S OWN owner-SET membership, not merely on frozen event id — two
+/// DIFFERENT intents can share the same frozen event id (a real intent
+/// and a byte-identical `Duplicate` of it). Under the ownership-set model
+/// (issue #2, team-lead decision) B is NOT unrelated to A here — an exact
+/// `Duplicate` is a CO-OWNER of the SAME stash slot — so compensating B
+/// must only remove B from that shared slot's owner set, never touch A's
+/// own membership or drop the slot outright while A still owns it.
+/// Falsifier: accept A for event E; accept B as a `Duplicate` of the
+/// identical E; accept C (a newer replaceable) so the shared A+B row is
+/// stashed under C; compensate B — A's ownership, and the stash entry
+/// itself, must survive (a later cancel of C must still restore A).
 #[test]
-fn compensating_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
+fn compensating_a_duplicate_intent_only_drops_its_own_stash_ownership() {
     for_each_backend(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "a", 100);
         let frozen_a_id = frozen_a.id;
         let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
 
-        // B: a byte-identical Duplicate of A's exact frozen body.
+        // B: a byte-identical Duplicate of A's exact frozen body -- joins
+        // A's owner set.
         let outcome_b = do_accept(store, accept(frozen_a, k.public_key(), 100));
         let intent_b = outcome_b.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
 
-        // C: a newer replaceable candidate that supersedes A, stashing A's
-        // row under C's OUTBOX_DISPLACED entry.
+        // C: a newer replaceable candidate that supersedes the shared A+B
+        // row, stashing it under C's OUTBOX_DISPLACED entry.
         let (frozen_c, _signed_c) = compose(&k, Kind::ContactList, "c", 200);
         let outcome_c = do_accept(store, accept(frozen_c, k.public_key(), 200));
         let intent_c = outcome_c.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_c, AcceptOutcome::Superseded { .. }));
 
-        // Compensating B — an unrelated intent that merely shares A's
-        // event id — must be a no-op with respect to A's stash entry.
+        // Compensating B only removes B from the shared stash entry's
+        // owner set -- A's still-open obligation keeps it alive, so
+        // nothing is returned as `restored` by THIS call (B never
+        // displaced anything of its own).
         let compensated_b = store
             .compensate_write(intent_b)
             .expect("compensate persistence");
@@ -1608,27 +2078,38 @@ fn compensating_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
             CompensateOutcome::Compensated { restored: None, .. }
         ));
 
-        // A's stash entry must still be intact — cancelling C must still
-        // restore A.
+        // A's stash entry must still be intact (now owned by A alone) —
+        // cancelling C must still restore A.
         let compensated_c = store
             .compensate_write(intent_c)
             .expect("compensate persistence");
         match compensated_c {
             CompensateOutcome::Compensated { restored, .. } => {
-                let restored = restored
-                    .expect("A's stash must survive compensating the unrelated Duplicate intent B");
+                let restored =
+                    restored.expect("A's still-open ownership must survive compensating B");
                 assert_eq!(restored.event.id, frozen_a_id);
+                let local = restored.provenance.local.expect("still locally owned by A");
+                assert!(local.owners.contains(&intent_a));
+                assert!(
+                    !local.owners.contains(&intent_b),
+                    "B must have been removed from the shared owner set"
+                );
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
     });
 }
 
-/// codex-nova finding, promote variant: `promote_signed` on B similarly
-/// must not write B's signature into A's unrelated stash entry, nor mark
-/// A's `LocalOrigin` as `Signed`.
+/// codex-nova finding, promote variant: under the ownership-set model
+/// (issue #2, team-lead decision) B is a CO-OWNER of A's shared stash
+/// slot, so `promote_signed` on B legitimately syncs B's signature into
+/// it — that is the whole point of "promotion by any owner promotes the
+/// canonical event-level state." What must NOT happen is a SECOND,
+/// DIFFERENT signature landing on the same row afterward: once B has
+/// signed the shared slot, A's own (distinct) promotion attempt must be
+/// refused, not silently overwrite B's real signature with a second one.
 #[test]
-fn promoting_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
+fn promoting_a_duplicate_intent_syncs_shared_stash_and_blocks_a_second_signature() {
     for_each_backend(|store| {
         let k = keys();
         let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
@@ -1645,38 +2126,39 @@ fn promoting_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
         let intent_c = outcome_c.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_c, AcceptOutcome::Superseded { .. }));
 
-        // Promote B with a signature that is NOT A's own.
-        let (_, signed_unrelated) = compose(&k, Kind::ContactList, "unrelated-sig-source", 999);
+        // Promote B -- syncs B's signature into the SHARED stash entry
+        // (B is a co-owner of it, not an unrelated bystander).
         let promoted_b = store
-            .promote_signed(intent_b, signed_unrelated.sig)
+            .promote_signed(intent_b, signed_a.sig)
             .expect("promote persistence");
         assert!(matches!(promoted_b, PromoteOutcome::Promoted { .. }));
 
-        // A's stash entry must still carry A's OWN sentinel signature,
-        // never mutated by promoting the unrelated intent B.
+        // A's own (distinct) promotion attempt must now be refused: the
+        // shared row already carries a real signature via co-owner B.
+        let promoted_a = store
+            .promote_signed(intent_a, signed_a.sig)
+            .expect("promote persistence");
+        assert!(
+            matches!(promoted_a, PromoteOutcome::NotFound),
+            "a second owner's promotion attempt on an already-signed shared row must be refused"
+        );
+
+        // Cancelling C restores the shared entry, still correctly Signed
+        // with B's synced signature, still owned by both A and B (A never
+        // successfully transitioned, so it stays a co-owner alongside B).
         let compensated_c = store
             .compensate_write(intent_c)
             .expect("compensate persistence");
         match compensated_c {
             CompensateOutcome::Compensated { restored, .. } => {
-                let restored = restored
-                    .expect("A's stash must survive promoting the unrelated Duplicate intent B");
+                let restored = restored.expect("the shared row must survive cancelling C");
                 assert_eq!(restored.event.id, frozen_a_id);
-                assert_eq!(
-                    restored.event.sig,
-                    sentinel_signature(),
-                    "A's stash entry must not have been mutated by promoting the unrelated intent B"
-                );
+                assert_eq!(restored.event.sig, signed_a.sig);
+                let local = restored.provenance.local.expect("still locally owned");
+                assert_eq!(local.sig_state, SigState::Signed);
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-
-        // A itself, now restored live by cancelling C, still promotes
-        // independently with its OWN signature.
-        let promoted_a = store
-            .promote_signed(intent_a, signed_a.sig)
-            .expect("promote persistence");
-        assert!(matches!(promoted_a, PromoteOutcome::Promoted { .. }));
     });
 }
 

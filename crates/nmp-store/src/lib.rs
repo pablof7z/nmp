@@ -64,7 +64,7 @@ pub use coverage::{coverage_key, ClaimSet, CoverageInterval, CoverageKey, GcRepo
 pub use memory_store::MemoryStore;
 pub use redb_store::RedbStore;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::secp256k1::schnorr::Signature;
@@ -110,20 +110,45 @@ pub enum SigState {
 /// A locally-authored row's provenance (issue #2's "`Local` origin; a row
 /// *field*, exactly ledger #5's shape"). Set iff this row entered through
 /// [`EventStore::accept_write`] rather than [`EventStore::insert`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `owners` is a SET, not a single `IntentId` (architecture review
+/// correction, team-lead decision on issue #2): an earlier revision
+/// conflated "this row's canonical signature state" with "the one intent
+/// that backs it," which broke the moment a byte-identical `Duplicate`
+/// intent was accepted against an already-locally-owned row — cancelling
+/// the FIRST intent would remove the row out from under a SECOND intent
+/// still durably obligated to deliver it (its own `OUTBOX_INTENTS`/receipt
+/// stayed open with no canonical row to promote or compensate). Every
+/// accepted intent that currently backs this row's existence is a member;
+/// coalescing duplicates into one owner was rejected because it would
+/// silently drop a later intent's own receipt, violating "every accepted
+/// write returns a receipt." `sig_state` stays canonical to the ROW, never
+/// per-owner: ANY owner's [`EventStore::promote_signed`] call sets it, in
+/// place, for every owner at once — there is exactly one signature on one
+/// row, however many intents are backing it.
+///
+/// [`EventStore::compensate_write`] on one owner only removes THAT owner
+/// from the set; the canonical row is only actually retracted once the set
+/// is empty AND `sig_state` is still `Pending` AND no relay has
+/// independently confirmed it (`Provenance::seen` empty) — an owner-less
+/// row that is already `Signed`, or that a relay has confirmed on its own,
+/// is left standing with an empty `owners` set rather than deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalOrigin {
-    pub intent_id: IntentId,
+    pub owners: BTreeSet<IntentId>,
     pub sig_state: SigState,
-    pub accepted_at: Timestamp,
 }
 
 /// Per-relay provenance for one stored event: which relays have delivered
 /// this exact event id, and the latest wall-clock time each one did so
 /// (ledger #5). A first-class field of the stored row, not a sidecar.
-/// `local` is `Some` iff the row was locally authored (issue #2) — it is
-/// preserved (never cleared) across a later relay echo merging into `seen`:
-/// the app's "sending…" chip resolves off `seen.is_empty()`, not off
-/// `local`'s presence (retraction doc §4.1).
+/// `local` is `Some` iff this row has ever been locally accepted (issue
+/// #2) — it is preserved (never cleared) across a later relay echo merging
+/// into `seen`, AND across every owning intent eventually being
+/// compensated away (`LocalOrigin::owners` can be empty while `local`
+/// stays `Some`, e.g. once relay provenance alone sustains the row — see
+/// [`LocalOrigin`]'s doc): the app's "sending…" chip resolves off
+/// `seen.is_empty()`, not off `local`'s presence (retraction doc §4.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Provenance {
     pub seen: BTreeMap<RelayUrl, Timestamp>,
@@ -501,24 +526,26 @@ impl AcceptOutcome {
 
 /// The result of an [`EventStore::promote_signed`] call — keyed by
 /// `IntentId`, not the frozen event's id (architecture review correction: a
-/// `Duplicate`/`Stale` intent never won a live row at its own id at all,
-/// and a once-live row can since have been superseded, kind:5-deleted, or
-/// expired). Three cases, all reachable: the intent's row is still live at
-/// its own id (sentinel swapped for `sig` in place — same id, same
-/// EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND entries, zero churn); the intent's
-/// frozen bytes are sitting in some OTHER intent's `OUTBOX_DISPLACED` stash
-/// (chained local supersession before this intent could sign — the real
-/// signature is synced into that stash entry too, so a future restore of
-/// it never resurrects a stale sentinel copy of an intent that actually
-/// signed); or neither (the row is gone for some unrelated reason — relay
-/// supersession, kind:5 deletion, NIP-40 expiry — and the signed bytes are
-/// synthesized from the journal's own copy so the engine can still publish
-/// them even though this intent wins no local address). Either way,
-/// `SigState`/`IntentSigState` flip to `Signed`, the durable
-/// `OUTBOX_DISPLACED` stash for THIS intent (if any) is deleted in the same
-/// transaction (R6), and — if this was a pending kind:5 draft — its
-/// provisional tombstone claims become authoritative (see
-/// `Kind5StashRecord`'s doc). Boxed for the same reason
+/// `Duplicate`/`Stale` intent with no shared row never won a live row at
+/// its own id at all, and a once-live row can since have been superseded,
+/// kind:5-deleted, or expired). Three cases, all reachable: `intent_id` is
+/// a MEMBER of a live row's owner set (issue #2, team-lead decision —
+/// ownership is a SET, so an exact `Duplicate` sharing an already-locally-
+/// owned row is a CO-OWNER of it, not a row of its own) — sentinel swapped
+/// for `sig` in place, same id, same EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND
+/// entries, zero churn; `intent_id` is a member of some OTHER intent's
+/// `OUTBOX_DISPLACED` stash entry's owner set (chained local supersession
+/// before this intent could sign — the real signature is synced into that
+/// stash entry too, so a future restore of it never resurrects a stale
+/// sentinel copy of an intent that actually signed); or neither (the row
+/// is gone for some unrelated reason — relay supersession, kind:5
+/// deletion, NIP-40 expiry — and the signed bytes are synthesized from the
+/// journal's own copy so the engine can still publish them even though
+/// this intent wins no local address). Either way, `SigState`/
+/// `IntentSigState` flip to `Signed`, the durable `OUTBOX_DISPLACED` stash
+/// for THIS intent (if any) is deleted in the same transaction (R6), and —
+/// if this was a pending kind:5 draft — its suppression claims become
+/// authoritative permanent tombstones. Boxed for the same reason
 /// `InsertOutcome::Superseded` is: keeps the common `NotFound` variant
 /// small.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,35 +553,50 @@ pub enum PromoteOutcome {
     Promoted {
         row: Box<StoredEvent>,
     },
-    /// This `IntentId` names no still-open intent: already promoted (a
-    /// repeat promotion is a no-op, not a re-signature — codex-nova
-    /// finding), already compensated, or never accepted through
+    /// This `IntentId` names no still-open intent, OR it does but the
+    /// shared row/stash entry it is a member of is ALREADY `Signed` by
+    /// some OTHER co-owner (architecture review correction, issue #2's
+    /// ownership-set model: a repeat promotion — whether by the SAME
+    /// intent re-promoting, codex-nova's original finding, or a
+    /// DIFFERENT co-owner's first promotion attempt on an
+    /// already-signed shared row — is a no-op, never a re-signature).
+    /// Also covers already compensated, or never accepted through
     /// `accept_write`.
     NotFound,
 }
 
 /// The result of an [`EventStore::compensate_write`] call — keyed by
 /// `IntentId`, same three-case dispatch [`PromoteOutcome`] documents (live
-/// row / displaced-in-another-intent's-stash / neither). If live, the row
-/// is removed (`remove(id, Rejected)` — no tombstone, the row was never
-/// validly signed); if sitting in another intent's stash, that stash entry
-/// is invalidated so the intent that displaced it can never later
-/// resurrect a cancelled predecessor via ITS OWN compensation. Either way,
-/// THIS intent's own displaced predecessor (if any) is restored through
-/// the same one door and returned here (`None` if it displaced nothing, or
-/// the re-offered predecessor came back `Stale` — retraction doc §3.4).
+/// row / displaced-in-another-intent's-stash / neither), same ownership-SET
+/// model (issue #2, team-lead decision). If live, `intent_id` is removed
+/// from the row's owner set; the row is only actually `remove(id,
+/// Rejected)`-ed (no tombstone — the row was never validly signed) once
+/// the set is EMPTY, `SigState` is still `Pending`, AND no relay has
+/// independently confirmed it — an exact `Duplicate`'s still-open
+/// obligation, an already-`Signed` state some OTHER co-owner committed, or
+/// independent relay provenance, all survive THIS one intent's
+/// cancellation (see `LocalOrigin`'s doc). If sitting in another intent's
+/// stash, the SAME conditional removal applies to that stash entry's
+/// owner set instead of dropping it outright. Either way, THIS intent's
+/// own displaced predecessor (if any) is restored through the same one
+/// door and returned here (`None` if it displaced nothing, or the
+/// re-offered predecessor came back `Stale` — retraction doc §3.4).
 /// If this was a pending kind:5 draft, this intent's OWN suppression
 /// claims are dropped outright — every target it named reappears in
 /// `query` immediately, with `revealed` listing the ones that ACTUALLY
-/// became newly visible (a target still hidden by some OTHER intent's
-/// overlapping claim, or already permanently removed by an intent that
-/// promoted its own deletion of the same target, is correctly excluded).
-/// Nothing is ever re-inserted for `revealed`: a suppressed row never left
-/// `EVENTS` in the first place — cancelling a delete brings the content
-/// back, not merely closes the journal. The intent's `OUTBOX_INTENTS`/
-/// `OUTBOX_DISPLACED`/suppression-claim rows were all deleted in the same
-/// transaction. Boxed for the same reason `InsertOutcome::Superseded` is:
-/// keeps the common `NotFound` variant small.
+/// became newly visible: a true visibility DELTA (architecture review
+/// correction), computed from before/after suppression state and deduped
+/// by event id, so a target still hidden by some OTHER intent's
+/// overlapping claim, one already permanently removed by an intent that
+/// promoted its own deletion of the same target, or one this claim's own
+/// author/ceiling component never actually covered in the first place, is
+/// correctly excluded. Nothing is ever re-inserted for `revealed`: a
+/// suppressed row never left `EVENTS` in the first place — cancelling a
+/// delete brings the content back, not merely closes the journal. The
+/// intent's `OUTBOX_INTENTS`/`OUTBOX_DISPLACED`/suppression-claim rows
+/// were all deleted in the same transaction. Boxed for the same reason
+/// `InsertOutcome::Superseded` is: keeps the common `NotFound` variant
+/// small.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompensateOutcome {
     Compensated {
@@ -748,22 +790,28 @@ pub trait EventStore {
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError>;
 
     /// Swap the sentinel signature on `intent_id`'s frozen body for the
-    /// real `sig` and flip its `SigState`/`IntentSigState` to `Signed`, in
-    /// the SAME transaction that durably drops the intent's own
-    /// `OUTBOX_DISPLACED` stash (R6) and updates its retained receipt.
+    /// real `sig` and flip the canonical `SigState`/`IntentSigState` to
+    /// `Signed`, in the SAME transaction that durably drops the intent's
+    /// own `OUTBOX_DISPLACED` stash (R6) and updates its retained receipt.
     /// Keyed by `IntentId`, NOT the frozen event's id (architecture review
     /// correction — load-bearing): the intent's `OUTBOX_INTENTS.frozen_json`
     /// is the durable source of truth for its body regardless of whether a
     /// live `EVENTS` row currently exists for it. Three cases, uniformly:
-    /// (a) a live row still carries `local.intent_id == intent_id` — mutate
-    /// it in place (same id — a NIP-01 id never depends on `sig` — so this
-    /// is a value update, not a remove/re-add); (b) no live row, but this
-    /// intent's exact frozen bytes are sitting in some OTHER intent's
-    /// `OUTBOX_DISPLACED` stash (it was superseded by a later local edit
-    /// before it could sign) — sync the real signature into that stash
-    /// entry too, so a future restore of it never resurrects a stale
-    /// sentinel copy; (c) neither (the intent was `Stale`/`Duplicate` at
-    /// acceptance, or its row was since superseded by a RELAY-observed
+    /// (a) a live row's owner set CONTAINS `intent_id` (issue #2, team-lead
+    /// decision: ownership is a SET — an exact `Duplicate` is a CO-OWNER
+    /// of the SAME row, not a second row of its own; see `LocalOrigin`'s
+    /// doc) — mutate it in place (same id — a NIP-01 id never depends on
+    /// `sig` — so this is a value update, not a remove/re-add) — refused
+    /// (`NotFound`) if the row's `SigState` is ALREADY `Signed`, even by a
+    /// different co-owner, so a later distinct owner's promotion can never
+    /// overwrite the one real signature with a second one; (b) no live
+    /// row, but `intent_id` is a member of some OTHER intent's
+    /// `OUTBOX_DISPLACED` stash entry's owner set (it was superseded by a
+    /// later local edit before it could sign) — sync the real signature
+    /// into that stash entry too (same already-`Signed` refusal applies),
+    /// so a future restore of it never resurrects a stale sentinel copy;
+    /// (c) neither (the intent was `Stale`/`Duplicate` at acceptance with
+    /// no shared row, or its row was since superseded by a RELAY-observed
     /// event, kind:5-deleted, or NIP-40-expired) — mutate only the durable
     /// `OUTBOX_INTENTS`/`OUTBOX_RECEIPTS` journal copies; the resulting
     /// signed bytes are still returned so the engine can publish them even
@@ -782,20 +830,26 @@ pub trait EventStore {
     /// correction": once `promote_signed` has run, relay ACK/reject/timeout
     /// is receipt-only and NEVER reaches this door — a `Signed` intent
     /// answers `NotFound` here). Keyed by `IntentId` (same architecture
-    /// review correction as `promote_signed`, same three cases): (a) a live
-    /// row still carries `local.intent_id == intent_id` — `remove(id,
-    /// Rejected)` (no tombstone), then re-`insert` the intent's
-    /// durably-stashed `displaced` predecessor (if any) through the same
-    /// one door — it wins its address back by ordinary supersession, never
-    /// an un-supersede operation; (b) no live row, but this intent's exact
-    /// frozen bytes are sitting in some OTHER intent's `OUTBOX_DISPLACED`
-    /// stash — that stash entry is invalidated (removed) for good: this
-    /// intent is being permanently rejected, so the intent that displaced
-    /// it must never later resurrect it via ITS OWN compensation; (c)
-    /// neither — nothing to remove or restore in `EVENTS`. In every case,
-    /// this intent's own `OUTBOX_INTENTS`/`OUTBOX_DISPLACED` rows are
-    /// deleted and its retained receipt updated to `Compensated`. Fallible
-    /// for the same reason `accept_write` is.
+    /// review correction as `promote_signed`, same three cases, same
+    /// ownership-SET model): (a) a live row's owner set CONTAINS
+    /// `intent_id` — remove `intent_id` from that set; the row is only
+    /// actually `remove(id, Rejected)`-ed (no tombstone) once the set is
+    /// EMPTY, `SigState` is still `Pending`, AND no relay has
+    /// independently confirmed it (`Provenance::seen` empty) — an exact
+    /// `Duplicate`'s still-open obligation, an already-`Signed` state some
+    /// OTHER co-owner committed, or independent relay provenance, all
+    /// survive this one intent's cancellation (see `LocalOrigin`'s doc);
+    /// if actually removed, this intent's durably-stashed `displaced`
+    /// predecessor (if any) is then re-`insert`ed through the same one
+    /// door — it wins its address back by ordinary supersession, never an
+    /// un-supersede operation; (b) no live row, but `intent_id` is a
+    /// member of some OTHER intent's `OUTBOX_DISPLACED` stash entry's
+    /// owner set — same conditional removal, applied to that stash slot's
+    /// owner set instead; (c) neither — nothing to remove or restore in
+    /// `EVENTS`. In every case, this intent's own `OUTBOX_INTENTS`/
+    /// `OUTBOX_DISPLACED` rows are deleted and its retained receipt
+    /// updated to `Compensated`. Fallible for the same reason
+    /// `accept_write` is.
     fn compensate_write(
         &mut self,
         intent_id: IntentId,
