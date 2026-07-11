@@ -26,10 +26,5 @@ path = "uniffi-bindgen.rs"
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-nmp-engine.workspace = true
-nmp-signer.workspace = true
-nmp-store.workspace = true
-nmp-router.workspace = true
-nmp-resolver.workspace = true
-nmp-transport.workspace = true
+nmp.workspace = true
 uniffi = { workspace = true, features = ["cli"] }

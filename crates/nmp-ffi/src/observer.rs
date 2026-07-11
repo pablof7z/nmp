@@ -28,14 +28,14 @@ pub trait ReceiptObserver: Send + Sync {
     fn on_status(&self, status: FfiWriteStatus);
 }
 
-/// Drains a live diagnostics stream (`nmp_engine::runtime::Handle::
-/// observe_diagnostics`'s `LatestReceiver`, M5 plan §1.2 step 5). `on_snapshot`
-/// fires once per delivered snapshot, in order, on a dedicated drain thread —
-/// never on the engine thread itself. Because the underlying mailbox is
-/// latest-wins (see `nmp_engine::runtime::diagnostics_channel`'s doc), a slow
-/// Swift-side consumer may observe fewer snapshots than were actually
-/// produced, but never a stale one out of order. `on_closed` fires exactly
-/// once, when the observer is cancelled or the engine shuts down.
+/// Drains a live diagnostics stream (`nmp::Engine::observe_diagnostics`'s
+/// `DiagnosticsSubscription`, M5 plan §1.2 step 5). `on_snapshot` fires once
+/// per delivered snapshot, in order, on a dedicated drain thread — never on
+/// the engine thread itself. Because the underlying mailbox is latest-wins
+/// (see `nmp::DiagnosticsSubscription::recv`'s doc), a slow Swift-side
+/// consumer may observe fewer snapshots than were actually produced, but
+/// never a stale one out of order. `on_closed` fires exactly once, when the
+/// observer is cancelled or the engine shuts down.
 #[uniffi::export(callback_interface)]
 pub trait DiagnosticsObserver: Send + Sync {
     fn on_snapshot(&self, snapshot: FfiDiagnosticsSnapshot);

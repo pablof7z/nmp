@@ -24,7 +24,7 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
     private let handle: NmpDiagnosticsHandle
     private let stream: AsyncStream<DiagnosticsSnapshot>
 
-    init(engine: NmpEngineProtocol) {
+    init(engine: NmpEngineProtocol) throws {
         var continuation: AsyncStream<DiagnosticsSnapshot>.Continuation!
         // `.bufferingNewest(1)`: same discipline as `NMPQuery` (#17) --
         // `observeDiagnostics()` must remain latest-wins and never regress
@@ -34,7 +34,7 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
             continuation = $0
         }
         let bridge = DiagnosticsBridge(continuation: continuation)
-        self.handle = engine.observeDiagnostics(observer: bridge)
+        self.handle = try nmpRethrowing { try engine.observeDiagnostics(observer: bridge) }
         self.stream = stream
     }
 

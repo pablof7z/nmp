@@ -18,7 +18,7 @@ final class DiagnosticsTests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
-        let diagnostics = engine.observeDiagnostics()
+        let diagnostics = try engine.observeDiagnostics()
         let snapshot = await Self.firstSnapshot(from: diagnostics, timeoutSeconds: 5)
         diagnostics.cancel()
 
@@ -47,7 +47,7 @@ final class DiagnosticsTests: XCTestCase {
         let hexPubkey = String(repeating: "a", count: 64)
         let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([hexPubkey])))
 
-        let diagnostics = engine.observeDiagnostics()
+        let diagnostics = try engine.observeDiagnostics()
         let snapshot = await Self.firstSnapshot(from: diagnostics, timeoutSeconds: 5)
         diagnostics.cancel()
         query.cancel()
