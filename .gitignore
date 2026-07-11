@@ -19,3 +19,8 @@ xcuserdata/
 /gen
 /Packages/NMP/NMP.xcframework
 /Packages/NMP/Sources/NMPFFI
+
+# SwiftPM's own build cache (`swift build`/`swift test` output) -- always
+# regenerated, never committed, same as /target above.
+/Packages/NMP/.build
+/Packages/NMP/.swiftpm

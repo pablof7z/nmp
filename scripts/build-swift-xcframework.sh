@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
 # M4 plan §3: cargo -> xcframework -> (a later builder wires) SwiftPM.
 #
-# 1. Build the nmp-ffi staticlib for device + both simulator triples.
+# 1. Build the nmp-ffi staticlib for device + both simulator triples, plus a
+#    macOS (aarch64-apple-darwin) slice.
 # 2. lipo the two simulator arches into one fat sim staticlib (device stays
 #    separate -- xcframework requires arch-disjoint slices).
 # 3. Run uniffi-bindgen in LIBRARY mode against one compiled staticlib to
 #    generate the Swift bindings (nmp_ffi.swift / nmp_ffiFFI.h / .modulemap)
 #    -- no .udl file, metadata is read straight out of the compiled binary.
-# 4. `xcodebuild -create-xcframework` the device + fat-sim slices into
-#    NMP.xcframework.
+# 4. `xcodebuild -create-xcframework` the device + fat-sim + macOS slices
+#    into NMP.xcframework.
+#
+# The macOS slice exists so `swift test` (which runs the package's own test
+# host process on THIS Mac, not a simulator) can link NMPFFI at all --
+# SwiftPM test hosts run on the build machine's own arch, so without a
+# macos-arm64 slice `swift build`/`swift test` cannot resolve the
+# binaryTarget. It carries the exact same Rust core as the iOS slices;
+# nothing macOS-specific lives behind it.
 #
 # Usage: scripts/build-swift-xcframework.sh [--sim-only]
 #   --sim-only  skip the device (aarch64-apple-ios) slice -- useful in CI/
-#               sandboxes with no signing identity; the sim slice alone
-#               proves the pipeline (M4 plan §C: "sim slice is enough for
-#               now; device needs signing").
+#               sandboxes with no signing identity; the sim + macOS slices
+#               alone prove the pipeline (M4 plan §C: "sim slice is enough
+#               for now; device needs signing").
 
 set -euo pipefail
 
@@ -33,16 +41,19 @@ XCFRAMEWORK_OUT=Packages/NMP/NMP.xcframework
 DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
 SIM_X86_TARGET=x86_64-apple-ios
+MACOS_TARGET=aarch64-apple-darwin
 
 echo "== 1. cargo build (release) =="
 cargo build -p "$CRATE" --release --target "$SIM_ARM_TARGET"
 cargo build -p "$CRATE" --release --target "$SIM_X86_TARGET"
+cargo build -p "$CRATE" --release --target "$MACOS_TARGET"
 if [[ "$SIM_ONLY" -eq 0 ]]; then
   cargo build -p "$CRATE" --release --target "$DEVICE_TARGET"
 fi
 
 SIM_ARM_LIB="target/$SIM_ARM_TARGET/release/$LIB_NAME"
 SIM_X86_LIB="target/$SIM_X86_TARGET/release/$LIB_NAME"
+MACOS_LIB="target/$MACOS_TARGET/release/$LIB_NAME"
 DEVICE_LIB="target/$DEVICE_TARGET/release/$LIB_NAME"
 
 echo "== 2. lipo the two simulator arches into one fat staticlib =="
@@ -81,8 +92,11 @@ echo "== 4. xcodebuild -create-xcframework =="
 mkdir -p "$(dirname "$XCFRAMEWORK_OUT")"
 rm -rf "$XCFRAMEWORK_OUT"
 
+# Headers/modulemap are arch-agnostic (same generated metadata for every
+# slice) -- every -library shares the one $HEADERS_DIR.
 XCFRAMEWORK_ARGS=(
   -library "$FAT_SIM_LIB" -headers "$HEADERS_DIR"
+  -library "$MACOS_LIB" -headers "$HEADERS_DIR"
 )
 if [[ "$SIM_ONLY" -eq 0 ]]; then
   XCFRAMEWORK_ARGS=(
@@ -97,5 +111,5 @@ xcodebuild -create-xcframework \
 
 echo "== done =="
 echo "Raw bindgen output:        $GEN_DIR/"
-echo "xcframework:                $XCFRAMEWORK_OUT"
+echo "xcframework:                $XCFRAMEWORK_OUT (ios device + ios simulator + macos-arm64 slices)"
 echo "Swift bindings source:      $SWIFT_SOURCES_DIR/nmp_ffi.swift (Package.swift wiring is the next builder's job)"
