@@ -280,3 +280,239 @@ workspace (agent test-scoping rule).
 Nothing in this plan invents beyond the contract: the shape is
 `query-demand-and-evidence.md` §3's "compact facts scoped to the descriptor's
 current planned sources," made concrete.
+
+---
+
+## Fable checkpoint (verdict)
+
+**GO — with required changes.** The plan's diagnosis is correct and
+code-verified, the excision is genuinely narrow at the engine layer, and the
+#12 fold is the right move. Two things the plan got wrong must be fixed before
+build: the proposed `SourceState` enum conflates two orthogonal facts (durable
+watermark vs live link state — the contract's own "cached-only" fact is
+inexpressible in it), and the caller inventory is incomplete (`nmp-bdd`, the
+hand-written Swift/Kotlin SDK wrappers, and the in-flight `crates/nmp` facade
+are all consumers the unit table misses).
+
+### Narrow-excision claim — verified against code, with the leak list
+
+The central claim **holds at the engine layer**:
+
+- `nmp-store/src/coverage.rs` is exactly as described: keyed by window-erased
+  shape hash per `(shape, relay)`, merge-only `record_coverage`, "no row = not
+  covered" `get_coverage`, GC-only lowering. It never makes a global claim.
+  **KEEP UNCHANGED — ratified.** Same for `attribution.rs` (engine decides
+  whether/what to record; the store only merges what it is told).
+- The ONLY place per-relay facts collapse into a query-global verdict is
+  `coverage_query.rs::query_coverage` (min-over-atoms-and-relays, unanimity,
+  empty-covering-set → `Unknown`) plus its projections. Confirmed by grep:
+  no other code path constructs `CompleteUpTo` as a query-level claim.
+- `rows_and_coverage_for` is at `core/mod.rs:1506-1520` (the issue's `:1414`
+  drifted); it feeds `resolver.root_atoms(id)` only — #12 confirmed.
+  `atoms_in_structural_order` exists at `graph.rs:282`, currently
+  refcount-only — the U1 accessor is a straightforward collect.
+
+But the **full consumer set is wider than the plan's unit table** (all must be
+reshaped in the same PR; none are optional):
+
+1. **`crates/nmp-bdd`** — `world.rs` (`World::apply(deltas, coverage)`, field
+   `coverage: QueryCoverage`, `feed_eventually` predicates) and
+   `steps/then.rs` consume `QueryCoverage` directly. Missing from the unit
+   table entirely. Add to U5 (falsifier reshape) or a U3b.
+2. **Hand-written SDK wrappers, not just regen:** `Packages/NMP/Sources/NMP/`
+   (`Row.swift`'s public `Coverage` enum, `Query.swift` `onBatch`,
+   `Observable.swift`'s `coverage` property, `Diagnostics.swift`
+   `FilterCoverage`) and `Packages/NMPKotlin/.../` (`Row.kt` `Coverage`,
+   `Query.kt` `onBatch`, `Diagnostics.kt`). "Swift/Kotlin regenerated"
+   under-describes U4: `gen/` regenerates; these are hand-reshaped and are
+   themselves governed surface.
+3. **`crates/nmp` (the #52 facade, in flight now)** — it will expose the batch
+   evidence value on the product surface. U4's scope must include it (see
+   sequencing). The plan predates it; this is a missing unit.
+4. **Engine integration falsifiers** carry semantics, not just types:
+   `integration_capstone.rs`'s offline-authoritative-read phases,
+   `core_headless.rs` §"per-query CompleteUpTo aggregation",
+   `diagnostics_headless.rs`, `negentropy_live.rs`. Each must be re-expressed
+   per-source with its underlying invariant preserved (see the watermark/link
+   split below — the capstone is why the split is mandatory).
+5. **Prose sweep:** doc comments referencing the deleted vocabulary survive
+   compilation — `runtime/mod.rs:37-41`, `nmp-store/coverage.rs:56,309`,
+   `nmp-store/lib.rs:226`, `nmp-grammar/concrete.rs:45`,
+   `nmp-ffi/facade.rs:49` ("authoritative"). Sweep in U5.
+
+`crates/nmp-demo` has zero coverage consumers — confirmed clean.
+
+### The three owner decisions — resolved
+
+**Q1 — Per-source facts only. RATIFIED, no query-level roll-up.** A
+`min-through` convenience is the deleted collapse wearing a new name; the
+contract's "never global completeness" forbids it and removing it loses
+convenience, not information — apps fold source facts into their own progress
+policy. Three teeth the builder must add:
+
+- **No aggregate anywhere** — no helper fn, no computed property on the Swift/
+  Kotlin wrappers either (an `isComplete` convenience in `Row.swift` would be
+  the same collapse one layer up; the parity/governance review must watch the
+  hand-written wrappers for exactly this).
+- **Vacuous-emptiness guard:** a query whose subtree yields zero atoms or zero
+  planned sources must read as explicit `shortfall`, never as an empty
+  `sources` list an app can read as trivially settled. The old
+  `atoms.is_empty() → Unknown` branch maps to a shortfall fact, not to
+  nothing.
+- **Recommended (not gating):** carry the plan revision the evidence was
+  computed against, so apps can correlate compact evidence with the
+  diagnostics stream's exact plan (§4's "current source plan and its
+  revision").
+
+**Q2 — Reserve the AUTH vocabulary now. YES, with a corrected shape.** #8 is a
+committed sibling in the same #43 step-5; re-opening a governed enum later is
+a second surface change for zero benefit. But the proposed
+`AwaitingAuth(AuthPhase{AwaitingPolicy, AwaitingSignature, Authenticated,
+Denied})` bakes two lies into a ratified vocabulary:
+`AwaitingAuth(Authenticated)` is a representable non-state (an authenticated
+source is just requesting/reconciled — authentication detail is diagnostics,
+per #8's own contract), and `Denied` is terminal, not awaited. Required shape:
+`AwaitingAuth { phase: AwaitingPolicy | AwaitingSignature }` plus a top-level
+`AuthDenied` status. The full ladder (challenge/authenticated/replay) stays
+diagnostics-only.
+
+**Q3 — Ratify the closed set: YES, full set now — but the enum must be split
+first.** The single `SourceState` enum conflates a **durable past fact** (a
+persisted watermark) with a **current link fact** (connecting/disconnected/
+auth-parked). These coexist: a relay with a persisted `through=T` that is
+currently offline is the contract's own "cached-only" fact
+(`query-demand-and-evidence.md` §3) and is exactly what
+`integration_capstone.rs`'s offline-authoritative phase proves (#49
+acceptance: "offline cached rows remain usable"). In a single enum, either
+`Disconnected` shadows the watermark (the offline read loses its evidence) or
+the watermark shadows the link state — both dishonest. **Required shape:**
+
+```rust
+pub struct SourceAcquisition {
+    pub relay: RelayUrl,
+    /// Durable per-(shape,relay) watermark evidence for the subtree atoms
+    /// this source covers (min over them, iff every one has a row with
+    /// from <= window floor). None = unproven. NOT "complete".
+    pub reconciled_through: Option<Timestamp>,
+    /// Current link/acquisition status — orthogonal to the watermark.
+    pub status: SourceStatus,
+}
+
+pub enum SourceStatus {
+    Requesting,    // sub open (pre- or post-proof; the watermark says which)
+    Connecting,
+    Disconnected,  // + Some(reconciled_through) == the contract's "cached-only"
+    AwaitingAuth { phase: AuthPhase },  // #8, reserved
+    AuthDenied,                          // #8, reserved
+    Error,
+}
+pub enum AuthPhase { AwaitingPolicy, AwaitingSignature }
+```
+
+(Exact spellings are the builder's; the split, the corrected AUTH vocabulary,
+and closedness are not.) Population honesty, resolving the reserved-variant
+concern raised in review: this frame populates `reconciled_through`,
+`Requesting`, and `shortfall` from `plan`+`store` as §2.1 says — **and also
+`Connecting`/`Disconnected`**, because the core already owns that state
+(`EngineMsg::RelayConnected/RelayDisconnected`, the slot map at
+`core/mod.rs:259-261`); folding it is a read, not new plumbing. That leaves
+exactly `AwaitingAuth`/`AuthDenied` reserved (named landing issue: #8) and
+`Error` reserved-or-folded per what transport actually surfaces today. Rule:
+every ratified variant is either populated in this PR or documented reserved
+with a named issue — no vocabulary that nothing can ever emit and no issue
+will ever populate.
+
+### Contract validation
+
+- **"Scoped evidence, never global completeness" — honored** under the
+  amended shape. No hidden aggregate: `sources` + `shortfall` are per-source/
+  per-atom facts; the vacuous-emptiness guard closes the one silent hole.
+- **`reconciled_through` is honest** — read from per-(shape,relay) rows with
+  the window-floor check, min'd only over the subtree atoms *this source
+  covers in this query*. Document that scoping in the field doc verbatim.
+- **The #12 fix closes the hole without re-collapse** — interior atoms'
+  covering relays appear in `sources` (unproven ⇒ watermark `None`), rows
+  still come from `root_atoms`, and no min crosses sources. The plan's
+  ordering discipline (never land #12's old-model `CompleteUpTo(min)` patch)
+  is correct — that patch would widen the input of a function this frame
+  deletes. Fold and close both issues together, as written.
+- **Hard delete with no compat alias is safe** — the full consumer set is the
+  leak list above (nmp-ffi, nmp-bdd, engine tests, Swift+Kotlin wrappers,
+  in-flight facade); all in-repo, one PR. No out-of-repo consumer exists yet
+  (pre-v2, no published crates).
+- **Determinism requirement (new):** `refresh_handle`'s change-detection at
+  `core/mod.rs:1482` becomes a `PartialEq` compare on the evidence value.
+  `sources` must have deterministic order (sort by relay URL) and stable
+  construction, or every refresh emits a spurious batch. Derive
+  `PartialEq/Eq`; add a falsifier: two consecutive refreshes with no
+  state change emit nothing.
+
+### Sequencing vs #52 and #2/#3
+
+- **vs #2/#3 (crash-safe Accepted): fully parallel.** Confirmed no schema
+  collision — this frame's store touches are `get_coverage` reads only; #2/#3
+  adds new `OUTBOX_*` tables and doors and does not touch the COVERAGE table.
+  The only overlap is textual in `core/mod.rs` (their seam: `on_publish`/
+  outbox; ours: `refresh_handle`/`rows_and_coverage_for` — disjoint regions).
+  Coordinate merge order, no design dependency either way.
+- **vs #52: start U1–U3 now; merge after E+F land.** U1–U3 are engine-internal
+  (under #52 everything below `nmp` is explicitly unstable — not governed
+  surface). But the type deletion breaks `nmp-ffi` in-workspace, so the one PR
+  necessarily includes U4, and U4 is a governed change. This frame must
+  **not** improvise its own change-log file or snapshot format — two agents
+  defining the governance artifact is a duplicate-plan violation; F owns the
+  format, E owns the snapshots. Since E depends on A+B, the effective merge
+  prerequisite is **#52 A0 → A → B → E → F landed** (all in flight, all
+  small), with this frame's log entry riding the real protocol as its second
+  real entry (after the #41 verify reshape). **D (parity) is NOT a hard
+  prerequisite:** if `nmp-parity` exists by merge time, reshape its evidence
+  assertions in lockstep (plan §5.3 stands); if not, D is simply built later
+  on the final shape — cheaper, no interim churn — and this PR's falsifiers
+  (engine + bdd + Swift/Kotlin tests) carry the burden. Add `crates/nmp` to
+  U4's scope; coordinate with `build-52-a-facade` so the facade's query
+  surface is reshaped once, not built on `Coverage` and immediately re-cut.
+- **Build order inside the frame: unchanged** — U1 → U2 → {U3, U4} → U5, one
+  shared worktree, one PR; test scope as written plus
+  `Packages/NMP`/`NMPKotlin` test suites (the wrappers have their own tests:
+  `DiagnosticsTests.swift` etc.).
+
+### Required changes (summary)
+
+1. Split watermark from link status in `SourceAcquisition` (Q3 shape above).
+2. Fix the AUTH vocabulary: no `Authenticated` in evidence; `AuthDenied`
+   top-level; phases = `AwaitingPolicy | AwaitingSignature` (Q2).
+3. Populate `Connecting`/`Disconnected` in this frame (core already owns the
+   state); only #8's variants stay reserved, documented with the issue number.
+4. Add the missing consumers to the unit table: `nmp-bdd` (U5 or U3b),
+   hand-written `Packages/NMP` + `Packages/NMPKotlin` wrappers (U4, explicit),
+   `crates/nmp` facade (U4, coordinate with `build-52-a-facade`).
+5. Vacuous-emptiness guard: zero atoms / zero planned sources ⇒ explicit
+   shortfall, never an empty `sources` list.
+6. Deterministic `sources` ordering + `PartialEq` + no-spurious-emit falsifier.
+7. No roll-up anywhere, including no convenience aggregate on the Swift/Kotlin
+   wrappers; reviewers watch for `isComplete`-shaped helpers.
+8. Merge gate: after #52 units E+F exist; log entry + snapshot regen ride the
+   real protocol. Parity lockstep only if `nmp-parity` exists by then.
+9. Prose sweep of the deleted vocabulary in doc comments (leak list item 5);
+   update the known-gaps "over-interprets relay evidence" bullet in U5 as
+   planned.
+
+### Residual risk
+
+1. **`core/mod.rs` is the workspace's most contested file** — this frame, #52
+   A0 (verify), and #2/#3 outbox all edit it within days. Regions are
+   disjoint, but merge-order coordination is on the team lead; rebase, never
+   force-push.
+2. **Evidence compare cost:** `AcquisitionEvidence` is heap-allocated and
+   compared on every `refresh_handle` (every event, every watermark advance).
+   Sizes are small (sources ≈ planned relays), but if profiling ever shows it,
+   the fix is a cheap revision counter, not a hash of a global claim — note
+   for the builder, not a blocker.
+3. **Subtree widening increases evidence-input size** for deep derived queries
+   (the Magpie/depth-3 probe). Same asymptotics as today's `query_coverage`
+   over a wider set; bounded by the demand graph. Acceptable.
+4. **The wrappers can quietly reintroduce judgment** (a Swift `Coverage`-like
+   enum "for ergonomics"). The governance review of the paired snapshot diff
+   is the backstop; required change 7 names it so reviewers look.
+
+— Fable, design checkpoint, 2026-07-11.
