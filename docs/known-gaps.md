@@ -18,16 +18,18 @@ about current code:
   exact per-relay/filter intervals as a distinct type. `AwaitingAuth` and
   `AuthDenied` land with #8, and `Error` lands with #51. Full source-authority
   and access-context identity remains part of the descriptor gap above (#49).
-- **Durable `Accepted` is not crash-safe acceptance of a canonical pending
-  row.** The intent journal, receipt, frozen unsigned body, stable pending row,
-  displaced replaceable state, and initial retry state are not yet one atomic
-  persistence boundary. Restart, cancellation, signature promotion, and
-  reattachment proofs are required.
-- **Signer selection is globally coupled today.** The target default is the
-  signer registered for `$currentPubkey`, with an optional per-write identity
-  override pinned at acceptance. Missing capability must persist as
-  `AwaitingSigner(pubkey)`. Standard platform secure signer providers and
-  reattachment are unbuilt.
+- **Crash-safe `Accepted` is built; restart recovery is not wired.** Durable and
+  at-most-once acceptance now atomically owns the intent, receipt, canonical
+  pending row, displaced replaceable state, and initial retry record through
+  the store/resolver path. Signing, promotion, cancellation/compensation,
+  co-owner fanout, and frozen signer selection run from those durable ids. The
+  runtime still must call `recover_outbox`, reattach observers/signers, resume
+  attempts without duplicate terminal facts, and prove the restart matrix.
+- **Signer selection is frozen at acceptance, but the full provider contract is
+  incomplete.** The default uses the signer registered for the active pubkey
+  and does not drift when the active account changes. A per-write identity
+  override, persisted `AwaitingSigner(pubkey)` recovery, standard platform
+  secure signer providers, and restart reattachment are unbuilt.
 - **Durable logical retry is unbuilt.** The outbox does not yet persist exact
   per-`(intent, relay)` attempt bytes, ordinal, outcome, and next eligibility.
   The deadline driver must grow into the one scheduler for expiry, liveness,
@@ -46,10 +48,19 @@ about current code:
   engine is one shared cache across accounts. A mutually-untrusted-user logout
   must atomically clear cached events, pending writes, receipts,
   coverage/evidence, and related local state.
-- **Public syntax remains provisional.** Any change now requires failure
-  evidence, Rust/persistence/diagnostics/FFI/Swift/Kotlin impact review, updated
-  falsifiers, human signoff, and removal of the superseded path. The repository
-  has not yet enforced this promotion protocol across every public projection.
+- **Public syntax remains provisional; its promotion protocol is now enforced.**
+  Pinned snapshots cover the canonical `nmp` Rust facade and the
+  language-independent UniFFI proc-macro component metadata. CI requires exact
+  regeneration and a schema-complete append to `docs/surface-change-log.md`
+  whenever either baseline moves, and rejects historical log edits/deletions.
+  Hand-written Swift/Kotlin public wrapper paths and their consumer-visible
+  package/build/settings manifests are governed directly even when generated
+  snapshots do not move. The component extractor is a separately locked,
+  base-trusted tool outside the product workspace. The trusted checker/workflow
+  is loaded from the PR base so a proposed head cannot replace its judge. This first
+  introduction is necessarily a manually reviewed bootstrap because no such
+  default-branch workflow exists yet; after merge, enabling its required status
+  is repository-settings issue #81.
 
 ## Load-bearing for M5 (the falsifier app) — must close before M5 claims pass
 
@@ -85,4 +96,7 @@ about current code:
 
 ## Process / tooling
 
-- **CI runs on push but is not proven to gate a PR** (no branch protection configured). The workflow exists (`.github/workflows/ci.yml`); enabling required-status-checks is an owner/settings action, not code.
+- **Required-status branch protection is not configured (#81).** Ordinary CI
+  and the trusted-base `surface-governance` workflow exist, but repository
+  settings must require both `surface-governance` and the protected ordinary
+  `surface-regeneration` check after the governance bootstrap merges.

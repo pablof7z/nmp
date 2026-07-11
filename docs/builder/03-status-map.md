@@ -20,9 +20,12 @@ repository today?
   reconnect, and supports probed negentropy.
 - Caller-supplied signed writes are verified at the engine acceptance boundary
   before `Accepted` or relay publication (#56).
-- The current in-process write path signs, routes, publishes, and streams
-  per-relay statuses.
-- Rust/FFI/Swift expose live queries, writes, and permanent diagnostics.
+- Durable and at-most-once writes are atomically accepted as one canonical
+  pending row plus obligation/receipt, then sign, promote, route, and stream
+  per-relay statuses from the durable ids; ephemeral writes are receipt-only.
+- Rust/FFI/Swift/Kotlin expose live queries, writes, and permanent diagnostics.
+- The canonical `nmp` facade and UniFFI component have pinned reproducible
+  surface snapshots with an append-only governance gate.
 - The Swift falsifier app runs against public relays as a normal SwiftUI app.
 - A desktop-JVM Kotlin package proves cold `Flow` observation and cancellation.
 
@@ -30,10 +33,10 @@ repository today?
 
 | Contract area | Current gap | Queue |
 |---|---|---|
-| Canonical Rust product facade | facade work is landing in units; FFI/demo/parity/governance remain | [#52](https://github.com/pablof7z/nmp/issues/52) |
-| Durable acceptance and pending row | current writes are not yet one crash-atomic row + obligation + receipt boundary | [#2](https://github.com/pablof7z/nmp/issues/2), [#3](https://github.com/pablof7z/nmp/issues/3) |
+| Canonical Rust product facade | facade, FFI, demo, direct-vs-FFI parity, surface snapshots, and append-only governance are built; v2 remains provisional while the broader promoted contracts below are open | [#52](https://github.com/pablof7z/nmp/issues/52) |
+| Durable acceptance and pending row | crash-atomic acceptance/promotion/cancellation are built; runtime restart recovery, receipt reattachment, and durable attempt resumption remain | [#2](https://github.com/pablof7z/nmp/issues/2), [#3](https://github.com/pablof7z/nmp/issues/3) |
 | Signer lifecycle | default/override pinning, provider reattachment, and platform vaults remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#6](https://github.com/pablof7z/nmp/issues/6) |
-| Query descriptor/evidence | public query is still filter-centric; nested `Derived` nodes cannot state independent source/access context; output exposes aggregate coverage rather than full contextual evidence | [#49](https://github.com/pablof7z/nmp/issues/49), [#12](https://github.com/pablof7z/nmp/issues/12) |
+| Query descriptor/evidence | query output now carries current-plan `AcquisitionEvidence` distinct from diagnostic intervals; descriptor identity is still filter-centric and lacks full source/access context | [#49](https://github.com/pablof7z/nmp/issues/49) |
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
 | Diagnostics | raw connection, AUTH, retry, error, and limit evidence remains incomplete | [#51](https://github.com/pablof7z/nmp/issues/51) |
@@ -49,16 +52,15 @@ The umbrella ordering and design-signoff trail live in
 |---|---|---|
 | Query identity | `LiveQuery(Filter<Binding>)` | selection + source authority + access context |
 | Nested derived query | `Derived(inner: Filter)` has selection only | explicit inner demand with independent source/access context |
-| Query output | row deltas/current rows plus aggregate `Coverage` | snapshot rows + cache/acquisition/shortfall evidence |
+| Query output | row deltas/current rows plus scoped `AcquisitionEvidence`; diagnostics retain exact intervals | richer descriptor-scoped cache/acquisition/shortfall evidence |
 | Current identity | `setActiveAccount` couples current pubkey and local signer selection | current-pubkey input plus registered providers and per-write override |
-| Accepted write | in-memory pending bookkeeping | crash-atomic obligation, receipt, and canonical pending row |
-| Explicitly non-durable write | current `Ephemeral` path has no status | observable, reattachable receipt with non-resumable obligation policy |
-| Rust construction | callers still reach mechanism assembly in existing apps | one canonical `nmp::Engine` facade |
+| Accepted write | crash-atomic obligation, receipt, and canonical pending row; restart recovery remains | recovered/reattached durable work with exact attempt evidence |
+| Explicitly non-durable write | receipt-only `Ephemeral` path, never journaled as a pending row | same observable non-resumable policy across platform projections |
+| Rust construction | one canonical `nmp::Engine` facade; mechanism crates remain internal/test seams | same facade, promoted to v2 compatibility |
 | Protocol meaning | raw events/app code | optional exact NIP modules over the same facade |
 
-Do not infer global completeness from the current aggregate `Coverage` enum.
-Use it only as current source/window evidence and inspect diagnostics for exact
-relay facts.
+Do not infer global completeness from `AcquisitionEvidence`. It is scoped to
+the current source plan; inspect diagnostics for exact per-relay/filter facts.
 
 ## Runnable evidence
 

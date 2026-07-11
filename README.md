@@ -90,6 +90,23 @@ NMP
       Nostr relays and signers
 ```
 
+### The supported surfaces
+
+Rust applications depend on the `nmp` crate and construct `nmp::Engine`. The
+lower-level resolver, router, store, transport, and runtime crates are
+implementation and repository-test seams, not alternate application APIs.
+`nmp-ffi` projects that same facade into Swift and Kotlin through UniFFI
+proc-macro metadata; NMP does not maintain a UDL contract.
+
+Public shapes are provisional but governed. Pinned, reproducible Rust and
+UniFFI component baselines live in [`docs/surface/`](docs/surface/), and every
+baseline, native public-wrapper, or consumer package-manifest change requires
+an append-only evidence/signoff entry in the
+[surface change log](docs/surface-change-log.md).
+The steady-state CI judge is loaded from the PR base, not the proposed head.
+See the concise
+[supported-surface architecture note](docs/architecture/supported-surface.md).
+
 ## Correctness is structural
 
 NMP does not treat correctness as a checklist for downstream app code. The supported boundary is shaped so that classes of bad behavior—lost subscriptions, unscoped relay injection, stale replaceable events, signer drift, silent truncation, or false claims of global completeness—can be ruled out at the engine boundary and falsified in tests.
