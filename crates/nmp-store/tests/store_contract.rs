@@ -40,7 +40,7 @@ fn stored(event: Event, url: &str, at: u64) -> StoredEvent {
     seen.insert(relay(url), Timestamp::from(at));
     StoredEvent {
         event,
-        provenance: Provenance { seen },
+        provenance: Provenance { seen, local: None },
     }
 }
 

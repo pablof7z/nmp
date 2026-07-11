@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
+use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, JsonUtil, Kind, PublicKey, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -34,8 +35,10 @@ use crate::coverage::{
     window_erase, ShapeRecord,
 };
 use crate::{
-    ClaimSet, CoverageInterval, CoverageKey, EventStore, GcReport, InsertOutcome, Provenance,
-    RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
+    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PromoteOutcome,
+    Provenance, RecoveredIntent, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
+    WriteDurability,
 };
 
 const EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
@@ -74,13 +77,112 @@ const BY_AUTHOR: TableDefinition<&str, &str> = TableDefinition::new("by_author")
 /// contiguously), one row per currently-held event keyed by its kind. Same
 /// narrowing purpose as [`BY_AUTHOR`], for kind-filtered queries.
 const BY_KIND: TableDefinition<&str, &str> = TableDefinition::new("by_kind");
+/// The durable write-outbox journal (crashsafe-accepted-2-3-plan.md §2.2,
+/// Fable checkpoint Q2 — APPROVED as co-resident in this same `Database`:
+/// redb atomicity is a per-`Database` property, so the one crash-atomic
+/// commit #3 requires forces the journal into the store's own transaction
+/// boundary). Key: [`intent_key`] (zero-padded decimal `IntentId`, shared
+/// verbatim with [`OUTBOX_DISPLACED`]). Value: JSON-encoded
+/// `OutboxIntentRecord`. A row exists for exactly as long as its intent is
+/// open — `compensate_write` deletes it on pre-signature termination; R8's
+/// terminal-deletion-on-full-delivery is a later unit's job (this frame
+/// never marks an intent all-lanes-terminal, since dispatch/ack tracking is
+/// U3/U4).
+const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_intents");
+/// The predecessor each open intent displaced, if any (retraction doc
+/// §4.2's durable stash). Key: the SAME [`intent_key`] as its
+/// `OUTBOX_INTENTS` row. Value: a `StoredEventRecord`-encoded JSON blob
+/// (reuses the exact `EVENTS` table encoding — see [`encode_stored_event`]/
+/// [`decode_stored_event`]), so the stash round-trips through the same
+/// decode path as any other row. Deleted durably by `promote_signed` (R6)
+/// or `compensate_write`; never by `recover_outbox` (read-only).
+const OUTBOX_DISPLACED: TableDefinition<&str, &str> = TableDefinition::new("outbox_displaced");
+/// Per-`(intent, relay, ordinal)` durable attempt evidence
+/// (crashsafe-accepted-2-3-plan.md §5) — schema created here so the table
+/// exists for the dispatch-time attempt writer to come (U3/U4: "Persist
+/// `AttemptStarted` before dispatch"). This unit does not write rows into
+/// it (Fable checkpoint R2: folding attempt eligibility into
+/// `next_deadline` here is a busy-loop spin hazard — that fold ships with
+/// the retry-owner follow-up, not this frame) and `recover_outbox` does not
+/// read it — it is created purely for forward schema compatibility.
+#[allow(dead_code)]
+const OUTBOX_ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
 
 /// The `events` table's JSON value: the event's canonical NIP-01 JSON plus
-/// its merged provenance.
+/// its merged provenance and, iff the row is locally authored, its
+/// [`LocalOrigin`] (issue #2's `Provenance::local` widening — `LocalOrigin`
+/// already derives `Serialize`/`Deserialize`, so no separate mirror type is
+/// needed here).
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredEventRecord {
     event_json: String,
     provenance: BTreeMap<RelayUrl, Timestamp>,
+    local: Option<LocalOrigin>,
+}
+
+/// One `OUTBOX_INTENTS` row's JSON value — the full acceptance journal
+/// payload (Fable checkpoint R7), everything issue #3's "one crash-atomic
+/// commit" enumerates besides the pending row itself (which lives in
+/// `EVENTS`, not duplicated here).
+#[derive(Debug, Serialize, Deserialize)]
+struct OutboxIntentRecord {
+    receipt_id: u64,
+    frozen_json: String,
+    expected_pubkey: PublicKey,
+    signing_identity_ref: String,
+    durability: WriteDurability,
+    routing: String,
+    sig_state: IntentSigState,
+    accepted_at: Timestamp,
+}
+
+/// [`OUTBOX_INTENTS`]/[`OUTBOX_DISPLACED`]'s shared key for `id` — a
+/// zero-padded decimal so the two tables can never disagree on how to find
+/// each other's row for the same intent, and so a future ordered scan sorts
+/// by acceptance order (lexicographic == numeric, matching
+/// [`expiration_key`]'s convention).
+fn intent_key(id: IntentId) -> String {
+    format!("{:020}", id.0)
+}
+
+/// Encode `se` exactly as the `EVENTS` table stores a row — shared by every
+/// door that writes a full [`StoredEvent`] back out (the durable
+/// `OUTBOX_DISPLACED` stash, `compensate_write`'s restore path).
+fn encode_stored_event(se: &StoredEvent) -> String {
+    let record = StoredEventRecord {
+        event_json: se.event.as_json(),
+        provenance: se.provenance.seen.clone(),
+        local: se.provenance.local,
+    };
+    serde_json::to_string(&record).expect("redb: encode stored event")
+}
+
+/// Decode one `EVENTS`/`OUTBOX_DISPLACED` JSON value into a [`StoredEvent`]
+/// — the read-side counterpart of [`encode_stored_event`].
+fn decode_stored_event(json: &str) -> StoredEvent {
+    let record: StoredEventRecord = serde_json::from_str(json).expect("redb: decode stored event");
+    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+    StoredEvent {
+        event,
+        provenance: Provenance {
+            seen: record.provenance,
+            local: record.local,
+        },
+    }
+}
+
+/// True iff `record` is a locally-authored row still awaiting a signature
+/// — the GC-exclusion predicate (Fable checkpoint R5), mirrors
+/// `MemoryStore`'s `is_open_local_intent` exactly so the two backends can
+/// never diverge on which rows GC may evict.
+fn is_open_local_intent(record: &StoredEventRecord) -> bool {
+    matches!(
+        record.local,
+        Some(LocalOrigin {
+            sig_state: SigState::Pending,
+            ..
+        })
+    )
 }
 
 /// The `addr_tombstones` table's JSON value.
@@ -198,14 +300,7 @@ fn remove_row_in_txn(
         .expect("redb: get event")?
         .value()
         .to_string();
-    let record: StoredEventRecord = serde_json::from_str(&json).expect("redb: decode stored event");
-    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-    let se = StoredEvent {
-        event,
-        provenance: Provenance {
-            seen: record.provenance,
-        },
-    };
+    let se = decode_stored_event(&json);
     if !predicate(&se) {
         return None;
     }
@@ -346,6 +441,180 @@ fn process_kind5_deletions(
     deleted
 }
 
+/// Re-admit a durably-stashed predecessor `se` through the ordinary
+/// dedup/tombstone/supersession rules `insert` runs, preserving its FULL
+/// original provenance (both relay `seen` history and any `local` origin)
+/// rather than reconstructing it from a single fresh observation —
+/// `compensate_write`'s compensating re-insert (retraction-and-negative-
+/// deltas.md §4.2: "through the same one door... wins its address back by
+/// ordinary supersession rules", never an un-supersede operation). Mirrors
+/// `MemoryStore::reinsert_stashed` exactly. Returns the row as it now
+/// stands if `se` actually (re)claims a slot; `None` if it is refused,
+/// deduped away, or loses the address race (`Stale` — the correct, silent
+/// §3.4 outcome for a re-offered grand-predecessor: nothing churns).
+#[allow(clippy::too_many_arguments)]
+fn reinsert_stashed_in_txn(
+    events: &mut redb::Table<'_, &str, &str>,
+    addr_index: &mut redb::Table<'_, &str, &str>,
+    tombstones: &redb::Table<'_, &str, &str>,
+    addr_tombstones: &redb::Table<'_, &str, &str>,
+    expiration_index: &mut redb::Table<'_, &str, &str>,
+    by_author: &mut redb::Table<'_, &str, &str>,
+    by_kind: &mut redb::Table<'_, &str, &str>,
+    se: StoredEvent,
+) -> Option<StoredEvent> {
+    let id_hex = se.event.id.to_hex();
+
+    let existing_json = events
+        .get(id_hex.as_str())
+        .expect("redb: get event")
+        .map(|guard| guard.value().to_string());
+    if let Some(existing_json) = existing_json {
+        // Extremely unlikely (a relay redelivered this exact id while it
+        // sat in the stash) — merge whatever the stash's `seen` adds; keep
+        // whatever `local` the live row already has.
+        let mut record: StoredEventRecord =
+            serde_json::from_str(&existing_json).expect("redb: decode stored event");
+        let mut provenance = Provenance {
+            seen: record.provenance,
+            local: record.local,
+        };
+        for (relay, at) in &se.provenance.seen {
+            provenance.merge_observation(&RelayObserved::new(relay.clone(), *at));
+        }
+        record.provenance = provenance.seen.clone();
+        record.local = provenance.local;
+        let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
+        events
+            .insert(id_hex.as_str(), encoded.as_str())
+            .expect("redb: update event provenance");
+        let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+        return Some(StoredEvent { event, provenance });
+    }
+    if tombstone_refuses(tombstones, addr_tombstones, &se.event) {
+        return None;
+    }
+
+    let encoded = encode_stored_event(&se);
+
+    match address_key_for(&se.event) {
+        None => {
+            events
+                .insert(id_hex.as_str(), encoded.as_str())
+                .expect("redb: insert event");
+            by_author
+                .insert(
+                    by_author_key(&se.event.pubkey, &se.event.id).as_str(),
+                    id_hex.as_str(),
+                )
+                .expect("redb: insert by_author");
+            by_kind
+                .insert(
+                    by_kind_key(se.event.kind, &se.event.id).as_str(),
+                    id_hex.as_str(),
+                )
+                .expect("redb: insert by_kind");
+            if let Some(ts) = se.event.tags.expiration().copied() {
+                let exp_key = expiration_key(ts, &se.event.id);
+                expiration_index
+                    .insert(exp_key.as_str(), id_hex.as_str())
+                    .expect("redb: insert expiration_index");
+            }
+            Some(se)
+        }
+        Some(addr_key) => {
+            let addr_key_str = addr_key.to_redb_key();
+            let current_id_hex = addr_index
+                .get(addr_key_str.as_str())
+                .expect("redb: get addr_index")
+                .map(|guard| guard.value().to_string());
+
+            match current_id_hex {
+                None => {
+                    events
+                        .insert(id_hex.as_str(), encoded.as_str())
+                        .expect("redb: insert event");
+                    addr_index
+                        .insert(addr_key_str.as_str(), id_hex.as_str())
+                        .expect("redb: insert addr_index");
+                    by_author
+                        .insert(
+                            by_author_key(&se.event.pubkey, &se.event.id).as_str(),
+                            id_hex.as_str(),
+                        )
+                        .expect("redb: insert by_author");
+                    by_kind
+                        .insert(
+                            by_kind_key(se.event.kind, &se.event.id).as_str(),
+                            id_hex.as_str(),
+                        )
+                        .expect("redb: insert by_kind");
+                    if let Some(ts) = se.event.tags.expiration().copied() {
+                        let exp_key = expiration_key(ts, &se.event.id);
+                        expiration_index
+                            .insert(exp_key.as_str(), id_hex.as_str())
+                            .expect("redb: insert expiration_index");
+                    }
+                    Some(se)
+                }
+                Some(current_id_hex) => {
+                    let current_json = events
+                        .get(current_id_hex.as_str())
+                        .expect("redb: get current winner")
+                        .expect("addr_index must always point at a stored event")
+                        .value()
+                        .to_string();
+                    let current_event = decode_stored_event(&current_json).event;
+
+                    if candidate_wins(&se.event, &current_event) {
+                        let current_id =
+                            EventId::from_hex(&current_id_hex).expect("redb: decode addr_index id");
+                        remove_row_in_txn(
+                            events,
+                            addr_index,
+                            expiration_index,
+                            by_author,
+                            by_kind,
+                            current_id,
+                            |_| true,
+                        )
+                        .expect("addr_index must always point at a stored event");
+
+                        events
+                            .insert(id_hex.as_str(), encoded.as_str())
+                            .expect("redb: insert winning event");
+                        addr_index
+                            .insert(addr_key_str.as_str(), id_hex.as_str())
+                            .expect("redb: update addr_index");
+                        by_author
+                            .insert(
+                                by_author_key(&se.event.pubkey, &se.event.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .expect("redb: insert by_author");
+                        by_kind
+                            .insert(
+                                by_kind_key(se.event.kind, &se.event.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .expect("redb: insert by_kind");
+                        if let Some(ts) = se.event.tags.expiration().copied() {
+                            let exp_key = expiration_key(ts, &se.event.id);
+                            expiration_index
+                                .insert(exp_key.as_str(), id_hex.as_str())
+                                .expect("redb: insert expiration_index");
+                        }
+                        Some(se)
+                    } else {
+                        // Stale — §3.4: nothing churns.
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The `coverage` table's JSON value: the window-erased shape the row was
 /// recorded against (needed so `gc` can test event-shape matches — see
 /// `ShapeRecord`'s doc comment) plus the proven interval, stored as raw
@@ -387,6 +656,9 @@ impl RedbStore {
             write_txn.open_table(EXPIRATION_INDEX)?;
             write_txn.open_table(BY_AUTHOR)?;
             write_txn.open_table(BY_KIND)?;
+            write_txn.open_table(OUTBOX_INTENTS)?;
+            write_txn.open_table(OUTBOX_DISPLACED)?;
+            write_txn.open_table(OUTBOX_ATTEMPTS)?;
         }
         write_txn.commit()?;
         Ok(Self {
@@ -425,15 +697,7 @@ impl RedbStore {
     fn decode_row(&self, json: &str) -> StoredEvent {
         #[cfg(test)]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
-        let record: StoredEventRecord =
-            serde_json::from_str(json).expect("redb: decode stored event");
-        let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-        StoredEvent {
-            event,
-            provenance: Provenance {
-                seen: record.provenance,
-            },
-        }
+        decode_stored_event(json)
     }
 
     /// `query`'s index-narrowing step (issue #17): `Some(ids)` -- the
@@ -536,9 +800,15 @@ impl EventStore for RedbStore {
                     serde_json::from_str(&existing_json).expect("redb: decode stored event");
                 let mut provenance = Provenance {
                     seen: record.provenance,
+                    local: record.local,
                 };
                 let grew = provenance.merge_observation(&from);
+                // `merge_observation` never touches `local` (a relay echo
+                // of an already-local row keeps its local provenance,
+                // retraction doc §4.1) — `provenance.local` is unchanged,
+                // written straight back.
                 record.provenance = provenance.seen;
+                record.local = provenance.local;
                 let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
                 events
                     .insert(id_hex.as_str(), encoded.as_str())
@@ -559,6 +829,7 @@ impl EventStore for RedbStore {
                         m.insert(from.relay.clone(), from.at);
                         m
                     },
+                    local: None,
                 };
                 let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
 
@@ -637,6 +908,7 @@ impl EventStore for RedbStore {
                                         event: current_event,
                                         provenance: Provenance {
                                             seen: current_record.provenance,
+                                            local: current_record.local,
                                         },
                                     };
                                     events
@@ -933,16 +1205,21 @@ impl EventStore for RedbStore {
                 .expect("redb: open by_author");
             let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
 
-            // Pass 1: find victims (regular events matched by no claim).
-            // Collected up front into owned values so the removal pass below
-            // never holds a borrow across a mutation.
+            // Pass 1: find victims (regular events matched by no claim, and
+            // not an open — unsigned — local intent: Fable checkpoint R5,
+            // mirrors `MemoryStore::gc`'s exclusion exactly). Collected up
+            // front into owned values so the removal pass below never holds
+            // a borrow across a mutation.
             let mut victims: Vec<(String, Event)> = Vec::new();
             for entry in events.iter().expect("redb: iter events") {
                 let (key, value) = entry.expect("redb: read event entry");
                 let record: StoredEventRecord =
                     serde_json::from_str(value.value()).expect("redb: decode stored event");
                 let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-                if address_key_for(&event).is_none() && !claims.is_claimed(&event) {
+                if address_key_for(&event).is_none()
+                    && !is_open_local_intent(&record)
+                    && !claims.is_claimed(&event)
+                {
                     victims.push((key.value().to_string(), event));
                 }
             }
@@ -1033,6 +1310,465 @@ impl EventStore for RedbStore {
         write_txn.commit().expect("redb: commit gc");
 
         report
+    }
+
+    fn accept_write(&mut self, accept: AcceptWrite) -> AcceptOutcome {
+        let AcceptWrite {
+            intent_id,
+            receipt_id,
+            frozen,
+            expected_pubkey,
+            signing_identity_ref,
+            durability,
+            routing,
+            sig_state,
+            accepted_at,
+        } = accept;
+
+        // Refused at the door FIRST, same as `insert`: never journaled,
+        // nothing to recover (R3).
+        if frozen.is_expired_at(&accepted_at) {
+            return AcceptOutcome::Refused(RefuseReason::AlreadyExpired);
+        }
+
+        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let outcome = {
+            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
+            let mut addr_index = write_txn
+                .open_table(ADDR_INDEX)
+                .expect("redb: open addr_index");
+            let tombstones = write_txn
+                .open_table(TOMBSTONES)
+                .expect("redb: open tombstones");
+            let addr_tombstones = write_txn
+                .open_table(ADDR_TOMBSTONES)
+                .expect("redb: open addr_tombstones");
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .expect("redb: open expiration_index");
+            let mut by_author = write_txn
+                .open_table(BY_AUTHOR)
+                .expect("redb: open by_author");
+            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+            let mut outbox_intents = write_txn
+                .open_table(OUTBOX_INTENTS)
+                .expect("redb: open outbox_intents");
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .expect("redb: open outbox_displaced");
+
+            let id_hex = frozen.id.to_hex();
+            let existing_json = events
+                .get(id_hex.as_str())
+                .expect("redb: get event")
+                .map(|guard| guard.value().to_string());
+
+            // Same tombstone-refusal + dedup-by-id + replaceable/addressable
+            // supersession rules `insert` runs — see this fn's own doc and
+            // `AcceptOutcome`'s. `Refused` is the ONLY branch that skips the
+            // journal write below (R3).
+            let (result, displaced): (AcceptOutcome, Option<StoredEvent>) =
+                if let Some(existing_json) = existing_json {
+                    (
+                        AcceptOutcome::Duplicate {
+                            row: decode_stored_event(&existing_json),
+                        },
+                        None,
+                    )
+                } else if tombstone_refuses(&tombstones, &addr_tombstones, &frozen) {
+                    (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
+                } else {
+                    let local = LocalOrigin {
+                        intent_id,
+                        sig_state: SigState::Pending,
+                        accepted_at,
+                    };
+                    let stored = StoredEvent {
+                        event: frozen.clone(),
+                        provenance: Provenance {
+                            seen: BTreeMap::new(),
+                            local: Some(local),
+                        },
+                    };
+                    let encoded = encode_stored_event(&stored);
+
+                    match address_key_for(&frozen) {
+                        None => {
+                            events
+                                .insert(id_hex.as_str(), encoded.as_str())
+                                .expect("redb: insert event");
+                            by_author
+                                .insert(
+                                    by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                    id_hex.as_str(),
+                                )
+                                .expect("redb: insert by_author");
+                            by_kind
+                                .insert(
+                                    by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                    id_hex.as_str(),
+                                )
+                                .expect("redb: insert by_kind");
+                            if let Some(ts) = frozen.tags.expiration().copied() {
+                                let exp_key = expiration_key(ts, &frozen.id);
+                                expiration_index
+                                    .insert(exp_key.as_str(), id_hex.as_str())
+                                    .expect("redb: insert expiration_index");
+                            }
+                            (AcceptOutcome::Inserted { row: stored }, None)
+                        }
+                        Some(addr_key) => {
+                            let addr_key_str = addr_key.to_redb_key();
+                            let current_id_hex = addr_index
+                                .get(addr_key_str.as_str())
+                                .expect("redb: get addr_index")
+                                .map(|guard| guard.value().to_string());
+
+                            match current_id_hex {
+                                None => {
+                                    events
+                                        .insert(id_hex.as_str(), encoded.as_str())
+                                        .expect("redb: insert event");
+                                    addr_index
+                                        .insert(addr_key_str.as_str(), id_hex.as_str())
+                                        .expect("redb: insert addr_index");
+                                    by_author
+                                        .insert(
+                                            by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                            id_hex.as_str(),
+                                        )
+                                        .expect("redb: insert by_author");
+                                    by_kind
+                                        .insert(
+                                            by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                            id_hex.as_str(),
+                                        )
+                                        .expect("redb: insert by_kind");
+                                    if let Some(ts) = frozen.tags.expiration().copied() {
+                                        let exp_key = expiration_key(ts, &frozen.id);
+                                        expiration_index
+                                            .insert(exp_key.as_str(), id_hex.as_str())
+                                            .expect("redb: insert expiration_index");
+                                    }
+                                    (AcceptOutcome::Inserted { row: stored }, None)
+                                }
+                                Some(current_id_hex) => {
+                                    let current_json = events
+                                        .get(current_id_hex.as_str())
+                                        .expect("redb: get current winner")
+                                        .expect("addr_index must always point at a stored event")
+                                        .value()
+                                        .to_string();
+                                    let current_event = decode_stored_event(&current_json).event;
+
+                                    if candidate_wins(&frozen, &current_event) {
+                                        let current_id = EventId::from_hex(&current_id_hex)
+                                            .expect("redb: decode addr_index id");
+                                        let replaced = remove_row_in_txn(
+                                            &mut events,
+                                            &mut addr_index,
+                                            &mut expiration_index,
+                                            &mut by_author,
+                                            &mut by_kind,
+                                            current_id,
+                                            |_| true,
+                                        )
+                                        .expect("addr_index must always point at a stored event");
+
+                                        events
+                                            .insert(id_hex.as_str(), encoded.as_str())
+                                            .expect("redb: insert winning event");
+                                        addr_index
+                                            .insert(addr_key_str.as_str(), id_hex.as_str())
+                                            .expect("redb: update addr_index");
+                                        by_author
+                                            .insert(
+                                                by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                                id_hex.as_str(),
+                                            )
+                                            .expect("redb: insert by_author");
+                                        by_kind
+                                            .insert(
+                                                by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                                id_hex.as_str(),
+                                            )
+                                            .expect("redb: insert by_kind");
+                                        if let Some(ts) = frozen.tags.expiration().copied() {
+                                            let exp_key = expiration_key(ts, &frozen.id);
+                                            expiration_index
+                                                .insert(exp_key.as_str(), id_hex.as_str())
+                                                .expect("redb: insert expiration_index");
+                                        }
+                                        (
+                                            AcceptOutcome::Superseded {
+                                                row: stored,
+                                                replaced: Box::new(replaced.clone()),
+                                            },
+                                            Some(replaced),
+                                        )
+                                    } else {
+                                        (AcceptOutcome::Stale, None)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
+            // R7: the intent's full journal payload commits in this SAME
+            // transaction as the event-table mutation above — a crash here
+            // leaves either nothing or a fully `recover_outbox`-able
+            // `Accepted`. R3: `Refused` is the one outcome that journals
+            // nothing at all.
+            if !matches!(result, AcceptOutcome::Refused(_)) {
+                let key = intent_key(intent_id);
+                let intent_record = OutboxIntentRecord {
+                    receipt_id,
+                    frozen_json: frozen.as_json(),
+                    expected_pubkey,
+                    signing_identity_ref,
+                    durability,
+                    routing,
+                    sig_state,
+                    accepted_at,
+                };
+                let encoded_intent =
+                    serde_json::to_string(&intent_record).expect("redb: encode outbox intent");
+                outbox_intents
+                    .insert(key.as_str(), encoded_intent.as_str())
+                    .expect("redb: insert outbox_intents");
+
+                if let Some(displaced) = &displaced {
+                    let encoded_displaced = encode_stored_event(displaced);
+                    outbox_displaced
+                        .insert(key.as_str(), encoded_displaced.as_str())
+                        .expect("redb: insert outbox_displaced");
+                }
+            }
+
+            result
+        };
+        write_txn.commit().expect("redb: commit accept_write");
+        outcome
+    }
+
+    fn promote_signed(&mut self, id: EventId, sig: Signature) -> PromoteOutcome {
+        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let outcome = {
+            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
+            let mut outbox_intents = write_txn
+                .open_table(OUTBOX_INTENTS)
+                .expect("redb: open outbox_intents");
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .expect("redb: open outbox_displaced");
+
+            let id_hex = id.to_hex();
+            let existing_json = events
+                .get(id_hex.as_str())
+                .expect("redb: get event")
+                .map(|guard| guard.value().to_string());
+
+            match existing_json {
+                None => PromoteOutcome::NotFound,
+                Some(json) => {
+                    let mut record: StoredEventRecord =
+                        serde_json::from_str(&json).expect("redb: decode stored event");
+                    match record.local {
+                        None => PromoteOutcome::NotFound,
+                        Some(mut local) => {
+                            let key = intent_key(local.intent_id);
+                            local.sig_state = SigState::Signed;
+                            record.local = Some(local);
+
+                            // Swap the sentinel for the real signature —
+                            // same id (a NIP-01 id never depends on `sig`),
+                            // so this is purely a value update: no
+                            // EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND key ever
+                            // changes.
+                            let mut event = Event::from_json(&record.event_json)
+                                .expect("redb: decode event json");
+                            event.sig = sig;
+                            record.event_json = event.as_json();
+
+                            let encoded =
+                                serde_json::to_string(&record).expect("redb: encode stored event");
+                            events
+                                .insert(id_hex.as_str(), encoded.as_str())
+                                .expect("redb: update promoted event");
+
+                            // R6, same transaction: durably drop the
+                            // displaced stash and flip the journal's
+                            // sig_state so recovery after a promote never
+                            // sees a stale stash or a pre-promotion state.
+                            outbox_displaced
+                                .remove(key.as_str())
+                                .expect("redb: remove outbox_displaced");
+                            if let Some(intent_json) = outbox_intents
+                                .get(key.as_str())
+                                .expect("redb: get outbox_intents")
+                                .map(|guard| guard.value().to_string())
+                            {
+                                let mut intent_record: OutboxIntentRecord =
+                                    serde_json::from_str(&intent_json)
+                                        .expect("redb: decode outbox intent");
+                                intent_record.sig_state = IntentSigState::Signed;
+                                intent_record.frozen_json = event.as_json();
+                                let encoded_intent = serde_json::to_string(&intent_record)
+                                    .expect("redb: encode outbox intent");
+                                outbox_intents
+                                    .insert(key.as_str(), encoded_intent.as_str())
+                                    .expect("redb: update outbox_intents");
+                            }
+
+                            let row = StoredEvent {
+                                event,
+                                provenance: Provenance {
+                                    seen: record.provenance,
+                                    local: record.local,
+                                },
+                            };
+                            PromoteOutcome::Promoted { row: Box::new(row) }
+                        }
+                    }
+                }
+            }
+        };
+        write_txn.commit().expect("redb: commit promote_signed");
+        outcome
+    }
+
+    fn compensate_write(&mut self, id: EventId) -> CompensateOutcome {
+        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let outcome = {
+            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
+            let mut addr_index = write_txn
+                .open_table(ADDR_INDEX)
+                .expect("redb: open addr_index");
+            let tombstones = write_txn
+                .open_table(TOMBSTONES)
+                .expect("redb: open tombstones");
+            let addr_tombstones = write_txn
+                .open_table(ADDR_TOMBSTONES)
+                .expect("redb: open addr_tombstones");
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .expect("redb: open expiration_index");
+            let mut by_author = write_txn
+                .open_table(BY_AUTHOR)
+                .expect("redb: open by_author");
+            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+            let mut outbox_intents = write_txn
+                .open_table(OUTBOX_INTENTS)
+                .expect("redb: open outbox_intents");
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .expect("redb: open outbox_displaced");
+
+            let id_hex = id.to_hex();
+            let intent_id = events
+                .get(id_hex.as_str())
+                .expect("redb: get event")
+                .and_then(|guard| {
+                    let record: StoredEventRecord =
+                        serde_json::from_str(guard.value()).expect("redb: decode stored event");
+                    record
+                        .local
+                        .filter(|local| local.sig_state == SigState::Pending)
+                        .map(|local| local.intent_id)
+                });
+
+            match intent_id {
+                None => CompensateOutcome::NotFound,
+                Some(intent_id) => {
+                    // §4.2: `remove(id, Rejected)` writes no tombstone
+                    // (only kind:5 processing ever does), then re-insert
+                    // the stashed predecessor through the SAME one door —
+                    // ordinary supersession, never an un-supersede
+                    // operation.
+                    remove_row_in_txn(
+                        &mut events,
+                        &mut addr_index,
+                        &mut expiration_index,
+                        &mut by_author,
+                        &mut by_kind,
+                        id,
+                        |_| true,
+                    );
+
+                    let key = intent_key(intent_id);
+                    outbox_intents
+                        .remove(key.as_str())
+                        .expect("redb: remove outbox_intents");
+                    let displaced_json = outbox_displaced
+                        .remove(key.as_str())
+                        .expect("redb: remove outbox_displaced")
+                        .map(|guard| guard.value().to_string());
+
+                    let restored = displaced_json
+                        .and_then(|json| {
+                            reinsert_stashed_in_txn(
+                                &mut events,
+                                &mut addr_index,
+                                &tombstones,
+                                &addr_tombstones,
+                                &mut expiration_index,
+                                &mut by_author,
+                                &mut by_kind,
+                                decode_stored_event(&json),
+                            )
+                        })
+                        .map(Box::new);
+
+                    CompensateOutcome::Compensated { restored }
+                }
+            }
+        };
+        write_txn.commit().expect("redb: commit compensate_write");
+        outcome
+    }
+
+    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+        let read_txn = self.db.begin_read().expect("redb: begin_read");
+        let outbox_intents = read_txn
+            .open_table(OUTBOX_INTENTS)
+            .expect("redb: open outbox_intents");
+        let outbox_displaced = read_txn
+            .open_table(OUTBOX_DISPLACED)
+            .expect("redb: open outbox_displaced");
+
+        let mut out = Vec::new();
+        for entry in outbox_intents.iter().expect("redb: iter outbox_intents") {
+            let (key, value) = entry.expect("redb: read outbox_intents entry");
+            let intent_id = IntentId(
+                key.value()
+                    .parse::<u64>()
+                    .expect("redb: parse outbox_intents key"),
+            );
+            let record: OutboxIntentRecord =
+                serde_json::from_str(value.value()).expect("redb: decode outbox intent");
+            let frozen =
+                Event::from_json(&record.frozen_json).expect("redb: decode frozen event json");
+
+            let displaced = outbox_displaced
+                .get(key.value())
+                .expect("redb: get outbox_displaced")
+                .map(|guard| decode_stored_event(guard.value()));
+
+            out.push(RecoveredIntent {
+                intent_id,
+                receipt_id: record.receipt_id,
+                frozen,
+                expected_pubkey: record.expected_pubkey,
+                signing_identity_ref: record.signing_identity_ref,
+                durability: record.durability,
+                routing: record.routing,
+                sig_state: record.sig_state,
+                displaced,
+                accepted_at: record.accepted_at,
+            });
+        }
+        out
     }
 }
 
