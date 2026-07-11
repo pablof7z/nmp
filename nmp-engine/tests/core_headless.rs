@@ -8,6 +8,7 @@
 //! `limit` poisoning, and per-query `CompleteUpTo`/`Unknown` aggregation).
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, QueryCoverage, RowDelta, RowSink};
 use nmp_engine::outbox::{
@@ -205,13 +206,107 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
     });
     let rows = emitted.expect("ingest must emit rows for the affected handle");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].event.id, b_post.id);
+    assert_eq!(
+        rows[0].event().map(|e| e.id),
+        Some(b_post.id),
+        "the single delta must be an Added(b_post), never a Removed or a re-delivered full set"
+    );
 
     // The sink was also called synchronously with the same rows.
     let captured = sink.0.lock().unwrap();
     assert!(captured
         .iter()
-        .any(|batch| batch.len() == 1 && batch[0].event.id == b_post.id));
+        .any(|batch| batch.len() == 1 && batch[0].event().map(|e| e.id) == Some(b_post.id)));
+}
+
+// ---- P0 load test (docs/known-gaps.md): redelivery must be O(distinct
+// rows), never O(rows^2) --------------------------------------------------
+
+/// The falsifier for the P0 dogfooding bug: before the `RowDelta::Added`/
+/// `Removed` delta fix, `EngineCore::refresh_handle` re-emitted the FULL
+/// current row set on every single ingested event (because
+/// `rows_and_coverage_for` always recomputed -- and `EmitRows` always
+/// carried -- every currently-matching row, not just what changed). N
+/// distinct matching events therefore delivered ~N*(N+1)/2 total rows
+/// across the run -- O(N^2) -- confirmed live against real relays as a
+/// 635-1294x redelivery ratio (~3.35M raw row deliveries for ~2,587
+/// distinct notes in 20s). This test subscribes once, then ingests N=2,000
+/// distinct matching events ONE AT A TIME through the real
+/// `EngineMsg::RelayFrame` ingest path (exactly what a live relay stream
+/// does -- `on_relay_frame`'s `Event` arm always calls `recompile` +
+/// `refresh_all_handles`), and asserts the TOTAL number of row-delta
+/// entries delivered across every `EmitRows` batch stays close to N (each
+/// distinct row delivered ~once), nowhere near the O(N^2) blow-up the old
+/// full-set-re-emit behavior produced. Bounded/deterministic: a fixed N,
+/// no network, and a generous wall-clock ceiling so an O(N^2) regression
+/// fails loudly instead of hanging.
+#[test]
+fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared() {
+    let start = Instant::now();
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let sink = CapturingSink::default();
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(sink.clone()),
+    ));
+
+    const N: u64 = 2_000;
+    let mut total_delta_entries = 0usize;
+    for i in 0..N {
+        let event = nmp_resolver::testkit::kind1(&a, &format!("load-test post #{i}"), 1_000 + i);
+        let effects = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            event_frame("s", event),
+        ));
+        for effect in &effects {
+            if let Effect::EmitRows(_, rows, _) = effect {
+                total_delta_entries += rows.len();
+            }
+        }
+    }
+
+    // The fix must not have traded over-delivery for under-delivery: every
+    // one of the N distinct events actually reaches the sink at least once
+    // (as an `Added`), or this "load test" would be vacuous.
+    let captured = sink.0.lock().unwrap();
+    let distinct_delivered: BTreeSet<nostr::EventId> = captured
+        .iter()
+        .flatten()
+        .filter_map(RowDelta::event)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(
+        distinct_delivered.len(),
+        N as usize,
+        "every one of the N distinct ingested events must be delivered at least once"
+    );
+
+    // THE falsifier: total delivered row-delta entries stays ~O(N) (a small
+    // constant multiple covers the initial empty-subscribe batch and any
+    // coverage-only re-emits), nowhere near the O(N^2) blow-up a full-set
+    // re-emit would produce (~N*(N+1)/2 = 2,001,000 for N=2,000 -- 500x+
+    // this bound).
+    let quadratic_blowup = (N * (N + 1)) / 2;
+    assert!(
+        total_delta_entries < (N as usize) * 2,
+        "total delivered row-delta entries ({total_delta_entries}) must stay ~O(N) -- the \
+         old full-set-re-emit bug would have delivered ~{quadratic_blowup} (O(N^2))"
+    );
+
+    assert!(
+        start.elapsed() < Duration::from_secs(30),
+        "load test must complete quickly -- an O(N^2) regression would blow this budget \
+         (elapsed: {:?})",
+        start.elapsed()
+    );
 }
 
 // ---- test 2 analog: EOSE records a watermark; a bare EVENT never does ---

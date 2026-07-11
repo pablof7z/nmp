@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
+use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_engine::runtime::EngineThread;
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, TagName};
@@ -218,23 +219,22 @@ fn main() {
 
     let deadline = Instant::now() + Duration::from_secs(args.secs);
 
-    // NOTE on the counters below: `Handle::subscribe`'s `RowsMsg` batch is
-    // NOT an incremental delta despite the `RowDelta` name -- every
-    // delivery is the query's FULL current matching row set
-    // (`nmp_engine::core::EngineCore::rows_and_coverage_for` recomputes the
-    // whole set from the store on every refresh; `refresh_handle` is only
-    // SUPPOSED to suppress a redelivery when the row-id set and coverage
-    // are both byte-for-byte unchanged since the last one). This app dedups
-    // by event id before printing, as any real app must -- but it also
-    // counts the raw, undeduped delivery volume, because during this run
-    // that suppression did not seem to be holding: see the summary for how
-    // large the gap between "distinct notes" and "raw batch deliveries" is.
-    let mut total_rows = 0usize;
-    let mut raw_row_deliveries = 0usize;
+    // `Handle::subscribe`'s `RowsMsg` batch is an INCREMENTAL delta (plan
+    // fix for the P0 redelivery blow-up in `docs/known-gaps.md`): each
+    // batch carries only the rows ADDED and REMOVED since this handle's
+    // last batch, never the query's full current row set. This app owns
+    // the accumulation into its own live row set (`known_notes`) -- exactly
+    // what M4's Swift bridge will do into a snapshot array, so
+    // `AsyncSequence<[Row]>` ergonomics still hold even though the WIRE is
+    // deltas. `raw_delta_entries` counts every `Added`/`Removed` entry ever
+    // delivered across the whole run -- with the fix, this should track the
+    // distinct-note count (each note delivered ~once), not blow up
+    // quadratically as the feed grows.
+    let mut known_notes: BTreeMap<nostr::EventId, nostr::Event> = BTreeMap::new();
+    let mut raw_delta_entries = 0usize;
     let mut total_batches = 0usize;
     let mut kind_counts: BTreeMap<u16, usize> = BTreeMap::new();
     let mut authors_seen: BTreeSet<String> = BTreeSet::new();
-    let mut seen_note_ids: BTreeSet<nostr::EventId> = BTreeSet::new();
     let mut last_coverage_printed: Option<String> = None;
 
     loop {
@@ -243,36 +243,35 @@ fn main() {
             break;
         }
         match rows_rx.recv_timeout(remaining) {
-            Ok((rows, coverage)) => {
+            Ok((deltas, coverage)) => {
                 total_batches += 1;
-                raw_row_deliveries += rows.len();
+                raw_delta_entries += deltas.len();
                 let coverage_str = format!("{coverage:?}");
-                if rows.is_empty() {
-                    // Every fresh subscribe delivers one such batch;
-                    // coverage on its own is still worth surfacing once it
-                    // changes, since it's the only aggregate liveness
-                    // signal this Handle currently exposes (see summary).
-                    if last_coverage_printed.as_deref() != Some(coverage_str.as_str()) {
-                        println!("[coverage] {coverage_str}");
-                        last_coverage_printed = Some(coverage_str);
+                for delta in deltas {
+                    match delta {
+                        RowDelta::Added(event) => {
+                            if known_notes.insert(event.id, event.clone()).is_some() {
+                                continue; // already rendered this exact event; skip re-printing it
+                            }
+                            *kind_counts.entry(event.kind.as_u16()).or_default() += 1;
+                            authors_seen.insert(event.pubkey.to_hex());
+                            let preview: String = event.content.chars().take(80).collect();
+                            println!(
+                                "[note] author={} created_at={} \"{}\"",
+                                event.pubkey.to_hex(),
+                                event.created_at.as_secs(),
+                                preview.replace('\n', " "),
+                            );
+                        }
+                        RowDelta::Removed(id) => {
+                            known_notes.remove(&id);
+                        }
                     }
-                    continue;
                 }
-                for row in rows {
-                    if !seen_note_ids.insert(row.event.id) {
-                        continue; // already rendered this exact event; skip re-printing it
-                    }
-                    total_rows += 1;
-                    *kind_counts.entry(row.event.kind.as_u16()).or_default() += 1;
-                    authors_seen.insert(row.event.pubkey.to_hex());
-                    let preview: String = row.event.content.chars().take(80).collect();
-                    println!(
-                        "[note] author={} created_at={} \"{}\"",
-                        row.event.pubkey.to_hex(),
-                        row.event.created_at.as_secs(),
-                        preview.replace('\n', " "),
-                    );
-                }
+                // Every fresh subscribe delivers one (possibly empty) batch;
+                // coverage on its own is still worth surfacing once it
+                // changes, since it's the only aggregate liveness signal
+                // this Handle currently exposes (see summary).
                 if last_coverage_printed.as_deref() != Some(coverage_str.as_str()) {
                     println!("[coverage] {coverage_str}");
                     last_coverage_printed = Some(coverage_str);
@@ -285,6 +284,7 @@ fn main() {
             }
         }
     }
+    let total_rows = known_notes.len();
 
     if let Some(rx) = receipt_rx {
         // Drain whatever receipt status arrived without extending the
@@ -300,26 +300,30 @@ fn main() {
     println!("rows by kind (distinct)        : {kind_counts:?}");
     println!(
         "row batches delivered on Handle::subscribe's channel : {total_batches} \
-         (raw row count across all batches, before this app's own \
-         dedup-by-event-id: {raw_row_deliveries})"
+         (raw Added+Removed delta-entry count across all batches, now that \
+         `EmitRows` delivers incremental deltas rather than the full \
+         current row set on every refresh: {raw_delta_entries})"
     );
-    if total_batches > 0 && raw_row_deliveries > total_rows.max(1) * 3 {
+    let delta_ratio = raw_delta_entries as f64 / total_rows.max(1) as f64;
+    if total_batches > 0 && raw_delta_entries > total_rows.max(1) * 3 {
         println!(
-            "WARNING: raw delivery volume is {:.1}x the distinct note count -- the \
-             SAME already-known rows are being redelivered on this Handle far more \
-             than once. Not something this app can fix from the outside (no \
-             delta/only-new-rows option exists on Handle::subscribe today); see the \
-             run report.",
-            raw_row_deliveries as f64 / total_rows.max(1) as f64
+            "WARNING: raw delta-entry volume is {delta_ratio:.1}x the distinct note count -- \
+             deltas are being re-delivered far more than once per row (expected ~1x). This \
+             would mean the P0 redelivery blow-up (docs/known-gaps.md) has regressed."
+        );
+    } else if total_batches > 0 {
+        println!(
+            "raw delta-entry volume is {delta_ratio:.1}x the distinct note count (expected \
+             ~1x with incremental delivery -- was 635-1294x before the fix)."
         );
     }
     println!(
         "per-relay / per-relay-kind diagnostic: NOT AVAILABLE from Handle -- \
-         nmp_engine::core::RowDelta carries only the raw `nostr::Event` \
-         (no relay provenance), and Handle exposes no relay-connection or \
-         per-relay-count accessor at all (PoolEvent::Health is dropped \
-         before it ever reaches EngineMsg). See the run report for what a \
-         Handle accessor would need to expose."
+         nmp_engine::core::RowDelta's Added variant carries only the raw \
+         `nostr::Event` (no relay provenance), and Handle exposes no \
+         relay-connection or per-relay-count accessor at all \
+         (PoolEvent::Health is dropped before it ever reaches EngineMsg). \
+         See the run report for what a Handle accessor would need to expose."
     );
 
     handle.shutdown();

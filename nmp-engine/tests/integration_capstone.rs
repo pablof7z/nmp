@@ -13,7 +13,7 @@
 //! re-exports a DIFFERENT `nostr` than this workspace's pinned `0.44.4`);
 //! every cross-version value is bridged by explicit hex/id round-trip.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -27,7 +27,7 @@ use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
-use nostr::{Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nostr::{EventId, Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 use nostr_relay_builder::local::LocalRelay;
 use nostr_relay_builder::prelude::{
@@ -53,20 +53,43 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
     })
 }
 
+/// Accumulates the channel's `Added`/`Removed` deltas into the row set they
+/// currently describe (exactly as a real app must -- `Handle::subscribe`'s
+/// wire is deltas, not snapshots, per `nmp_engine::core::RowDelta`'s doc) and
+/// blocks until that accumulated set + the latest coverage satisfy `pred`,
+/// or `timeout` lapses. Replaying `Removed` deltas (not just tracking "ever
+/// added") is load-bearing for `follows_minus_mutes_resolves_over_a_real_
+/// relay` below, whose predicate needs the settled CURRENT membership, not
+/// a monotonic history.
 fn wait_for_rows(
     rx: &Receiver<RowsMsg>,
     timeout: Duration,
-    pred: impl Fn(&[RowDelta], QueryCoverage) -> bool,
+    pred: impl Fn(&[nostr::Event], QueryCoverage) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
+    let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return false;
         }
         match rx.recv_timeout(remaining) {
-            Ok((rows, coverage)) if pred(&rows, coverage) => return true,
-            Ok(_) => {} // non-matching batch -- keep waiting for the next one
+            Ok((deltas, coverage)) => {
+                for delta in deltas {
+                    match delta {
+                        RowDelta::Added(event) => {
+                            current.insert(event.id, event);
+                        }
+                        RowDelta::Removed(id) => {
+                            current.remove(&id);
+                        }
+                    }
+                }
+                let snapshot: Vec<nostr::Event> = current.values().cloned().collect();
+                if pred(&snapshot, coverage) {
+                    return true;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => return false,
             Err(RecvTimeoutError::Disconnected) => return false,
         }
@@ -189,7 +212,7 @@ async fn watermark_cold_start_offline() {
 
         assert!(
             wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, coverage| {
-                let ids: BTreeSet<String> = rows.iter().map(|r| r.event.id.to_hex()).collect();
+                let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
                 ids == post_ids && matches!(coverage, QueryCoverage::CompleteUpTo(_))
             }),
             "phase 1 (online) must fetch all 3 seeded posts and reach CompleteUpTo via a real EOSE"
@@ -230,7 +253,7 @@ async fn watermark_cold_start_offline() {
         let (_qh_a, rows_rx_a) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
         assert!(
             wait_for_rows(&rows_rx_a, Duration::from_secs(5), |rows, coverage| {
-                let ids: BTreeSet<String> = rows.iter().map(|r| r.event.id.to_hex()).collect();
+                let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
                 ids == post_ids && matches!(coverage, QueryCoverage::CompleteUpTo(_))
             }),
             "offline cold read must be AUTHORITATIVE: CompleteUpTo from the persisted watermark, \
@@ -334,7 +357,7 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
         wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, coverage| {
             let matching = rows
                 .iter()
-                .filter(|r| r.event.id.to_hex() == shared_post_id)
+                .filter(|r| r.id.to_hex() == shared_post_id)
                 .count();
             matching == 1 && matches!(coverage, QueryCoverage::CompleteUpTo(_))
         }),
@@ -617,7 +640,7 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
     // resolved end-to-end over the real relay.
     assert!(
         wait_for_rows(&rows_rx, Duration::from_secs(15), |rows, _coverage| {
-            let ids: BTreeSet<String> = rows.iter().map(|r| r.event.id.to_hex()).collect();
+            let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
             ids.contains(&b_post.id.to_hex()) && !ids.contains(&c_post.id.to_hex())
         }),
         "follows-minus-mutes must surface b's post and exclude c's (muted) once both the \

@@ -17,7 +17,7 @@
 //! hex/id string round-trip below rather than by sharing a single `Keys`/
 //! `Event` type across both crate versions.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -31,7 +31,7 @@ use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
-use nostr::{Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nostr::{EventId, Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 use nostr_relay_builder::local::LocalRelay;
 use nostr_relay_builder::prelude::{
@@ -57,24 +57,40 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 }
 
 /// Block (on the calling OS thread -- this crate's `Receiver`s are plain
-/// `std::sync::mpsc`, never tokio) until a rows batch matching `pred`
-/// arrives, or return `false` after `timeout`. Drains and discards
-/// non-matching batches (e.g. the initial empty/`Unknown` batch every fresh
-/// `subscribe` delivers).
+/// `std::sync::mpsc`, never tokio) until the ACCUMULATED row set (built by
+/// replaying every `Added`/`Removed` delta this channel has delivered so
+/// far, exactly as a real app must -- `Handle::subscribe`'s wire is deltas,
+/// not snapshots, per `nmp_engine::core::RowDelta`'s doc) matches `pred`, or
+/// return `false` after `timeout`.
 fn wait_for_rows(
     rx: &Receiver<RowsMsg>,
     timeout: Duration,
-    pred: impl Fn(&[RowDelta]) -> bool,
+    pred: impl Fn(&[nostr::Event]) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
+    let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return false;
         }
         match rx.recv_timeout(remaining) {
-            Ok((rows, _coverage)) if pred(&rows) => return true,
-            Ok(_) => {} // non-matching batch -- keep waiting for the next one
+            Ok((deltas, _coverage)) => {
+                for delta in deltas {
+                    match delta {
+                        RowDelta::Added(event) => {
+                            current.insert(event.id, event);
+                        }
+                        RowDelta::Removed(id) => {
+                            current.remove(&id);
+                        }
+                    }
+                }
+                let snapshot: Vec<nostr::Event> = current.values().cloned().collect();
+                if pred(&snapshot) {
+                    return true;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => return false,
             Err(RecvTimeoutError::Disconnected) => return false,
         }
@@ -176,7 +192,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     assert!(
         !wait_for_rows(&rows_rx, Duration::from_millis(500), |rows| rows
             .iter()
-            .any(|r| r.event.id.to_hex() == b_post.id.to_hex())),
+            .any(|r| r.id.to_hex() == b_post.id.to_hex())),
         "b's post must not surface before a follows b"
     );
 
@@ -208,7 +224,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     assert!(
         wait_for_rows(&rows_rx, Duration::from_secs(10), |rows| rows
             .iter()
-            .any(|r| r.event.id.to_hex() == b_post.id.to_hex())),
+            .any(|r| r.id.to_hex() == b_post.id.to_hex())),
         "b's pre-seeded post must surface once a's contact list names b"
     );
 
@@ -239,7 +255,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     assert!(
         wait_for_rows(&rows_rx, Duration::from_secs(15), |rows| rows
             .iter()
-            .any(|r| r.event.id.to_hex() == second_post.id.to_hex())),
+            .any(|r| r.id.to_hex() == second_post.id.to_hex())),
         "reconnect must replay the current subs with no gap -- b's post-reconnect note must surface without the app resubscribing"
     );
 

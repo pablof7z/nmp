@@ -75,11 +75,49 @@ pub trait RowSink: Send {
     fn on_rows(&self, rows: Vec<RowDelta>);
 }
 
-/// A raw row delta (plan §7 non-goal: no ordering/windowing in M3 — raw
-/// deltas + coverage only).
+/// A row-set delta (plan §7 non-goal: no ordering/windowing in M3 — raw
+/// deltas + coverage only). This is the standard reactive-query contract:
+/// `Effect::EmitRows`/`RowSink::on_rows` NEVER re-sends the query's full
+/// current row set -- only the rows ADDED and REMOVED since that handle's
+/// LAST emit (`refresh_handle`'s job). The FIRST emit for a fresh subscribe
+/// is "every currently-matching row, as `Added`" (there is nothing to diff
+/// against yet); an identity re-root (`set_active_pubkey`) that swaps the
+/// whole row set falls out of the SAME diff -- "remove everything old, add
+/// everything new" -- with no special-casing. Without this contract, a
+/// long-running subscription that keeps matching new events re-delivers its
+/// ENTIRE growing row set on every single ingest: O(rows) work per event,
+/// O(rows²) total over a session (confirmed live: ~3.35M raw row deliveries
+/// for ~2,587 distinct notes in 20s against real relays --
+/// `docs/known-gaps.md`'s P0).
 #[derive(Debug, Clone)]
-pub struct RowDelta {
-    pub event: nostr::Event,
+pub enum RowDelta {
+    /// A row that newly matches the query, carrying the full event so the
+    /// app never has to look it up separately.
+    Added(nostr::Event),
+    /// A row that no longer matches the query. Carries only the id -- the
+    /// app is expected to already hold the event from an earlier `Added`
+    /// (raw deltas + coverage only: no second copy of the payload is kept
+    /// around just to hand back on removal).
+    Removed(EventId),
+}
+
+impl RowDelta {
+    /// The event id this delta concerns, regardless of variant.
+    pub fn id(&self) -> EventId {
+        match self {
+            RowDelta::Added(event) => event.id,
+            RowDelta::Removed(id) => *id,
+        }
+    }
+
+    /// The event payload, if this is an `Added` delta (`None` for
+    /// `Removed`).
+    pub fn event(&self) -> Option<&nostr::Event> {
+        match self {
+            RowDelta::Added(event) => Some(event),
+            RowDelta::Removed(_) => None,
+        }
+    }
 }
 
 /// The read/write/frame vocabulary the reducer consumes (plan §3.4).
@@ -1122,23 +1160,48 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Recompute `id`'s current row set + query coverage; emit (and
     /// synchronously deliver to its sink) `Effect::EmitRows` only if either
-    /// changed since the last refresh.
+    /// changed since the last refresh -- and, when something DID change, the
+    /// row payload is ALWAYS just the incremental added/removed delta
+    /// against `state.last_rows`, never the full current set (see
+    /// `RowDelta`'s doc: this is what keeps a long-running subscription's
+    /// total delivered row volume ~O(distinct rows) instead of O(rows²)).
+    /// Coverage can change with no row change at all (a watermark advancing)
+    /// -- that case still emits, carrying an EMPTY row delta alongside the
+    /// new coverage.
     fn refresh_handle(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
-        let (rows, coverage) = self.rows_and_coverage_for(id);
+        let (current, coverage) = self.rows_and_coverage_for(id);
         let Some(state) = self.handles.get_mut(&id) else {
             return;
         };
-        let row_ids: BTreeSet<EventId> = rows.iter().map(|r| r.event.id).collect();
-        if row_ids == state.last_rows && state.last_coverage == Some(coverage) {
+        let current_ids: BTreeSet<EventId> = current.keys().copied().collect();
+        if current_ids == state.last_rows && state.last_coverage == Some(coverage) {
             return;
         }
-        state.last_rows = row_ids;
+        let mut delta: Vec<RowDelta> = Vec::new();
+        for (event_id, event) in &current {
+            if !state.last_rows.contains(event_id) {
+                delta.push(RowDelta::Added(event.clone()));
+            }
+        }
+        for old_id in &state.last_rows {
+            if !current.contains_key(old_id) {
+                delta.push(RowDelta::Removed(*old_id));
+            }
+        }
+        state.last_rows = current_ids;
         state.last_coverage = Some(coverage);
-        state.sink.on_rows(rows.clone());
-        effects.push(Effect::EmitRows(id, rows, coverage));
+        state.sink.on_rows(delta.clone());
+        effects.push(Effect::EmitRows(id, delta, coverage));
     }
 
-    fn rows_and_coverage_for(&self, id: HandleId) -> (Vec<RowDelta>, QueryCoverage) {
+    /// The query's FULL current matching row set (by id) + its aggregate
+    /// coverage -- an internal snapshot `refresh_handle` diffs against the
+    /// handle's own remembered `last_rows` to compute the outgoing delta.
+    /// This snapshot itself is never handed to a caller/effect directly.
+    fn rows_and_coverage_for(
+        &self,
+        id: HandleId,
+    ) -> (BTreeMap<EventId, nostr::Event>, QueryCoverage) {
         let atoms = self.resolver.root_atoms(id);
         let mut by_id: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
         for atom in &atoms {
@@ -1146,12 +1209,8 @@ impl<S: EventStore> EngineCore<S> {
                 by_id.entry(se.event.id).or_insert(se.event);
             }
         }
-        let rows = by_id
-            .into_values()
-            .map(|event| RowDelta { event })
-            .collect();
         let coverage =
             coverage_query::query_coverage(&atoms, self.router.plan(), self.resolver.store());
-        (rows, coverage)
+        (by_id, coverage)
     }
 }

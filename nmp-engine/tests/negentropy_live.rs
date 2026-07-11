@@ -13,6 +13,7 @@
 //! identical `nostr`-version-shadowing precaution (this workspace pins
 //! `nostr = "0.44.4"`; `nostr-relay-builder` pulls its own `0.45.0-alpha.4`).
 
+use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
-use nostr::{Keys, RelayUrl};
+use nostr::{EventId, Keys, RelayUrl};
 
 use nostr_relay_builder::local::LocalRelay;
 use nostr_relay_builder::prelude::{
@@ -42,20 +43,42 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
         .expect("mirror keypair across nostr crate versions")
 }
 
+/// Accumulates the channel's `Added`/`Removed` deltas into the row set they
+/// currently describe (exactly as a real app must -- the wire is deltas, not
+/// snapshots, per `nmp_engine::core::RowDelta`'s doc) and blocks until that
+/// accumulated set + the latest coverage satisfy `pred`, or `timeout` lapses.
+/// Coverage and rows can change independently (a watermark advancing carries
+/// an empty row delta) -- `pred` is checked against the freshest coverage
+/// seen alongside the freshest accumulated row set on every batch.
 fn wait_for_rows(
     rx: &Receiver<RowsMsg>,
     timeout: Duration,
-    pred: impl Fn(&[RowDelta], nmp_engine::core::QueryCoverage) -> bool,
+    pred: impl Fn(&[nostr::Event], nmp_engine::core::QueryCoverage) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
+    let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return false;
         }
         match rx.recv_timeout(remaining) {
-            Ok((rows, coverage)) if pred(&rows, coverage) => return true,
-            Ok(_) => {} // non-matching batch -- keep waiting for the next one
+            Ok((deltas, coverage)) => {
+                for delta in deltas {
+                    match delta {
+                        RowDelta::Added(event) => {
+                            current.insert(event.id, event);
+                        }
+                        RowDelta::Removed(id) => {
+                            current.remove(&id);
+                        }
+                    }
+                }
+                let snapshot: Vec<nostr::Event> = current.values().cloned().collect();
+                if pred(&snapshot, coverage) {
+                    return true;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => return false,
             Err(RecvTimeoutError::Disconnected) => return false,
         }
@@ -148,8 +171,7 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
 
     assert!(
         wait_for_rows(&b_rows_rx, Duration::from_secs(15), |rows, coverage| {
-            rows.iter()
-                .any(|r| r.event.id.to_hex() == b_post.id.to_hex())
+            rows.iter().any(|r| r.id.to_hex() == b_post.id.to_hex())
                 && matches!(coverage, nmp_engine::core::QueryCoverage::CompleteUpTo(_))
         }),
         "negentropy must discover b's pre-seeded, never-REQ'd post, backfill it via the \
