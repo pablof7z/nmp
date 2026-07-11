@@ -30,7 +30,10 @@ use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
-use nmp_store::{EventStore, MemoryStore, RedbStore, RelayObserved};
+use nmp_store::{
+    sentinel_signature, AcceptWrite, EventStore, IntentSigState, MemoryStore, RedbStore,
+    RelayObserved, WriteDurability,
+};
 use nmp_transport::PoolConfig;
 use nostr::{
     EventId, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag, Timestamp,
@@ -287,7 +290,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
 // ---- #39: the deadline-armed driver (design §3.3) ------------------------
 //
 // `EngineThread::spawn`'s `Handle` exposes no manual-tick verb at all (see
-// `handle_surface_is_exactly_five_verbs_plus_shutdown` below) -- so any
+// `handle_surface_is_closed_and_receipt_reattachment_is_explicit` below) -- so any
 // `RowDelta::Removed` this crate's own tests observe with no further
 // command sent can only have come from `runtime::engine_loop`'s own
 // `recv_timeout` arming itself off `core::EngineCore::next_deadline()` and
@@ -854,17 +857,17 @@ fn boot_catches_up_past_due_expiry() {
     engine_thread.join();
 }
 
-/// Structural grep-guard (M3 plan §5 test 14, widened by M4 §5 and M5):
-/// `Handle`'s public surface is exactly the five verbs (`subscribe`/
-/// `unsubscribe`/`add_signer`/`set_active_account`/`publish`) plus
-/// `shutdown` -- no `relays:` parameter, no open-REQ method anywhere on it
+/// Structural grep-guard (M3 plan §5 test 14, widened by M4/M5 and #3 U4):
+/// `Handle`'s public surface is the original verbs plus diagnostics and the
+/// two stable-receipt operations (`publish_tracked`/`reattach_receipt`) -- no
+/// `relays:` parameter, no open-REQ method anywhere on it
 /// (ledger #2/#3 preserved at the top edge; `add_signer` is M4's deliberate
 /// widening, closing the multi-account gap; `observe_diagnostics` is M5's --
 /// read-only, off the data path, never influences routing/delivery). Asserted
 /// by reading this crate's own source rather than by reflection (Rust has
 /// none) -- the same "grep-guard" idiom the plan itself names.
 #[test]
-fn handle_surface_is_exactly_five_verbs_plus_shutdown() {
+fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runtime/mod.rs"))
         .expect("read runtime/mod.rs");
 
@@ -890,6 +893,8 @@ fn handle_surface_is_exactly_five_verbs_plus_shutdown() {
         "add_signer",
         "observe_diagnostics",
         "publish",
+        "publish_tracked",
+        "reattach_receipt",
         "set_active_account",
         "shutdown",
         "subscribe",
@@ -898,7 +903,7 @@ fn handle_surface_is_exactly_five_verbs_plus_shutdown() {
     expected.sort_unstable();
     assert_eq!(
         methods, expected,
-        "Handle must expose exactly the five verbs + shutdown -- no relays:/open-REQ method"
+        "Handle must expose only the reviewed verbs -- no relays:/open-REQ method"
     );
 
     // Scan CODE lines only (skip `///`/`//` doc/comment prose, which is
@@ -919,4 +924,138 @@ fn handle_surface_is_exactly_five_verbs_plus_shutdown() {
             .any(|l| l.contains("fn open_req") || l.contains("fn open(")),
         "no open-REQ method may exist anywhere in the runtime module"
     );
+}
+
+#[test]
+fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() {
+    let keys = Keys::generate();
+    let (thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        PoolConfig::default(),
+    );
+    handle.set_active_account(Some(keys.public_key()));
+    let tracked = handle.publish_tracked(WriteIntent {
+        payload: WritePayload::Unsigned(UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::now(),
+            Kind::TextNote,
+            vec![],
+            "tracked",
+        )),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+    });
+    assert!(
+        tracked.id.0 < (1u64 << 63),
+        "accepted ids use store namespace"
+    );
+    assert_eq!(tracked.statuses.recv().unwrap(), WriteStatus::Accepted);
+
+    let first = handle.reattach_receipt(tracked.id).expect("known receipt");
+    let second = handle.reattach_receipt(tracked.id).expect("known receipt");
+    assert_eq!(
+        first.recv_timeout(Duration::from_secs(1)).unwrap(),
+        WriteStatus::Accepted
+    );
+    assert_eq!(
+        first.recv_timeout(Duration::from_secs(1)).unwrap(),
+        WriteStatus::AwaitingCapability
+    );
+    assert_eq!(
+        second.recv_timeout(Duration::from_secs(1)).unwrap(),
+        WriteStatus::Accepted
+    );
+    assert_eq!(
+        second.recv_timeout(Duration::from_secs(1)).unwrap(),
+        WriteStatus::AwaitingCapability
+    );
+    handle.add_signer(LocalKeySigner::new(keys.clone()));
+    assert!(wait_for_status(
+        &first,
+        Duration::from_secs(2),
+        |status| matches!(status, WriteStatus::Signed(_))
+    ));
+    assert!(wait_for_status(
+        &second,
+        Duration::from_secs(2),
+        |status| matches!(status, WriteStatus::Signed(_))
+    ));
+    assert!(handle
+        .reattach_receipt(nmp_engine::core::ReceiptId(999_999))
+        .is_none());
+
+    handle.shutdown();
+    thread.join();
+}
+
+#[test]
+fn runtime_boot_recovery_precedes_first_reattach_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("boot-before-command.redb");
+    let keys = Keys::generate();
+    let unsigned = UnsignedEvent::new(
+        keys.public_key(),
+        Timestamp::now(),
+        Kind::TextNote,
+        vec![],
+        "boot first",
+    );
+    let id = EventId::new(
+        &unsigned.pubkey,
+        &unsigned.created_at,
+        &unsigned.kind,
+        &unsigned.tags,
+        &unsigned.content,
+    );
+    let receipt = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let outcome = store
+            .accept_write(AcceptWrite {
+                frozen: nostr::Event::new(
+                    id,
+                    unsigned.pubkey,
+                    unsigned.created_at,
+                    unsigned.kind,
+                    unsigned.tags,
+                    unsigned.content,
+                    sentinel_signature(),
+                ),
+                expected_pubkey: keys.public_key(),
+                signing_identity_ref: keys.public_key().to_hex(),
+                durability: WriteDurability::Durable,
+                routing: "author-outbox".into(),
+                sig_state: IntentSigState::AwaitingSigner,
+                accepted_at: Timestamp::now(),
+            })
+            .unwrap();
+        nmp_engine::core::ReceiptId(outcome.journaled_receipt_id().unwrap())
+    };
+    let (thread, handle) = EngineThread::spawn(
+        RedbStore::open(&path).unwrap(),
+        FixtureDirectory::new(),
+        10,
+        PoolConfig::default(),
+    );
+    // This is literally the first command sent to the new engine thread.
+    let statuses = handle
+        .reattach_receipt(receipt)
+        .expect("boot rebuilt receipt");
+    assert_eq!(
+        statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
+        WriteStatus::Accepted
+    );
+    assert_eq!(
+        statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
+        WriteStatus::AwaitingCapability
+    );
+    handle.add_signer(LocalKeySigner::new(keys));
+    assert!(wait_for_status(
+        &statuses,
+        Duration::from_secs(2),
+        |status| matches!(status, WriteStatus::Signed(event_id) if *event_id == id)
+    ));
+    handle.shutdown();
+    thread.join();
 }

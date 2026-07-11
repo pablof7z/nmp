@@ -74,8 +74,8 @@ use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timest
 use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, RowDelta,
-    RowSink,
+    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, ReceiptId,
+    RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteIntent, WriteStatus};
 
@@ -93,6 +93,14 @@ pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
 /// [`Handle::unsubscribe`] needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryHandle(HandleId);
+
+/// A newly accepted write's stable store-issued identity plus its live
+/// observer. Keeping the id separate from the channel lets a later process
+/// call [`Handle::reattach_receipt`] without replaying acceptance.
+pub struct ReceiptStream {
+    pub id: ReceiptId,
+    pub statuses: Receiver<WriteStatus>,
+}
 
 /// A `RowSink` that intentionally does nothing: rows+coverage are delivered
 /// from `Effect::EmitRows` instead (see the module doc). `EngineCore`'s
@@ -132,6 +140,16 @@ enum Cmd {
     Subscribe {
         query: LiveQuery,
         reply: Sender<(HandleId, Receiver<RowsMsg>)>,
+    },
+    PublishTracked {
+        intent: WriteIntent,
+        sink: Box<dyn ReceiptSink>,
+        reply: Sender<ReceiptId>,
+    },
+    ReattachReceipt {
+        id: ReceiptId,
+        sink: Box<dyn ReceiptSink>,
+        reply: Sender<bool>,
     },
     /// Register a new signing capability (M4 §5: `SignerRegistry`). The
     /// reply carries the pubkey the engine thread's registry keyed it under
@@ -359,6 +377,20 @@ fn engine_loop<S, D>(
     let mut preambles: Preambles = Preambles::new();
     let mut registry = SignerRegistry::default();
 
+    // Recovery happens before the first externally-issued command. Pending
+    // rows already live in the store; this only rebuilds ownership and may
+    // replay exact durable attempt bytes whose Started fact was committed.
+    let recovery_effects = core.recover_on_boot();
+    dispatch_effects(
+        recovery_effects,
+        &pool,
+        &mut row_channels,
+        &mut diag_channels,
+        &mut preambles,
+        &registry,
+        self_inbox,
+    );
+
     loop {
         let cmd = match core.next_deadline() {
             None => match cmd_rx.recv() {
@@ -419,6 +451,35 @@ fn engine_loop<S, D>(
             }
             Cmd::UnobserveDiagnostics(id) => {
                 diag_channels.remove(&id);
+            }
+            Cmd::ReattachReceipt { id, sink, reply } => {
+                let found = core.reattach_receipt(id, sink);
+                let _ = reply.send(found);
+            }
+            Cmd::PublishTracked {
+                intent,
+                sink,
+                reply,
+            } => {
+                let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                effects.extend(core.handle(EngineMsg::Publish(intent, sink)));
+                let id = effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        Effect::EmitReceipt(id, _) => Some(*id),
+                        _ => None,
+                    })
+                    .expect("every publish produces a receipt correlation id");
+                let _ = reply.send(id);
+                dispatch_effects(
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    self_inbox,
+                );
             }
             Cmd::Subscribe { query, reply } => {
                 let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
@@ -884,12 +945,44 @@ impl Handle {
     /// no durable delivery obligation or query-visible pending row.
     #[must_use]
     pub fn publish(&self, intent: WriteIntent) -> Receiver<WriteStatus> {
+        self.publish_tracked(intent).statuses
+    }
+
+    /// Enqueue a write and expose its stable receipt id. This synchronous
+    /// round trip waits only for the local crash-atomic acceptance door,
+    /// never for signing, routing, network I/O, or ACKs.
+    #[must_use]
+    pub fn publish_tracked(&self, intent: WriteIntent) -> ReceiptStream {
         let (tx, rx) = mpsc::channel();
         let sink: Box<dyn ReceiptSink> = Box::new(ChannelReceiptSink(tx));
-        let _ = self
-            .inbox
-            .send(Cmd::Engine(EngineMsg::Publish(intent, sink)));
-        rx
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::PublishTracked {
+                intent,
+                sink,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: publish called after shutdown");
+        let id = reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped publish receipt reply");
+        ReceiptStream { id, statuses: rx }
+    }
+
+    /// Attach an additional observer to a retained receipt. The returned
+    /// channel is primed with durable receipt/attempt facts; `None` means
+    /// the id was never issued by this store.
+    pub fn reattach_receipt(&self, id: ReceiptId) -> Option<Receiver<WriteStatus>> {
+        let (tx, rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ReattachReceipt {
+                id,
+                sink: Box::new(ChannelReceiptSink(tx)),
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv().ok()?.then_some(rx)
     }
 
     /// Open a live diagnostics stream (M5 plan §1.2 step 4) — see

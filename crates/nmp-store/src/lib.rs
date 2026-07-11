@@ -724,6 +724,41 @@ pub struct RecoveredReceipt {
     pub state: ReceiptState,
 }
 
+/// Versioned, durable evidence for one publication attempt. The key is the
+/// full `(intent, relay, ordinal)` tuple: a restart can never confuse a new
+/// send with an older ambiguous send, and the exact signed bytes are retained
+/// rather than reconstructed from mutable routing state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredAttempt {
+    pub version: u8,
+    pub intent_id: IntentId,
+    pub relay: RelayUrl,
+    pub ordinal: u64,
+    pub event: Event,
+    pub outcome: AttemptOutcome,
+}
+
+/// Persisted attempt state. `Started` is committed before the engine emits
+/// `PublishEvent`; every other value is an append-only terminal fact for that
+/// ordinal. Retry eligibility/deadlines deliberately do not live here yet
+/// (issue #79 owns that policy).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttemptOutcome {
+    Started,
+    Acked,
+    Rejected(String),
+    GaveUp,
+    OutcomeUnknown,
+}
+
+/// Successful result of making one attempt ordinal terminal. Missing rows
+/// and contradictory terminals are errors, never false-success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishAttemptOutcome {
+    Committed,
+    AlreadySame,
+}
+
 /// The single mutating door onto the event store.
 pub trait EventStore {
     /// Insert an event observed via `from`. An already-expired event (NIP-40,
@@ -910,6 +945,32 @@ pub trait EventStore {
     /// that carve-out is specifically about surviving a REAL crash, which
     /// this door never claims to do for a volatile backend).
     fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt>;
+
+    /// Atomically append the next attempt ordinal for `(intent, relay)` and
+    /// its exact signed bytes. This door must return successfully before a
+    /// caller may place those bytes on the wire.
+    fn start_attempt(
+        &mut self,
+        intent_id: IntentId,
+        relay: RelayUrl,
+        event: Event,
+    ) -> Result<RecoveredAttempt, PersistenceError>;
+
+    /// Make one started ordinal terminal. The full key prevents a late ACK
+    /// from closing a newer attempt.
+    fn finish_attempt(
+        &mut self,
+        intent_id: IntentId,
+        relay: &RelayUrl,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    ) -> Result<FinishAttemptOutcome, PersistenceError>;
+
+    /// Read all retained attempt facts for one intent in stable key order.
+    fn recover_attempts(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredAttempt>, PersistenceError>;
 
     /// Persist a receipt-ONLY record for an `Ephemeral` write (VISION-
     /// ratified contract clarification, team-lead correction, issue #3):

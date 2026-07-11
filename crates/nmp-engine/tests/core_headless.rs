@@ -22,9 +22,10 @@ use nmp_grammar::{Binding, ConcreteFilter, Filter};
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
-    EventStore, GcReport, InsertOutcome, MemoryStore, PersistenceError, PromoteOutcome,
-    RecoveredIntent, RecoveredReceipt, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
+    CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, MemoryStore,
+    PersistenceError, PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt,
+    RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
@@ -91,6 +92,7 @@ fn activate<S: EventStore>(core: &mut EngineCore<S>, keys: &Keys) {
 struct FailOnceCompensationStore {
     inner: MemoryStore,
     fail_next_compensation: bool,
+    fail_next_attempt_finish: bool,
 }
 
 impl FailOnceCompensationStore {
@@ -98,6 +100,15 @@ impl FailOnceCompensationStore {
         Self {
             inner: MemoryStore::new(),
             fail_next_compensation: true,
+            fail_next_attempt_finish: false,
+        }
+    }
+
+    fn failing_attempt_finish() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            fail_next_compensation: false,
+            fail_next_attempt_finish: true,
         }
     }
 }
@@ -160,6 +171,34 @@ impl EventStore for FailOnceCompensationStore {
     }
     fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
         self.inner.reattach_receipt(receipt_id)
+    }
+    fn start_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: RelayUrl,
+        event: nostr::Event,
+    ) -> Result<RecoveredAttempt, PersistenceError> {
+        self.inner.start_attempt(intent_id, relay, event)
+    }
+    fn finish_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: &RelayUrl,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    ) -> Result<FinishAttemptOutcome, PersistenceError> {
+        if self.fail_next_attempt_finish {
+            self.fail_next_attempt_finish = false;
+            return Err(PersistenceError("injected attempt finish failure".into()));
+        }
+        self.inner
+            .finish_attempt(intent_id, relay, ordinal, outcome)
+    }
+    fn recover_attempts(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+        self.inner.recover_attempts(intent_id)
     }
     fn accept_ephemeral(
         &mut self,
@@ -1327,7 +1366,13 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
-    connect(&mut core, 0, &relay);
+    core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        relay.clone(),
+    ));
     let signed = unsigned(&a, 1, "signed cache truth")
         .sign_with_keys(&a)
         .unwrap();
@@ -2022,6 +2067,89 @@ fn write_ack_per_relay() {
     assert!(statuses
         .iter()
         .any(|s| matches!(s, WriteStatus::Rejected(r, _) if r == &relay_bad)));
+}
+
+#[test]
+fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://finish-failure.example").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let mut core = EngineCore::new(
+        FailOnceCompensationStore::failing_attempt_finish(),
+        Box::new(dir),
+        10,
+    );
+    activate(&mut core, &a);
+    core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        relay.clone(),
+    ));
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 2, "finish persistence")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(CapturingReceiptSink::default()),
+    ));
+    let (id, generation, unsigned) = find_sign_request(&effects);
+    let signed = unsigned.sign_with_keys(&a).unwrap();
+    core.handle(EngineMsg::SignerCompleted(
+        id,
+        generation,
+        Ok(signed.clone()),
+    ));
+    let frame = || RelayFrame::Text(RelayMessage::ok(signed.id, true, "").as_json());
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        frame(),
+    ));
+    assert!(!failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Acked(_)))));
+    let retried = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        frame(),
+    ));
+    assert!(retried.iter().any(
+        |effect| matches!(effect, Effect::EmitReceipt(receipt, WriteStatus::Acked(r)) if *receipt == id && r == &relay)
+    ));
+}
+
+#[test]
+fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
+    let a = Keys::generate();
+    let mut core = new_core(FixtureDirectory::new());
+    let fail = |core: &mut EngineCore<MemoryStore>, seq| {
+        core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(&a, seq, "unaccepted")),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(CapturingReceiptSink::default()),
+        ))
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::EmitReceipt(id, WriteStatus::Failed(_)) => Some(id),
+            _ => None,
+        })
+        .unwrap()
+    };
+    let first = fail(&mut core, 200);
+    let second = fail(&mut core, 201);
+    assert_ne!(first, second);
+    assert!(first.0 >= (1u64 << 63));
+    assert!(second.0 >= (1u64 << 63));
 }
 
 // ---- negentropy (M3 plan §6 E): ledger #8 structural gate + REQ fallback

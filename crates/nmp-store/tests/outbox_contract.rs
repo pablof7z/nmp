@@ -16,12 +16,13 @@
 use std::collections::BTreeSet;
 
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, EventStore,
-    InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState,
-    RedbStore, RefuseReason, RelayObserved, RetractReason, SigState, WriteDurability,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome,
+    EventStore, FinishAttemptOutcome, InsertOutcome, IntentSigState, LocalOrigin, MemoryStore,
+    PromoteOutcome, ReceiptState, RedbStore, RefuseReason, RelayObserved, RetractReason, SigState,
+    WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
+use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 fn keys() -> Keys {
@@ -476,6 +477,348 @@ fn recover_outbox_reconstructs_inflight_after_reopen() {
             ..
         })
     ));
+}
+
+#[test]
+fn attempt_started_bytes_and_ordinals_survive_real_reopen_append_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+    let (frozen, signed) = compose(&k, Kind::TextNote, "attempt bytes", 101);
+    let relay = RelayUrl::parse("wss://attempt.example").unwrap();
+
+    let intent_id = {
+        let mut store = RedbStore::open(&path).expect("open");
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 101));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store.promote_signed(intent_id, signed.sig).unwrap();
+        // Drop a database produced by the pre-attempt acceptance shape.
+        // Reopening it and writing the first v1 attempt is the migration
+        // behavior: existing OUTBOX_* rows remain readable and no rewrite
+        // of the intent/receipt is required.
+        intent_id
+    };
+
+    {
+        let mut store = RedbStore::open(&path).expect("reopen before first attempt");
+        let first = store
+            .start_attempt(intent_id, relay.clone(), signed.clone())
+            .unwrap();
+        assert_eq!(first.version, 1);
+        assert_eq!(first.ordinal, 1);
+        assert_eq!(first.event.as_json(), signed.as_json());
+    }
+
+    {
+        let mut store = RedbStore::open(&path).expect("reopen");
+        let recovered = store.recover_attempts(intent_id).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].outcome, AttemptOutcome::Started);
+        assert_eq!(recovered[0].event.as_json(), signed.as_json());
+        store
+            .finish_attempt(
+                intent_id,
+                &relay,
+                1,
+                AttemptOutcome::Rejected("nope".into()),
+            )
+            .unwrap();
+        // A late contradictory terminal is typed non-success and cannot
+        // rewrite append-only truth.
+        assert!(store
+            .finish_attempt(intent_id, &relay, 1, AttemptOutcome::Acked)
+            .is_err());
+        let second = store
+            .start_attempt(intent_id, relay.clone(), signed.clone())
+            .unwrap();
+        assert_eq!(second.ordinal, 2);
+    }
+
+    let store = RedbStore::open(&path).expect("second reopen");
+    let recovered = store.recover_attempts(intent_id).unwrap();
+    assert_eq!(recovered.len(), 2);
+    assert_eq!(
+        recovered[0].outcome,
+        AttemptOutcome::Rejected("nope".into())
+    );
+    assert_eq!(recovered[1].outcome, AttemptOutcome::Started);
+    assert!(recovered
+        .iter()
+        .all(|a| a.event.as_json() == signed.as_json()));
+}
+
+#[test]
+fn finish_attempt_missing_same_and_conflict_are_not_false_success() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, signed) = compose(&k, Kind::TextNote, "finish truth", 102);
+        let relay = RelayUrl::parse("wss://finish.example").unwrap();
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 102));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store.promote_signed(intent_id, signed.sig).unwrap();
+        assert!(store
+            .finish_attempt(intent_id, &relay, 1, AttemptOutcome::Acked)
+            .is_err());
+        store
+            .start_attempt(intent_id, relay.clone(), signed)
+            .unwrap();
+        assert_eq!(
+            store
+                .finish_attempt(intent_id, &relay, 1, AttemptOutcome::Acked)
+                .unwrap(),
+            FinishAttemptOutcome::Committed
+        );
+        assert_eq!(
+            store
+                .finish_attempt(intent_id, &relay, 1, AttemptOutcome::Acked)
+                .unwrap(),
+            FinishAttemptOutcome::AlreadySame
+        );
+        assert!(store
+            .finish_attempt(
+                intent_id,
+                &relay,
+                1,
+                AttemptOutcome::Rejected("conflict".into())
+            )
+            .is_err());
+    });
+}
+
+#[test]
+fn relay_prefixes_have_disjoint_attempt_ordinals() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, signed) = compose(&k, Kind::TextNote, "prefix", 103);
+        let short = RelayUrl::parse("wss://prefix.example/x").unwrap();
+        let extended = RelayUrl::parse("wss://prefix.example/x:443").unwrap();
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 103));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store.promote_signed(intent_id, signed.sig).unwrap();
+        assert_eq!(
+            store
+                .start_attempt(intent_id, short.clone(), signed.clone())
+                .unwrap()
+                .ordinal,
+            1
+        );
+        assert_eq!(
+            store
+                .start_attempt(intent_id, extended.clone(), signed)
+                .unwrap()
+                .ordinal,
+            1
+        );
+        let attempts = store.recover_attempts(intent_id).unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts.iter().any(|a| a.relay == short));
+        assert!(attempts.iter().any(|a| a.relay == extended));
+    });
+}
+
+#[test]
+fn recover_attempt_order_is_canonical_and_identical_across_backends() {
+    // Lexically `aa` sorts before `z`, while the length-prefixed Redb key
+    // sorts the shorter `z` URL first. Recovery must ignore that storage
+    // order and return `(relay, ordinal)` canonically on both backends.
+    let mut backend_orders = Vec::new();
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, signed) = compose(&k, Kind::TextNote, "ordering", 109);
+        let z_short = RelayUrl::parse("wss://z.example/x").unwrap();
+        let aa_long = RelayUrl::parse("wss://aa.example/x").unwrap();
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 109));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store.promote_signed(intent_id, signed.sig).unwrap();
+
+        store
+            .start_attempt(intent_id, z_short.clone(), signed.clone())
+            .unwrap();
+        store
+            .finish_attempt(intent_id, &z_short, 1, AttemptOutcome::GaveUp)
+            .unwrap();
+        store
+            .start_attempt(intent_id, z_short.clone(), signed.clone())
+            .unwrap();
+        store
+            .start_attempt(intent_id, aa_long.clone(), signed)
+            .unwrap();
+
+        let order: Vec<_> = store
+            .recover_attempts(intent_id)
+            .unwrap()
+            .into_iter()
+            .map(|attempt| (attempt.relay, attempt.ordinal))
+            .collect();
+        assert_eq!(
+            order,
+            vec![(aa_long, 1), (z_short.clone(), 1), (z_short, 2)]
+        );
+        backend_orders.push(order);
+    });
+    assert_eq!(backend_orders.len(), 2);
+    assert_eq!(backend_orders[0], backend_orders[1]);
+}
+
+fn raw_attempt_key(intent_id: nmp_store::IntentId, relay: &RelayUrl, ordinal: &str) -> String {
+    format!(
+        "{:020}:{:020}:{}:{}",
+        intent_id.0,
+        relay.as_str().len(),
+        relay.as_str(),
+        ordinal
+    )
+}
+
+#[test]
+fn corrupt_or_unknown_attempt_rows_are_fallible_not_panics() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt-attempt.redb");
+    let k = keys();
+    let (frozen, signed) = compose(&k, Kind::TextNote, "corrupt", 104);
+    let relay = RelayUrl::parse("wss://corrupt.example").unwrap();
+    let intent_id = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 104));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store.promote_signed(intent_id, signed.sig).unwrap();
+        store
+            .start_attempt(intent_id, relay.clone(), signed.clone())
+            .unwrap();
+        intent_id
+    };
+
+    const ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(ATTEMPTS).unwrap();
+        let key = raw_attempt_key(intent_id, &relay, &format!("{:020}", 1));
+        let json = table
+            .get(key.as_str())
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_string();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["version"] = serde_json::json!(99);
+        let encoded = serde_json::to_string(&value).unwrap();
+        table.insert(key.as_str(), encoded.as_str()).unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+
+    let store = RedbStore::open(&path).unwrap();
+    assert!(store.recover_attempts(intent_id).is_err());
+}
+
+#[test]
+fn attempt_key_tuple_mismatch_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tuple-mismatch.redb");
+    let k = keys();
+    let (frozen, signed) = compose(&k, Kind::TextNote, "tuple", 107);
+    let relay = RelayUrl::parse("wss://tuple.example").unwrap();
+    let intent_id = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 107));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store.promote_signed(intent_id, signed.sig).unwrap();
+        store
+            .start_attempt(intent_id, relay.clone(), signed)
+            .unwrap();
+        intent_id
+    };
+    const ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(ATTEMPTS).unwrap();
+        let key = raw_attempt_key(intent_id, &relay, &format!("{:020}", 1));
+        let json = table
+            .get(key.as_str())
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_string();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["ordinal"] = serde_json::json!(2);
+        let encoded = serde_json::to_string(&value).unwrap();
+        table.insert(key.as_str(), encoded.as_str()).unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+    assert!(RedbStore::open(&path)
+        .unwrap()
+        .recover_attempts(intent_id)
+        .unwrap_err()
+        .to_string()
+        .contains("key does not match"));
+}
+
+#[test]
+fn malformed_matching_attempt_key_and_ordinal_exhaustion_are_typed_errors() {
+    for (suffix, expected) in [
+        ("not-an-ordinal".to_string(), "parse"),
+        (u64::MAX.to_string(), "exhausted"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-key.redb");
+        let k = keys();
+        let (frozen, signed) = compose(&k, Kind::TextNote, "bad key", 105);
+        let relay = RelayUrl::parse("wss://bad-key.example").unwrap();
+        let intent_id = {
+            let mut store = RedbStore::open(&path).unwrap();
+            let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 105));
+            let intent_id = outcome.journaled_intent_id().unwrap();
+            store.promote_signed(intent_id, signed.sig).unwrap();
+            intent_id
+        };
+        const ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
+        let db = Database::open(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(ATTEMPTS).unwrap();
+            let key = raw_attempt_key(intent_id, &relay, &suffix);
+            table.insert(key.as_str(), "{}").unwrap();
+        }
+        tx.commit().unwrap();
+        drop(db);
+        let mut store = RedbStore::open(&path).unwrap();
+        let err = store
+            .start_attempt(intent_id, relay, signed)
+            .expect_err("corrupt key cannot allocate an ordinal");
+        assert!(err.to_string().contains(expected), "{err}");
+    }
+}
+
+#[test]
+fn durable_id_counter_overflow_and_receipt_namespace_boundary_are_errors() {
+    for (meta_key, value, expected) in [
+        ("next_intent_id", u64::MAX.to_string(), "exhausted"),
+        ("next_receipt_id", (1u64 << 63).to_string(), "namespace"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("counter.redb");
+        drop(RedbStore::open(&path).unwrap());
+        const META: TableDefinition<&str, &str> = TableDefinition::new("outbox_meta");
+        let db = Database::open(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(META).unwrap();
+            table.insert(meta_key, value.as_str()).unwrap();
+        }
+        tx.commit().unwrap();
+        drop(db);
+        let k = keys();
+        let (frozen, _) = compose(&k, Kind::TextNote, "counter", 106);
+        let mut store = RedbStore::open(&path).unwrap();
+        let err = store
+            .accept_write(accept(frozen, k.public_key(), 106))
+            .expect_err("counter boundary must reject acceptance atomically");
+        assert!(err.to_string().contains(expected), "{err}");
+        assert!(store.recover_outbox().is_empty());
+    }
 }
 
 /// Architecture-review correction #1 falsifier: `IntentId` must be

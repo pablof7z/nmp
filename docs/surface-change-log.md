@@ -40,3 +40,14 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Updated falsifiers:** engine plan-churn/coalescing/zero-source tests plus exhaustive Rust, Swift, and Kotlin evidence mapping tests in PR #77.
 - **Superseded path removed:** `QueryCoverage`, aggregate query `Coverage`, stale facade vocabulary, and the non-optional empty Swift pre-first-batch evidence state were deleted.
 - **Human signoff:** merged through PR #77 on 2026-07-11 after local, Atlas, and Nova review; the PR review and merge record is the approval trail.
+
+## 2026-07-11 — Add stable receipt reattachment and truthful restart ambiguity ([PR #83](https://github.com/pablof7z/nmp/pull/83))
+
+- **Failure evidence:** issues #2/#3 showed that a process restart could retain an accepted write in the store while losing the Rust receipt observer, frozen signer work, and per-relay attempt ownership; an at-most-once send crossing that boundary also had no truthful public status distinct from ordinary `GaveUp`.
+- **Changed projections:** ffi,kotlin,rust,swift
+- **Rust / FFI / Swift / Kotlin impact:** Rust exports `ReceiptId`/`ReceiptStream`, adds `Engine::publish_tracked` and `Engine::reattach_receipt`, and adds `WriteStatus::OutcomeUnknown`; UniFFI, Swift, and Kotlin add the corresponding `OutcomeUnknown(relay)` status without collapsing it into `GaveUp`. Native stable-id reattachment APIs remain a later coordinated surface rather than being fabricated in this change.
+- **Persistence impact:** Redb now retains versioned, exact-byte `(intent, relay, ordinal)` attempt facts and stable receipt ids; attempt keys are unambiguous, terminal transitions distinguish committed/idempotent-same from missing/conflicting facts, corrupt/unknown versions fail closed, and durable receipt ids are bounded below the disjoint unaccepted-correlation namespace.
+- **Diagnostics impact:** no diagnostics schema changes; restart and attempt facts are replayed through receipt streams, while existing diagnostics remain the read-only relay/query projection.
+- **Updated falsifiers:** cross-backend attempt ordering/prefix/terminal/corruption/overflow tests, genuine Redb close/reopen recovery tests, exact frozen-signer and boot-before-first-command tests, two-observer future-transition proof, Rust/FFI parity, and exhaustive Swift/Kotlin `OutcomeUnknown` mapping tests.
+- **Superseded path removed:** stream-local accepted-write identity, lossy boot reconstruction, blind at-most-once resend/`GaveUp` projection, panic-based attempt decoding, ambiguous relay-prefix keys, and false-success terminal persistence are replaced rather than retained as compatibility paths.
+- **Human signoff:** PR #83 is approved under the repository owner's delegated orchestration authority in this session, with independent exact-head review plus the required CI and merge record serving as the approval trail.

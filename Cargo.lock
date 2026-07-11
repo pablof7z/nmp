@@ -1396,6 +1396,7 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
+ "redb",
  "serde_json",
  "tempfile",
  "tokio",

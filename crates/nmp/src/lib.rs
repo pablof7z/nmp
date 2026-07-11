@@ -67,7 +67,9 @@ pub use nmp_resolver::LiveQuery;
 // not be able to place arbitrary public relays into a route that looks
 // structurally narrow. A validated, opaque private-route mint belongs in a
 // protocol module, not the default facade surface.
+pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
+pub use nmp_engine::runtime::ReceiptStream;
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,

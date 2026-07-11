@@ -774,6 +774,19 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "OutcomeUnknown",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
             name: "Failed",
             discr: None,
             fields: [
