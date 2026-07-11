@@ -6,8 +6,7 @@ Honest running list of things built-but-incomplete or deliberately deferred, so 
 
 - **`RelayDirectory` has no reactive update path (found dogfooding the Rust demo).** It is boxed into `EngineCore` at `spawn` with no way to update it afterward, and no live (non-fixture) implementation exists — an app must pre-resolve all NIP-65 relays before spawn (as `nmp-demo/src/bootstrap.rs` does). The falsifier's "pick relays from your follows' kind:10002" mode needs relay facts to update *reactively* as follows and their 10002s change. **Fix:** a live, updatable `RelayDirectory` fed by the engine's own kind:10002 ingestion (itself expressible as a `Derived` binding). Needed for M5's relay-picker mode.
 
-
-- **Multi-account signer switching is NOT wired (M3-C).** `set_active_pubkey` re-roots the *read* graph (M1-proven identity re-root), but the signer is a fixed constructor argument to `EngineThread::spawn`. So publishing *as a different account* after a switch has no path. The falsifier's #1 requirement is multi-nsec login + switch, which includes writing as the switched-to account. **Fix:** the engine must hold a signer per account (or a signer registry) and `set_active_signer`/account-switch must select both the reactive pubkey and the active signing capability. Owner: M4/M5 boundary work. Until then, "account switching" is proven for reads only.
+- **Publish payload is unsigned-only across FFI (M4).** The `nmp-ffi` publish path accepts unsigned intents only; pre-signed verbatim publish isn't exposed yet. Fine for the falsifier's compose flow; revisit if a Swift caller needs to publish an already-signed event.
 
 ## Real but non-blocking for the falsifier (feeds, not DMs)
 
