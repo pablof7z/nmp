@@ -25,4 +25,14 @@ pub struct RelayHealth {
     /// Human-readable message from the most recent connect/read/write
     /// failure. Cleared on a fresh `Connected`.
     pub last_error: Option<String>,
+    /// Count of `EVENT` frames from this relay that FAILED the ingest
+    /// signature-verification gate (`pool::verify::gate`) -- a schnorr
+    /// verification failure on first sight, or a signature that mismatched
+    /// a previously-verified value for the same event id. This is a relay
+    /// MISBEHAVIOR signal, not a routine drop: a well-behaved relay never
+    /// produces a nonzero count here. Never cleared by a reconnect (unlike
+    /// `last_error`) -- it is a lifetime tally for the slot's current
+    /// generation, meant to be visible to a caller deciding whether to stop
+    /// trusting this relay.
+    pub invalid_signature_count: u64,
 }
