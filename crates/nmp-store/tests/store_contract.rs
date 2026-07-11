@@ -17,6 +17,7 @@ use nmp_store::{
     coverage_key, ClaimSet, CoverageInterval, EventStore, InsertOutcome, MemoryStore, Provenance,
     RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
+use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 fn keys() -> Keys {
@@ -719,4 +720,354 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
         .expect("coverage survives reopen");
     assert_eq!(interval.from, Timestamp::from(0u64));
     assert_eq!(interval.through, Timestamp::from(150u64));
+}
+
+// ---------------------------------------------------------------------
+// Retraction store-internals (issue #28,
+// retraction-and-negative-deltas.md §2/§3.1/§7): kind:5 deletion +
+// PERMANENT tombstones, and the persistent NIP-40 expiration index.
+// ---------------------------------------------------------------------
+
+fn deletion_event(keys: &Keys, targets: Vec<Tag>, created_at: u64) -> Event {
+    EventBuilder::new(Kind::EventDeletion, "")
+        .tags(targets)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+fn expiring_event(keys: &Keys, content: &str, created_at: u64, expiration: u64) -> Event {
+    EventBuilder::new(Kind::TextNote, content)
+        .custom_created_at(Timestamp::from(created_at))
+        .tag(Tag::expiration(Timestamp::from(expiration)))
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+#[test]
+fn kind5_from_author_drops_held_target_and_returns_it() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = regular_event_at(&k, "delete me", 100);
+        let target_id = target.id;
+        store.insert(target.clone(), observed("wss://r1", 1));
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
+        let deletion_id = deletion.id;
+        match store.insert(deletion, observed("wss://r1", 2)) {
+            InsertOutcome::Kind5Processed { deleted } => {
+                assert_eq!(deleted.len(), 1);
+                assert_eq!(deleted[0].event, target);
+            }
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        // The kind:5 event itself is stored normally, re-servable.
+        assert_eq!(store.query(&Filter::new().id(deletion_id)).len(), 1);
+    });
+}
+
+#[test]
+fn kind5_from_non_author_does_not_delete() {
+    for_each_backend(|store| {
+        let author = keys();
+        let attacker = keys();
+        let target = regular_event_at(&author, "keep me", 100);
+        let target_id = target.id;
+        store.insert(target.clone(), observed("wss://r1", 1));
+
+        let deletion = deletion_event(&attacker, vec![Tag::event(target_id)], 200);
+        match store.insert(deletion, observed("wss://r1", 2)) {
+            InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        let results = store.query(&Filter::new().id(target_id));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event, target);
+    });
+}
+
+#[test]
+fn tombstoned_event_is_refused_on_redelivery() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = regular_event_at(&k, "delete me", 100);
+        let target_id = target.id;
+        store.insert(target.clone(), observed("wss://r1", 1));
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
+        store.insert(deletion, observed("wss://r1", 2));
+
+        // A relay replays the deleted event later -- never resurrected.
+        assert_eq!(
+            store.insert(target, observed("wss://r2", 3)),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        );
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+    });
+}
+
+#[test]
+fn kind5_before_target_arrives_still_tombstones_then_refuses() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = regular_event_at(&k, "delete me", 100);
+        let target_id = target.id;
+
+        // The deletion arrives BEFORE its target ever does -- arrival-order
+        // independence.
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
+        match store.insert(deletion, observed("wss://r1", 1)) {
+            InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        assert_eq!(
+            store.insert(target, observed("wss://r2", 2)),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        );
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+    });
+}
+
+#[test]
+fn unauthorized_kind5_cannot_resurrect_authorized_deletion() {
+    // The smoking-gun falsifier: id-tombstones must be keyed per claiming
+    // author, never collapsed to one overwritable slot per id -- else an
+    // unauthorized third party naming an already-deleted id can silently
+    // undo the real author's permanent, authorized deletion.
+    for_each_backend(|store| {
+        let author = keys();
+        let attacker = keys();
+        let target = regular_event_at(&author, "delete me", 100);
+        let target_id = target.id;
+        store.insert(target.clone(), observed("wss://r1", 1));
+
+        // The real author deletes it -- authorized, permanent.
+        let real_deletion = deletion_event(&author, vec![Tag::event(target_id)], 200);
+        match store.insert(real_deletion, observed("wss://r1", 2)) {
+            InsertOutcome::Kind5Processed { deleted } => assert_eq!(deleted.len(), 1),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // An unrelated, unauthorized third party ALSO names the same id in
+        // its own kind:5 -- structurally powerless (author-only), and must
+        // not be able to overwrite or shadow the real author's claim.
+        let attacker_deletion = deletion_event(&attacker, vec![Tag::event(target_id)], 300);
+        match store.insert(attacker_deletion, observed("wss://r1", 3)) {
+            InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        // The real author's authorized, permanent deletion must still
+        // hold -- the attacker's claim must never resurrect it.
+        assert_eq!(
+            store.insert(target, observed("wss://r2", 4)),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        );
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+    });
+}
+
+#[test]
+fn kind5_id_claims_are_independent_per_author() {
+    // Positive companion to the falsifier above: distinct (id, author)
+    // claims never interfere with each other in either direction.
+    for_each_backend(|store| {
+        let author = keys();
+        let bystander = keys();
+
+        // `bystander` deletes an id it actually authored -- authorized.
+        let bystanders_own = regular_event_at(&bystander, "bystander's own", 50);
+        let bystanders_own_id = bystanders_own.id;
+        store.insert(bystanders_own.clone(), observed("wss://r1", 1));
+        let bystanders_deletion =
+            deletion_event(&bystander, vec![Tag::event(bystanders_own_id)], 60);
+        store.insert(bystanders_deletion, observed("wss://r1", 1));
+
+        // `bystander` ALSO (unauthorized) names `author`'s target id in a
+        // separate kind:5 -- structurally powerless.
+        let authors_target = regular_event_at(&author, "author's own", 100);
+        let authors_target_id = authors_target.id;
+        store.insert(authors_target.clone(), observed("wss://r1", 2));
+        let unauthorized = deletion_event(&bystander, vec![Tag::event(authors_target_id)], 200);
+        match store.insert(unauthorized, observed("wss://r1", 3)) {
+            InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        // `author`'s own event, which `author` never deleted, is
+        // unaffected by `bystander`'s unrelated, unauthorized claim on the
+        // same id.
+        let results = store.query(&Filter::new().id(authors_target_id));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event, authors_target);
+
+        // `bystander`'s own legitimate deletion is still correctly
+        // tombstoned -- the fix didn't break the authorized case.
+        assert!(store.query(&Filter::new().id(bystanders_own_id)).is_empty());
+        assert_eq!(
+            store.insert(bystanders_own, observed("wss://r2", 4)),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        );
+    });
+}
+
+#[test]
+fn kind5_a_tag_deletes_addressable_target_and_ceiling_blocks_older_redelivery() {
+    for_each_backend(|store| {
+        let k = keys();
+        let g1 = addressable_event(&k, 30_003, "g1", 100);
+        let g1_id = g1.id;
+        store.insert(g1.clone(), observed("wss://r1", 1));
+
+        let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
+        let deletion = deletion_event(&k, vec![Tag::coordinate(coord, None)], 200);
+        match store.insert(deletion, observed("wss://r1", 2)) {
+            InsertOutcome::Kind5Processed { deleted } => {
+                assert_eq!(deleted.len(), 1);
+                assert_eq!(deleted[0].event, g1);
+            }
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(g1_id)).is_empty());
+
+        // Older-than-the-deletion-ceiling event at the same address: still
+        // blocked -- the ceiling, not just the specific id, is tombstoned.
+        let older_replay = addressable_event(&k, 30_003, "g1", 150);
+        assert_eq!(
+            store.insert(older_replay, observed("wss://r2", 3)),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        );
+
+        // A genuinely NEW post-deletion event at the same address wins
+        // normally -- NIP-09 does not permanently kill the address itself.
+        let fresh = addressable_event(&k, 30_003, "g1", 250);
+        let fresh_id = fresh.id;
+        assert_eq!(
+            store.insert(fresh, observed("wss://r2", 4)),
+            InsertOutcome::Inserted
+        );
+        let results = store.query(
+            &Filter::new()
+                .kind(Kind::from(30_003u16))
+                .author(k.public_key()),
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, fresh_id);
+    });
+}
+
+#[test]
+fn tombstones_survive_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+
+    let k = keys();
+    let target = regular_event_at(&k, "delete me", 100);
+    let target_id = target.id;
+
+    {
+        let mut store = RedbStore::open(&path).expect("open");
+        store.insert(target.clone(), observed("wss://r1", 1));
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
+        store.insert(deletion, observed("wss://r1", 2));
+        // `store` dropped here, closing the database file.
+    }
+
+    let mut store = RedbStore::open(&path).expect("reopen");
+    assert_eq!(
+        store.insert(target, observed("wss://r2", 3)),
+        InsertOutcome::Refused(RefuseReason::Tombstoned)
+    );
+}
+
+#[test]
+fn expiration_index_drains_due_and_reports_next() {
+    for_each_backend(|store| {
+        let k = keys();
+        let soon = expiring_event(&k, "soon", 1, 150);
+        let soon_id = soon.id;
+        let later = expiring_event(&k, "later", 1, 300);
+        let later_id = later.id;
+
+        store.insert(soon, observed("wss://r1", 1));
+        store.insert(later, observed("wss://r1", 1));
+
+        assert_eq!(store.next_expiration(), Some(Timestamp::from(150u64)));
+
+        let due = store.expire_due(Timestamp::from(200u64));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].event.id, soon_id);
+        assert!(store.query(&Filter::new().id(soon_id)).is_empty());
+
+        assert_eq!(store.next_expiration(), Some(Timestamp::from(300u64)));
+        let due2 = store.expire_due(Timestamp::from(300u64));
+        assert_eq!(due2.len(), 1);
+        assert_eq!(due2[0].event.id, later_id);
+        assert_eq!(store.next_expiration(), None);
+    });
+}
+
+#[test]
+fn expired_events_retract_at_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+
+    let k = keys();
+    let expiring = expiring_event(&k, "bye", 1, 150);
+    let expiring_id = expiring.id;
+
+    {
+        let mut store = RedbStore::open(&path).expect("open");
+        // Observed well BEFORE its own deadline -- inserted normally.
+        assert_eq!(
+            store.insert(expiring, observed("wss://r1", 1)),
+            InsertOutcome::Inserted
+        );
+        // `store` dropped here; the deadline passes while "offline".
+    }
+
+    let mut store = RedbStore::open(&path).expect("reopen");
+    assert_eq!(store.next_expiration(), Some(Timestamp::from(150u64)));
+    let due = store.expire_due(Timestamp::from(200u64));
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].event.id, expiring_id);
+    assert!(store.query(&Filter::new().id(expiring_id)).is_empty());
+}
+
+#[test]
+fn coverage_bit_identical_across_delete_and_expiry() {
+    for_each_backend(|store| {
+        let k = keys();
+        let r = relay("wss://r1");
+        let s = shape(&[1], Some(&k));
+
+        let deleted_target = regular_event_at(&k, "delete me", 50);
+        let deleted_target_id = deleted_target.id;
+        let expiring_target = expiring_event(&k, "expire me", 60, 150);
+
+        store.insert(deleted_target, observed("wss://r1", 1));
+        store.insert(expiring_target, observed("wss://r1", 1));
+        store.record_coverage(
+            &s,
+            &r,
+            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
+        );
+
+        let key = coverage_key(&s);
+        let before = store.get_coverage(key, &r).expect("row exists");
+
+        let deletion = deletion_event(&k, vec![Tag::event(deleted_target_id)], 200);
+        store.insert(deletion, observed("wss://r1", 2));
+        let after_delete = store.get_coverage(key, &r).expect("row still exists");
+        assert_eq!(before, after_delete, "delete must not touch coverage");
+
+        store.expire_due(Timestamp::from(200u64));
+        let after_expiry = store.get_coverage(key, &r).expect("row still exists");
+        assert_eq!(before, after_expiry, "expiry must not touch coverage");
+    });
 }

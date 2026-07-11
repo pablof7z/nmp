@@ -2,13 +2,13 @@
 //! `RedbStore` is diffed against for every shared contract test
 //! (`nmp-store/tests/store_contract.rs`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
-use nostr::{Event, EventId, Filter, RelayUrl, Timestamp};
+use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, Timestamp};
 
-use crate::address_key::{address_key_for, candidate_wins, AddressKey};
+use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins, AddressKey};
 use crate::coverage::{
     coverage_key, merge_interval, shape_matches, shrink_after_eviction, window_erase,
 };
@@ -16,6 +16,17 @@ use crate::{
     ClaimSet, CoverageInterval, CoverageKey, EventStore, GcReport, InsertOutcome, Provenance,
     RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
+
+/// An address-tombstone's durable fact: which kind:5 event set the
+/// deletion ceiling, and (diagnostics only — the ceiling comparison alone
+/// decides refusal) that kind:5's own author. Retention is PERMANENT
+/// (retraction-and-negative-deltas.md §7 owner decision) — never GC-claimed.
+/// Id-tombstones do NOT use this: see `MemoryStore::deleted_ids`'s doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TombstoneRecord {
+    deleting_event_id: EventId,
+    deleting_author: PublicKey,
+}
 
 /// One coverage row as retained in memory: the window-erased shape it was
 /// recorded against (needed so `gc` can test "does an evicted event match
@@ -39,12 +50,159 @@ pub struct MemoryStore {
     by_id: HashMap<EventId, StoredEvent>,
     addr_index: HashMap<AddressKey, EventId>,
     coverage: HashMap<(CoverageKey, RelayUrl), CoverageRow>,
+    /// Permanent kind:5 tombstones for individual event ids
+    /// (retraction-and-negative-deltas.md §2/§7), keyed `(target id,
+    /// deleting author)` -- value is the deleting kind:5's own id
+    /// (diagnostics only). NOT collapsed to one record per target id: the
+    /// target's real author is unknown until it actually arrives, so an
+    /// unauthorized third party can always name an id that's already been
+    /// (or will be) legitimately deleted by its real author. If a single
+    /// slot per id were overwritable, that unauthorized kind:5 would
+    /// silently replace -- and so undo -- the real author's permanent,
+    /// authorized deletion the moment the real target is redelivered. Every
+    /// distinct claiming author gets its own permanent entry instead; a
+    /// redelivered target is refused iff ITS OWN author is among the
+    /// claimants, regardless of how many other (irrelevant) authors also
+    /// named that id. Never GC-claimed.
+    deleted_ids: HashMap<(EventId, PublicKey), EventId>,
+    /// Permanent kind:5 tombstones for replaceable/addressable addresses:
+    /// the highest deleting-event `created_at` seen for that address (the
+    /// "ceiling") plus the record of the deletion that set it. A candidate
+    /// with `created_at <= ceiling` is tombstoned; NIP-09 allows a fresh
+    /// post-deletion event at the same address to win normally.
+    deleted_addrs: HashMap<AddressKey, (Timestamp, TombstoneRecord)>,
+    /// Persistent NIP-40 expiration index: `expiry_ts -> {ids expiring at
+    /// that instant}`, kept in lockstep with `by_id` on every insert and
+    /// every removal so `expire_due`/`next_expiration` never rescan the
+    /// whole store (retraction-and-negative-deltas.md §3.1).
+    expiration_index: BTreeMap<Timestamp, HashSet<EventId>>,
 }
 
 impl MemoryStore {
     /// A new, empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Add `se` to the expiration index if it carries a NIP-40 `expiration`
+    /// tag. Called for every row entering `by_id`.
+    fn index_expiration(&mut self, se: &StoredEvent) {
+        if let Some(ts) = se.event.tags.expiration().copied() {
+            self.expiration_index
+                .entry(ts)
+                .or_default()
+                .insert(se.event.id);
+        }
+    }
+
+    /// Remove `se` from the expiration index, if it was in it. Called for
+    /// every row leaving `by_id` (supersession's evicted row, `remove`).
+    fn unindex_expiration(&mut self, se: &StoredEvent) {
+        if let Some(ts) = se.event.tags.expiration().copied() {
+            if let Some(ids) = self.expiration_index.get_mut(&ts) {
+                ids.remove(&se.event.id);
+                if ids.is_empty() {
+                    self.expiration_index.remove(&ts);
+                }
+            }
+        }
+    }
+
+    /// The tombstone check (retraction-and-negative-deltas.md §2): `true`
+    /// iff `event` must be `Refused(Tombstoned)`. Runs for every event, not
+    /// just kind:5 redeliveries — a kind:5 event's own id could itself have
+    /// been the target of an earlier (unusual but not forbidden) deletion.
+    ///
+    /// For an id-tombstone, this is where the deferred NIP-09 author-only
+    /// check happens for a target that was NOT held at deletion time (the
+    /// `deleted_ids` entry was written speculatively, before this event
+    /// ever arrived): refused iff `event.pubkey` itself is among the
+    /// authors who have claimed this id (`deleted_ids` is keyed per-author,
+    /// not collapsed to one slot -- see its doc for why). A wrong-author
+    /// claim on this same id never suppresses this event: it simply isn't
+    /// in the set.
+    fn tombstone_refuses(&self, event: &Event) -> bool {
+        if self.deleted_ids.contains_key(&(event.id, event.pubkey)) {
+            return true;
+        }
+        if let Some(key) = address_key_for(event) {
+            if let Some((ceiling, _)) = self.deleted_addrs.get(&key) {
+                if event.created_at <= *ceiling {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Kind:5 processing (retraction-and-negative-deltas.md §2), run once
+    /// the deleting event itself has been durably stored. For each `e`-tag
+    /// id / `a`-tag coordinate: author-verify (immediately if the target is
+    /// held or the coordinate carries its own pubkey; deferred via
+    /// `tombstone_refuses` otherwise), write the PERMANENT tombstone, and
+    /// drop the row if currently held. Returns every row actually dropped.
+    fn process_kind5_deletions(&mut self, deleting: &Event) -> Vec<StoredEvent> {
+        let mut deleted = Vec::new();
+
+        let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
+        for target_id in target_ids {
+            let authorized_and_held = self
+                .by_id
+                .get(&target_id)
+                .is_some_and(|se| se.event.pubkey == deleting.pubkey);
+            if authorized_and_held {
+                if let Some(removed) = self.remove(target_id, RetractReason::Deleted) {
+                    deleted.push(removed);
+                }
+            }
+            // Claim recorded regardless of hold state right now -- a
+            // target not yet held is checked, deferred, by
+            // `tombstone_refuses` at the moment it actually arrives. NEVER
+            // overwrite another author's existing claim on this same id
+            // (see `deleted_ids`'s doc) -- accumulate.
+            self.deleted_ids
+                .insert((target_id, deleting.pubkey), deleting.id);
+        }
+
+        let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
+        for coord in coords {
+            if coord.public_key != deleting.pubkey {
+                // NIP-09 author-only: a coordinate naming a pubkey other
+                // than this deletion's own author carries no authority at
+                // all here -- skip entirely, no tombstone recorded.
+                continue;
+            }
+            let Some(key) = address_key_for_coordinate(&coord) else {
+                continue;
+            };
+
+            let record = TombstoneRecord {
+                deleting_event_id: deleting.id,
+                deleting_author: deleting.pubkey,
+            };
+            let raises_ceiling = self
+                .deleted_addrs
+                .get(&key)
+                .is_none_or(|(ceiling, _)| deleting.created_at > *ceiling);
+            if raises_ceiling {
+                self.deleted_addrs
+                    .insert(key.clone(), (deleting.created_at, record));
+            }
+
+            if let Some(current_id) = self.addr_index.get(&key).copied() {
+                let held_at_or_before = self
+                    .by_id
+                    .get(&current_id)
+                    .is_some_and(|se| se.event.created_at <= deleting.created_at);
+                if held_at_or_before {
+                    if let Some(removed) = self.remove(current_id, RetractReason::Deleted) {
+                        deleted.push(removed);
+                    }
+                }
+            }
+        }
+
+        deleted
     }
 }
 
@@ -57,7 +215,7 @@ impl EventStore for MemoryStore {
         }
 
         // Dedup-by-id FIRST: merge provenance, no index churn, before any
-        // supersession logic (ledger #5).
+        // tombstone or supersession logic (ledger #5).
         if let Some(existing) = self.by_id.get_mut(&event.id) {
             let grew = existing.provenance.merge_observation(&from);
             return InsertOutcome::Duplicate {
@@ -65,14 +223,22 @@ impl EventStore for MemoryStore {
             };
         }
 
+        // Tombstone check, AFTER dedup-by-id, BEFORE storage
+        // (retraction-and-negative-deltas.md §2).
+        if self.tombstone_refuses(&event) {
+            return InsertOutcome::Refused(RefuseReason::Tombstoned);
+        }
+
+        let is_deletion = event.kind == Kind::EventDeletion;
         let stored = StoredEvent {
             event: event.clone(),
             provenance: Provenance::first_observation(from),
         };
 
-        match address_key_for(&event) {
+        let outcome = match address_key_for(&event) {
             None => {
                 // Regular event: no competition, always inserted.
+                self.index_expiration(&stored);
                 self.by_id.insert(event.id, stored);
                 InsertOutcome::Inserted
             }
@@ -80,6 +246,7 @@ impl EventStore for MemoryStore {
                 None => {
                     // First event ever seen at this address.
                     let id = event.id;
+                    self.index_expiration(&stored);
                     self.by_id.insert(id, stored);
                     self.addr_index.insert(key, id);
                     InsertOutcome::Inserted
@@ -97,6 +264,8 @@ impl EventStore for MemoryStore {
                             .by_id
                             .remove(&current_id)
                             .expect("addr_index must always point at a stored event");
+                        self.unindex_expiration(&replaced);
+                        self.index_expiration(&stored);
                         self.by_id.insert(new_id, stored);
                         self.addr_index.insert(key, new_id);
                         InsertOutcome::Superseded {
@@ -108,7 +277,20 @@ impl EventStore for MemoryStore {
                     }
                 }
             },
+        };
+
+        // Kind:5 has no replaceable/addressable address (M1's set excludes
+        // it), so `outcome` above is always `Inserted` here, by
+        // construction -- process its deletions now that the event itself
+        // is durably stored (re-servable, per §2).
+        if is_deletion {
+            if let InsertOutcome::Inserted = outcome {
+                let deleted = self.process_kind5_deletions(&event);
+                return InsertOutcome::Kind5Processed { deleted };
+            }
         }
+
+        outcome
     }
 
     fn remove(&mut self, id: EventId, _reason: RetractReason) -> Option<StoredEvent> {
@@ -122,15 +304,15 @@ impl EventStore for MemoryStore {
                 self.addr_index.remove(&key);
             }
         }
+        self.unindex_expiration(&removed);
         Some(removed)
     }
 
     fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
         let due: Vec<EventId> = self
-            .by_id
-            .iter()
-            .filter(|(_, se)| se.event.is_expired_at(&now))
-            .map(|(id, _)| *id)
+            .expiration_index
+            .range(..=now)
+            .flat_map(|(_, ids)| ids.iter().copied())
             .collect();
 
         due.into_iter()
@@ -139,10 +321,7 @@ impl EventStore for MemoryStore {
     }
 
     fn next_expiration(&self) -> Option<Timestamp> {
-        self.by_id
-            .values()
-            .filter_map(|se| se.event.tags.expiration().copied())
-            .min()
+        self.expiration_index.keys().next().copied()
     }
 
     fn query(&self, filter: &Filter) -> Vec<StoredEvent> {
