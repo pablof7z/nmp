@@ -1,96 +1,100 @@
 # Threading, bounded delivery, and app lifecycle
 
-**Status: CURRENT + TARGET.** The Rust engine uses blocking receive loops and
-dedicated FFI drain threads. Swift query and diagnostics delivery is already
-frame-coalesced with newest-value buffering. End-to-end bounded engine queues
-and durable receipt replay are target work.
+NMP owns its interior concurrency. An app observes native asynchronous values
+and uses its platform's ordinary UI and task scopes. It does not run an engine
+loop, poll state, or forward scene-phase events.
 
-After this chapter you will know where values arrive, which observations may
-coalesce, and why NMP requires no scene-phase integration.
+## No app code runs in the reducer
 
-## Current execution path
+The Rust runtime serializes engine decisions over explicit messages and typed
+effects. Network frames, clocks, signer results, AUTH callbacks, and other
+nondeterministic inputs enter through explicit capability boundaries.
 
-The runtime currently uses:
-
-- one engine thread owning `EngineCore` and blocking on `recv()`;
-- a transport bridge that forwards connection/frame events;
-- a dedicated blocking drain thread for each FFI observer; and
-- native reactive adapters such as Swift `AsyncSequence`.
-
-No app code runs on the engine thread. SwiftUI consumers still update UI state
-on the main actor:
+App callbacks and presentation code do not execute inside the engine reducer.
+A SwiftUI consumer still follows normal main-actor rules:
 
 ```swift
 .task {
-    let query = try engine.observe(filter)
-    for await snapshot in query {
+    for try await snapshot in engine.observe(demand) {
         rows = snapshot.rows
     }
 }
 ```
 
-If a detached task consumes the sequence, it must use `MainActor.run` before
-mutating UI-bound state. Kotlin will expose the same value stream as `Flow`; the
-app chooses its UI collection scope and dispatcher.
+Kotlin consumers collect a `Flow` in their chosen coroutine scope. Rust callers
+use the facade's observation type. Platform projections may differ in syntax,
+not in ownership or ordering semantics.
 
-## Query and diagnostic observations are latest-state streams
+## Query and diagnostic observations are latest state
 
-A query snapshot represents the newest complete **local** state incorporated
-through its revision. It is not a durable log and it is not a claim about all
-of Nostr. Intermediate deliveries may be coalesced when producers outrun the
-consumer.
+A query delivery is a replaceable snapshot of the newest complete **local**
+state incorporated through its revision. Diagnostics is likewise a recomputed
+projection. When a consumer is slower than the engine, intermediate snapshots
+may coalesce as long as the consumer eventually receives the newest exact state.
 
-The current Swift bridge applies every row delta to its accumulator, then uses
-`FrameCoalescer` and `AsyncStream.bufferingNewest(1)`. A slow UI may skip
-intermediate frames but eventually receives the latest exact local rows and
-evidence. Diagnostics uses the same Swift policy and a latest-wins Rust mailbox.
+This is not permission to skip ingestion or row mutations internally. NMP must
+incorporate every accepted change before producing the later snapshot. It is
+only permission to avoid an unbounded observer backlog of states that have
+already been superseded.
 
-Current Rust row channels before the Swift bridge are still unbounded. The
-target contract carries bounded newest-state delivery through every supported
-facade, including Kotlin, rather than relying on a platform-specific final
-adapter.
+The snapshot says nothing about complete global Nostr state. It carries local
+rows and scoped source evidence.
 
-## Receipt observations are durable facts
+## Receipt transitions are durable facts
 
-Receipt transitions differ from query frames. `Accepted`, signer waiting,
-signature promotion, attempts, ACKs, rejections, cancellation, expiry, and
-at-most-once ambiguity are facts that must survive observer loss and restart.
+Receipt facts are not disposable UI frames. Acceptance, signer waiting,
+signature promotion, route revisions, attempts, ACKs, rejections, cancellation,
+expiry, and ambiguity must remain inspectable after observer loss and restart.
 
-The current receipt path uses an in-memory channel and streams each status in
-this process. The target path persists receipt history/state and lets an
-observer reattach by receipt id. Its in-memory delivery can then be bounded
-because durable facts remain queryable; a full queue is never permission to
-forget them.
+In-memory notification may still use bounded latest delivery because the
+durable receipt can be re-read by id. A full observer queue is never permission
+to forget the underlying transition.
 
-## Backpressure belongs inside the engine boundary
+Explicitly non-durable publication weakens delivery-resume behavior, not receipt
+observability. After process loss its receipt reattaches to an explicit policy
+terminal such as abandonment or unknown handoff; NMP does not silently erase it.
 
-Transport input, graph compilation, observer delivery, signer work, and retry
-scheduling all need explicit limits. When pressure exceeds a limit, NMP must
-backpressure, coalesce exact latest-state observations, reject with a typed
-error, or disconnect an overwhelming source with a diagnostic reason. It must
-not grow an invisible unbounded backlog or silently drop verified events.
+## Backpressure remains inside the boundary
 
-See [Bounded delivery, overload, and shortfall](../design/bounded-delivery.md).
+Transport ingestion, graph compilation, signer work, observation delivery,
+retry scheduling, and retained history all need explicit limits. At a limit NMP
+must do one of four honest things:
 
-## Lifecycle is ownership, not an NMP framework
+- apply backpressure;
+- coalesce superseded latest-state observations;
+- reject or report explicit shortfall; or
+- disconnect an overwhelming source with a diagnostic reason.
 
-NMP requires no `onForeground`, scene-phase hook, provider container, or
-background-task registration. Query demand exists while its handle/iterator is
-owned. Dropping the final owner withdraws demand; explicit `cancel()` is only an
-early teardown option.
+It must not grow an invisible unbounded queue, silently truncate a demand, or
+drop a verified event without accounting for the loss. See
+[Cost, coalescing, and boundedness](24-performance.md).
 
-If the OS suspends the process, app tasks cannot execute. If sockets are lost,
-the transport reconnect path re-establishes still-live demand when execution
-resumes. If the process is terminated, the app constructs the engine and
-declares its queries again on next launch; persisted cache, source evidence,
-pending writes, and receipts restore engine-owned durable state according to
-their contracts.
+## Lifecycle follows ownership
 
-The app chooses observation scope using ordinary SwiftUI task ownership,
-Kotlin coroutine scope, or Rust `Drop`. NMP does not ask the app to mirror a
-subscription lifecycle or keep an expanded relay/author set alive.
+Demand exists while at least one observation owner exists. Dropping the final
+owner withdraws demand; an explicit cancel operation is an early teardown tool,
+not a required application lifecycle protocol.
+
+If a socket disconnects, transport reconnects and restores the wire work for
+still-live demand. If the operating system suspends the process, no app task can
+run and NMP requires no foreground polling callback. After process termination,
+the app constructs its engine and declares its queries again; the engine
+restores its persistent replica, source evidence, accepted write obligations,
+attempts, and receipts.
+
+The app may keep the engine in its own model, dependency container, or service
+registry. Normal teardown is resource ownership: dropping the facade must close
+and join interior workers safely. Calling an explicit shutdown method must not
+leave a public object whose remaining methods panic or silently disconnect.
+
+## Current implementation
+
+Some platform adapters already coalesce newest snapshots, while end-to-end
+bounded queues and durable receipt replay are still being completed. Use
+[Current implementation status](03-status-map.md) rather than inferring shipping
+behavior from the target contract above.
 
 ---
 
 <!-- nav-footer -->
-<sub>← [Diagnostics](22-diagnostics.md) · [Index](README.md) · [Cost & performance](24-performance.md) →</sub>
+<sub>[Index](README.md) · [Cost and boundedness](24-performance.md) →</sub>

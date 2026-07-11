@@ -22,7 +22,7 @@ The canonical failure is simple:
    replacement.
 4. The newer event wins at relays and the previous list is lost.
 
-## What current NMP can say
+## What a query can say
 
 NMP can return:
 
@@ -41,7 +41,7 @@ Therefore this is not a valid structural contract:
 CompleteUpTo -> safe to edit globally
 ```
 
-## What apps should do today
+## Conservative application policy
 
 Until a mechanism is designed and implemented:
 

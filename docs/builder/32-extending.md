@@ -1,101 +1,107 @@
-# Extending NMP with protocol modules
+# Authoring a protocol module
 
-**Status: TARGET.** The generic engine and closed query grammar are built. The
-cross-platform protocol-module mechanism is not. Its exact package names and
-registration syntax remain provisional; the ownership rules below are the
-agreed contract.
+This chapter is for library authors adding NIP-aware functionality, not for
+ordinary apps using NMP.
 
-## Extend protocol knowledge, not app architecture
+## Claim exact protocol ownership
 
-An app enables a protocol module to avoid hand-writing event encoding,
-validation, reconstruction, and routing rules from a NIP. Enabling one must not
-turn the app into an NMP application or require a container, store, reducer,
-scene hook, or navigation model.
+A module declares only the exact schemas and kinds its protocol defines. It
+may own:
 
-The app still uses one engine facade and the same two primary operations:
-observe declared data and publish an intent. Modules add typed values and
-semantic operations around those operations.
+- typed event builders and parsers;
+- tag validation and canonical encoding;
+- multi-event state reconstruction;
+- closed reusable demand fragments;
+- typed protocol queries and semantic operations;
+- protocol-defined source/access/routing context; and
+- bounded use of signer, AUTH, encrypt, or decrypt capabilities.
 
-## What a module owns
+Sparse NIP kind sets remain sparse. A convenience range is not ownership.
+Ownership collisions are errors.
 
-A protocol module may own:
+## Do not claim participating content
 
-- event schemas and kinds defined by that protocol;
-- tag construction and validation defined by the protocol;
-- parsing and typed semantic values;
-- multi-event state reconstruction required for correctness;
-- declarative query helpers whose full demand remains introspectable;
-- semantic write operations;
-- typed source/routing context defined by the protocol;
-- protocol-specific capability use.
+Protocol context is different from schema ownership. NIP-29 may contextualize
+an article, photo, podcast episode, or app-owned event for a group. It owns only
+the NIP-29 fields and authority it contributes.
 
-It does not own unrelated content kinds merely because those kinds can
-participate in the protocol.
+The originating module remains the draft's schema owner.
 
-## NIP-29 as the boundary test
+## Return closed values
 
-A NIP-29 module owns NIP-29 management and group-state events and knows the
-group host relay. It may expose operations such as creating a group or changing
-an administrator because those are protocol state transitions.
+Module APIs may return:
 
-It may also bind a foreign unsigned draft to a group:
+- public `Filter`/`Binding` graphs;
+- typed values reconstructed from ordinary live demands;
+- immutable unsigned drafts;
+- opaque validated source/access/routing authority; or
+- semantic operations that resolve to core demands/write intents.
 
-```text
-group.publish(photoDraft)
-```
+They may not register callbacks that later decide demand, routing, signer
+selection, ordering, or admission.
 
-The photo's schema owner remains the photo module. NIP-29 contributes only its
-group context, including the correct `h` tag and the host-relay authority. The
-core freezes the resulting draft and signs once.
+If a module needs a new grammar node, propose a public closed vocabulary change
+with defined hashing, equality, persistence, diagnostics, and Rust/Swift/Kotlin
+projection. Do not hide the missing concept in an opaque extension payload.
 
-This is why "every module member must desugar to a standalone filter or raw
-write intent" is too narrow. A semantic operation may coordinate protocol
-facts while still producing closed, inspectable engine inputs.
+## Make authority unforgeable
 
-## Composition contract
+A protocol-host or private-inbox authority cannot be a public constructor over
+arbitrary relay URLs. The module mints an opaque value only after validating the
+protocol reference and its source facts.
 
-Module composition must satisfy all of these:
+Core can inspect the value's reason and relay constraints without giving app
+code a raw widen operation. Diagnostics shows the module/context that produced
+the lane.
 
-1. Drafts are immutable values.
-2. Each module can add only fields/context it owns.
-3. Signed events are never rewritten.
-4. The final signer is selected by core: current-pubkey signer by default,
-   explicit identity override when requested.
-5. Demand, routing, and capability selection remain closed and explainable.
-6. Failures remain separated by owner. A Blossom upload failure is not a Nostr
-   publish failure, and neither is reported as the other.
+## Compose drafts immutably
 
-## What a module may not do
+Every stage returns a new unsigned value and contributes only fields it owns.
+The operation fails before acceptance if contributions conflict or violate a
+narrow/private route.
 
-- Register app closures as lane mappers, comparators, or admission predicates.
-- Own app state, view lifecycle, navigation, or presentation.
-- Hide which protocol context changed a draft or where demand is sourced.
-- Become a required import for apps that do not use the protocol.
-- Add a favored content-kind path to core.
-- Keep a second event store, relay pool, outbox, or signing path beside core.
+No module may:
 
-## Packaging
+- mutate a signed event;
+- sign early;
+- access raw signer secret material;
+- write directly to store indexes;
+- publish through its own transport; or
+- maintain a second optimistic row path.
 
-Protocol functionality is opt-in code weight. Rust may use separate crates or
-features; Swift and Kotlin should expose corresponding optional products. All
-of them must call the same canonical Rust facade used by core and FFI. A direct
-Rust app is not expected to assemble mechanism crates into a second supported
-engine.
+Core validates the final body/context, pins the signer, accepts the canonical
+row, signs once, and routes through the durable outbox.
 
-The exact Cargo/SwiftPM/Gradle packaging is deliberately not frozen. A proposed
-shape must show binary modularity and cross-platform semantic parity before it
-becomes public API.
+## Keep failure ownership separate
 
-## When the grammar itself must change
+An upload failure, draft-validation failure, AUTH failure, signer denial,
+acceptance failure, and relay rejection are different facts. A module maps only
+the failures it owns and preserves core receipt/source evidence for the rest.
 
-A protocol module cannot hide an opaque extension inside the query grammar. If
-a real protocol cannot express its demand using the closed binding and selector
-vocabulary, that is an explicit public-surface design event. The proposal must
-show the missing protocol fact, its hashing/equality/routing semantics,
-diagnostic representation, and projections across Rust, FFI, Swift, and
-Kotlin.
+## Package without registration framework
+
+Module presence is a build/dependency choice. Enabling it must not require app
+startup registration, a global module container, navigation hooks, or scene
+callbacks.
+
+Rust crates/features and SwiftPM/Gradle products may differ mechanically, but
+they project one semantic module over the canonical facade. Disabling the module
+removes its code and semantic API without changing core behavior.
+
+## Required falsifiers
+
+A module is ready only when tests prove:
+
+- it cannot claim an unowned schema;
+- its reusable binding prints exactly like the raw expansion;
+- reconstructed state uses canonical store/query semantics;
+- source/routing authority cannot be forged from app relay arrays;
+- cross-module composition produces deterministic final unsigned bytes;
+- core signs the composed body once;
+- Swift, Kotlin, and direct Rust agree on bytes and observable facts;
+- disabling it leaves the raw engine useful; and
+- no hidden lifecycle, store, signer, or transport path appears.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Example gallery](31-gallery.md) · [Index](README.md) · [Versioning & stability](33-versioning.md) →</sub>
+<sub>[Index](README.md) · Related: [Using protocol modules](27-recipes-and-choosing.md) · [Governed provisional API](33-versioning.md)</sub>

@@ -1,91 +1,67 @@
-# Governed provisional public surface
+# Building against a governed provisional API
 
-**Status: CURRENT POLICY.** NMP has not promised v2 compatibility, but public
-shape changes are governed. "Provisional" means change is possible with
-evidence and signoff, not that any surface may drift casually.
+NMP has not promised v2 source compatibility. Public names and record layouts
+may change when a falsifier proves the current shape unsafe or incomplete.
 
-## The posture
+"Provisional" does not mean casual drift. Public changes require evidence,
+cross-surface/persistence impact review, explicit human signoff, synchronized
+Rust/Swift/Kotlin falsifiers, and removal of the superseded path.
 
-The two-noun thesis and promoted behavioral invariants direct the work. Public
-names, enum cases, records, FFI layouts, and platform spellings remain
-provisional until they survive cross-platform falsification and earn a v2
-compatibility contract.
+## What builders can rely on
 
-This leaves room to correct a shape that cannot express source-scoped evidence,
-durable signer waiting, contextual protocol authority, or explicit shortfall.
-It does not license an unreviewed breaking change.
-
-## What may change before v2
-
-- `NMPFilter` may become a richer demand descriptor whose identity includes
-  selection, source authority, and access context.
-- Aggregate `Coverage` may be replaced by cache/acquisition/shortfall evidence.
-- `WriteIntent`, receipt status, pending-row state, and signer-provider records
-  may change to carry the durable contract.
-- `setActiveAccount` may split into a current-pubkey input plus independent
-  signer registration/default/override behavior.
-- Diagnostics will grow raw source, connection, AUTH, retry, error, and limit
-  facts.
-- Protocol module and Kotlin projections remain target surfaces and will move
-  as their falsifiers expose pressure.
-
-These are examples of known pressure, not a promise of exact names.
-
-## Required change discipline
-
-Every proposed public-shape change must:
-
-1. state what the current shape cannot express or makes unsafe;
-2. map impact across the canonical Rust facade, persistence, diagnostics, FFI,
-   Swift, Kotlin, and enabled protocol modules;
-3. update affected projections and falsifiers together;
-4. receive explicit human architecture signoff; and
-5. remove the superseded path instead of preserving premature parallel APIs.
-
-A passing local implementation test is not enough. The supported facade and at
-least the platform falsifier affected by the change must agree on behavior.
-
-## What remains the frame
-
-Before v2, even behavioral decisions can be revisited when new evidence exposes
-a flaw. They are nevertheless the current architecture frame and cannot be
-eroded accidentally:
+The current architecture frame is:
 
 - NMP is an embeddable engine, not an app framework.
-- Live query and write intent remain the two workload nouns.
-- Engine decisions consume closed, introspectable values; app closures stay
-  after delivery.
-- Core has no preferred content kind or product feed policy.
-- Protocol modules own exact schemas and compose immutable unsigned drafts.
-- Query evidence is source-scoped and never global Nostr truth.
-- Durable `Accepted` means persisted obligation plus canonical pending row.
-- Signer choice is defaultable, overridable, and pinned at acceptance.
-- One engine is one shared local trust domain with explicit destructive reset.
-- Limits and overload produce explicit shortfall/backpressure, never silent
-  first-N substitution.
+- Live query and write intent are the two workload nouns.
+- Engine decisions consume closed, introspectable values.
+- Core has no preferred content kind or feed policy.
+- Query snapshots report scoped evidence, not global Nostr truth.
+- Durable acceptance owns one canonical pending row plus the obligation.
+- Every write has observable, reattachable receipt facts; durability controls
+  whether the publication obligation resumes.
+- Signer selection has a current-pubkey default, per-write override, and is
+  pinned at acceptance.
+- Protocol modules own exact schemas and compose immutable drafts/context.
+- One engine is one shared cache trust domain with explicit destructive reset.
+- Limits produce exact chunking, rejection, backpressure, or shortfall, never
+  silent first-N substitution.
 
-Changing one of these requires an explicit architecture decision and ledger /
-design-document update, not an incidental API patch.
+New evidence can still revise one of these, but not as an incidental API patch.
 
-## Building on NMP before v2
+## What is expected to move
 
-1. Pin a commit or tag and upgrade deliberately.
-2. Distinguish `CURRENT`, `PARTIAL`, and `TARGET` documentation.
-3. Watch the bug-class ledger and known gaps for behavioral movement.
-4. Keep product-specific query composition in the app. Use opt-in protocol
-   modules only for their exact protocol-semantic surface as it becomes built.
-5. Expect synchronized migrations when a governed public change lands; do not
-   assume today's name is frozen merely because its current test passes.
+Known pressure exists around:
 
-## What v2 earns
+- filter-only query identity becoming selection + source + access;
+- aggregate coverage becoming cache/acquisition/shortfall evidence;
+- current account splitting into current-pubkey input and signer providers;
+- crash-safe receipt/pending-row records;
+- optional protocol-module packaging; and
+- Android/native secure-provider projection.
 
-v2 turns the surviving cross-platform surface into a compatibility contract
-with ordinary versioning and deprecation discipline. The project freezes an
-earned contract after falsification, not a guess before it. Until then the
-accurate promise is: **provisional shapes, protected review discipline, and
-truth-anchored current/target documentation.**
+The guide uses one coherent illustrative spelling so the product can be
+evaluated. It does not promise those identifiers.
+
+## Upgrade discipline before v2
+
+1. Pin a commit or release tag.
+2. Read the surface-change entry and [current status](03-status-map.md) before
+   upgrading.
+3. Regenerate/rebuild matched Rust and native bindings together.
+4. Run the platform and protocol-module falsifiers your app depends on.
+5. Delete use of the superseded shape rather than keeping compatibility
+   adapters in application code.
+
+Do not infer stability from one example compiling. The supported facade and its
+governance snapshots define the actual surface.
+
+## Compatibility starts at v2
+
+Before declaring v2, NMP must prove one canonical facade, crash-safe writes,
+scoped evidence, bounded delivery, signer providers, protocol composition,
+permanent diagnostics, and Rust/Swift/Kotlin parity. Only then should semantic
+versioning turn current provisional shapes into compatibility promises.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Extending NMP](32-extending.md) · [Index](README.md)</sub>
+<sub>[Index](README.md) · Related: [Current status](03-status-map.md) · [Guarantees](28-patterns.md) · [Protocol module authoring](32-extending.md)</sub>
