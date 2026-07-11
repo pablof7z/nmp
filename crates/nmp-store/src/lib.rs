@@ -442,7 +442,15 @@ pub enum AcceptOutcome {
     /// doc — an edge case, not the relay-echo hand-off, which goes through
     /// ordinary `insert`/dedup instead). Still allocates and journals a
     /// fresh `intent_id`/`receipt_id` — this call is still a distinct
-    /// accepted intent.
+    /// accepted intent, joining the existing row's owner set (issue #2's
+    /// ownership-set model — see `LocalOrigin`'s doc) rather than being
+    /// silently discarded. If the existing row (locally owned OR purely
+    /// relay-observed — either way its `event.sig` is already real, not a
+    /// sentinel) is ALREADY signed, this intent's OWN journal/receipt are
+    /// journaled `Signed` from the start rather than `Pending` (codex-nova
+    /// ruling): an offline co-owner signer must never strand a receipt
+    /// behind an event that's already validly signed, and there is
+    /// nothing left for this intent to sign.
     Duplicate {
         intent_id: IntentId,
         receipt_id: u64,
@@ -541,26 +549,45 @@ impl AcceptOutcome {
 /// is gone for some unrelated reason — relay supersession, kind:5
 /// deletion, NIP-40 expiry — and the signed bytes are synthesized from the
 /// journal's own copy so the engine can still publish them even though
-/// this intent wins no local address). Either way, `SigState`/
-/// `IntentSigState` flip to `Signed`, the durable `OUTBOX_DISPLACED` stash
-/// for THIS intent (if any) is deleted in the same transaction (R6), and —
-/// if this was a pending kind:5 draft — its suppression claims become
-/// authoritative permanent tombstones. Boxed for the same reason
+/// this intent wins no local address).
+///
+/// codex-nova ruling (issue #2's ownership-set model, tightened after
+/// review): the FIRST owner to sign atomically transitions EVERY other
+/// co-owner's own `OUTBOX_INTENTS`/`OUTBOX_RECEIPTS` row to `Signed`
+/// against the SAME canonical bytes, in this SAME call — never lazily,
+/// deferred until (or unless) each co-owner separately calls
+/// `promote_signed` itself. An offline co-owner signer that never calls
+/// back must not strand its receipt behind an event that is already
+/// validly signed. `co_signed` names every OTHER intent this call just
+/// advanced this way, so the caller can advance each of THEIR routing
+/// obligations too, not only `intent_id`'s own. A co-owner's OWN later
+/// call (e.g. its signer's delayed callback) now correctly answers
+/// `NotFound` — its journal is already `Signed` by the time it calls, so
+/// the existing per-intent guard catches it (see `NotFound`'s doc).
+///
+/// Either way, `SigState`/`IntentSigState` flip to `Signed`, the durable
+/// `OUTBOX_DISPLACED` stash for `intent_id` AND every co-owner named in
+/// `co_signed` is deleted in the same transaction (R6), and — if this was
+/// a pending kind:5 draft — every owner's suppression claims become
+/// authoritative permanent tombstones together. Boxed for the same reason
 /// `InsertOutcome::Superseded` is: keeps the common `NotFound` variant
 /// small.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromoteOutcome {
     Promoted {
         row: Box<StoredEvent>,
+        /// Every OTHER co-owner `IntentId` this call ALSO atomically
+        /// transitioned to `Signed` against the SAME canonical bytes (see
+        /// this enum's own doc for why) — empty when `intent_id` is the
+        /// row's only owner, which is the common case.
+        co_signed: Vec<IntentId>,
     },
-    /// This `IntentId` names no still-open intent, OR it does but the
-    /// shared row/stash entry it is a member of is ALREADY `Signed` by
-    /// some OTHER co-owner (architecture review correction, issue #2's
-    /// ownership-set model: a repeat promotion — whether by the SAME
-    /// intent re-promoting, codex-nova's original finding, or a
-    /// DIFFERENT co-owner's first promotion attempt on an
-    /// already-signed shared row — is a no-op, never a re-signature).
-    /// Also covers already compensated, or never accepted through
+    /// This `IntentId` names no still-open intent, OR its OWN journal is
+    /// ALREADY `Signed` — either because it promoted before (codex-nova's
+    /// original repeat-promotion finding), or because some OTHER co-owner
+    /// promoted first and this call's `co_signed` already advanced it
+    /// (this intent's own delayed signer callback arriving after the
+    /// fact). Also covers already compensated, or never accepted through
     /// `accept_write`.
     NotFound,
 }

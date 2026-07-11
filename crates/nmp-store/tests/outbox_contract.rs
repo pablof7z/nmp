@@ -198,7 +198,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
         .promote_signed(intent_b, real_sig)
         .expect("promote_signed persistence");
     match promoted {
-        PromoteOutcome::Promoted { row } => {
+        PromoteOutcome::Promoted { row, .. } => {
             assert_eq!(
                 row.event.id, frozen_b_id,
                 "zero id churn: same id before/after promotion"
@@ -823,7 +823,7 @@ fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
             .promote_signed(intent_stale, signed_old.sig)
             .expect("promote persistence");
         match promoted_stale {
-            PromoteOutcome::Promoted { row } => {
+            PromoteOutcome::Promoted { row, .. } => {
                 assert_eq!(row.event.sig, signed_old.sig);
             }
             other => panic!("expected Promoted for a Stale intent, got {other:?}"),
@@ -872,7 +872,7 @@ fn chained_local_supersession_promote_displaced_then_cancel_newer_restores_signe
         .promote_signed(intent_a, signed_a.sig)
         .expect("promote persistence");
     match promoted_a {
-        PromoteOutcome::Promoted { row } => {
+        PromoteOutcome::Promoted { row, .. } => {
             assert_eq!(row.event.id, frozen_a_id);
             assert_eq!(row.event.sig, signed_a.sig);
         }
@@ -1266,7 +1266,7 @@ fn target_signs_while_hidden() {
             .promote_signed(intent_t, signed_t.sig)
             .expect("promote persistence");
         match promoted_t {
-            PromoteOutcome::Promoted { row } => {
+            PromoteOutcome::Promoted { row, .. } => {
                 assert_eq!(row.event.id, target_id);
                 assert_eq!(row.event.sig, signed_t.sig);
             }
@@ -1401,9 +1401,12 @@ fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
 }
 
 /// codex-nova P0 falsifier: an exact-`Duplicate` kind:5 intent's own
-/// promotion must commit the deletion for real even though it never
-/// staged its own suppression claim (only the ORIGINAL, canonical intent
-/// did) — and cancelling the ORIGINAL afterward must never undo it. The
+/// promotion must commit the deletion for real — and, since A and B are
+/// CO-OWNERS of the deletion event's own row (issue #2's ownership-set
+/// model), B's promotion atomically transitions A's OWN journal to
+/// `Signed` too (codex-nova ruling, tightened after review), so A's own
+/// later `compensate_write` attempt correctly answers `NotFound` rather
+/// than silently undoing B's already-promoted, permanent deletion. The
 /// withdrawn Kind5Stash design got this backwards: a stashed row was the
 /// ONLY thing giving the deletion effect, so promoting a claim-less
 /// Duplicate committed nothing durable of its own, and cancelling the
@@ -1446,25 +1449,30 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
 
         assert!(store.query(&Filter::new().id(target_id)).is_empty());
 
-        // Promote B — must commit the deletion for real, permanently.
+        // Promote B — must commit the deletion for real, permanently, AND
+        // atomically advance A's own routing obligation too (A is a
+        // CO-OWNER of the deletion event's own row).
         let promoted_b = store
             .promote_signed(intent_b, signed_deletion.sig)
             .expect("promote persistence");
-        assert!(matches!(promoted_b, PromoteOutcome::Promoted { .. }));
+        match promoted_b {
+            PromoteOutcome::Promoted { co_signed, .. } => {
+                assert_eq!(co_signed, vec![intent_a]);
+            }
+            other => panic!("expected Promoted, got {other:?}"),
+        }
 
-        // Cancel A afterward — must NOT undo B's now-permanent deletion.
+        // A's OWN journal is already `Signed` (advanced by B's call
+        // above) — its own (now redundant) compensation attempt correctly
+        // answers `NotFound`, never undoing B's already-promoted,
+        // permanent deletion.
         let compensated_a = store
             .compensate_write(intent_a)
             .expect("compensate persistence");
-        match compensated_a {
-            CompensateOutcome::Compensated { revealed, .. } => {
-                assert!(
-                    revealed.is_empty(),
-                    "cancelling A must never undo B's already-promoted, permanent deletion"
-                );
-            }
-            other => panic!("expected Compensated, got {other:?}"),
-        }
+        assert!(
+            matches!(compensated_a, CompensateOutcome::NotFound),
+            "A's own journal is already Signed -- compensation is pre-signature only"
+        );
         assert!(
             store.query(&Filter::new().id(target_id)).is_empty(),
             "the target must stay permanently deleted"
@@ -1853,11 +1861,15 @@ fn duplicate_pending_b_survives_cancel_of_canonical_a() {
     });
 }
 
-/// Issue #2 required falsifier #2: if the `Duplicate` B signs first, its
-/// promotion sets the canonical row's signature in place; cancelling the
-/// OTHER co-owner A afterward must leave the row signed and queryable —
-/// the whole point of "signature state is canonical to the row, not
-/// per-owner" (see `LocalOrigin`'s doc).
+/// Issue #2 required falsifier #2 (tightened by codex-nova after review):
+/// if the `Duplicate` B signs first, its promotion sets the canonical
+/// row's signature in place AND atomically transitions the OTHER co-owner
+/// A's own journal/receipt to `Signed` too, in the SAME call — never
+/// lazily deferred until (or unless) A's own signer calls back. An
+/// offline co-owner signer must never strand a receipt behind an event
+/// that's already validly signed. A's own (now redundant) later
+/// `compensate_write` call correctly answers `NotFound` — the row stays
+/// signed and queryable throughout.
 #[test]
 fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
     for_each_backend(|store| {
@@ -1883,23 +1895,34 @@ fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
         let promoted_b = store
             .promote_signed(intent_b, signed.sig)
             .expect("promote persistence");
-        assert!(matches!(promoted_b, PromoteOutcome::Promoted { .. }));
+        match promoted_b {
+            PromoteOutcome::Promoted { co_signed, .. } => {
+                assert_eq!(
+                    co_signed,
+                    vec![intent_a],
+                    "B's promotion must atomically advance A's own routing obligation too"
+                );
+            }
+            other => panic!("expected Promoted, got {other:?}"),
+        }
 
-        // Cancel A -- B's promotion must survive; the row stays signed
-        // and queryable.
+        // A's OWN journal is already `Signed` (advanced by B's call above)
+        // — its own (now redundant) promotion/compensation attempts must
+        // both answer `NotFound`, never resurrect or re-transition
+        // anything.
         let compensated_a = store
             .compensate_write(intent_a)
             .expect("compensate persistence");
-        assert!(matches!(
-            compensated_a,
-            CompensateOutcome::Compensated { restored: None, .. }
-        ));
+        assert!(
+            matches!(compensated_a, CompensateOutcome::NotFound),
+            "A's own journal is already Signed -- compensation is pre-signature only"
+        );
 
         let rows = store.query(&Filter::new().id(frozen_id));
         assert_eq!(
             rows.len(),
             1,
-            "a signed row must survive an unrelated co-owner's cancellation"
+            "the row must stay signed and queryable throughout"
         );
         assert_eq!(rows[0].event.sig, signed.sig);
         let local = rows[0]
@@ -1959,6 +1982,112 @@ fn duplicate_ownership_survives_restart() {
         !recovered.iter().any(|r| r.intent_id == intent_a),
         "A's compensated journal row must be gone"
     );
+}
+
+/// codex-nova ruling (tightened after review): a NEW duplicate accepted
+/// AFTER the row it duplicates is ALREADY signed (by an earlier LOCAL
+/// promotion) must itself start `Signed` and route the CANONICAL bytes —
+/// an offline co-owner signer must never strand a receipt behind an event
+/// that's already validly signed, and there is nothing left for a fresh
+/// duplicate to sign.
+#[test]
+fn duplicate_of_already_signed_local_row_starts_signed() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
+        let frozen_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let promoted_a = store
+            .promote_signed(intent_a, signed_a.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_a, PromoteOutcome::Promoted { .. }));
+
+        // C: a fresh duplicate accepted AFTER the row is already signed.
+        let (frozen_c, _signed_c) = compose(&k, Kind::TextNote, "shared body", 100);
+        assert_eq!(frozen_c.id, frozen_id);
+        let outcome_c = do_accept(store, accept(frozen_c, k.public_key(), 100));
+        let intent_c = outcome_c.journaled_intent_id().expect("journaled");
+        let receipt_c = outcome_c.journaled_receipt_id().expect("journaled");
+        match outcome_c {
+            AcceptOutcome::Duplicate { row, .. } => {
+                assert_eq!(
+                    row.event.sig, signed_a.sig,
+                    "must route the CANONICAL signature"
+                );
+                let local = row.provenance.local.expect("still locally owned");
+                assert_eq!(local.sig_state, SigState::Signed);
+                assert!(local.owners.contains(&intent_c));
+            }
+            other => panic!("expected Duplicate, got {other:?}"),
+        }
+
+        // C's own receipt must ALREADY be Signed -- nothing left to sign,
+        // no obligation strands.
+        let receipt = store.reattach_receipt(receipt_c).expect("receipt retained");
+        assert_eq!(receipt.state, ReceiptState::Signed);
+
+        // C's own compensation/promotion attempts are both correctly
+        // refused -- it never had anything pending to begin with.
+        let compensated_c = store
+            .compensate_write(intent_c)
+            .expect("compensate persistence");
+        assert!(matches!(compensated_c, CompensateOutcome::NotFound));
+        let promoted_c = store
+            .promote_signed(intent_c, signed_a.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_c, PromoteOutcome::NotFound));
+    });
+}
+
+/// codex-nova ruling (tightened after review), relay variant: a duplicate
+/// of a row that was NEVER locally accepted at all — purely relay-
+/// observed, `local: None` — must likewise start `Signed` the first time
+/// a LOCAL intent duplicates against it: a relay-observed row's own
+/// `event.sig` is by construction already real, never a sentinel, so
+/// there is nothing provisional about it either.
+#[test]
+fn duplicate_of_already_signed_relay_row_starts_signed() {
+    for_each_backend(|store| {
+        let k = keys();
+        let relay_event = EventBuilder::new(Kind::TextNote, "relay body")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign relay event");
+        let relay_id = relay_event.id;
+        let relay_sig = relay_event.sig;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(relay_event, RelayObserved::new(relay, Timestamp::from(50)));
+        // Sanity: purely relay-observed, no local provenance at all yet.
+        let rows = store.query(&Filter::new().id(relay_id));
+        assert!(rows[0].provenance.local.is_none());
+
+        // D: a fresh LOCAL duplicate accepted against the relay-only row.
+        let (frozen_d, _signed_d) = compose(&k, Kind::TextNote, "relay body", 50);
+        assert_eq!(frozen_d.id, relay_id);
+        let outcome_d = do_accept(store, accept(frozen_d, k.public_key(), 50));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        let receipt_d = outcome_d.journaled_receipt_id().expect("journaled");
+        match outcome_d {
+            AcceptOutcome::Duplicate { row, .. } => {
+                assert_eq!(
+                    row.event.sig, relay_sig,
+                    "must route the CANONICAL (relay) signature"
+                );
+                let local = row
+                    .provenance
+                    .local
+                    .expect("D's acceptance must attach local ownership for the first time");
+                assert_eq!(local.sig_state, SigState::Signed);
+                assert!(local.owners.contains(&intent_d));
+            }
+            other => panic!("expected Duplicate, got {other:?}"),
+        }
+
+        let receipt = store.reattach_receipt(receipt_d).expect("receipt retained");
+        assert_eq!(receipt.state, ReceiptState::Signed);
+    });
 }
 
 /// Issue #2 required falsifier #4 (kind:5 variant): an exact-`Duplicate`
