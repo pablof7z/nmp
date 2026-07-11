@@ -26,7 +26,13 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
 
     init(engine: NmpEngineProtocol) {
         var continuation: AsyncStream<DiagnosticsSnapshot>.Continuation!
-        let stream = AsyncStream<DiagnosticsSnapshot> { continuation = $0 }
+        // `.bufferingNewest(1)`: same discipline as `NMPQuery` (#17) --
+        // `observeDiagnostics()` must remain latest-wins and never regress
+        // into a backlog, belt-and-suspenders alongside `DiagnosticsBridge`'s
+        // own frame coalescing below.
+        let stream = AsyncStream<DiagnosticsSnapshot>(bufferingPolicy: .bufferingNewest(1)) {
+            continuation = $0
+        }
         let bridge = DiagnosticsBridge(continuation: continuation)
         self.handle = engine.observeDiagnostics(observer: bridge)
         self.stream = stream
@@ -63,18 +69,30 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
 
 /// Drains a live diagnostics stream into an `AsyncStream` (M5 plan §1.3).
 /// Not exposed publicly -- an implementation detail of `NMPDiagnostics`.
+///
+/// DELIVERY is coalesced through `FrameCoalescer` (#17/docs/known-gaps.md):
+/// `observeDiagnostics()`'s first jank finding was its own initial-snapshot
+/// storm, same shape as `RowBridge`'s -- at most one delivered snapshot per
+/// ~60Hz tick, always the latest, never a growing backlog.
 private final class DiagnosticsBridge: DiagnosticsObserver, @unchecked Sendable {
     private let continuation: AsyncStream<DiagnosticsSnapshot>.Continuation
+    // Captures `continuation` only (not `self`) -- avoids a retain cycle
+    // between this bridge and its own coalescer.
+    private lazy var coalescer = FrameCoalescer<DiagnosticsSnapshot> {
+        [continuation = self.continuation] snapshot in
+        continuation.yield(snapshot)
+    }
 
     init(continuation: AsyncStream<DiagnosticsSnapshot>.Continuation) {
         self.continuation = continuation
     }
 
     func onSnapshot(snapshot: FfiDiagnosticsSnapshot) {
-        continuation.yield(DiagnosticsSnapshot(snapshot))
+        coalescer.push(DiagnosticsSnapshot(snapshot))
     }
 
     func onClosed() {
+        coalescer.flushNow()
         continuation.finish()
     }
 }
