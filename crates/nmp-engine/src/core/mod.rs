@@ -372,22 +372,46 @@ impl<S: EventStore> EngineCore<S> {
         )
     }
 
-    /// A pure clock update PLUS the negentropy liveness-deadline sweep (plan
-    /// §6 E, harvest `nmp-nip77`'s "30s liveness-deadline REQ fallback"):
-    /// any reconciliation session open longer than
-    /// [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is abandoned in favor of
-    /// a plain REQ for the same (unfloored/unlimited) filter. Backoff/
-    /// keepalive scheduling stays D/A2 territory -- untouched here.
+    /// A pure clock update PLUS two deadline sweeps: NIP-40 expiry
+    /// (retraction-and-negative-deltas.md §3.2 — drains `store.expire_due`
+    /// and retracts every row past its deadline) and the negentropy
+    /// liveness-deadline sweep (plan §6 E, harvest `nmp-nip77`'s "30s
+    /// liveness-deadline REQ fallback"): any reconciliation session open
+    /// longer than [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is
+    /// abandoned in favor of a plain REQ for the same (unfloored/unlimited)
+    /// filter. Backoff/keepalive scheduling stays D/A2 territory --
+    /// untouched here.
     ///
     /// Nothing in `runtime` currently drives `EngineMsg::Tick` on a
     /// wall-clock cadence (D8 forbids a poll-loop timer thread, and no
-    /// caller-facing `Handle` verb exists for it either) -- this sweep is
-    /// real and unit-tested against a synthetic clock, but is not yet wired
-    /// to fire on its own in the live runtime. See the builder report's
+    /// caller-facing `Handle` verb exists for it either) -- both sweeps are
+    /// real and unit-tested against a synthetic clock, but neither is yet
+    /// wired to fire on its own in the live runtime; the `recv_timeout`
+    /// deadline-armed driver that would do that is a separate #23 child
+    /// (retraction-and-negative-deltas.md §3.3). See the builder report's
     /// scope note.
     pub fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
         self.clock = now;
         let mut effects = Vec::new();
+
+        // NIP-40 expiry (retraction-and-negative-deltas.md §3.2) — manual
+        // for now, same caveat as the neg-liveness sweep below: nothing yet
+        // drives `Tick` on its own cadence (the `recv_timeout`
+        // deadline-armed runtime driver is a separate #23 child, §3.3).
+        // Drain every row whose expiration is due straight through the
+        // store's own index (`O(log n + due)`, never a scan), then route
+        // the removed rows through the SAME retraction lane a kind:5
+        // delete already uses inside `ingest_observed` — `resolver.retract`
+        // seeds dirty-marks from `removed` alone, `recompile` + `refresh_
+        // all_handles` do the rest, and `RowDelta::Removed` falls out the
+        // ordinary way.
+        let expired = self.resolver.store_mut().expire_due(now);
+        if !expired.is_empty() {
+            let removed: Vec<_> = expired.into_iter().map(|se| se.event).collect();
+            let _delta = self.resolver.retract(removed);
+            self.recompile(&mut effects);
+            self.refresh_all_handles(&mut effects);
+        }
 
         let stale: Vec<SubId> = self
             .neg_sessions
