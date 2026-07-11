@@ -22,11 +22,11 @@ use std::path::Path;
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
-use nostr::{Event, EventId, Filter, JsonUtil, RelayUrl, Timestamp};
+use nostr::{Event, EventId, Filter, JsonUtil, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::address_key::{address_key_for, candidate_wins};
+use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
 use crate::coverage::{
     coverage_key as compute_coverage_key, merge_interval, shape_matches, shrink_after_eviction,
     window_erase, ShapeRecord,
@@ -39,6 +39,20 @@ use crate::{
 const EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
 const ADDR_INDEX: TableDefinition<&str, &str> = TableDefinition::new("addr_index");
 const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
+/// Permanent kind:5 tombstones for individual event ids
+/// (retraction-and-negative-deltas.md §2/§7). Key: event id hex. Never
+/// GC-claimed.
+const TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("tombstones");
+/// Permanent kind:5 tombstones for replaceable/addressable addresses. Key:
+/// [`crate::address_key::AddressKey::to_redb_key`]. Value carries the
+/// deletion ceiling (highest deleting-event `created_at` seen for that
+/// address) — a candidate with `created_at <= ceiling` is tombstoned.
+const ADDR_TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("addr_tombstones");
+/// The persistent NIP-40 expiration index (retraction-and-negative-
+/// deltas.md §3.1). Key: [`expiration_key`] (`"{ts:020}:{id_hex}"`, so
+/// byte-lexicographic order matches numeric deadline order); value: the
+/// event id hex (redundant with the key suffix, kept for a cheap decode).
+const EXPIRATION_INDEX: TableDefinition<&str, &str> = TableDefinition::new("expiration_index");
 
 /// The `events` table's JSON value: the event's canonical NIP-01 JSON plus
 /// its merged provenance.
@@ -46,6 +60,226 @@ const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
 struct StoredEventRecord {
     event_json: String,
     provenance: BTreeMap<RelayUrl, Timestamp>,
+}
+
+/// The `tombstones` table's JSON value.
+#[derive(Debug, Serialize, Deserialize)]
+struct TombstoneRecord {
+    deleting_event_id: String,
+    deleting_author: String,
+}
+
+/// The `addr_tombstones` table's JSON value.
+#[derive(Debug, Serialize, Deserialize)]
+struct AddrTombstoneRecord {
+    ceiling: u64,
+    deleting_event_id: String,
+    deleting_author: String,
+}
+
+/// The `expiration_index` table's key: zero-padded decimal seconds so
+/// byte-lexicographic order (what `redb`'s `range` uses) matches numeric
+/// timestamp order, `:`-joined with the event id hex to disambiguate
+/// multiple events sharing one deadline.
+fn expiration_key(ts: Timestamp, id: &EventId) -> String {
+    format!("{:020}:{}", ts.as_secs(), id.to_hex())
+}
+
+/// The inclusive upper bound of every `expiration_key` at or before `ts`:
+/// `'f'` is the greatest ASCII hex-digit character, so 64 of them sorts
+/// after every real 32-byte id hex sharing that same timestamp prefix.
+fn expiration_key_upper_bound(ts: Timestamp) -> String {
+    format!("{:020}:{}", ts.as_secs(), "f".repeat(64))
+}
+
+/// Read-side tombstone check shared by `insert`
+/// (retraction-and-negative-deltas.md §2): `true` iff `event` must be
+/// `Refused(Tombstoned)`. Mirrors `MemoryStore::tombstone_refuses` exactly,
+/// including the deferred NIP-09 author-only check for an id-tombstone
+/// written before its target ever arrived.
+fn tombstone_refuses(
+    tombstones: &redb::Table<'_, &str, &str>,
+    addr_tombstones: &redb::Table<'_, &str, &str>,
+    event: &Event,
+) -> bool {
+    let id_hex = event.id.to_hex();
+    if let Some(guard) = tombstones
+        .get(id_hex.as_str())
+        .expect("redb: get tombstone")
+    {
+        let rec: TombstoneRecord =
+            serde_json::from_str(guard.value()).expect("redb: decode tombstone");
+        if rec.deleting_author == event.pubkey.to_hex() {
+            return true;
+        }
+    }
+    if let Some(key) = address_key_for(event) {
+        let key_str = key.to_redb_key();
+        if let Some(guard) = addr_tombstones
+            .get(key_str.as_str())
+            .expect("redb: get addr tombstone")
+        {
+            let rec: AddrTombstoneRecord =
+                serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
+            if event.created_at.as_secs() <= rec.ceiling {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Remove `id`'s row within an already-open write transaction, iff
+/// `predicate` accepts the decoded row — clearing the address index (if it
+/// still points at `id`) and the expiration index (if the row carried a
+/// NIP-40 `expiration`) in the same pass. Shared by the trait's own
+/// `remove` (`predicate` always `true`) and kind:5 processing (`predicate`
+/// is the NIP-09 author-only check).
+fn remove_row_in_txn(
+    events: &mut redb::Table<'_, &str, &str>,
+    addr_index: &mut redb::Table<'_, &str, &str>,
+    expiration_index: &mut redb::Table<'_, &str, &str>,
+    id: EventId,
+    predicate: impl FnOnce(&StoredEvent) -> bool,
+) -> Option<StoredEvent> {
+    let id_hex = id.to_hex();
+    let json = events
+        .get(id_hex.as_str())
+        .expect("redb: get event")?
+        .value()
+        .to_string();
+    let record: StoredEventRecord = serde_json::from_str(&json).expect("redb: decode stored event");
+    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+    let se = StoredEvent {
+        event,
+        provenance: Provenance {
+            seen: record.provenance,
+        },
+    };
+    if !predicate(&se) {
+        return None;
+    }
+
+    events.remove(id_hex.as_str()).expect("redb: remove event");
+
+    if let Some(addr_key) = address_key_for(&se.event) {
+        let addr_key_str = addr_key.to_redb_key();
+        let still_points_here = addr_index
+            .get(addr_key_str.as_str())
+            .expect("redb: get addr_index")
+            .map(|guard| guard.value().to_string())
+            == Some(id_hex.clone());
+        if still_points_here {
+            addr_index
+                .remove(addr_key_str.as_str())
+                .expect("redb: remove addr_index");
+        }
+    }
+
+    if let Some(ts) = se.event.tags.expiration().copied() {
+        let exp_key = expiration_key(ts, &id);
+        expiration_index
+            .remove(exp_key.as_str())
+            .expect("redb: remove expiration_index");
+    }
+
+    Some(se)
+}
+
+/// kind:5 processing (retraction-and-negative-deltas.md §2), run within the
+/// same write transaction that just stored the deleting event itself. For
+/// each `e`-tag id / `a`-tag coordinate: author-verify (immediately if the
+/// target is held or the coordinate carries its own pubkey; deferred via
+/// `tombstone_refuses` at the target's own future insert otherwise), write
+/// the PERMANENT tombstone, and drop the row if currently held. Returns
+/// every row actually dropped.
+#[allow(clippy::too_many_arguments)]
+fn process_kind5_deletions(
+    events: &mut redb::Table<'_, &str, &str>,
+    addr_index: &mut redb::Table<'_, &str, &str>,
+    tombstones: &mut redb::Table<'_, &str, &str>,
+    addr_tombstones: &mut redb::Table<'_, &str, &str>,
+    expiration_index: &mut redb::Table<'_, &str, &str>,
+    deleting: &Event,
+) -> Vec<StoredEvent> {
+    let mut deleted = Vec::new();
+    let deleting_id_hex = deleting.id.to_hex();
+    let deleting_author_hex = deleting.pubkey.to_hex();
+
+    let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
+    for target_id in target_ids {
+        if let Some(removed) =
+            remove_row_in_txn(events, addr_index, expiration_index, target_id, |se| {
+                se.event.pubkey == deleting.pubkey
+            })
+        {
+            deleted.push(removed);
+        }
+        // Tombstone recorded regardless of hold state right now -- a
+        // target not yet held is checked, deferred, by
+        // `tombstone_refuses` at the moment it actually arrives.
+        let record = TombstoneRecord {
+            deleting_event_id: deleting_id_hex.clone(),
+            deleting_author: deleting_author_hex.clone(),
+        };
+        let encoded = serde_json::to_string(&record).expect("redb: encode tombstone");
+        tombstones
+            .insert(target_id.to_hex().as_str(), encoded.as_str())
+            .expect("redb: insert tombstone");
+    }
+
+    let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
+    for coord in coords {
+        if coord.public_key != deleting.pubkey {
+            // NIP-09 author-only: a coordinate naming a pubkey other than
+            // this deletion's own author carries no authority at all here
+            // -- skip entirely, no tombstone recorded.
+            continue;
+        }
+        let Some(key) = address_key_for_coordinate(&coord) else {
+            continue;
+        };
+        let key_str = key.to_redb_key();
+
+        let existing_ceiling = addr_tombstones
+            .get(key_str.as_str())
+            .expect("redb: get addr tombstone")
+            .map(|guard| {
+                let rec: AddrTombstoneRecord =
+                    serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
+                rec.ceiling
+            });
+        let new_ceiling = deleting.created_at.as_secs();
+        if existing_ceiling.is_none_or(|ceiling| new_ceiling > ceiling) {
+            let record = AddrTombstoneRecord {
+                ceiling: new_ceiling,
+                deleting_event_id: deleting_id_hex.clone(),
+                deleting_author: deleting_author_hex.clone(),
+            };
+            let encoded = serde_json::to_string(&record).expect("redb: encode addr tombstone");
+            addr_tombstones
+                .insert(key_str.as_str(), encoded.as_str())
+                .expect("redb: insert addr tombstone");
+        }
+
+        let current_id_hex = addr_index
+            .get(key_str.as_str())
+            .expect("redb: get addr_index")
+            .map(|guard| guard.value().to_string());
+        if let Some(current_id_hex) = current_id_hex {
+            let current_id =
+                EventId::from_hex(&current_id_hex).expect("redb: decode addr_index id");
+            if let Some(removed) =
+                remove_row_in_txn(events, addr_index, expiration_index, current_id, |se| {
+                    se.event.created_at <= deleting.created_at
+                })
+            {
+                deleted.push(removed);
+            }
+        }
+    }
+
+    deleted
 }
 
 /// The `coverage` table's JSON value: the window-erased shape the row was
@@ -68,7 +302,7 @@ pub struct RedbStore {
 
 impl RedbStore {
     /// Open (creating if absent) a `redb` database file at `path`, ensuring
-    /// all three tables exist.
+    /// all six tables exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
         let write_txn = db.begin_write()?;
@@ -76,6 +310,9 @@ impl RedbStore {
             write_txn.open_table(EVENTS)?;
             write_txn.open_table(ADDR_INDEX)?;
             write_txn.open_table(COVERAGE)?;
+            write_txn.open_table(TOMBSTONES)?;
+            write_txn.open_table(ADDR_TOMBSTONES)?;
+            write_txn.open_table(EXPIRATION_INDEX)?;
         }
         write_txn.commit()?;
         Ok(Self { db })
@@ -110,6 +347,15 @@ impl EventStore for RedbStore {
             let mut addr_index = write_txn
                 .open_table(ADDR_INDEX)
                 .expect("redb: open addr_index");
+            let mut tombstones = write_txn
+                .open_table(TOMBSTONES)
+                .expect("redb: open tombstones");
+            let mut addr_tombstones = write_txn
+                .open_table(ADDR_TOMBSTONES)
+                .expect("redb: open addr_tombstones");
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .expect("redb: open expiration_index");
             let id_hex = event.id.to_hex();
 
             let existing_json = events
@@ -136,7 +382,12 @@ impl EventStore for RedbStore {
                 InsertOutcome::Duplicate {
                     provenance_grew: grew,
                 }
+            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event) {
+                // Tombstone check, AFTER dedup-by-id, BEFORE storage
+                // (retraction-and-negative-deltas.md §2).
+                InsertOutcome::Refused(RefuseReason::Tombstoned)
             } else {
+                let is_deletion = event.kind == Kind::EventDeletion;
                 let record = StoredEventRecord {
                     event_json: event.as_json(),
                     provenance: {
@@ -147,11 +398,17 @@ impl EventStore for RedbStore {
                 };
                 let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
 
-                match address_key_for(&event) {
+                let outcome = match address_key_for(&event) {
                     None => {
                         events
                             .insert(id_hex.as_str(), encoded.as_str())
                             .expect("redb: insert event");
+                        if let Some(ts) = event.tags.expiration().copied() {
+                            let exp_key = expiration_key(ts, &event.id);
+                            expiration_index
+                                .insert(exp_key.as_str(), id_hex.as_str())
+                                .expect("redb: insert expiration_index");
+                        }
                         InsertOutcome::Inserted
                     }
                     Some(addr_key) => {
@@ -169,6 +426,12 @@ impl EventStore for RedbStore {
                                 addr_index
                                     .insert(addr_key_str.as_str(), id_hex.as_str())
                                     .expect("redb: insert addr_index");
+                                if let Some(ts) = event.tags.expiration().copied() {
+                                    let exp_key = expiration_key(ts, &event.id);
+                                    expiration_index
+                                        .insert(exp_key.as_str(), id_hex.as_str())
+                                        .expect("redb: insert expiration_index");
+                                }
                                 InsertOutcome::Inserted
                             }
                             Some(current_id_hex) => {
@@ -194,12 +457,24 @@ impl EventStore for RedbStore {
                                     events
                                         .remove(current_id_hex.as_str())
                                         .expect("redb: remove superseded event");
+                                    if let Some(ts) = replaced.event.tags.expiration().copied() {
+                                        let exp_key = expiration_key(ts, &replaced.event.id);
+                                        expiration_index
+                                            .remove(exp_key.as_str())
+                                            .expect("redb: remove expiration_index");
+                                    }
                                     events
                                         .insert(id_hex.as_str(), encoded.as_str())
                                         .expect("redb: insert winning event");
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
                                         .expect("redb: update addr_index");
+                                    if let Some(ts) = event.tags.expiration().copied() {
+                                        let exp_key = expiration_key(ts, &event.id);
+                                        expiration_index
+                                            .insert(exp_key.as_str(), id_hex.as_str())
+                                            .expect("redb: insert expiration_index");
+                                    }
                                     InsertOutcome::Superseded {
                                         replaced: Box::new(replaced),
                                     }
@@ -209,6 +484,28 @@ impl EventStore for RedbStore {
                             }
                         }
                     }
+                };
+
+                // kind:5 has no replaceable/addressable address (M1's set
+                // excludes it), so `outcome` above is always `Inserted`
+                // here, by construction -- process its deletions now that
+                // the event itself is durably stored (re-servable, §2).
+                if is_deletion {
+                    if let InsertOutcome::Inserted = outcome {
+                        let deleted = process_kind5_deletions(
+                            &mut events,
+                            &mut addr_index,
+                            &mut tombstones,
+                            &mut addr_tombstones,
+                            &mut expiration_index,
+                            &event,
+                        );
+                        InsertOutcome::Kind5Processed { deleted }
+                    } else {
+                        outcome
+                    }
+                } else {
+                    outcome
                 }
             }
         };
@@ -245,74 +542,77 @@ impl EventStore for RedbStore {
             let mut addr_index = write_txn
                 .open_table(ADDR_INDEX)
                 .expect("redb: open addr_index");
-            let id_hex = id.to_hex();
-
-            let existing_json = events
-                .get(id_hex.as_str())
-                .expect("redb: get event")
-                .map(|guard| guard.value().to_string());
-
-            match existing_json {
-                None => None,
-                Some(json) => {
-                    let record: StoredEventRecord =
-                        serde_json::from_str(&json).expect("redb: decode stored event");
-                    let event =
-                        Event::from_json(&record.event_json).expect("redb: decode event json");
-
-                    events.remove(id_hex.as_str()).expect("redb: remove event");
-
-                    // Clear the address index too, but only if it still
-                    // points at the row we just removed.
-                    if let Some(addr_key) = address_key_for(&event) {
-                        let addr_key_str = addr_key.to_redb_key();
-                        let still_points_here = addr_index
-                            .get(addr_key_str.as_str())
-                            .expect("redb: get addr_index")
-                            .map(|guard| guard.value().to_string())
-                            == Some(id_hex.clone());
-                        if still_points_here {
-                            addr_index
-                                .remove(addr_key_str.as_str())
-                                .expect("redb: remove addr_index");
-                        }
-                    }
-
-                    Some(StoredEvent {
-                        event,
-                        provenance: Provenance {
-                            seen: record.provenance,
-                        },
-                    })
-                }
-            }
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .expect("redb: open expiration_index");
+            remove_row_in_txn(
+                &mut events,
+                &mut addr_index,
+                &mut expiration_index,
+                id,
+                |_| true,
+            )
         };
         write_txn.commit().expect("redb: commit remove");
         removed
     }
 
     fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
-        // Minimal seam (no persistent expiration index yet): read
-        // expiration straight off whatever `query` would return today, then
-        // remove each due row through the same `remove` door.
-        let due_ids: Vec<EventId> = self
-            .query(&Filter::new())
-            .into_iter()
-            .filter(|se| se.event.is_expired_at(&now))
-            .map(|se| se.event.id)
-            .collect();
+        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let removed = {
+            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
+            let mut addr_index = write_txn
+                .open_table(ADDR_INDEX)
+                .expect("redb: open addr_index");
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .expect("redb: open expiration_index");
 
-        due_ids
-            .into_iter()
-            .filter_map(|id| self.remove(id, RetractReason::Expired))
-            .collect()
+            let upper = expiration_key_upper_bound(now);
+            let due_ids: Vec<EventId> = expiration_index
+                .range::<&str>(..=upper.as_str())
+                .expect("redb: range expiration_index")
+                .map(|entry| {
+                    let (_key, value) = entry.expect("redb: read expiration_index entry");
+                    EventId::from_hex(value.value()).expect("redb: decode expiration_index id")
+                })
+                .collect();
+
+            due_ids
+                .into_iter()
+                .filter_map(|id| {
+                    remove_row_in_txn(
+                        &mut events,
+                        &mut addr_index,
+                        &mut expiration_index,
+                        id,
+                        |_| true,
+                    )
+                })
+                .collect()
+        };
+        write_txn.commit().expect("redb: commit expire_due");
+        removed
     }
 
     fn next_expiration(&self) -> Option<Timestamp> {
-        self.query(&Filter::new())
-            .into_iter()
-            .filter_map(|se| se.event.tags.expiration().copied())
-            .min()
+        let read_txn = self.db.begin_read().expect("redb: begin_read");
+        let expiration_index = read_txn
+            .open_table(EXPIRATION_INDEX)
+            .expect("redb: open expiration_index");
+        let (key, _value) = expiration_index
+            .first()
+            .expect("redb: first expiration_index")?;
+        let ts_str = key
+            .value()
+            .split(':')
+            .next()
+            .expect("expiration_index key always has a ts prefix");
+        Some(Timestamp::from(
+            ts_str
+                .parse::<u64>()
+                .expect("redb: parse expiration_index ts"),
+        ))
     }
 
     fn record_coverage(

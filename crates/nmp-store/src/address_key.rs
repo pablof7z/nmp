@@ -6,6 +6,7 @@
 
 use std::cmp::Ordering;
 
+use nostr::nips::nip01::Coordinate;
 use nostr::{Event, Kind, PublicKey};
 
 /// The replaceable/addressable competition key for an event, or `None` if
@@ -44,6 +45,27 @@ pub(crate) fn address_key_for(event: &Event) -> Option<AddressKey> {
     } else if is_addressable_kind(kind_num) {
         let d = event.tags.identifier().unwrap_or("").to_string();
         Some(AddressKey::Addressable(event.pubkey, event.kind, d))
+    } else {
+        None
+    }
+}
+
+/// Compute the address key a NIP-09 `a`-tag `coordinate` names, or `None` if
+/// its kind is neither replaceable nor addressable (a malformed/pointless
+/// `a`-tag: NIP-01 coordinates are only meaningful for those two kinds).
+/// Deliberately independent of any stored event's tags — an `a`-tag carries
+/// its own `(kind, pubkey, d-tag)` triple, which is exactly `AddressKey`'s
+/// shape, so this never needs to look anything up.
+pub(crate) fn address_key_for_coordinate(coord: &Coordinate) -> Option<AddressKey> {
+    let kind_num = coord.kind.as_u16();
+    if is_replaceable_kind(kind_num) {
+        Some(AddressKey::Replaceable(coord.public_key, coord.kind))
+    } else if is_addressable_kind(kind_num) {
+        Some(AddressKey::Addressable(
+            coord.public_key,
+            coord.kind,
+            coord.identifier.clone(),
+        ))
     } else {
         None
     }

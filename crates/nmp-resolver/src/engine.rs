@@ -407,11 +407,18 @@ impl<S: EventStore> Engine<S> {
         let mut changed: Vec<nostr::Event> = Vec::new();
         for (event, from) in events {
             match self.store.insert(event.clone(), from) {
-                InsertOutcome::Inserted | InsertOutcome::Superseded { .. } => changed.push(event),
+                InsertOutcome::Inserted
+                | InsertOutcome::Superseded { .. }
+                // A kind:5 event is itself a fresh, durably stored event
+                // like any `Inserted` one; the targets it additionally
+                // dropped (`deleted`) are not yet fed into the dirty-seed
+                // here -- that wiring is a separate #23 child (store
+                // door only, issue #28).
+                | InsertOutcome::Kind5Processed { .. } => changed.push(event),
                 // Never stored -- neither is "changed": a duplicate/stale
                 // event was already reflected in the store, and a refused
-                // event (already-expired, or future tombstoned) never
-                // entered it at all.
+                // event (already-expired, or tombstoned) never entered it
+                // at all.
                 InsertOutcome::Duplicate { .. }
                 | InsertOutcome::Stale
                 | InsertOutcome::Refused(_) => {}
