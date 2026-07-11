@@ -413,12 +413,14 @@ resurrection window (a relay replaying a deleted event after its tombstone was
 collected re-admits it). This is inherent Nostr tension, not introduced complexity —
 but it needs a policy.
 
-**Owner decision (one):** kind:5 policy at the door — confirm (a) deletion honored
-default-on, author-only, enforced inside `insert` (recommended: it is ledger-#1's
-"delete on insert through one door" made real), and (b) tombstone retention: permanent
-(recommended default — tombstones are ~40 bytes/deletion and deletions are rare; revisit
-only if a real replica proves otherwise) vs claim/time-bounded GC with the documented
-resurrection window.
+**Owner decision (RESOLVED 2026-07-11):** kind:5 policy at the door — (a) deletion is
+honored default-on, author-only, enforced inside `insert` (ledger-#1's "delete on insert
+through one door" made real), and (b) **tombstone retention is PERMANENT** — tombstones
+are ~40 bytes/deletion and deletions are rare, so no GC/resurrection window is
+introduced; the door refuses redelivered deleted events for the life of the replica.
+Revisit only if a real long-lived replica proves the growth matters (at which point the
+GC-bounded variant with a documented resurrection window is the fallback, not the
+default). Build accordingly: tombstones are a permanent durable table, not GC-claimed.
 
 Everything else in this design is derivable from settled principles (one door,
 replace-not-rebuild, D8, two nouns, ledger #5/#7) and carries no new app-facing
