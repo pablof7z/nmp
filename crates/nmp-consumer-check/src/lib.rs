@@ -23,10 +23,10 @@
 //!   ([`describe_snapshot`]/[`describe_relay`]/[`describe_coverage_entry`]) --
 //!   `DiagnosticsSnapshot`, `RelayDiagnosticsSnapshot`, `FilterCoverageEntry`,
 //!   `CoverageInterval` (the engine-global diagnostics watermark type
-//!   `FilterCoverageEntry.coverage` now carries -- the scoped, per-query
-//!   `AcquisitionEvidence` surface is a DISTINCT concept, deliberately never
-//!   named here since this proof only drives `observe_diagnostics`, never
-//!   `observe`), and `Lane` are each named as an explicit type, not just
+//!   `FilterCoverageEntry.coverage` now carries), and `Lane` are each named
+//!   explicitly. The distinct query-facing `AcquisitionEvidence` type is named
+//!   by [`describe_evidence`], so both halves of the read surface are closure-
+//!   checked from an `nmp`-only dependency rather than merely imported.
 //!   imported and left unused past one field read.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`

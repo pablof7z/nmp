@@ -213,8 +213,8 @@ pub enum Effect {
 /// the last-emitted row-id/evidence pair (so `EmitRows` fires only when
 /// something actually changed, not on every unrelated recompile).
 /// `AcquisitionEvidence` derives `PartialEq` precisely so this
-/// change-detection compare stays a plain value comparison, same shape as
-/// the old `QueryCoverage` one.
+/// change-detection compare stays a plain value comparison, as the former
+/// query-evidence aggregate's did.
 struct HandleState {
     _handle: QueryHandle,
     sink: Box<dyn RowSink>,

@@ -373,7 +373,7 @@ The rule, stated as the invariant it already almost is: **`record_coverage` merg
   in the proven window."
 - **Why GC shrinks but retraction doesn't** (the distinction that makes this sound):
   GC *forgets* an event the relay still legitimately serves — keeping the watermark
-  would let an authoritative-`CompleteUpTo` read omit rows that exist and are wanted,
+  would let retained source evidence omit rows that exist and are wanted,
   so `gc` shrinks the interval (coverage.rs `shrink_after_eviction`). A
   deleted/expired event is *invalid*, not forgotten — and the door **refuses
   re-admission** (tombstone check / expired-at-insert check), so a hypothetical

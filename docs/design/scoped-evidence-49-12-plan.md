@@ -1,9 +1,8 @@
 # Scoped acquisition evidence — #49 / #12 / #8 (evidence half)
 
-- **Status:** IMPLEMENTATION IN PROGRESS. U1/U2/U2.5 are implemented on the
-  #49/#12 branch; the cohesive Rust/FFI/Swift/Kotlin surface wave and its
-  falsifiers are being completed before the PR is proposed for merge. #43
-  step-5 frame.
+- **Status:** BUILT AND PR-READY on #77. The cohesive Rust/FFI/Swift/Kotlin
+  evidence wave, native mapping falsifiers, and scoped correctness proofs are
+  complete pending review/merge. #43 step-5 frame.
 - **Scope:** Replace the engine-global `QueryCoverage::CompleteUpTo | Unknown`
   query-result value with **rows + compact, per-current-plan acquisition
   evidence**; fix derived-query coverage to account for interior atoms (#12);
@@ -263,8 +262,8 @@ in one PR):**
   `EmitRows(HandleId, Vec<RowDelta>, AcquisitionEvidence)`;
   `HandleState.last_coverage` → `last_evidence` (the change-detection compare at
   `mod.rs:1482` must compare evidence values — derive `PartialEq`).
-- FFI: `FfiCoverage` → `FfiAcquisitionEvidence` (+ `FfiSourceAcquisition`,
-  `FfiSourceState`, `FfiAuthPhase`, `FfiShortfallFact`); `coverage_to_ffi` →
+- FFI: `FfiCoverage` → `FfiAcquisitionEvidence` (+ `FfiSourceEvidence`,
+  `FfiSourceStatus`, `FfiAuthPhase`, `FfiShortfallFact`); `coverage_to_ffi` →
   `evidence_to_ffi`; `on_batch` signature; Swift/Kotlin regenerated.
 
 **Retained (the diagnostics surface — this is allowed and required):**

@@ -42,8 +42,8 @@ pub struct ConcreteFilter {
 /// collision construction, not just accidental clashes. A 64-bit hash
 /// (the previous implementation used FNV-1a) is offline-constructible by a
 /// determined attacker; the consequence for `CoverageKey` specifically is a
-/// forged `CompleteUpTo` watermark — a false authoritative-empty — which
-/// erodes the crown-jewel coverage guarantee. BLAKE3 was chosen over
+/// forged association between a filter and another filter's persisted
+/// source evidence. BLAKE3 was chosen over
 /// SHA-256 for its performance (this hash is computed on every atom
 /// resolve, not just at rest) with no less cryptographic assurance for this
 /// use case (content-addressing, not password hashing).
