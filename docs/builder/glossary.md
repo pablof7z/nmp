@@ -8,6 +8,11 @@
   NIP, another protocol specification, or the application that defines it.
 - **Filter:** the NIP-01 selection value used in `REQ`, including ids, authors,
   kinds, tags, time bounds, limit, and optional extensions.
+- **Indexed tag name:** the one case-sensitive ASCII letter after `#` in a
+  generic NIP-01 filter key. All 52 letters are valid; multi-character and
+  non-letter event tag names are not generic indexed filter keys.
+- **Event tag name:** the arbitrary string in the first position of an event
+  tag. It is event data, not a member of a core whitelist.
 - **Relay:** a WebSocket server that accepts Nostr protocol messages and may
   store/serve events.
 - **REQ / CLOSE:** NIP-01 wire messages that open and close relay
@@ -36,19 +41,25 @@
 - **Selection:** a Nostr filter whose set-valued fields may contain bindings.
 - **Binding:** `Literal | Reactive(CurrentPubkey) | Derived | SetOp`, the closed
   grammar for a selection field's value.
-- **Selector:** `Authors | Ids | Tag(char) | AddressCoord`, the closed
-  projection vocabulary used by `Derived`.
+- **Derived:** a binding whose explicit inner `Demand` produces values through
+  a closed selector. The inner demand has its own source/access context and
+  never implicitly inherits the outer demand's context.
+- **Selector:** `Authors | Ids | Tag(EventTagName) | AddressCoord`, the closed
+  projection vocabulary used by `Derived`. Tag projection accepts arbitrary
+  event tag names; it is not limited to indexed filter keys.
 - **Source authority:** a typed value saying which routing facts may acquire a
   selection. It is not a raw relay override.
 - **Access context:** typed identity/visibility context that may change a
   source's answer.
 - **Query snapshot:** current canonical local rows plus cache, acquisition, and
   shortfall evidence for one descriptor revision.
-- **Acquisition evidence:** compact facts about currently planned sources, such
-  as connecting, AUTH-blocked, EOSE-observed, reconciled, disconnected, or
-  error.
-- **Shortfall:** explicit intended work NMP could not perform because a source,
-  route fact, access requirement, or local limit prevented it.
+- **Source acquisition:** one planned relay's durable
+  `reconciledThrough` watermark (if any) plus its orthogonal current status,
+  such as requesting, connecting, disconnected, awaiting AUTH, denied, or
+  error. A disconnected source can still carry prior watermark evidence.
+- **Shortfall:** explicit demand with no covering source candidate, including
+  the zero-atom/zero-source case, or an engine-imposed local limit that prevented
+  intended work.
 - **Watermark:** persisted reconciliation evidence for one source/filter window,
   never a global-completeness claim.
 - **Write intent:** an immutable draft plus durability, typed context, and an

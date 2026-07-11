@@ -27,6 +27,11 @@ the NIP-29 fields and authority it contributes.
 
 The originating module remains the draft's schema owner.
 
+Dependencies do not transfer ownership either. An NIP-29 module may depend on
+NIP-51 and compose typed kind `10009` Simple-group entries into NIP-29 group
+references. NIP-51 remains unaware of NIP-29 and exclusively owns the `10009`
+schema; NIP-29 claims neither `10009` nor generic kind `30002` relay sets.
+
 ## Return closed values
 
 Module APIs may return:
@@ -44,11 +49,16 @@ If a module needs a new grammar node, propose a public closed vocabulary change
 with defined hashing, equality, persistence, diagnostics, and Rust/Swift/Kotlin
 projection. Do not hide the missing concept in an opaque extension payload.
 
-## Make authority unforgeable
+## Distinguish public protocol context from private authority
 
-A protocol-host or private-inbox authority cannot be a public constructor over
-arbitrary relay URLs. The module mints an opaque value only after validating the
-protocol reference and its source facts.
+A public protocol may make one host relay part of an object's identity. A
+NIP-29 constructor can therefore accept `(groupId, hostRelay)` and return an
+opaque group context. That typed parameter is not a generic relay list and
+cannot be reused to route unrelated traffic.
+
+Private-inbox or recipient authority is stricter: it cannot be a public
+constructor over arbitrary relay URLs. The owning module or engine mints it only
+from verified recipient/source facts.
 
 Core can inspect the value's reason and relay constraints without giving app
 code a raw widen operation. Diagnostics shows the module/context that produced
@@ -78,15 +88,21 @@ An upload failure, draft-validation failure, AUTH failure, signer denial,
 acceptance failure, and relay rejection are different facts. A module maps only
 the failures it owns and preserves core receipt/source evidence for the rest.
 
-## Package without registration framework
+## Assemble static claims without a registration framework
 
-Module presence is a build/dependency choice. Enabling it must not require app
-startup registration, a global module container, navigation hooks, or scene
-callbacks.
+Module presence is a build/dependency choice. The one app/platform composition
+root passes each enabled module's immutable `ModuleRegistration` claims into
+engine construction. The router depends on the shared claim vocabulary, never
+on concrete module crates.
+
+This static list is not a callback registry or global module container. Modules
+perform no startup work and require no navigation, scene, or application
+lifecycle hooks.
 
 Rust crates/features and SwiftPM/Gradle products may differ mechanically, but
 they project one semantic module over the canonical facade. Disabling the module
-removes its code and semantic API without changing core behavior.
+removes its code, semantic API, and claims while leaving the raw core facade
+usable.
 
 ## Required falsifiers
 

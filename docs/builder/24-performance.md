@@ -1,10 +1,5 @@
 # Cost, coalescing, and boundedness
 
-**Status: CURRENT + TARGET.** Refcounted demand, safe wire coalescing, router
-caps, Swift newest-frame delivery, and latest-wins diagnostics are built. The
-cross-platform/end-to-end boundedness and shortfall contract is still target
-work.
-
 After this chapter you will know what an observation costs, when demand can
 share, and how NMP reports a limit without silently changing the query.
 
@@ -22,9 +17,8 @@ core remains usable without a preferred content module.
 
 ## Sharing follows semantic compatibility
 
-Current refcounting shares identical filters, and the router may widen filters
-only under a proved rule such as author union. The target semantic descriptor
-is broader:
+NMP may refcount identical demand and widen wire filters only under a proved
+rule such as author union. The semantic descriptor is:
 
 ```text
 Demand = Selection + SourceAuthority + AccessContext
@@ -41,20 +35,15 @@ deduplication, coalescing, reference counts, and last-observer teardown.
 
 ## Latest-state delivery is bounded
 
-Swift's current `RowBridge` incorporates every delta into the latest local
-state, then frame-coalesces delivery and buffers only the newest snapshot. The
-app does not need to implement its own debounce to prevent historical replay
-from building a render backlog.
+Every platform projection incorporates engine mutations into the latest local
+state, then bounds observer delivery to the newest snapshot. The app does not
+need to implement its own debounce to prevent historical replay from building a
+render backlog.
 
 Skipping an intermediate query or diagnostic frame is safe because the next
 frame supersedes it and contains the newest complete local state. It would not
 be safe to drop a durable receipt fact unless that fact was already persisted
-and replayable, which is why receipt durability is part of the target contract.
-
-The remaining gap is below the platform adapters: current Rust row/receipt
-channels and transport ingestion are not yet one end-to-end bounded system.
-The JVM Kotlin projection already uses `Flow.conflate()` for newest-state
-delivery; that does not by itself close the engine-wide contract.
+and replayable, which is why receipt durability is a separate contract.
 
 ## Limits must be explicit
 
@@ -95,6 +84,9 @@ without a module-registration lifecycle in the app.
 
 The performance rule is the correctness rule: bound work explicitly, coalesce
 only superseded state, and expose every semantic shortfall.
+
+See [Current implementation status](03-status-map.md) for the bounds proven by
+the shipping projections today.
 
 ---
 

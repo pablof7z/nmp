@@ -22,8 +22,9 @@ struct NMPQuerySnapshot {
 - `cache` identifies the local revision and retained provenance represented.
 - `acquisition` reports compact facts for currently planned sources and access
   contexts.
-- `shortfall` reports intended work that a source failure, AUTH requirement,
-  cap, or local limit prevented.
+- `shortfall` reports demand atoms with no covering source and local limits that
+  prevented intended acquisition. A planned source's connection or AUTH state
+  remains a source-status fact instead.
 
 Exact wire filters, counters, compiler lanes, and history remain in diagnostics.
 

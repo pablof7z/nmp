@@ -33,8 +33,9 @@ repository today?
 | Canonical Rust product facade | facade work is landing in units; FFI/demo/parity/governance remain | [#52](https://github.com/pablof7z/nmp/issues/52) |
 | Durable acceptance and pending row | current writes are not yet one crash-atomic row + obligation + receipt boundary | [#2](https://github.com/pablof7z/nmp/issues/2), [#3](https://github.com/pablof7z/nmp/issues/3) |
 | Signer lifecycle | default/override pinning, provider reattachment, and platform vaults remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#6](https://github.com/pablof7z/nmp/issues/6) |
-| Query descriptor/evidence | public query is still filter-centric and exposes aggregate coverage rather than full source/access evidence | [#49](https://github.com/pablof7z/nmp/issues/49), [#12](https://github.com/pablof7z/nmp/issues/12) |
-| Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped | [#45](https://github.com/pablof7z/nmp/issues/45) |
+| Query descriptor/evidence | public query is still filter-centric; nested `Derived` nodes cannot state independent source/access context; output exposes aggregate coverage rather than full contextual evidence | [#49](https://github.com/pablof7z/nmp/issues/49), [#12](https://github.com/pablof7z/nmp/issues/12) |
+| Tag grammar | current `TagName(char)` conflates arbitrary event/projection names with indexed single-letter filter keys and retains a whitelist | [#64](https://github.com/pablof7z/nmp/issues/64) |
+| Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
 | Diagnostics | raw connection, AUTH, retry, error, and limit evidence remains incomplete | [#51](https://github.com/pablof7z/nmp/issues/51) |
 | Shared-cache logout | explicit destructive engine reset remains | [#53](https://github.com/pablof7z/nmp/issues/53) |
@@ -48,6 +49,8 @@ The umbrella ordering and design-signoff trail live in
 | Concept | Current repository surface | Provisional North Star |
 |---|---|---|
 | Query identity | `LiveQuery(Filter<Binding>)` | selection + source authority + access context |
+| Nested derived query | `Derived(inner: Filter)` has selection only | explicit inner demand with independent source/access context |
+| Tag names | one whitelisted `char` type is shared by filters and projections | all 52 indexed single-letter keys plus arbitrary event/projection tag names |
 | Query output | row deltas/current rows plus aggregate `Coverage` | snapshot rows + cache/acquisition/shortfall evidence |
 | Current identity | `setActiveAccount` couples current pubkey and local signer selection | current-pubkey input plus registered providers and per-write override |
 | Accepted write | in-memory pending bookkeeping | crash-atomic obligation, receipt, and canonical pending row |
@@ -61,14 +64,14 @@ relay facts.
 
 ## Runnable evidence
 
-- [`apps/Falsifier`](../../apps/Falsifier) is the iOS library-vs-framework
+- [apps/Falsifier](https://github.com/pablof7z/nmp/tree/master/apps/Falsifier) is the iOS library-vs-framework
   falsifier and permanent diagnostics screen.
-- [`crates/nmp-demo`](../../crates/nmp-demo) exercises the current direct-Rust
+- [crates/nmp-demo](https://github.com/pablof7z/nmp/tree/master/crates/nmp-demo) exercises the current direct-Rust
   path.
-- [`Packages/NMP`](../../Packages/NMP) is the Swift package.
-- [`Packages/NMPKotlin`](../../Packages/NMPKotlin) is the desktop-JVM Flow
+- [Packages/NMP](https://github.com/pablof7z/nmp/tree/master/Packages/NMP) is the Swift package.
+- [Packages/NMPKotlin](https://github.com/pablof7z/nmp/tree/master/Packages/NMPKotlin) is the desktop-JVM Flow
   projection.
-- [`features/`](../../features) contains executable current behavior plus
+- [features](https://github.com/pablof7z/nmp/tree/master/features) contains executable current behavior plus
   `@wip` target scenarios.
 
 For terminology, use the [glossary](glossary.md). For the imagined product,

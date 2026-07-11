@@ -22,12 +22,18 @@ An app-owned index event names record ids in `e` tags:
 
 ```text
 outer.ids = Derived(
-  inner: kinds:[appIndexKind], authors:[CurrentPubkey],
+  inner: Demand {
+    selection: kinds:[appIndexKind], authors:[CurrentPubkey],
+    source: AuthorOutboxes,
+    access: Public
+  },
   project: Tag(e)
 )
 ```
 
-The engine owns the expanded ids and incremental demand repair.
+The engine owns the expanded ids and incremental demand repair. The inner
+index demand carries its own source/access context rather than inheriting the
+outer observation's context.
 
 ## 3. Multi-account addressed data
 
@@ -54,12 +60,15 @@ and presentation. Core owns neither a home feed nor kind:1 preference.
 ## 5. NIP-29 group management
 
 ```swift
-let groups = nip29.observeMyGroups(using: engine)
+let groups = nip29.observeRememberedGroups(using: engine)
 let receipt = try group.makeAdmin(pubkey, using: engine)
 ```
 
-NIP-29 owns its exact group metadata, membership, role, and moderation schemas,
-reconstruction, host authority, and semantic operations.
+The remembered group/host list is NIP-51 kind `10009`: NIP-51 owns that schema
+and codec, while NIP-29 composes its typed entries into group references. NIP-29
+owns only its exact group metadata, membership, role, and moderation schemas,
+reconstruction, host authority, and semantic operations. It claims neither
+kind `10009` nor generic NIP-51 relay sets such as kind `30002`.
 
 ## 6. NIP-68 photo in a NIP-29 group
 

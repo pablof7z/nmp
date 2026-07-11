@@ -107,8 +107,10 @@ Inbound events pass the transport verification boundary and canonical store.
 Dedup merges provenance; replaceable/delete/expiry rules decide current rows.
 
 Wire coalescing may deliberately overfetch. Before a row reaches one query,
-NMP matches it against that descriptor's original selection and access rules.
-Widen on the wire, exact at local delivery.
+NMP matches it against that descriptor's original selection. Access context
+remains attached to acquisition planning and evidence; after validation it does
+not hide a matching row in the engine's shared local trust domain. Widen on the
+wire, exact at local selection.
 
 ## Worked shape
 
@@ -116,17 +118,22 @@ An app-owned derived index might resolve from:
 
 ```text
 ids := Derived(
-  inner: kinds:[appIndexKind], authors:[CurrentPubkey],
+  inner: Demand {
+    selection: kinds:[appIndexKind], authors:[CurrentPubkey],
+    source: AuthorOutboxes,
+    access: Public
+  },
   project: Tag(e)
 )
-source := AuthorOutboxes
-access := Public
+outer.source := AuthorOutboxes
+outer.access := Public
 ```
 
 Diagnostics can show the inner expansion, projected ids, author-outbox source
 facts, selected relays, exact coalesced filters, received counts, per-source
 EOSE/watermarks, and any uncovered shortfall. The app never holds the projected
-id set or relay grouping.
+id set or relay grouping. Inner and outer source/access facts remain distinct;
+neither demand silently inherits the other's context.
 
 ## What to inspect when rows are missing
 

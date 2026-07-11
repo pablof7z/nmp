@@ -8,17 +8,28 @@ closed bindings rather than fixed literals.
 ```text
 Binding = Literal(set)
         | Reactive(CurrentPubkey)
-        | Derived(inner: Filter, project: Selector)
+        | Derived(inner: Demand, project: Selector)
         | SetOp(Union | Intersect | Diff, [Binding])
 
-Selector = Authors | Ids | Tag(char) | AddressCoord
+Selector = Authors | Ids | Tag(EventTagName) | AddressCoord
+
+IndexedTagName = exactly one ASCII letter, A-Z or a-z
+EventTagName   = an arbitrary Nostr tag-name string
 ```
 
 Every node is serializable, hashable, comparable, printable, and available to
 diagnostics. There are no app closures in the grammar.
 
-The exact public constructors may change. The four-case algebra and closed
-selector vocabulary are the contract.
+The exact public constructors may change. The four-case algebra, explicit
+context for every nested demand, and closed selector vocabulary are the
+contract.
+
+Filter tag keys and event tag names are different types. NIP-01 generic
+`#<tag>` filters index exactly one case-sensitive ASCII letter; all 52 letters
+are valid. Event tag names are arbitrary strings, so values such as `alt`, `-`,
+or an application-defined name are valid event data and valid projection keys
+even though they are not generic wire-filter keys. NMP has no whitelist of
+blessed tag names.
 
 ## Literal: fixed app demand
 
@@ -58,12 +69,18 @@ Suppose an app-owned index event contains `e` tags naming the records the app
 should observe. The app declares the relationship once:
 
 ```swift
+let indexDemand = NMPDemand(
+    selection: NMPFilter(
+        kinds: .literal([appIndexKind]),
+        authors: .reactive(.currentPubkey)
+    ),
+    source: .authorOutboxes,
+    access: .public
+)
+
 let selectedRecords = NMPFilter(
     ids: .derived(
-        inner: NMPFilter(
-            kinds: .literal([appIndexKind]),
-            authors: .reactive(.currentPubkey)
-        ),
+        inner: indexDemand,
         project: .tag("e")
     )
 )
@@ -74,7 +91,10 @@ demand for newly named records, withdraws records no longer named, preserves
 shared demand, and updates the existing observation handle.
 
 The app never owns the expanded id set or watches the inner kind to reopen
-network subscriptions.
+network subscriptions. The inner demand names its own source and access
+context. It never implicitly inherits those values from the outer observation.
+That prevents, for example, an inner user-list query from accidentally running
+through an outer group host or borrowing its AUTH evidence.
 
 `Derived` may feed any compatible set-valued field:
 
@@ -110,9 +130,13 @@ func recordsNamedByCurrentUser(
     indexKind: UInt16
 ) -> NMPBinding<EventId> {
     .derived(
-        inner: NMPFilter(
-            kinds: .literal([indexKind]),
-            authors: .reactive(.currentPubkey)
+        inner: NMPDemand(
+            selection: NMPFilter(
+                kinds: .literal([indexKind]),
+                authors: .reactive(.currentPubkey)
+            ),
+            source: .authorOutboxes,
+            access: .public
         ),
         project: .tag("e")
     )
@@ -124,8 +148,9 @@ Diagnostics prints the expansion. The helper owns no subscription, cache, or
 lifecycle.
 
 NIP-02 may similarly expose `myFollows()` as a module-owned convenience that
-expands to a kind:3 contact-list projection. That does not make a follows-based
-feed or kind:1 a core feature.
+expands to a kind:3 contact-list projection with its own user-list source and
+access context. That does not make a follows-based feed or kind:1 a core
+feature.
 
 ## Selection is not the whole descriptor
 
@@ -145,9 +170,9 @@ let authenticatedDemand = NMPDemand(
 )
 ```
 
-`group.sourceAuthority` is an opaque, validated value minted by the NIP-29
-module. The app cannot manufacture protocol-host authority from an arbitrary
-relay URL.
+`group.sourceAuthority` is an opaque value scoped by the NIP-29 module to one
+typed group/host context. The app may supply that protocol-defined public host;
+it cannot turn the relay URL into generic authority for unrelated demand.
 
 NMP may share local selection matching. It may share wire work and acquisition
 evidence only where the full context makes sharing valid.
