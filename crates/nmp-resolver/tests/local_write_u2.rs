@@ -13,10 +13,12 @@
 //! classification and the emitted `DemandDelta` + `Metrics` witness
 //! (`atoms_opened + atoms_closed == |symmetric diff|`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, Selector};
-use nmp_resolver::testkit::{accept_write_of, kind3, Harness};
+use nmp_grammar::{
+    Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, IndexedTagName, Selector,
+};
+use nmp_resolver::testkit::{accept_write_of, deletion, kind3, Harness};
 use nmp_resolver::LiveQuery;
 use nmp_store::AcceptOutcome;
 use nostr::Keys;
@@ -28,6 +30,19 @@ fn cf_kinds_authors(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
     ConcreteFilter {
         kinds: Some(kinds.iter().copied().collect()),
         authors: Some(authors.iter().map(|s| s.to_string()).collect()),
+        ..ConcreteFilter::default()
+    }
+}
+
+fn cf_kinds_tag(kinds: &[u16], tag: char, values: &[&str]) -> ConcreteFilter {
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        IndexedTagName::new(tag).unwrap(),
+        values.iter().map(|s| s.to_string()).collect(),
+    );
+    ConcreteFilter {
+        kinds: Some(kinds.iter().copied().collect()),
+        tags,
         ..ConcreteFilter::default()
     }
 }
@@ -45,6 +60,33 @@ fn my_follows_filter() -> Filter {
             },
             project: Selector::Tag("p".to_string()),
         }))),
+        ..Filter::default()
+    }
+}
+
+/// `kinds:[1], #e := Derived(inner=(kinds:[5], authors:[Reactive]),
+/// project=Tag(e))` — "notes e-tagging the things I've deleted". The inner
+/// resolves to the active pubkey's OWN kind:5 deletions; projecting their
+/// `e` tags binds each deleted event id into an `#e` atom. Used to make the
+/// kind:5 deletion row's entry into `inserted` observable at the demand
+/// level (when a local kind:5 lands, this Derived opens an atom for its
+/// e-tagged target).
+fn deletions_by_etag_filter() -> Filter {
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        IndexedTagName::new('e').unwrap(),
+        Binding::Derived(Box::new(Derived {
+            inner: Filter {
+                kinds: Some(BTreeSet::from([5u16])),
+                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                ..Filter::default()
+            },
+            project: Selector::Tag("e".to_string()),
+        })),
+    );
+    Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        tags,
         ..Filter::default()
     }
 }
@@ -312,5 +354,93 @@ fn duplicate_local_accept_yields_empty_delta() {
         after.recompute_passes - before.recompute_passes,
         0,
         "a Duplicate accept triggers no recompute pass"
+    );
+}
+
+// ---- 5. a local kind:5 is Kind5Processed: row -> inserted, hidden -------
+//         targets -> removed, in ONE react ---------------------------------
+
+/// The load-bearing `Kind5Processed` arm. TWO live queries observe a single
+/// local deletion accept from both sides at once:
+///
+/// - `my_follows` (kind:3 `Derived`) currently resolves to {b, c} from a
+///   pending local kind:3. When the kind:5 hides that kind:3, the hidden
+///   target enters `react`'s `removed`, the inner re-resolves to empty, and
+///   the follow atoms b/c CLOSE.
+/// - `deletions_by_etag` (kind:5 `Derived`) sees the pending kind:5 row enter
+///   `react`'s `inserted` and OPENS an `#e` atom for the deleted id.
+///
+/// Both happen in ONE `react` (one recompute pass), proving `accept_local`
+/// feeds the `Kind5Processed { row, hidden }` outcome's row into `inserted`
+/// and its hidden targets into `removed` symmetrically — the §1 negative-
+/// delta lane for a local deletion, with the `Metrics` witness holding.
+#[test]
+fn local_kind5_processed_inserts_row_and_removes_hidden_targets_in_one_react() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_h_follows, _d1) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_h_dels, _d2) = h.subscribe(LiveQuery(deletions_by_etag_filter()));
+
+    // A pending local kind:3 => my_follows resolves to {b, c}.
+    let follow_list = kind3(&a, &[b.public_key(), c.public_key()], 100);
+    let follow_list_id = follow_list.id;
+    let (outcome1, _d) = h.accept(accept_write_of(follow_list, 100));
+    assert!(matches!(outcome1, AcceptOutcome::Inserted { .. }));
+
+    let atom_b = cf_kinds_authors(&[1], &[&b.public_key().to_hex()]);
+    let atom_c = cf_kinds_authors(&[1], &[&c.public_key().to_hex()]);
+    let deleted_atom = cf_kinds_tag(&[1], 'e', &[&follow_list_id.to_hex()]);
+    assert!(h.demand().contains(&atom_b) && h.demand().contains(&atom_c));
+    assert!(
+        !h.demand().contains(&deleted_atom),
+        "no deletion yet: the e-tag atom is not open"
+    );
+
+    // A local kind:5 deleting that kind:3 => Kind5Processed.
+    let before = h.metrics();
+    let (outcome2, delta) = h.accept(accept_write_of(deletion(&a, &[follow_list_id], 101), 101));
+
+    assert!(
+        matches!(outcome2, AcceptOutcome::Kind5Processed { .. }),
+        "a local kind:5 deletion is Kind5Processed -- got {outcome2:?}"
+    );
+    // Hidden target (kind:3) entered `removed`: the follow atoms close.
+    assert_eq!(
+        closed(&delta),
+        BTreeSet::from([atom_b.clone(), atom_c.clone()]),
+        "the hidden kind:3's suppression closes the follow atoms b,c (removed side)"
+    );
+    // Deletion row (kind:5) entered `inserted`: the e-tag atom opens.
+    assert_eq!(
+        opened(&delta),
+        BTreeSet::from([deleted_atom.clone()]),
+        "the pending kind:5 row opens the deletions-by-e-tag atom (inserted side)"
+    );
+
+    let after = h.metrics();
+    assert_eq!(
+        after.recompute_passes - before.recompute_passes,
+        1,
+        "insertion AND suppression-removal ride ONE react pass, not two"
+    );
+    // Witness: opened + closed == |symmetric diff| == {deleted_id opened} + {b,c closed} == 3.
+    assert_eq!(
+        (after.atoms_opened - before.atoms_opened) + (after.atoms_closed - before.atoms_closed),
+        3,
+        "witness: opened + closed == |symmetric diff|"
+    );
+
+    let demand = h.demand();
+    assert!(
+        !demand.contains(&atom_b) && !demand.contains(&atom_c),
+        "the deleted follow list's members are gone from demand"
+    );
+    assert!(
+        demand.contains(&deleted_atom),
+        "the deletion is query-visible: its e-tag atom is open"
     );
 }
