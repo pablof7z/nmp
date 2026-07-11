@@ -1174,15 +1174,32 @@ fn reinsert_stashed_in_txn(
             provenance.merge_observation(&RelayObserved::new(relay.clone(), *at));
         }
         let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
-        let mut result_event = se.event.clone();
         if let Some(stashed_local) = &se.provenance.local {
+            // codex-nova ruling (cross-door reachability finding): a row
+            // with NO local provenance at all is purely relay-observed --
+            // its `event_json`'s signature is by construction already
+            // real, never a sentinel -- so it counts as "already signed"
+            // exactly like a locally-owned row whose own `sig_state` is
+            // `Signed` (the SAME rule `accept_write`'s `already_signed`
+            // and `insert`'s dedup branch already apply). `unwrap_or(true)`,
+            // NOT `is_some_and` defaulting to `false` -- getting this
+            // backwards here specifically meant a relay-confirmed row
+            // restored from a stash collision never told the stash's own
+            // owner it was safe to stop waiting.
             let existing_signed = provenance
                 .local
                 .as_ref()
-                .is_some_and(|l| l.sig_state == SigState::Signed);
+                .map(|l| l.sig_state == SigState::Signed)
+                .unwrap_or(true);
             let stashed_signed = stashed_local.sig_state == SigState::Signed;
             if !existing_signed && stashed_signed {
-                result_event.sig = se.event.sig;
+                // Adopt the stash's real signature onto the record's OWN
+                // event bytes (NIP-01 id never depends on `sig`, so this
+                // is a pure value update, no id churn).
+                let mut adopted =
+                    Event::from_json(&record.event_json).expect("redb: decode event json");
+                adopted.sig = se.event.sig;
+                record.event_json = adopted.as_json();
             }
             let mut owners = provenance
                 .local
@@ -1199,20 +1216,26 @@ fn reinsert_stashed_in_txn(
                     SigState::Pending
                 },
             });
-            if result_signed && !existing_signed {
+            // Fan out whenever the RESULT is Signed, regardless of which
+            // side already held the real signature -- `fan_out_signed_in_
+            // txn` itself is idempotent per owner (it only transitions an
+            // owner whose OWN journal is still `Pending`), so this is
+            // always safe, and it is the ONLY way the STASH's own
+            // owner(s) ever learn that a row which was ALREADY signed on
+            // the live/relay side is done waiting on them.
+            if result_signed {
                 fan_out_owners = Some(owners);
             }
         }
         record.provenance = provenance.seen.clone();
         record.local = provenance.local.clone();
-        if fan_out_owners.is_some() {
-            record.event_json = result_event.as_json();
-        }
         let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
         events
             .insert(id_hex.as_str(), encoded.as_str())
             .map_err(persist_err)?;
         if let Some(owners) = &fan_out_owners {
+            let canonical_event =
+                Event::from_json(&record.event_json).expect("redb: decode event json");
             fan_out_signed_in_txn(
                 events,
                 addr_index,
@@ -1228,7 +1251,7 @@ fn reinsert_stashed_in_txn(
                 outbox_suppress_by_id,
                 outbox_suppress_by_addr,
                 owners,
-                &result_event,
+                &canonical_event,
             )?;
         }
         let event = Event::from_json(&record.event_json).expect("redb: decode event json");
