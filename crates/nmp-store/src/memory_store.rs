@@ -786,11 +786,14 @@ impl EventStore for MemoryStore {
                     fan_out = Some((local.owners.clone(), existing.event.clone()));
                 }
             }
-            if let Some((owners, canonical)) = fan_out {
-                self.fan_out_signed(&owners, &canonical);
-            }
+            let satisfied_intents = if let Some((owners, canonical)) = fan_out {
+                self.fan_out_signed(&owners, &canonical)
+            } else {
+                Vec::new()
+            };
             return InsertOutcome::Duplicate {
                 provenance_grew: grew,
+                satisfied_intents,
             };
         }
 
