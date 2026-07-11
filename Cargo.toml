@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/nmp-grammar",
+    "crates/nmp-ownership",
     "crates/nmp-store",
     "crates/nmp-resolver",
     "crates/nmp-router",
@@ -28,6 +29,7 @@ nostr = "0.44.4"
 # watermark key -- a forged collision there would forge a `CompleteUpTo`).
 blake3 = "1"
 nmp-grammar = { path = "crates/nmp-grammar" }
+nmp-ownership = { path = "crates/nmp-ownership" }
 nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
 nmp-router = { path = "crates/nmp-router" }
