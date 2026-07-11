@@ -13,6 +13,8 @@
 //! `RedbStore`; recovery/atomicity tests that specifically need a durable
 //! reopen are `RedbStore`-only.
 
+use std::collections::BTreeSet;
+
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, EventStore,
     InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState,
@@ -1294,7 +1296,8 @@ fn first_arrival_while_suppressed_is_retained_deduped_and_revealed_on_cancel() {
         assert!(matches!(
             second,
             InsertOutcome::Duplicate {
-                provenance_grew: true
+                provenance_grew: true,
+                ..
             }
         ));
         assert!(store.query(&Filter::new().id(target_id)).is_empty());
@@ -2767,12 +2770,16 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
             signed_a.clone(),
             RelayObserved::new(relay, Timestamp::from(100)),
         );
-        assert!(matches!(
-            insert_outcome,
+        match insert_outcome {
             InsertOutcome::Duplicate {
-                provenance_grew: true
-            }
-        ));
+                provenance_grew: true,
+                satisfied_intents,
+            } => assert_eq!(
+                satisfied_intents.into_iter().collect::<BTreeSet<_>>(),
+                BTreeSet::from([intent_a, intent_b])
+            ),
+            other => panic!("expected signed duplicate adoption, got {other:?}"),
+        }
 
         // The row must now carry the real signature and be Signed.
         let rows = store.query(&Filter::new().id(frozen_id));

@@ -286,7 +286,8 @@ fn provenance_merges_across_relays() {
         assert_eq!(
             store.insert(e, observed("wss://b", 20)),
             InsertOutcome::Duplicate {
-                provenance_grew: true
+                provenance_grew: true,
+                satisfied_intents: Vec::new(),
             }
         );
 
@@ -308,19 +309,22 @@ fn provenance_does_not_grow_on_earlier_or_equal_redelivery_from_same_relay() {
         assert_eq!(
             store.insert(e.clone(), observed("wss://a", 10)),
             InsertOutcome::Duplicate {
-                provenance_grew: false
+                provenance_grew: false,
+                satisfied_intents: Vec::new(),
             }
         );
         assert_eq!(
             store.insert(e.clone(), observed("wss://a", 5)),
             InsertOutcome::Duplicate {
-                provenance_grew: false
+                provenance_grew: false,
+                satisfied_intents: Vec::new(),
             }
         );
         assert_eq!(
             store.insert(e, observed("wss://a", 15)),
             InsertOutcome::Duplicate {
-                provenance_grew: true
+                provenance_grew: true,
+                satisfied_intents: Vec::new(),
             }
         );
 

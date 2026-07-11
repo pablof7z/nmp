@@ -43,7 +43,10 @@ use nmp_router::{
     SubId, WireDelta, WireOp, WireReq,
 };
 use nmp_signer::SignerError;
-use nmp_store::{CoverageKey, EventStore, RelayObserved};
+use nmp_store::{
+    sentinel_signature, AcceptOutcome, AcceptWrite, CompensateOutcome, CoverageKey, EventStore,
+    IntentId, IntentSigState, PromoteOutcome, RelayObserved, WriteDurability,
+};
 use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
@@ -143,7 +146,17 @@ pub enum EngineMsg {
     RelayConnected(TransportRelayHandle, RelayUrl),
     RelayDisconnected(u32),
     RelayFrame(TransportRelayHandle, RelayFrame),
-    SignerCompleted(ReceiptId, Result<SignedEvent, SignerError>),
+    SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
+    /// The runtime has no signer attached for this accepted author. This is
+    /// non-terminal: the canonical pending row and durable obligation stay
+    /// alive until a matching signer is attached or the app cancels.
+    SignerUnavailable(ReceiptId, u64),
+    /// A capability for this author was attached. Re-arm every matching
+    /// accepted unsigned intent through the ordinary RequestSign effect.
+    SignerAttached(PublicKey),
+    /// Explicit pre-signature cancellation. Once promotion has committed,
+    /// cancellation cannot retract a valid signed cache row.
+    CancelWrite(ReceiptId),
     Tick(Timestamp),
 }
 
@@ -195,7 +208,7 @@ pub enum Effect {
     /// buffered/replayed).
     EmitDiagnostics(DiagnosticsSnapshot),
     EmitReceipt(ReceiptId, WriteStatus),
-    RequestSign(ReceiptId, UnsignedEvent),
+    RequestSign(ReceiptId, u64, UnsignedEvent),
     RequestDecrypt(EventId, PublicKey, String),
     /// Outbox: publish `event` to `relay` (plan §3.4's "`Effect::Wire`
     /// publish REQ/EVENT per relay", re-cut as its OWN effect rather than a
@@ -223,14 +236,30 @@ struct HandleState {
 }
 
 /// Per-receipt bookkeeping the reducer retains from `Publish` through to the
-/// last per-relay ack (or `Ephemeral`'s immediate forget). `sink: None`
-/// marks an `Ephemeral` intent (ledger #9: "no receipt/ack" — the reducer
-/// never again touches `sink`/emits `EmitReceipt` for this id once this is
-/// `None`).
+/// last per-relay ack (or `Ephemeral`'s immediate post-send forget).
+/// Ephemeral still owns a receipt-only record and status stream; what it
+/// lacks is a durable delivery obligation and canonical pending row.
 struct PendingWrite {
     durability: Durability,
     routing: WriteRouting,
-    sink: Option<Box<dyn ReceiptSink>>,
+    sink: Box<dyn ReceiptSink>,
+    /// Store-allocated durable intent id. `None` only for Ephemeral's
+    /// receipt-only path, which never owns a pending row.
+    intent_id: Option<IntentId>,
+    /// Signer identity selected and frozen at acceptance. Later active-
+    /// account changes cannot redirect this obligation.
+    signing_pubkey: PublicKey,
+    /// Exact frozen body accepted by the store (sentinel signature). Kept
+    /// so signer responses can be validated byte-for-byte before promotion
+    /// and so compensation can invalidate the ordinary resolver graph.
+    frozen: SignedEvent,
+    /// True when `accept_write` found an already-signed duplicate and
+    /// journaled this co-owner as Signed immediately.
+    already_signed: bool,
+    /// Exactly one signer operation may be outstanding for an intent.
+    /// Attach/activate notifications are idempotent while this is true.
+    sign_request_in_flight: bool,
+    sign_generation: u64,
     /// Set once the signer resolves; used to clean up `event_to_receipt`.
     event_id: Option<EventId>,
     /// Relays sent-to but not yet terminal (acked/rejected/given-up).
@@ -280,13 +309,14 @@ pub struct EngineCore<S: EventStore> {
     /// connected) for the same evidence computation.
     ever_connected_relays: BTreeSet<RelayUrl>,
     clock: Timestamp,
+    active_pubkey: Option<PublicKey>,
     next_receipt: u64,
     /// Write outbox (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
     /// `ReceiptId` from `Publish` through to the last terminal per-relay
     /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
     /// `EventId` on the wire) find its receipt.
     pending: HashMap<ReceiptId, PendingWrite>,
-    event_to_receipt: HashMap<EventId, ReceiptId>,
+    event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
     /// Live reconciliation sessions, keyed by the SAME `SubId` a plain REQ
@@ -344,9 +374,10 @@ impl<S: EventStore> EngineCore<S> {
             connected_relays: BTreeSet::new(),
             ever_connected_relays: BTreeSet::new(),
             clock: Timestamp::from(0u64),
+            active_pubkey: None,
             next_receipt: 0,
             pending: HashMap::new(),
-            event_to_receipt: HashMap::new(),
+            event_to_receipts: HashMap::new(),
             prober: Prober::new(),
             neg_sessions: HashMap::new(),
             pending_backfills: BTreeSet::new(),
@@ -499,7 +530,14 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::RelayConnected(handle, url) => self.on_relay_connected(handle, url),
             EngineMsg::RelayDisconnected(slot) => self.on_relay_disconnected(slot),
             EngineMsg::RelayFrame(handle, frame) => self.on_relay_frame(handle, frame),
-            EngineMsg::SignerCompleted(id, result) => self.on_signer_completed(id, result),
+            EngineMsg::SignerCompleted(id, generation, result) => {
+                self.on_signer_completed(id, generation, result)
+            }
+            EngineMsg::SignerUnavailable(id, generation) => {
+                self.on_signer_unavailable(id, generation)
+            }
+            EngineMsg::SignerAttached(pk) => self.on_signer_attached(pk),
+            EngineMsg::CancelWrite(id) => self.on_cancel_write(id),
             EngineMsg::Tick(now) => self.tick(now),
         }
     }
@@ -542,21 +580,29 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn on_set_active_pubkey(&mut self, pk: Option<PublicKey>) -> Vec<Effect> {
+        self.active_pubkey = pk;
         let _delta = self.resolver.set_active_pubkey(pk);
         let mut effects = Vec::new();
         self.recompile(&mut effects);
         self.refresh_all_handles(&mut effects);
+        if let Some(pk) = pk {
+            // The runtime moves its active signer pointer before delivering
+            // this message. Re-arm matching accepted work here as well as
+            // on SignerAttached so both ordering cases (activate→attach and
+            // attach→activate) converge without polling.
+            effects.extend(self.on_signer_attached(pk));
+        }
         effects
     }
 
     // ---- write outbox (D: intent -> signed -> routed -> sent -> acked) --
 
-    /// `Publish` (plan §3.4 step 1): accept durably, assign a `ReceiptId`,
-    /// emit `RequestSign` unless the payload already carries a signature
-    /// (VISION P: signing and publishing are orthogonal). `Ephemeral`
-    /// intents never get a `sink`/`EmitReceipt` at all (ledger #9's
-    /// amendment: "no receipt/ack" for ephemeral) — everything past this
-    /// point (routing, wire) still runs for them, fire-and-forget.
+    /// `Publish` (issues #2/#3 U3): enter durable/at-most-once writes through
+    /// `resolver.accept_local` exactly once. The store allocates both ids
+    /// and commits the canonical pending row, obligation and receipt before
+    /// `Accepted` is observable. Ephemeral uses the distinct receipt-only
+    /// door: no pending row and no retry obligation, but still a stable,
+    /// reattachable receipt as required by the promoted VISION.
     ///
     /// A `Signed` payload is verified here, at the acceptance boundary,
     /// BEFORE `WriteStatus::Accepted` is ever emitted (#52 Q2). This is the
@@ -568,36 +614,107 @@ impl<S: EventStore> EngineCore<S> {
     /// a whole-intent terminal (`WriteStatus::Failed`): no `Accepted`, no
     /// pending write recorded, no `Effect::PublishEvent`.
     fn on_publish(&mut self, intent: WriteIntent, sink: Box<dyn ReceiptSink>) -> Vec<Effect> {
-        let id = self.alloc_receipt_id();
         let WriteIntent {
             payload,
             durability,
             routing,
         } = intent;
 
-        let sink = match durability {
-            Durability::Ephemeral => None,
-            _ => Some(sink),
+        let signing_pubkey = match &payload {
+            WritePayload::Unsigned(unsigned) => match self.active_pubkey {
+                Some(active) if active == unsigned.pubkey => active,
+                Some(_) => {
+                    return self.fail_unaccepted(
+                        sink,
+                        "unsigned draft author does not match current active account".to_string(),
+                    );
+                }
+                None => {
+                    return self.fail_unaccepted(
+                        sink,
+                        "unsigned publish requires an active account".to_string(),
+                    );
+                }
+            },
+            // Already-signed payloads are verified verbatim and never ask a
+            // local signer, so their author is intrinsically frozen.
+            WritePayload::Signed(event) => event.pubkey,
         };
 
         if let WritePayload::Signed(event) = &payload {
             if let Err(err) = event.verify() {
-                let status = WriteStatus::Failed(err.to_string());
-                return match sink {
-                    Some(sink) => {
-                        sink.on_status(status.clone());
-                        vec![Effect::EmitReceipt(id, status)]
-                    }
-                    None => Vec::new(),
-                };
+                return self.fail_unaccepted(sink, err.to_string());
             }
         }
 
+        let frozen = match Self::freeze_payload(&payload) {
+            Ok(frozen) => frozen,
+            Err(reason) => return self.fail_unaccepted(sink, reason),
+        };
+
+        let (id, intent_id, already_signed, accepted_signed_event) = if durability
+            == Durability::Ephemeral
+        {
+            match self
+                .resolver
+                .store_mut()
+                .accept_ephemeral(frozen.id, signing_pubkey)
+            {
+                Ok(receipt_id) => (ReceiptId(receipt_id), None, false, None),
+                Err(err) => return self.fail_unaccepted(sink, err.to_string()),
+            }
+        } else {
+            let store_durability = match durability {
+                Durability::Durable => WriteDurability::Durable,
+                Durability::AtMostOnce => WriteDurability::AtMostOnce,
+                Durability::Ephemeral => unreachable!("handled above"),
+            };
+            let accept = AcceptWrite {
+                frozen: frozen.clone(),
+                expected_pubkey: signing_pubkey,
+                signing_identity_ref: signing_pubkey.to_hex(),
+                durability: store_durability,
+                routing: Self::routing_snapshot(&routing),
+                // Treat an unsigned acceptance as reattachable signer work.
+                // If a signer is already present the immediate request below
+                // promotes it; if not, restart safely re-requests it.
+                sig_state: match payload {
+                    WritePayload::Unsigned(_) => IntentSigState::AwaitingSigner,
+                    WritePayload::Signed(_) => IntentSigState::Pending,
+                },
+                accepted_at: self.clock,
+            };
+            let (outcome, _delta) = match self.resolver.accept_local(accept) {
+                Ok(value) => value,
+                Err(err) => return self.fail_unaccepted(sink, err.to_string()),
+            };
+            let Some(intent_id) = outcome.journaled_intent_id() else {
+                let AcceptOutcome::Refused(reason) = outcome else {
+                    unreachable!("only Refused omits journal ids")
+                };
+                return self.fail_unaccepted(sink, format!("write refused: {reason:?}"));
+            };
+            let receipt_id = outcome
+                .journaled_receipt_id()
+                .expect("journaled intent always has a receipt id");
+            let accepted_signed_event = match &outcome {
+                AcceptOutcome::Duplicate { row, .. } if row.event.sig != sentinel_signature() => {
+                    Some(row.event.clone())
+                }
+                _ => None,
+            };
+            (
+                ReceiptId(receipt_id),
+                Some(intent_id),
+                accepted_signed_event.is_some(),
+                accepted_signed_event,
+            )
+        };
+
+        self.next_receipt = self.next_receipt.max(id.0);
         let mut effects = Vec::new();
-        if let Some(sink) = &sink {
-            sink.on_status(WriteStatus::Accepted);
-            effects.push(Effect::EmitReceipt(id, WriteStatus::Accepted));
-        }
+        sink.on_status(WriteStatus::Accepted);
+        effects.push(Effect::EmitReceipt(id, WriteStatus::Accepted));
 
         self.pending.insert(
             id,
@@ -605,14 +722,41 @@ impl<S: EventStore> EngineCore<S> {
                 durability,
                 routing,
                 sink,
+                intent_id,
+                signing_pubkey,
+                frozen: frozen.clone(),
+                already_signed,
+                sign_request_in_flight: false,
+                sign_generation: 0,
                 event_id: None,
                 pending_relays: BTreeSet::new(),
             },
         );
 
+        if durability != Durability::Ephemeral {
+            // The pending row was committed before Accepted. Expose it only
+            // through ordinary demand recompilation/query refresh.
+            self.recompile(&mut effects);
+            self.refresh_all_handles(&mut effects);
+        }
+
         match payload {
             WritePayload::Unsigned(unsigned) => {
-                effects.push(Effect::RequestSign(id, unsigned));
+                if already_signed {
+                    self.on_signed(
+                        id,
+                        accepted_signed_event
+                            .expect("already-signed acceptance carries its canonical event"),
+                        &mut effects,
+                    );
+                } else {
+                    if let Some(pending) = self.pending.get_mut(&id) {
+                        pending.sign_request_in_flight = true;
+                        pending.sign_generation += 1;
+                        let generation = pending.sign_generation;
+                        effects.push(Effect::RequestSign(id, generation, unsigned));
+                    }
+                }
             }
             WritePayload::Signed(event) => {
                 self.on_signed(id, event, &mut effects);
@@ -627,21 +771,73 @@ impl<S: EventStore> EngineCore<S> {
     fn on_signer_completed(
         &mut self,
         id: ReceiptId,
+        generation: u64,
         result: Result<SignedEvent, SignerError>,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let Some(pending) = self.pending.get_mut(&id) else {
+            return effects;
+        };
+        if !pending.sign_request_in_flight || pending.sign_generation != generation {
+            return effects;
+        }
+        pending.sign_request_in_flight = false;
         match result {
             Ok(event) => self.on_signed(id, event, &mut effects),
             Err(err) => {
-                if let Some(pending) = self.pending.remove(&id) {
-                    let status = WriteStatus::Failed(err.to_string());
-                    if let Some(sink) = pending.sink {
-                        sink.on_status(status.clone());
-                        effects.push(Effect::EmitReceipt(id, status));
-                    }
-                }
+                self.fail_and_compensate(id, err.to_string(), &mut effects);
             }
         }
+        effects
+    }
+
+    fn on_signer_unavailable(&mut self, id: ReceiptId, generation: u64) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if let Some(pending) = self.pending.get_mut(&id) {
+            if !pending.sign_request_in_flight || pending.sign_generation != generation {
+                return effects;
+            }
+            pending.sign_request_in_flight = false;
+            pending.sink.on_status(WriteStatus::AwaitingCapability);
+            effects.push(Effect::EmitReceipt(id, WriteStatus::AwaitingCapability));
+        }
+        effects
+    }
+
+    fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for (id, pending) in &mut self.pending {
+            if pending.signing_pubkey == pk
+                && pending.event_id.is_none()
+                && !pending.already_signed
+                && !pending.sign_request_in_flight
+            {
+                pending.sign_request_in_flight = true;
+                pending.sign_generation += 1;
+                effects.push(Effect::RequestSign(
+                    *id,
+                    pending.sign_generation,
+                    UnsignedEvent {
+                        id: Some(pending.frozen.id),
+                        pubkey: pending.frozen.pubkey,
+                        created_at: pending.frozen.created_at,
+                        kind: pending.frozen.kind,
+                        tags: pending.frozen.tags.clone(),
+                        content: pending.frozen.content.clone(),
+                    },
+                ));
+            }
+        }
+        effects
+    }
+
+    fn on_cancel_write(&mut self, id: ReceiptId) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.fail_and_compensate(
+            id,
+            "write cancelled before signing".to_string(),
+            &mut effects,
+        );
         effects
     }
 
@@ -654,19 +850,70 @@ impl<S: EventStore> EngineCore<S> {
     /// `self.pending` below is scoped to its own statement so the map can
     /// be freely read/mutated/removed across steps.
     fn on_signed(&mut self, id: ReceiptId, event: SignedEvent, effects: &mut Vec<Effect>) {
+        let Some(pending) = self.pending.get(&id) else {
+            return; // unknown/already-resolved receipt id.
+        };
+        if pending.event_id.is_some() {
+            return; // duplicate/delayed signer completion after routing.
+        }
+
+        if let Err(reason) = Self::validate_signed_template(&pending.frozen, &event) {
+            self.fail_and_compensate(id, reason, effects);
+            return;
+        }
+
+        let mut co_receipts = Vec::new();
+        if let Some(intent_id) = pending.intent_id {
+            if !pending.already_signed {
+                match self
+                    .resolver
+                    .store_mut()
+                    .promote_signed(intent_id, event.sig)
+                {
+                    Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
+                        // The store atomically promotes every exact-duplicate
+                        // co-owner against the same canonical bytes. Advance
+                        // each matching in-memory obligation too; otherwise
+                        // an offline co-owner could remain stranded forever
+                        // behind a row that is already validly signed.
+                        for co_intent in co_signed {
+                            if let Some((receipt_id, co_pending)) = self
+                                .pending
+                                .iter_mut()
+                                .find(|(_, candidate)| candidate.intent_id == Some(co_intent))
+                            {
+                                co_pending.already_signed = true;
+                                co_receipts.push(*receipt_id);
+                            }
+                        }
+                    }
+                    Ok(PromoteOutcome::NotFound) => {
+                        self.fail_and_compensate(
+                            id,
+                            "accepted intent was unavailable for signature promotion".to_string(),
+                            effects,
+                        );
+                        return;
+                    }
+                    Err(err) => {
+                        self.fail_and_compensate(id, err.to_string(), effects);
+                        return;
+                    }
+                }
+            }
+        }
+
+        for co_receipt in co_receipts {
+            self.on_signed(co_receipt, event.clone(), effects);
+        }
+
         if let Some(pending) = self.pending.get_mut(&id) {
             pending.event_id = Some(event.id);
-        } else {
-            return; // unknown/already-resolved receipt id.
         }
 
         if let Some(pending) = self.pending.get(&id) {
-            if let Some(sink) = &pending.sink {
-                sink.on_status(WriteStatus::Signed(event.id));
-            }
-            if pending.sink.is_some() {
-                effects.push(Effect::EmitReceipt(id, WriteStatus::Signed(event.id)));
-            }
+            pending.sink.on_status(WriteStatus::Signed(event.id));
+            effects.push(Effect::EmitReceipt(id, WriteStatus::Signed(event.id)));
         }
 
         let author_hex = event.pubkey.to_hex();
@@ -680,37 +927,25 @@ impl<S: EventStore> EngineCore<S> {
             Err(reason) => {
                 if let Some(pending) = self.pending.remove(&id) {
                     let status = WriteStatus::Failed(reason);
-                    if let Some(sink) = pending.sink {
-                        sink.on_status(status.clone());
-                        effects.push(Effect::EmitReceipt(id, status));
-                    }
+                    pending.sink.on_status(status.clone());
+                    effects.push(Effect::EmitReceipt(id, status));
                 }
                 return;
             }
         };
 
         if let Some(pending) = self.pending.get(&id) {
-            if let Some(sink) = &pending.sink {
-                sink.on_status(WriteStatus::Routed(relays.clone()));
-            }
-            if pending.sink.is_some() {
-                effects.push(Effect::EmitReceipt(id, WriteStatus::Routed(relays.clone())));
-            }
+            pending.sink.on_status(WriteStatus::Routed(relays.clone()));
+            effects.push(Effect::EmitReceipt(id, WriteStatus::Routed(relays.clone())));
         }
 
         for relay in &relays {
             effects.push(Effect::PublishEvent(relay.clone(), event.clone()));
         }
         if let Some(pending) = self.pending.get(&id) {
-            if let Some(sink) = &pending.sink {
-                for relay in &relays {
-                    sink.on_status(WriteStatus::Sent(relay.clone()));
-                }
-            }
-            if pending.sink.is_some() {
-                for relay in &relays {
-                    effects.push(Effect::EmitReceipt(id, WriteStatus::Sent(relay.clone())));
-                }
+            for relay in &relays {
+                pending.sink.on_status(WriteStatus::Sent(relay.clone()));
+                effects.push(Effect::EmitReceipt(id, WriteStatus::Sent(relay.clone())));
             }
         }
 
@@ -719,12 +954,147 @@ impl<S: EventStore> EngineCore<S> {
             Some(Durability::Ephemeral)
         );
         if ephemeral {
-            // Fire-and-forget: no ack tracking, no receipt ever again.
+            // Fire-and-forget delivery: the retained receipt has already
+            // observed acceptance/sign/send facts, but no ack tracking or
+            // durable publication obligation remains in this reducer.
             self.pending.remove(&id);
         } else if let Some(pending) = self.pending.get_mut(&id) {
             pending.pending_relays = relays;
-            self.event_to_receipt.insert(event.id, id);
+            self.event_to_receipts
+                .entry(event.id)
+                .or_default()
+                .insert(id);
         }
+    }
+
+    fn freeze_payload(payload: &WritePayload) -> Result<SignedEvent, String> {
+        match payload {
+            WritePayload::Unsigned(unsigned) => {
+                let computed = EventId::new(
+                    &unsigned.pubkey,
+                    &unsigned.created_at,
+                    &unsigned.kind,
+                    &unsigned.tags,
+                    &unsigned.content,
+                );
+                if let Some(declared) = unsigned.id {
+                    if declared != computed {
+                        return Err(
+                            "unsigned event carries an id that does not match its body".into()
+                        );
+                    }
+                }
+                Ok(SignedEvent::new(
+                    computed,
+                    unsigned.pubkey,
+                    unsigned.created_at,
+                    unsigned.kind,
+                    unsigned.tags.clone(),
+                    unsigned.content.clone(),
+                    sentinel_signature(),
+                ))
+            }
+            WritePayload::Signed(event) => Ok(SignedEvent::new(
+                event.id,
+                event.pubkey,
+                event.created_at,
+                event.kind,
+                event.tags.clone(),
+                event.content.clone(),
+                sentinel_signature(),
+            )),
+        }
+    }
+
+    fn validate_signed_template(frozen: &SignedEvent, signed: &SignedEvent) -> Result<(), String> {
+        if signed.id != frozen.id
+            || signed.pubkey != frozen.pubkey
+            || signed.created_at != frozen.created_at
+            || signed.kind != frozen.kind
+            || signed.tags != frozen.tags
+            || signed.content != frozen.content
+        {
+            return Err(
+                "signer returned an event that does not match the accepted template".into(),
+            );
+        }
+        signed
+            .verify()
+            .map_err(|err| format!("signer returned an invalid signature: {err}"))
+    }
+
+    fn routing_snapshot(routing: &WriteRouting) -> String {
+        match routing {
+            WriteRouting::AuthorOutbox => "author-outbox".to_string(),
+            WriteRouting::ToInboxes(recipients) => format!(
+                "to-inboxes:{}",
+                recipients
+                    .iter()
+                    .map(PublicKey::to_hex)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            WriteRouting::PrivateNarrow(route) => format!(
+                "private-narrow-hex:{}",
+                route
+                    .relays
+                    .iter()
+                    .map(|relay| hex::encode(relay.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
+    }
+
+    fn fail_unaccepted(&mut self, sink: Box<dyn ReceiptSink>, reason: String) -> Vec<Effect> {
+        // No store id exists on refusal/persistence failure by contract.
+        // This correlation id is stream-local only and never enters the
+        // durable receipt namespace.
+        let id = self.alloc_receipt_id();
+        let status = WriteStatus::Failed(reason);
+        sink.on_status(status.clone());
+        vec![Effect::EmitReceipt(id, status)]
+    }
+
+    fn fail_and_compensate(&mut self, id: ReceiptId, reason: String, effects: &mut Vec<Effect>) {
+        let Some(pending) = self.pending.remove(&id) else {
+            return;
+        };
+
+        if let Some(intent_id) = pending.intent_id {
+            match self.resolver.store_mut().compensate_write(intent_id) {
+                Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
+                    let _delta = self
+                        .resolver
+                        .react_to_compensation(pending.frozen.clone(), &outcome);
+                    self.recompile(effects);
+                    self.refresh_all_handles(effects);
+                }
+                Ok(CompensateOutcome::NotFound) => {
+                    // Promotion already made the row valid. Never retract a
+                    // signed row; cancellation/signing errors arriving late
+                    // cannot rewrite cache truth.
+                    self.pending.insert(id, pending);
+                    return;
+                }
+                Err(err) => {
+                    // Compensation itself failed atomically. Keep the
+                    // in-memory obligation so the caller can retry rather
+                    // than losing ownership of a still-visible pending row.
+                    // Crucially, do NOT emit terminal Failed: persistence
+                    // did not commit the terminal transition, so claiming it
+                    // did would contradict both the row and journal. U4 owns
+                    // durable retry scheduling; a later explicit cancel or
+                    // signer completion can re-enter this door.
+                    self.pending.insert(id, pending);
+                    let _persistence_error = err;
+                    return;
+                }
+            }
+        }
+
+        pending.sink.on_status(WriteStatus::Failed(reason.clone()));
+        effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
     }
 
     /// Resolve a `WriteRouting` to a concrete relay set using the SAME
@@ -823,27 +1193,41 @@ impl<S: EventStore> EngineCore<S> {
         relay: &RelayUrl,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(&id) = self.event_to_receipt.get(&event_id) else {
+        let Some(ids) = self.event_to_receipts.get(&event_id).cloned() else {
             return;
         };
-        let Some(pending) = self.pending.get_mut(&id) else {
-            return;
-        };
-        if !pending.pending_relays.remove(relay) {
-            return;
+        let mut terminal = Vec::new();
+        for id in ids {
+            let Some(pending) = self.pending.get_mut(&id) else {
+                terminal.push(id);
+                continue;
+            };
+            if !pending.pending_relays.remove(relay) {
+                continue;
+            }
+            let new_status = if status {
+                WriteStatus::Acked(relay.clone())
+            } else {
+                WriteStatus::Rejected(relay.clone(), message.clone())
+            };
+            pending.sink.on_status(new_status.clone());
+            effects.push(Effect::EmitReceipt(id, new_status));
+            if pending.pending_relays.is_empty() {
+                terminal.push(id);
+            }
         }
-        let new_status = if status {
-            WriteStatus::Acked(relay.clone())
-        } else {
-            WriteStatus::Rejected(relay.clone(), message)
-        };
-        if let Some(sink) = &pending.sink {
-            sink.on_status(new_status.clone());
-        }
-        effects.push(Effect::EmitReceipt(id, new_status));
-        if pending.pending_relays.is_empty() {
+        for id in terminal {
             self.pending.remove(&id);
-            self.event_to_receipt.remove(&event_id);
+            if let Some(owners) = self.event_to_receipts.get_mut(&event_id) {
+                owners.remove(&id);
+            }
+        }
+        if self
+            .event_to_receipts
+            .get(&event_id)
+            .is_some_and(BTreeSet::is_empty)
+        {
+            self.event_to_receipts.remove(&event_id);
         }
     }
 
@@ -864,9 +1248,7 @@ impl<S: EventStore> EngineCore<S> {
             let event_id = if let Some(pending) = self.pending.get_mut(&id) {
                 pending.pending_relays.remove(relay);
                 let status = WriteStatus::GaveUp(relay.clone());
-                if let Some(sink) = &pending.sink {
-                    sink.on_status(status.clone());
-                }
+                pending.sink.on_status(status.clone());
                 effects.push(Effect::EmitReceipt(id, status));
                 if pending.pending_relays.is_empty() {
                     pending.event_id
@@ -880,7 +1262,12 @@ impl<S: EventStore> EngineCore<S> {
                 self.pending.remove(&id);
             }
             if let Some(event_id) = event_id {
-                self.event_to_receipt.remove(&event_id);
+                if let Some(owners) = self.event_to_receipts.get_mut(&event_id) {
+                    owners.remove(&id);
+                    if owners.is_empty() {
+                        self.event_to_receipts.remove(&event_id);
+                    }
+                }
             }
         }
     }
@@ -1005,7 +1392,22 @@ impl<S: EventStore> EngineCore<S> {
                 let relay_list_author =
                     (event.kind == nostr::Kind::RelayList).then_some(event.pubkey);
                 let observed = RelayObserved::new(relay, self.clock);
-                let _delta = self.resolver.ingest_observed(vec![(event, observed)]);
+                let ingest = self
+                    .resolver
+                    .ingest_observed_detailed(vec![(event, observed)]);
+                let _delta = ingest.delta;
+                for (intent_id, canonical) in ingest.satisfied_intents {
+                    if let Some((receipt_id, pending)) = self
+                        .pending
+                        .iter_mut()
+                        .find(|(_, pending)| pending.intent_id == Some(intent_id))
+                    {
+                        pending.already_signed = true;
+                        pending.sign_request_in_flight = false;
+                        let receipt_id = *receipt_id;
+                        self.on_signed(receipt_id, canonical, &mut effects);
+                    }
+                }
                 if let Some(author) = relay_list_author {
                     self.ingest_relay_list_winner(author);
                 }
