@@ -10,12 +10,12 @@
 //! 12) is `RedbStore`-only — it specifically exercises closing and
 //! reopening the same file, which `MemoryStore` has no equivalent of.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::ConcreteFilter;
 use nmp_store::{
-    coverage_key, ClaimSet, CoverageInterval, EventStore, InsertOutcome, MemoryStore, RedbStore,
-    RelayObserved,
+    coverage_key, ClaimSet, CoverageInterval, EventStore, InsertOutcome, MemoryStore, Provenance,
+    RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 
@@ -29,6 +29,18 @@ fn relay(url: &str) -> RelayUrl {
 
 fn observed(url: &str, at: u64) -> RelayObserved {
     RelayObserved::new(relay(url), Timestamp::from(at))
+}
+
+/// The `StoredEvent` a single `insert(event, observed(url, at))` produces —
+/// used to assert `Superseded { replaced }` hands back the FULL evicted row,
+/// not just its id.
+fn stored(event: Event, url: &str, at: u64) -> StoredEvent {
+    let mut seen = BTreeMap::new();
+    seen.insert(relay(url), Timestamp::from(at));
+    StoredEvent {
+        event,
+        provenance: Provenance { seen },
+    }
 }
 
 fn kind3_event(keys: &Keys, created_at: u64) -> Event {
@@ -94,9 +106,8 @@ fn newest_created_at_wins_replaceable() {
         let k = keys();
 
         let old = kind3_event(&k, 100);
-        let old_id = old.id;
         assert_eq!(
-            store.insert(old, observed("wss://r1", 1)),
+            store.insert(old.clone(), observed("wss://r1", 1)),
             InsertOutcome::Inserted
         );
 
@@ -104,7 +115,9 @@ fn newest_created_at_wins_replaceable() {
         let newer_id = newer.id;
         assert_eq!(
             store.insert(newer, observed("wss://r1", 2)),
-            InsertOutcome::Superseded { replaced: old_id }
+            InsertOutcome::Superseded {
+                replaced: Box::new(stored(old, "wss://r1", 1))
+            }
         );
 
         let results = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
@@ -139,7 +152,7 @@ fn lexically_smallest_id_wins_on_created_at_tie() {
         assert_eq!(
             store.insert(smallest.clone(), observed("wss://r1", 2)),
             InsertOutcome::Superseded {
-                replaced: larger.id
+                replaced: Box::new(stored(larger.clone(), "wss://r1", 1))
             }
         );
 
@@ -204,9 +217,8 @@ fn addressable_keyed_by_pubkey_kind_d_distinct_from_replaceable() {
         let k = keys();
 
         let g1_old = addressable_event(&k, 30_003, "g1", 100);
-        let g1_old_id = g1_old.id;
         assert_eq!(
-            store.insert(g1_old, observed("wss://r1", 1)),
+            store.insert(g1_old.clone(), observed("wss://r1", 1)),
             InsertOutcome::Inserted
         );
 
@@ -221,7 +233,7 @@ fn addressable_keyed_by_pubkey_kind_d_distinct_from_replaceable() {
         assert_eq!(
             store.insert(g1_new, observed("wss://r1", 2)),
             InsertOutcome::Superseded {
-                replaced: g1_old_id
+                replaced: Box::new(stored(g1_old, "wss://r1", 1))
             }
         );
 
@@ -554,6 +566,105 @@ fn gc_evicts_unclaimed_event_even_when_unrelated_claims_exist() {
 
         let results = store.query(&Filter::new());
         assert!(!results.iter().any(|se| se.event.id == e_id));
+    });
+}
+
+// ---------------------------------------------------------------------
+// Retraction: the store door goes symmetric (issue #25 / #23 §1.1) —
+// `Superseded` hands back the full row, `remove` clears both indexes, and an
+// already-expired event is `Refused` before it ever touches storage.
+// ---------------------------------------------------------------------
+
+#[test]
+fn superseded_returns_the_full_evicted_row() {
+    for_each_backend(|store| {
+        let k = keys();
+
+        let old = kind3_event(&k, 100);
+        store.insert(old.clone(), observed("wss://r1", 1));
+        // A second relay observes the same old event before it is
+        // superseded -- its provenance must merge into the returned row too,
+        // not just the event.
+        store.insert(old.clone(), observed("wss://r2", 2));
+
+        let newer = kind3_event(&k, 200);
+        match store.insert(newer, observed("wss://r1", 3)) {
+            InsertOutcome::Superseded { replaced } => {
+                assert_eq!(replaced.event, old);
+                assert_eq!(
+                    replaced.provenance.seen.get(&relay("wss://r1")),
+                    Some(&Timestamp::from(1u64))
+                );
+                assert_eq!(
+                    replaced.provenance.seen.get(&relay("wss://r2")),
+                    Some(&Timestamp::from(2u64))
+                );
+            }
+            other => panic!("expected Superseded, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn remove_returns_the_removed_row_and_clears_indexes() {
+    for_each_backend(|store| {
+        let k = keys();
+
+        let e = kind3_event(&k, 100);
+        let e_id = e.id;
+        store.insert(e.clone(), observed("wss://r1", 1));
+
+        let removed = store
+            .remove(e_id, RetractReason::Deleted)
+            .expect("the row was present");
+        assert_eq!(removed.event, e);
+
+        // Id index misses.
+        assert!(store.query(&Filter::new().id(e_id)).is_empty());
+
+        // Address index misses too: if `remove` had left `addr_index`
+        // pointing at the now-gone `e_id`, inserting a fresh event at the
+        // SAME address (even an older `created_at`) would either panic
+        // (memory store: `addr_index must always point at a stored event`)
+        // or wrongly lose to a ghost winner. It must simply win as the
+        // first event at a now-empty address.
+        let fresh = kind3_event(&k, 50);
+        let fresh_id = fresh.id;
+        assert_eq!(
+            store.insert(fresh, observed("wss://r1", 2)),
+            InsertOutcome::Inserted
+        );
+        let results = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, fresh_id);
+
+        // Removing an id no longer held is a no-op `None`.
+        assert!(store.remove(e_id, RetractReason::Deleted).is_none());
+    });
+}
+
+#[test]
+fn refused_event_is_never_stored() {
+    for_each_backend(|store| {
+        let k = keys();
+
+        let expired = EventBuilder::new(Kind::TextNote, "bye")
+            .tag(Tag::expiration(Timestamp::from(100u64)))
+            .sign_with_keys(&k)
+            .unwrap();
+        let expired_id = expired.id;
+
+        // Observed well after its expiration deadline.
+        assert_eq!(
+            store.insert(expired, observed("wss://r1", 200)),
+            InsertOutcome::Refused(RefuseReason::AlreadyExpired)
+        );
+
+        assert!(!store
+            .query(&Filter::new())
+            .iter()
+            .any(|se| se.event.id == expired_id));
+        assert!(store.remove(expired_id, RetractReason::Expired).is_none());
     });
 }
 
