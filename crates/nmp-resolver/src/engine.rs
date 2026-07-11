@@ -9,10 +9,18 @@ use std::rc::{Rc, Weak};
 
 use nmp_grammar::{Binding, ConcreteFilter, DemandDelta, DemandOp, DescriptorHash, Filter};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, EventStore, InsertOutcome, PersistenceError, RelayObserved,
+    AcceptOutcome, AcceptWrite, CompensateOutcome, EventStore, InsertOutcome, PersistenceError,
+    RelayObserved,
 };
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
+
+/// Full result of relay ingest when a verified relay copy also satisfies
+/// locally-pending write owners of the same canonical event.
+pub struct RelayIngestResult {
+    pub delta: DemandDelta,
+    pub satisfied_intents: Vec<(nmp_store::IntentId, nostr::Event)>,
+}
 
 use crate::eval::{project_events, resolve_reactive, resolve_setop};
 use crate::graph::{
@@ -444,8 +452,16 @@ impl<S: EventStore> Engine<S> {
     /// a kind:5/expiry retraction would (§0's "by luck of shape overlap"
     /// finding).
     pub fn ingest_observed(&mut self, events: Vec<(nostr::Event, RelayObserved)>) -> DemandDelta {
+        self.ingest_observed_detailed(events).delta
+    }
+
+    pub fn ingest_observed_detailed(
+        &mut self,
+        events: Vec<(nostr::Event, RelayObserved)>,
+    ) -> RelayIngestResult {
         let mut inserted: Vec<nostr::Event> = Vec::new();
         let mut removed: Vec<nostr::Event> = Vec::new();
+        let mut satisfied_intents = Vec::new();
         for (event, from) in events {
             match self.store.insert(event.clone(), from) {
                 InsertOutcome::Inserted => inserted.push(event),
@@ -461,12 +477,21 @@ impl<S: EventStore> Engine<S> {
                 // duplicate/stale event was already reflected in the store,
                 // and a refused event (already-expired, or tombstoned)
                 // never entered it at all.
-                InsertOutcome::Duplicate { .. }
-                | InsertOutcome::Stale
-                | InsertOutcome::Refused(_) => {}
+                InsertOutcome::Duplicate {
+                    satisfied_intents: owners,
+                    ..
+                } => satisfied_intents.extend(
+                    owners
+                        .into_iter()
+                        .map(|intent_id| (intent_id, event.clone())),
+                ),
+                InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
             }
         }
-        self.react(inserted, removed)
+        RelayIngestResult {
+            delta: self.react(inserted, removed),
+            satisfied_intents,
+        }
     }
 
     /// The local-authorship mirror of [`Self::ingest_observed`]
@@ -524,6 +549,29 @@ impl<S: EventStore> Engine<S> {
         }
         let delta = self.react(inserted, removed);
         Ok((outcome, delta))
+    }
+
+    /// Apply the graph invalidation produced by the store's atomic
+    /// pre-signature compensation door. The store mutation has already
+    /// happened when this is called; this method only feeds its exact
+    /// removed/inserted facts through the same symmetric `react` lane used
+    /// by relay ingest and expiry.
+    pub fn react_to_compensation(
+        &mut self,
+        removed_pending: nostr::Event,
+        outcome: &CompensateOutcome,
+    ) -> DemandDelta {
+        match outcome {
+            CompensateOutcome::Compensated { restored, revealed } => {
+                let mut inserted: Vec<nostr::Event> =
+                    revealed.iter().map(|row| row.event.clone()).collect();
+                if let Some(restored) = restored {
+                    inserted.push(restored.event.clone());
+                }
+                self.react(inserted, vec![removed_pending])
+            }
+            CompensateOutcome::NotFound => DemandDelta::default(),
+        }
     }
 
     /// Seed dirty-marks from removals that arrive with NO inbound event at

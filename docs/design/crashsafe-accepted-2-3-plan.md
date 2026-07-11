@@ -1,7 +1,9 @@
 # Crash-safe durable `Accepted` + canonical pending row — implementation plan (#2 + #3)
 
 - **Date:** 2026-07-11
-- **Status:** Design / implementation plan. No code. Governs GitHub issues
+- **Status:** Active implementation plan. U1 store doors landed in #58 and U2
+  resolver integration landed in #74; U3 engine lifecycle is the current unit.
+  Governs GitHub issues
   **#2** (canonical pending-signature row, no app optimistic mirror) and **#3**
   (crash-safe durable `Accepted`). Epic #23's sequencing note treats these as
   **one atomic persistence seam**; this plan designs them together.
@@ -599,11 +601,12 @@ logic.
    into a tombstoned address, or an already-expired NIP-40 body) is a terminal
    typed failure to the caller with **no journal residue** — nothing to recover,
    all in the same transaction.
-4. **R4 — Ephemeral bypasses everything new.** Per #3 "Ephemeral writes do not
-   enter the durable journal": `Durability::Ephemeral` keeps today's exact path —
-   no journal row, no pending store row, no receipt (ledger #9). Durable **and**
-   AtMostOnce go through `accept_write` (AtMostOnce needs the journal for
-   `OutcomeUnknown`). State this in §2.1.
+4. **R4 — Ephemeral is receipt-only.** Per the promoted VISION and landed U1
+   contract, `Durability::Ephemeral` never enters the durable delivery journal
+   and never gains a pending store row, but it still receives a store-allocated,
+   reattachable receipt through `accept_ephemeral`. Durable **and** AtMostOnce
+   use `accept_write`. An unfinished ephemeral receipt becomes `Abandoned` on
+   restart; no publication obligation or retry survives with it.
 5. **R5 — GC claim per open intent.** `gc` evicts regular events matched by no
    claim; an unsigned pending kind:1 row must not be GC-evictable before it ever
    signs. The engine's `ClaimSet` construction adds a claim per open

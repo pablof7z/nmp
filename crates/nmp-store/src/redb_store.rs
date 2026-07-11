@@ -1636,7 +1636,7 @@ impl EventStore for RedbStore {
                 events
                     .insert(id_hex.as_str(), encoded.as_str())
                     .expect("redb: update event provenance");
-                if let Some(owners) = &fan_out_owners {
+                let satisfied_intents = if let Some(owners) = &fan_out_owners {
                     fan_out_signed_in_txn(
                         &mut events,
                         &mut addr_index,
@@ -1654,10 +1654,13 @@ impl EventStore for RedbStore {
                         owners,
                         &event,
                     )
-                    .expect("redb: fan out adopted signature");
-                }
+                    .expect("redb: fan out adopted signature")
+                } else {
+                    Vec::new()
+                };
                 InsertOutcome::Duplicate {
                     provenance_grew: grew,
+                    satisfied_intents,
                 }
             } else if tombstone_refuses(&tombstones, &addr_tombstones, &event)
                 .expect("redb: tombstone check")

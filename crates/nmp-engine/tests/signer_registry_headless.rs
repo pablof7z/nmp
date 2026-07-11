@@ -1,7 +1,8 @@
 //! M4 §5 — `SignerRegistry` headless falsifier: two accounts registered via
-//! [`nmp_engine::runtime::Handle::add_signer`], `set_active_account` must
-//! move BOTH halves together (P3, ledger #10) -- the reactive read root AND
-//! the capability `Effect::RequestSign` dispatches through. Deliberately
+//! [`nmp_engine::runtime::Handle::add_signer`]. `set_active_account` re-roots
+//! reactive reads and authorizes default unsigned acceptance. Once accepted,
+//! a write resolves the exact signer frozen at that boundary; later read-root
+//! changes cannot redirect it. Deliberately
 //! offline (an empty `FixtureDirectory`, `MemoryStore` pre-seeded directly
 //! via `EventStore::insert` rather than a live relay round trip): the read
 //! side's first batch is computed purely from the local store
@@ -91,7 +92,7 @@ fn reactive_kind1() -> LiveQuery {
 }
 
 #[test]
-fn set_active_account_switches_read_root_and_publish_signer_together() {
+fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     let a = Keys::generate();
     let b = Keys::generate();
     let seed_relay = RelayUrl::parse("wss://seed.invalid").expect("parse seed relay url");
@@ -187,12 +188,9 @@ fn set_active_account_switches_read_root_and_publish_signer_together() {
          the write half of the coupled switch"
     );
 
-    // ---- write: still active = b, template authored as a -> must FAIL ----
-    // Proves the switch actually moved the signing capability: a's key is
-    // still registered (via add_signer above) but is no longer active, so
-    // b's LocalKeySigner rejects a template whose pubkey doesn't match its
-    // own (nmp-signer/src/local.rs's pubkey-mismatch guard) rather than
-    // silently falling back to a's still-registered capability.
+    // ---- write: still active = b, template authored as a -> reject -------
+    // Default publish authority is currentPubkey. An explicit identity
+    // override does not exist on this surface yet.
     let unsigned_as_a_while_b_active = UnsignedEvent::new(
         a.public_key(),
         Timestamp::now(),
@@ -210,11 +208,10 @@ fn set_active_account_switches_read_root_and_publish_signer_together() {
             s,
             WriteStatus::Failed(_)
         )),
-        "a template authored for a, published while b is active, must be REJECTED -- the \
-         active signer never silently falls back to a different registered account"
+        "a default A-authored draft while B is active must fail before selecting signer A"
     );
 
-    // ---- switch back: active = a -> publish as a succeeds again ----------
+    // ---- switch back: read identity changes; author-pinned signing stays --
     handle.set_active_account(Some(pk_a));
     let unsigned_as_a = UnsignedEvent::new(
         a.public_key(),
@@ -233,20 +230,17 @@ fn set_active_account_switches_read_root_and_publish_signer_together() {
             s,
             WriteStatus::Signed(_)
         )),
-        "switching active back to a must restore a's signing capability for the next publish"
+        "A-authored work continues to use A's signer after another read-root change"
     );
 
     handle.shutdown();
     engine_thread.join();
 }
 
-/// No active account at all (a fresh engine, or an explicit
-/// `set_active_account(None)`) must fail every publish CLOSED --
-/// `WriteStatus::Failed`, never a panic, never a silent fallback to whatever
-/// signer happens to be registered (M4 §5: "the engine may start with zero
-/// accounts, matching a logged-out launch").
+/// A registered signer is not authority to publish when no account is
+/// active. Default unsigned publish fails before acceptance.
 #[test]
-fn publish_with_no_active_account_fails_closed_never_panics() {
+fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
     let a = Keys::generate();
     let store = MemoryStore::new();
     let dir = FixtureDirectory::new();
@@ -268,13 +262,127 @@ fn publish_with_no_active_account_fails_closed_never_panics() {
         routing: WriteRouting::AuthorOutbox,
     });
 
-    assert!(
-        wait_for_status(&receipt_rx, Duration::from_secs(5), |s| matches!(
-            s,
-            WriteStatus::Failed(_)
+    assert!(wait_for_status(&receipt_rx, Duration::from_secs(5), |s| {
+        matches!(s, WriteStatus::Failed(_))
+    }));
+
+    handle.shutdown();
+    engine_thread.join();
+}
+
+#[test]
+fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+    );
+    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle.add_signer(LocalKeySigner::new(b.clone()));
+    handle.set_active_account(Some(a.public_key()));
+
+    let receipt = handle.publish(WriteIntent {
+        payload: WritePayload::Unsigned(UnsignedEvent::new(
+            b.public_key(),
+            Timestamp::now(),
+            Kind::TextNote,
+            vec![],
+            "unauthorized default author",
         )),
-        "publish with a registered-but-inactive signer must still fail closed -- \
-         `active_signer()` must require BOTH registration AND the active pointer"
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+    });
+    assert!(wait_for_status(
+        &receipt,
+        Duration::from_secs(5),
+        |status| { matches!(status, WriteStatus::Failed(_)) }
+    ));
+
+    handle.shutdown();
+    engine_thread.join();
+}
+
+#[test]
+fn attaching_matching_signer_rearms_awaiting_intent() {
+    let a = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+    );
+
+    // Pin the active identity before its capability exists.
+    handle.set_active_account(Some(a.public_key()));
+    let receipt = handle.publish(WriteIntent {
+        payload: WritePayload::Unsigned(UnsignedEvent::new(
+            a.public_key(),
+            Timestamp::now(),
+            Kind::TextNote,
+            vec![],
+            "reattach me",
+        )),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+    });
+    assert!(wait_for_status(
+        &receipt,
+        Duration::from_secs(5),
+        |status| { matches!(status, WriteStatus::AwaitingCapability) }
+    ));
+
+    handle.add_signer(LocalKeySigner::new(a));
+    assert!(
+        wait_for_status(&receipt, Duration::from_secs(5), |status| {
+            matches!(status, WriteStatus::Signed(_))
+        }),
+        "attaching the matching signer must re-arm the durable accepted template"
+    );
+
+    handle.shutdown();
+    engine_thread.join();
+}
+
+#[test]
+fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+    );
+    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle.set_active_account(Some(b.public_key()));
+
+    let receipt = handle.publish(WriteIntent {
+        payload: WritePayload::Unsigned(UnsignedEvent::new(
+            b.public_key(),
+            Timestamp::now(),
+            Kind::TextNote,
+            vec![],
+            "authored by b",
+        )),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+    });
+    assert!(wait_for_status(
+        &receipt,
+        Duration::from_secs(5),
+        |status| { matches!(status, WriteStatus::AwaitingCapability) }
+    ));
+
+    handle.set_active_account(Some(a.public_key()));
+    handle.add_signer(LocalKeySigner::new(b));
+    assert!(
+        wait_for_status(&receipt, Duration::from_secs(5), |status| {
+            matches!(status, WriteStatus::Signed(_))
+        }),
+        "the intent accepted while B was active must stay pinned to B after switching to A"
     );
 
     handle.shutdown();

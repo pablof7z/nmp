@@ -262,7 +262,14 @@ pub enum InsertOutcome {
     /// This exact event id is already present. `provenance_grew` is `true`
     /// iff the merge actually changed the provenance map (M1's no-op stub
     /// becomes a real merge in M3 — ledger #5).
-    Duplicate { provenance_grew: bool },
+    Duplicate {
+        provenance_grew: bool,
+        /// Locally-accepted intent owners that this verified relay copy
+        /// atomically advanced from Pending to Signed. The engine must route
+        /// each matching obligation exactly once; an empty set is the common
+        /// ordinary-dedup case.
+        satisfied_intents: Vec<IntentId>,
+    },
     /// A replaceable/addressable winner changed. `replaced` is the evicted
     /// row itself, handed back whole: the store is holding it at the exact
     /// moment of eviction, and this is the only moment it can be returned

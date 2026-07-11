@@ -28,4 +28,7 @@ mod types;
 mod engine;
 pub mod testkit;
 
-pub use engine::{Engine, GraphNodeInfo, GraphSnapshot, HandleId, LiveQuery, Metrics, QueryHandle};
+pub use engine::{
+    Engine, GraphNodeInfo, GraphSnapshot, HandleId, LiveQuery, Metrics, QueryHandle,
+    RelayIngestResult,
+};
