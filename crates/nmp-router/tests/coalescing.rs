@@ -171,6 +171,48 @@ fn local_refilter_is_exact() {
     });
 }
 
+/// The relay-truncation falsifier the original widen-only property test
+/// could never catch (ledger's own admitted gap): `matches()`/`match_event`
+/// is a per-event PREDICATE, so it cannot express "a relay only returns the
+/// first `limit` rows" -- a merged filter can satisfy the per-event
+/// widening property and STILL under-fetch once a real relay truncates the
+/// result count. The actual fix is structural (exclude any limited filter
+/// from the union rules), so this property test checks the structural
+/// invariant directly rather than trying to model truncation: for ANY pair
+/// where at least one side carries a `limit`, `AuthorUnion`/`KindUnion` must
+/// refuse to merge, full stop -- regardless of kind/author overlap.
+#[test]
+fn union_rules_never_merge_a_filter_that_carries_a_limit() {
+    let pool: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
+    let pool_hex: Vec<String> = pool.iter().map(|k| k.public_key().to_hex()).collect();
+    let n = pool.len();
+
+    proptest!(|(
+        kind_a in small_kind(),
+        kind_b in small_kind(),
+        authors_a in prop::collection::btree_set(0..n, 1..=2),
+        authors_b in prop::collection::btree_set(0..n, 1..=2),
+        limit_a in prop::option::of(1usize..500),
+        limit_b in prop::option::of(1usize..500),
+    )| {
+        prop_assume!(limit_a.is_some() || limit_b.is_some());
+        let a = ConcreteFilter {
+            kinds: Some(BTreeSet::from([kind_a])),
+            authors: Some(authors_a.iter().map(|&i| pool_hex[i].clone()).collect()),
+            limit: limit_a,
+            ..ConcreteFilter::default()
+        };
+        let b = ConcreteFilter {
+            kinds: Some(BTreeSet::from([kind_b])),
+            authors: Some(authors_b.iter().map(|&i| pool_hex[i].clone()).collect()),
+            limit: limit_b,
+            ..ConcreteFilter::default()
+        };
+        prop_assert!(AuthorUnion.try_merge(&a, &b).is_none());
+        prop_assert!(KindUnion.try_merge(&a, &b).is_none());
+    });
+}
+
 /// Test 13: `non_widening_rule_is_dropped_and_ships_separately`.
 #[test]
 fn non_widening_rule_is_dropped_and_ships_separately() {
