@@ -563,14 +563,14 @@ fn terminal_receipt_still_reattachable_after_recover() {
     let receipt_signed = store
         .reattach_receipt(500)
         .expect("signed receipt must still be reattachable");
-    assert_eq!(receipt_signed.intent_id, intent_signed);
+    assert_eq!(receipt_signed.intent_id, Some(intent_signed));
     assert_eq!(receipt_signed.frozen_id, frozen_signed_id);
     assert_eq!(receipt_signed.state, ReceiptState::Signed);
 
     let receipt_comp = store
         .reattach_receipt(600)
         .expect("compensated receipt must still be reattachable");
-    assert_eq!(receipt_comp.intent_id, intent_comp);
+    assert_eq!(receipt_comp.intent_id, Some(intent_comp));
     assert_eq!(receipt_comp.frozen_id, frozen_comp_id);
     assert_eq!(receipt_comp.state, ReceiptState::Compensated);
 
@@ -589,6 +589,80 @@ fn terminal_receipt_still_reattachable_after_recover() {
     let receipt_fresh = mem
         .reattach_receipt(700)
         .expect("fresh receipt reattachable on MemoryStore too");
-    assert_eq!(receipt_fresh.intent_id, intent_fresh);
+    assert_eq!(receipt_fresh.intent_id, Some(intent_fresh));
     assert_eq!(receipt_fresh.state, ReceiptState::Accepted);
+}
+
+/// VISION-ratified receipt contract clarification (team-lead correction,
+/// issue #3): `Ephemeral` must NOT mean "no receipt / no restart
+/// reattachment" — a durable OR explicitly non-durable write is still
+/// observed through a reattachable receipt. `accept_ephemeral` persists a
+/// receipt-ONLY record (`intent_id: None` — no `OUTBOX_INTENTS`/journal row
+/// backs it, and `accept_ephemeral` never touches `EVENTS` at all, so
+/// there is no query-visible pending row either). After a reopen with no
+/// further transition ever recorded, the receipt must report the
+/// `Abandoned` terminal (R4 stays correct: `Ephemeral` is never retried
+/// after process loss, so `Accepted`-at-reopen can only mean the process
+/// died before any further transition).
+#[test]
+fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_after_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+
+    let (frozen, _signed) = compose(&k, Kind::TextNote, "fire and forget", 100);
+    let frozen_id = frozen.id;
+
+    {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        store.accept_ephemeral(800, frozen_id, k.public_key());
+
+        // No pending row: `accept_ephemeral` never touches `EVENTS`.
+        assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
+        // No open-work/journal row: `recover_outbox` (OUTBOX_INTENTS-only)
+        // sees nothing.
+        assert!(store.recover_outbox().is_empty());
+
+        // The receipt itself IS there, `Accepted`, receipt-only.
+        let receipt = store
+            .reattach_receipt(800)
+            .expect("ephemeral receipt persists immediately");
+        assert_eq!(receipt.intent_id, None, "receipt-only: nothing backs it");
+        assert_eq!(receipt.frozen_id, frozen_id);
+        assert_eq!(receipt.state, ReceiptState::Accepted);
+        // Dropped here with no further transition — simulates the process
+        // dying before any dispatch/ack tracking (out of this unit's
+        // scope) ever advanced this receipt past `Accepted`.
+    }
+
+    let store = RedbStore::open(&path).expect("reopen redb store");
+
+    // Still no pending row, still no open-work row, after reopen.
+    assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
+    assert!(store.recover_outbox().is_empty());
+
+    // But the receipt is reattachable, now correctly `Abandoned` — the
+    // boot-time reconciliation `RedbStore::open()` runs.
+    let receipt = store
+        .reattach_receipt(800)
+        .expect("ephemeral receipt still reattachable after reopen");
+    assert_eq!(receipt.intent_id, None);
+    assert_eq!(receipt.frozen_id, frozen_id);
+    assert_eq!(receipt.state, ReceiptState::Abandoned);
+
+    // MemoryStore: same receipt-only shape, but no crash concept — it
+    // stays `Accepted` for the life of the process (Q4: retention, not
+    // restart-survival, is the contract for the volatile backend, and
+    // there is no "reopen" event to reconcile against).
+    let mut mem = MemoryStore::new();
+    let (frozen2, _signed2) = compose(&k, Kind::TextNote, "fire and forget 2", 200);
+    let frozen2_id = frozen2.id;
+    mem.accept_ephemeral(900, frozen2_id, k.public_key());
+    assert!(mem.query(&Filter::new().id(frozen2_id)).is_empty());
+    assert!(mem.recover_outbox().is_empty());
+    let mem_receipt = mem
+        .reattach_receipt(900)
+        .expect("ephemeral receipt reattachable on MemoryStore too");
+    assert_eq!(mem_receipt.intent_id, None);
+    assert_eq!(mem_receipt.state, ReceiptState::Accepted);
 }

@@ -188,7 +188,7 @@ impl MemoryStore {
             receipt_id,
             RecoveredReceipt {
                 receipt_id,
-                intent_id,
+                intent_id: Some(intent_id),
                 frozen_id,
                 expected_pubkey,
                 state: ReceiptState::Accepted,
@@ -766,7 +766,7 @@ impl EventStore for MemoryStore {
         if let Some(receipt) = self
             .outbox_receipts
             .values_mut()
-            .find(|r| r.intent_id == intent_id)
+            .find(|r| r.intent_id == Some(intent_id))
         {
             receipt.state = ReceiptState::Signed;
         }
@@ -803,7 +803,7 @@ impl EventStore for MemoryStore {
         if let Some(receipt) = self
             .outbox_receipts
             .values_mut()
-            .find(|r| r.intent_id == intent_id)
+            .find(|r| r.intent_id == Some(intent_id))
         {
             receipt.state = ReceiptState::Compensated;
         }
@@ -823,5 +823,29 @@ impl EventStore for MemoryStore {
         // the contract here, and `MemoryStore` retains faithfully for the
         // life of the process — see `EventStore::reattach_receipt`'s doc.
         self.outbox_receipts.get(&receipt_id).cloned()
+    }
+
+    fn accept_ephemeral(
+        &mut self,
+        receipt_id: u64,
+        frozen_id: EventId,
+        expected_pubkey: PublicKey,
+    ) {
+        // Receipt-ONLY: no EVENTS row, no OUTBOX_INTENTS row — nothing
+        // backs `intent_id` at all (`None`). `MemoryStore` never models a
+        // real crash (Q4), so there is no boot-time reconciliation to
+        // `Abandoned` here — an ephemeral receipt just stays `Accepted`
+        // for the life of the process unless the engine transitions it
+        // itself (out of this unit's scope).
+        self.outbox_receipts.insert(
+            receipt_id,
+            RecoveredReceipt {
+                receipt_id,
+                intent_id: None,
+                frozen_id,
+                expected_pubkey,
+                state: ReceiptState::Accepted,
+            },
+        );
     }
 }
