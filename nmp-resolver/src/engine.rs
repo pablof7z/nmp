@@ -176,6 +176,38 @@ impl<S: EventStore> Engine<S> {
         self.atoms.values().map(|(cf, _)| cf.clone()).collect()
     }
 
+    /// Read access to the underlying store. `EngineCore` (M3 step B) needs
+    /// this for coverage watermark reads (`get_coverage`) that have nothing
+    /// to do with graph evaluation — the resolver's own methods only ever
+    /// touch the store via `insert`/`query` internally, so there was no
+    /// existing seam for a caller that needs the store's OTHER door.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Mutable access to the underlying store. `EngineCore` needs this to
+    /// call `record_coverage` (the coverage-attribution ruling,
+    /// `docs/consults/2026-07-11-fable-coverage-attribution.md`, is engine-
+    /// owned logic; the resolver has no notion of relays or wire REQs at
+    /// all, so it cannot and must not decide what to record here itself).
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
+    }
+
+    /// The ROOT FilterNode's own current atoms for `id`'s subscription —
+    /// i.e. exactly the (possibly fanned-out) `ConcreteFilter`s the query's
+    /// OWN descriptor resolves to, never an inner `Derived`'s bookkeeping
+    /// atoms (contrast with `Graph::atoms_in_structural_order`, which walks
+    /// the WHOLE subtree and exists purely for demand-set refcounting).
+    /// `EngineCore` uses this to know which store rows/coverage a handle's
+    /// `EmitRows` should be computed over. Empty for an unknown handle.
+    pub fn root_atoms(&self, id: HandleId) -> BTreeSet<ConcreteFilter> {
+        let Some(&root) = self.handle_to_root.get(&id) else {
+            return BTreeSet::new();
+        };
+        self.graph.cached_atoms_of(root).clone()
+    }
+
     pub fn graph_snapshot(&self) -> GraphSnapshot {
         let nodes = self
             .graph
@@ -335,14 +367,14 @@ impl<S: EventStore> Engine<S> {
     // ---- ingest: the real path (M1 plan §3.3) ---------------------------
 
     /// `Engine::ingest` predates per-relay provenance (M1) and has no relay
-    /// identity of its own to attribute an insert to — real attribution is
-    /// `EngineCore`'s job (M3 step B), which calls `store.insert` directly
-    /// with the actual `RelayObserved` for the relay a frame arrived on.
-    /// This resolver-level path is exercised by the M1 contract-test harness
+    /// identity of its own to attribute an insert to. This resolver-level
+    /// path is exercised by the M1 contract-test harness
     /// (`testkit::Harness::deliver`, which has no relay concept either), so
     /// it attributes every ingested event to a single fixture relay identity
     /// at the event's own `created_at` — sufficient to satisfy the new
     /// `EventStore::insert` door without inventing resolver-owned routing.
+    /// `EngineCore` (M3 step B), which DOES know the real relay a frame
+    /// arrived on, calls [`Self::ingest_observed`] directly instead.
     fn ingest_fixture_observation(at: nostr::Timestamp) -> RelayObserved {
         RelayObserved::new(
             RelayUrl::parse("wss://resolver-ingest.fixture.invalid")
@@ -352,15 +384,29 @@ impl<S: EventStore> Engine<S> {
     }
 
     pub fn ingest(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
+        let observed = events
+            .into_iter()
+            .map(|e| {
+                let at = e.created_at;
+                (e, Self::ingest_fixture_observation(at))
+            })
+            .collect();
+        self.ingest_observed(observed)
+    }
+
+    /// The real ingest path (M1 plan §3.3), parameterized over each event's
+    /// ACTUAL relay attribution rather than a resolver-invented fixture.
+    /// `EngineCore` is the intended caller: it knows exactly which relay a
+    /// `RelayFrame` arrived on (`nmp-store`'s `RelayObserved`) and must not
+    /// launder that real provenance through `ingest`'s fixture. `ingest`
+    /// above is a thin wrapper over this for the resolver-only contract
+    /// tests, which have no relay concept of their own.
+    pub fn ingest_observed(&mut self, events: Vec<(nostr::Event, RelayObserved)>) -> DemandDelta {
         let drop_delta = self.drain_pending_drops();
 
         let mut changed: Vec<nostr::Event> = Vec::new();
-        for event in events {
-            let observed_at = event.created_at;
-            match self
-                .store
-                .insert(event.clone(), Self::ingest_fixture_observation(observed_at))
-            {
+        for (event, from) in events {
+            match self.store.insert(event.clone(), from) {
                 InsertOutcome::Inserted | InsertOutcome::Superseded { .. } => changed.push(event),
                 InsertOutcome::Duplicate { .. } | InsertOutcome::Stale => {}
             }

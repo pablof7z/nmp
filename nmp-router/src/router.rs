@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::ConcreteFilter;
+use nmp_store::{coverage_key, CoverageKey};
 
 use crate::coalesce::RuleRegistry;
 use crate::diag::{self, Diagnostics};
@@ -61,9 +62,14 @@ impl Router {
         }
 
         // Step 2 + 3: route (coverage-solve outbox groups / pinned lookup)
-        // and materialize each relay's bag of (filter, provenance) entries.
-        let mut bag: BTreeMap<RelayUrl, Vec<(ConcreteFilter, Vec<RouteProvenance>)>> =
-            BTreeMap::new();
+        // and materialize each relay's bag of (filter, provenance, absorbed)
+        // entries. `absorbed` is the coverage-attribution ruling's per-atom
+        // `CoverageKey` (§2): each entry here is exactly one pre-coalesce
+        // demand atom (one author, for outbox; the pinned atom itself, for
+        // pinned), so it contributes exactly one key, later unioned by
+        // `coalesce_with` alongside provenance as same-skeleton atoms merge.
+        type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+        let mut bag: BTreeMap<RelayUrl, Vec<BagEntry>> = BTreeMap::new();
         let mut uncovered_authors: BTreeMap<PubkeyHex, Shortfall> = BTreeMap::new();
 
         for (skeleton, authors) in &outbox_groups {
@@ -79,15 +85,21 @@ impl Router {
 
             for (relay, prov) in route::provenance_for_outbox(&coverage, &candidates) {
                 let filter = skeleton.with_authors(prov.covers_authors.clone());
-                bag.entry(relay).or_default().push((filter, vec![prov]));
+                let key = coverage_key(&filter);
+                bag.entry(relay)
+                    .or_default()
+                    .push((filter, vec![prov], BTreeSet::from([key])));
             }
         }
 
         for atom in &pinned_atoms {
+            let key = coverage_key(atom);
             for (relay, prov) in route::provenance_for_pinned(atom, dir) {
-                bag.entry(relay)
-                    .or_default()
-                    .push((atom.clone(), vec![prov]));
+                bag.entry(relay).or_default().push((
+                    atom.clone(),
+                    vec![prov],
+                    BTreeSet::from([key]),
+                ));
             }
         }
 
@@ -98,12 +110,13 @@ impl Router {
             let merged = self.rules.coalesce_with(entries);
             let mut relay_reqs: Vec<WireReq> = merged
                 .into_iter()
-                .map(|(filter, provenance)| {
+                .map(|(filter, provenance, absorbed)| {
                     let sub_id = SubId::for_filter(relay.clone(), &filter);
                     WireReq {
                         sub_id,
                         filter,
                         provenance,
+                        absorbed,
                     }
                 })
                 .collect();

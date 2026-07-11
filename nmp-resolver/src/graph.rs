@@ -151,6 +151,15 @@ impl Graph {
             .collect()
     }
 
+    /// A FilterNode's own current atoms — no subtree walk, unlike
+    /// [`Self::atoms_in_structural_order`] (which also collects every
+    /// descendant `Derived`'s inner FilterNode atoms, for demand-set
+    /// refcounting). Used by `Engine::root_atoms` to report exactly what a
+    /// subscription's OWN descriptor resolves to.
+    pub(crate) fn cached_atoms_of(&self, filter_id: NodeId) -> &BTreeSet<ConcreteFilter> {
+        &self.filter_data(filter_id).cached_atoms
+    }
+
     /// The wide query filter for a FilterNode: base (kinds/since/until/limit)
     /// merged with the FULL resolved set of every bound field. This is the
     /// single `nostr::Filter` a `Derived` parent queries the store with, and

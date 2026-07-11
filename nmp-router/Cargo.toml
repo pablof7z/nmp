@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
+nmp-store.workspace = true
 
 [dev-dependencies]
 nmp-resolver.workspace = true

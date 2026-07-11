@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
+use nmp_store::CoverageKey;
 
 use crate::route::RouteProvenance;
 
@@ -169,33 +170,48 @@ impl RuleRegistry {
     /// Exact-canonical dedup, then fixed-point pairwise merge across every
     /// registered rule.
     pub fn coalesce(&self, filters: BTreeSet<ConcreteFilter>) -> Vec<ConcreteFilter> {
-        let entries = filters.into_iter().map(|f| (f, Vec::new())).collect();
+        let entries = filters
+            .into_iter()
+            .map(|f| (f, Vec::new(), BTreeSet::new()))
+            .collect();
         self.coalesce_with(entries)
             .into_iter()
-            .map(|(f, _)| f)
+            .map(|(f, _, _)| f)
             .collect()
     }
 
-    /// Provenance-threading variant used by the router: identical merge
-    /// decisions to [`Self::coalesce`] (implemented in terms of the exact
-    /// same rule set, so the two can never diverge), but concatenates the
-    /// provenance lists of every filter folded into a merge.
+    /// Provenance/coverage-threading variant used by the router: identical
+    /// merge decisions to [`Self::coalesce`] (implemented in terms of the
+    /// exact same rule set, so the two can never diverge), but concatenates
+    /// both the provenance list AND the `absorbed` coverage-key set of every
+    /// filter folded into a merge.
+    ///
+    /// `absorbed` threading is what discharges the coverage-attribution
+    /// ruling's containment rule
+    /// (`docs/consults/2026-07-11-fable-coverage-attribution.md` §2) at
+    /// materialization time: because every rule here is proven widen-only
+    /// (`matches(merged) ⊇ matches(a) ∪ matches(b)`), the union of two
+    /// atoms' `absorbed` sets is still soundly contained in the merged
+    /// filter's matches — the SAME real mechanism that already threads
+    /// `provenance` through a merge.
     pub(crate) fn coalesce_with(
         &self,
-        entries: Vec<(ConcreteFilter, Vec<RouteProvenance>)>,
-    ) -> Vec<(ConcreteFilter, Vec<RouteProvenance>)> {
+        entries: Vec<(ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>)>,
+    ) -> Vec<(ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>)> {
         // 1. Exact-canonical dedup by hash (the trivially-correct floor).
-        let mut by_hash: BTreeMap<DescriptorHash, (ConcreteFilter, Vec<RouteProvenance>)> =
-            BTreeMap::new();
-        for (f, prov) in entries {
+        type Entry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+        let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
+        for (f, prov, absorbed) in entries {
             let h = f.hash();
             by_hash
                 .entry(h)
-                .and_modify(|(_, p)| p.extend(prov.clone()))
-                .or_insert((f, prov));
+                .and_modify(|(_, p, a)| {
+                    p.extend(prov.clone());
+                    a.extend(absorbed.clone());
+                })
+                .or_insert((f, prov, absorbed));
         }
-        let mut current: Vec<(ConcreteFilter, Vec<RouteProvenance>)> =
-            by_hash.into_values().collect();
+        let mut current: Vec<Entry> = by_hash.into_values().collect();
 
         // 2. Fixed-point pairwise merge across every registered rule.
         loop {
@@ -206,13 +222,15 @@ impl RuleRegistry {
                         if let Some(merged) = rule.try_merge(&current[i].0, &current[j].0) {
                             let mut prov = current[i].1.clone();
                             prov.extend(current[j].1.clone());
+                            let mut absorbed = current[i].2.clone();
+                            absorbed.extend(current[j].2.clone());
                             let mut next = Vec::with_capacity(current.len() - 1);
                             for (k, entry) in current.into_iter().enumerate() {
                                 if k != i && k != j {
                                     next.push(entry);
                                 }
                             }
-                            next.push((merged, prov));
+                            next.push((merged, prov, absorbed));
                             current = next;
                             merged_once = true;
                             break 'search;

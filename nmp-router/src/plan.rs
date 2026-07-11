@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
+use nmp_store::CoverageKey;
 
 use crate::facts::RelayUrl;
 use crate::route::{RouteProvenance, Skeleton};
@@ -31,11 +32,24 @@ impl SubId {
 
 /// A single wire request: the (possibly coalesced/widened) filter plus why
 /// it exists.
+///
+/// `absorbed` (coverage-attribution ruling
+/// `docs/consults/2026-07-11-fable-coverage-attribution.md` §2) is every
+/// narrow demand atom's window-erased [`CoverageKey`] this (possibly
+/// coalesced) wire filter supersets — populated at materialization (one key
+/// per pre-coalesce atom entry) and concatenated through every
+/// `coalesce_with` merge exactly as `provenance` already is. Because every
+/// merge in this crate is widen-only-proven (`coalesce.rs`), `wide ⊇ atom`
+/// holds for every key in `absorbed` BY CONSTRUCTION at the moment of
+/// materialization — this is the containment rule the ruling requires,
+/// discharged once, here, never re-derived at read time by subset-testing
+/// filters (banned by the ruling).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WireReq {
     pub sub_id: SubId,
     pub filter: ConcreteFilter,
     pub provenance: Vec<RouteProvenance>,
+    pub absorbed: BTreeSet<CoverageKey>,
 }
 
 /// The full per-relay plan for the CURRENT demand set.
@@ -133,6 +147,7 @@ mod tests {
             sub_id,
             filter,
             provenance: Vec::new(),
+            absorbed: BTreeSet::new(),
         };
         RelayPlan {
             reqs: BTreeMap::from([(relay, vec![req])]),
@@ -186,6 +201,7 @@ mod tests {
                 sub_id: SubId::for_filter(relay(1), &cf(1, &["bb", "cc"])),
                 filter: cf(1, &["bb", "cc"]),
                 provenance: Vec::new(),
+                absorbed: BTreeSet::new(),
             }],
         );
 
