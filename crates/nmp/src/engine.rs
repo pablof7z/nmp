@@ -538,6 +538,98 @@ mod tests {
         drop(diagnostics);
     }
 
+    /// codex-nova's non-negotiable proof #1: `ObservationCancel::cancel()`
+    /// called from ANOTHER handle must unblock a drain loop genuinely
+    /// parked inside `Subscription::recv()`, within a bounded wait -- not
+    /// rely on that loop's own next `recv()` call to eventually notice a
+    /// disconnect on its own timescale. This is exactly the shape
+    /// `nmp-ffi`'s drain thread depends on: it owns the `Subscription`
+    /// (`recv()` blocks, so nothing else can), while a caller-held
+    /// `cancel_handle()` clone triggers withdrawal from elsewhere.
+    #[test]
+    fn cancel_handle_unblocks_a_genuinely_blocked_recv_within_a_bound() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let subscription = engine.observe(probe_query()).expect("engine is open");
+
+        // Drain the one proactive delivery a fresh subscribe always makes,
+        // so the drain thread's `recv()` below has nothing already queued
+        // and must genuinely block.
+        subscription
+            .recv()
+            .expect("a fresh subscribe delivers one batch before anything else happens");
+
+        let cancel = subscription.cancel_handle();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // No further events are ever published against this probe
+            // query (no relays configured, arbitrary caller-owned kind) --
+            // absent cancellation, this call blocks forever.
+            let result = subscription.recv();
+            let _ = result_tx.send(result.is_err());
+        });
+
+        cancel.cancel();
+
+        let disconnected = result_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect(
+                "cancel() from a separate handle must unblock the drain thread's recv() \
+                 within a bounded wait, not hang",
+            );
+        assert!(
+            disconnected,
+            "the unblocked recv() must observe a disconnect (Err), the same outcome \
+             Drop-driven withdrawal produces"
+        );
+
+        engine.shutdown();
+    }
+
+    /// codex-nova's non-negotiable proof #3: an `Engine` with a LIVE query
+    /// subscription AND a live diagnostics subscription -- neither
+    /// cancelled, both still holding an outstanding `cancel_handle()` clone
+    /// nobody ever calls -- must still `shutdown()` cleanly within a
+    /// bounded wait. An outstanding, never-invoked cancel token must not
+    /// become a reason `shutdown` hangs or panics.
+    #[test]
+    fn shutdown_stays_clean_with_outstanding_cancel_tokens_for_query_and_diagnostics() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+
+        let subscription = engine.observe(probe_query()).expect("engine is open");
+        let diagnostics = engine.observe_diagnostics().expect("engine is open");
+
+        // Obtain (but deliberately never call before shutdown) a cancel
+        // token for each -- an outstanding, uninvoked token is the scenario
+        // under test.
+        let query_cancel = subscription.cancel_handle();
+        let diagnostics_cancel = diagnostics.cancel_handle();
+
+        subscription
+            .recv()
+            .expect("a fresh subscribe delivers one batch before anything else happens");
+        diagnostics
+            .recv()
+            .expect("observe_diagnostics delivers the current snapshot immediately");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            engine.shutdown();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect(
+                "shutdown() must complete within a bounded wait even with outstanding, \
+             never-cancelled tokens still alive",
+            );
+
+        // The outstanding tokens themselves must still be safe to cancel
+        // (or simply drop) after the engine they named is already gone.
+        query_cancel.cancel();
+        diagnostics_cancel.cancel();
+    }
+
     fn probe_query() -> LiveQuery {
         LiveQuery(nmp_grammar::Filter {
             // An arbitrary caller-owned kind, not any NIP-01 core schema --

@@ -23,21 +23,21 @@ enum class Durability {
         }
 }
 
-/** Where a write is routed. `PrivateNarrow`'s `relays` is the fixed,
- * fail-closed set itself -- an empty list is exactly how "unroutable" is
- * expressed; there is no widen operation on this wire. */
+/** Where a write is routed. There is deliberately no `PrivateNarrow` case
+ * (#22/#52): a private/narrow route must come from a trusted protocol
+ * module's own resolved logic, never a raw relay-URL string an app hands
+ * across this boundary with no way to prove it is actually private --
+ * exactly the "route escape hatch" #22's canonical design rules out. See
+ * `FfiWriteRouting`'s doc. */
 sealed class WriteRouting {
     object AuthorOutbox : WriteRouting()
 
     data class ToInboxes(val recipients: List<String>) : WriteRouting()
 
-    data class PrivateNarrow(val relays: List<String>) : WriteRouting()
-
     fun toFfi(): FfiWriteRouting =
         when (this) {
             is AuthorOutbox -> FfiWriteRouting.AuthorOutbox
             is ToInboxes -> FfiWriteRouting.ToInboxes(recipients)
-            is PrivateNarrow -> FfiWriteRouting.PrivateNarrow(relays)
         }
 }
 

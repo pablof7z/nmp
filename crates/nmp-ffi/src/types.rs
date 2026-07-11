@@ -153,17 +153,16 @@ pub struct FfiRow {
     pub sig: String,
 }
 
-/// `nmp_engine::core::RowDelta` mirror -- the wire is deltas, never
-/// snapshots (see that type's own doc); the Swift bridge (a later builder)
-/// accumulates these into a snapshot.
+/// `nmp::RowDelta` mirror -- the wire is deltas, never snapshots (see that
+/// type's own doc); the Swift bridge (a later builder) accumulates these
+/// into a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiRowDelta {
     Added { row: FfiRow },
     Removed { id: String },
 }
 
-/// `nmp_engine::core::QueryCoverage` mirror (ruling §6 — ledger #7's
-/// variant).
+/// `nmp::QueryCoverage` mirror (ruling §6 — ledger #7's variant).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiCoverage {
     CompleteUpTo { unix_seconds: u64 },
@@ -171,15 +170,15 @@ pub enum FfiCoverage {
 }
 
 /// One delivered batch: raw row deltas + the query's aggregate coverage
-/// (mirrors `nmp_engine::runtime::RowsMsg`).
+/// (mirrors `nmp::RowsMsg`).
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiRowBatch {
     pub deltas: Vec<FfiRowDelta>,
     pub coverage: FfiCoverage,
 }
 
-/// `nmp_engine::outbox::Durability` mirror (a typed PROPERTY of a write, not
-/// a routing choice -- M0 amendment).
+/// `nmp::Durability` mirror (a typed PROPERTY of a write, not a routing
+/// choice -- M0 amendment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiDurability {
     Durable,
@@ -187,30 +186,44 @@ pub enum FfiDurability {
     AtMostOnce,
 }
 
-/// `nmp_engine::outbox::WriteRouting` mirror. `PrivateNarrow`'s `relays` is
-/// the fixed, fail-closed set itself (ledger #6) -- an empty `Vec` here is
-/// exactly how "unroutable" is expressed; there is no widen operation on
-/// the wire, matching `NarrowOnly`'s own construction discipline.
+/// `nmp::WriteRouting` mirror -- `PrivateNarrow` deliberately has NO wire
+/// form here (#22/#52). `nmp_engine::outbox::NarrowOnly::new`'s
+/// own doc requires "the caller must already have resolved and narrowed
+/// this itself" -- i.e. a trusted protocol module's own logic, not a raw
+/// relay-URL string handed across the FFI boundary by an app with no way to
+/// prove those URLs are actually private. Minting `PrivateRoute` from
+/// FFI-supplied strings would be exactly the "raw app-provided expanded
+/// relay set"/"route escape hatch" #22's canonical design rules out; the
+/// `nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`
+/// for the identical reason (see `crates/nmp/src/lib.rs`'s doc). A
+/// validated, opaque private-route mint belongs in a protocol module built
+/// on direct Rust, not this FFI surface -- `AuthorOutbox`/`ToInboxes`
+/// remain the only FFI-constructible routing choices for now.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteRouting {
     AuthorOutbox,
     ToInboxes { recipients: Vec<String> },
-    PrivateNarrow { relays: Vec<String> },
 }
 
-/// The event payload of a write intent (`nmp_engine::outbox::WritePayload`
-/// mirror). VISION P: signing and publishing are ORTHOGONAL stages --
-/// `Unsigned` is a template the engine signs internally ("the key lives in
-/// the engine", ledger #12); `Signed` (#32, the M5 unlock) is a caller that
-/// already holds a validly-signed event -- an external signer / NIP-46
-/// bunker, or a verbatim republish -- and hands its fields across as-is.
-/// `Signed`'s fields are field-for-field [`FfiRow`] (the read-side mirror of
-/// a signed `nostr::Event`) plus `sig`, deliberately: the write side stays
-/// symmetric with the read side rather than introducing a JSON-blob shape.
-/// Validated (`nostr::Event::verify`) at the FFI boundary before it ever
-/// reaches the engine -- see `convert::write_intent_from_ffi`; the engine
-/// itself never re-signs, mutates a tag, or recomputes an id for this
-/// variant.
+/// The event payload of a write intent (`nmp::WritePayload` mirror). VISION
+/// P: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a
+/// template the engine signs internally ("the key lives in the engine",
+/// ledger #12); `Signed` (#32, the M5 unlock) is a caller that already
+/// holds a validly-signed event -- an external signer / NIP-46 bunker, or a
+/// verbatim republish -- and hands its fields across as-is. `Signed`'s
+/// fields are field-for-field [`FfiRow`] (the read-side mirror of a signed
+/// `nostr::Event`) plus `sig`, deliberately: the write side stays symmetric
+/// with the read side rather than introducing a JSON-blob shape.
+///
+/// `Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-
+/// shape errors, see `convert::signed_event_from_ffi`) but NOT verified
+/// here (#52 Unit B) -- `nostr::Event::verify` runs at
+/// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit
+/// A0/#56) instead, so the guarantee holds for every entry point, not only
+/// this one. A tampered `Signed` event still parses fine here and is
+/// rejected downstream, surfacing as `WriteStatus::Failed` on the receipt
+/// stream rather than a synchronous `FfiError`. The engine itself never
+/// re-signs, mutates a tag, or recomputes an id for this variant.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWritePayload {
     Unsigned {
@@ -231,7 +244,7 @@ pub enum FfiWritePayload {
     },
 }
 
-/// A caller's publish request (`nmp_engine::outbox::WriteIntent` mirror).
+/// A caller's publish request (`nmp::WriteIntent` mirror).
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiWriteIntent {
     pub payload: FfiWritePayload,
@@ -239,7 +252,7 @@ pub struct FfiWriteIntent {
     pub routing: FfiWriteRouting,
 }
 
-/// One (relay, kind) event count -- `nmp_engine::core::DiagnosticsSnapshot`'s
+/// One (relay, kind) event count -- `nmp::DiagnosticsSnapshot`'s
 /// events-received-per-kind mirror (M5 plan §1.1): the one datum
 /// `nmp-router`'s own `Diagnostics` cannot see, since it only ever reflects
 /// what was compiled/sent, never what was actually received.
@@ -250,7 +263,7 @@ pub struct FfiKindCount {
 }
 
 /// One lane's wire-req count within a relay's diagnostics (M5 plan §1.1;
-/// `nmp_router::Lane` mirror, rendered as a string -- see
+/// `nmp::Lane` mirror, rendered as a string -- see
 /// `convert::lane_to_ffi_string`).
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiLaneCount {
@@ -296,9 +309,9 @@ pub struct FfiDiagnosticsSnapshot {
     pub dropped_merge_rules: Vec<String>,
 }
 
-/// The receipt STREAM (`nmp_engine::outbox::WriteStatus` mirror; ledger #9 —
-/// enqueue is not converged, the app's `ReceiptObserver` may see many of
-/// these per publish).
+/// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is
+/// not converged, the app's `ReceiptObserver` may see many of these per
+/// publish).
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteStatus {
     Accepted,

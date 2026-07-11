@@ -52,7 +52,7 @@ mod subscription;
 pub use config::EngineConfig;
 pub use engine::Engine;
 pub use error::EngineError;
-pub use subscription::{DiagnosticsSubscription, Subscription};
+pub use subscription::{DiagnosticsSubscription, ObservationCancel, Subscription};
 
 // The grammar an app builds a `LiveQuery`'s `Filter` out of.
 pub use nmp_grammar::{
