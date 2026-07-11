@@ -10,6 +10,7 @@ members = [
     "crates/nmp-signer",
     "crates/nmp-engine",
     "crates/nmp",
+    "crates/nmp-consumer-check",
     "crates/nmp-demo",
     "crates/nmp-ffi",
     "crates/nmp-bdd",

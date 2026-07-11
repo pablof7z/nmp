@@ -18,9 +18,12 @@ use crate::error::EngineError;
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
-    /// -> a persistent on-disk store opened at that path (the same file
-    /// reopened across restarts is what makes a cold, offline read
-    /// authoritative -- ledger #7).
+    /// -> a persistent on-disk store opened at that path, so the same file
+    /// reopened across restarts makes THIS replica's already-ingested rows
+    /// readable cold, offline. This is local availability, not a claim of
+    /// global completeness -- a query snapshot only proves what this store
+    /// has acquired, never `synced`/`authoritativeEmpty` (ledger #7 is
+    /// still TARGET).
     pub store_path: Option<String>,
     /// Operator indexer relay set (`Lane::IndexerDiscovery`) -- eligible
     /// only for discovery-kind atoms. This, plus `app_relays`/
