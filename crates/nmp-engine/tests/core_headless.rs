@@ -683,6 +683,117 @@ fn enqueue_is_not_converged() {
     );
 }
 
+/// #52 Q2 smoking gun: `EngineCore::on_publish` is the ONE place every
+/// publish converges (FFI, direct-Rust, `nmp-bdd`'s `EngineThread`), so a
+/// `WritePayload::Signed` whose content was tampered with after signing
+/// (id/sig stale relative to the new content) must be rejected there,
+/// before `WriteStatus::Accepted` is ever emitted and before any
+/// `Effect::PublishEvent` is produced -- regardless of caller, with no FFI
+/// verify layer anywhere in the loop.
+#[test]
+fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let genuine = unsigned(&a, 1, "genuine content")
+        .sign_with_keys(&a)
+        .unwrap();
+    // Forge: reuse the genuine id/signature but swap in different content --
+    // exactly the "reconstructed from caller-supplied fields verbatim"
+    // shape the FFI boundary's own `signed_event_from_ffi` guards against,
+    // now driven straight through `Handle::publish` with no FFI in the loop.
+    let forged = nostr::Event::new(
+        genuine.id,
+        genuine.pubkey,
+        genuine.created_at,
+        genuine.kind,
+        genuine.tags.clone(),
+        "forged content -- attacker tampered after signing",
+        genuine.sig,
+    );
+    assert!(
+        forged.verify().is_err(),
+        "test fixture sanity: the forged event must not verify"
+    );
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Signed(forged),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(sink.clone()),
+    ));
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::EmitReceipt(_, WriteStatus::Failed(_))]
+        ),
+        "a forged Signed publish must terminate as the ONLY effect, as Failed -- got {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PublishEvent(..))),
+        "a forged Signed publish must never produce Effect::PublishEvent"
+    );
+    let statuses = sink.0.lock().unwrap();
+    assert!(
+        matches!(statuses.as_slice(), [WriteStatus::Failed(_)]),
+        "the sink must see Failed and nothing else -- never Accepted -- got {statuses:?}"
+    );
+}
+
+/// Companion to the forged-event smoking gun: a properly-signed `Signed`
+/// payload is unaffected by the acceptance-boundary verify and flows to
+/// `Effect::PublishEvent` exactly as before -- no `RequestSign` (VISION P:
+/// a caller that already holds a valid signature skips signing entirely).
+#[test]
+fn direct_publish_of_valid_signed_event_still_publishes() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let genuine = unsigned(&a, 1, "genuine content")
+        .sign_with_keys(&a)
+        .unwrap();
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Signed(genuine.clone()),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(sink.clone()),
+    ));
+
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
+        ),
+        "a valid Signed publish must still be Accepted first"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::RequestSign(..))),
+        "an already-signed payload must never request the signer"
+    );
+    assert!(
+        effects.iter().any(
+            |e| matches!(e, Effect::PublishEvent(r, ev) if r == &relay0 && ev.id == genuine.id)
+        ),
+        "a valid Signed publish must still reach the wire -- got {effects:?}"
+    );
+}
+
 /// Test 5 analog: `private_route_fails_closed` (ledger #6). A
 /// `PrivateNarrow` route whose relay set is empty (unroutable) fails CLOSED
 /// with a typed `WriteStatus::Failed` -- it never reaches a public relay.
