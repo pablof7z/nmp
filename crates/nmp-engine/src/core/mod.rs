@@ -527,6 +527,16 @@ impl<S: EventStore> EngineCore<S> {
     /// intents never get a `sink`/`EmitReceipt` at all (ledger #9's
     /// amendment: "no receipt/ack" for ephemeral) — everything past this
     /// point (routing, wire) still runs for them, fire-and-forget.
+    ///
+    /// A `Signed` payload is verified here, at the acceptance boundary,
+    /// BEFORE `WriteStatus::Accepted` is ever emitted (#52 Q2). This is the
+    /// only publish path in the crate — `Handle::publish` is the sole entry
+    /// point regardless of caller (FFI, direct-Rust, `nmp-bdd`'s
+    /// `EngineThread`) — so verifying here, rather than at each caller,
+    /// makes "a forged `Signed` event can never be published" true
+    /// unconditionally instead of entry-point-dependent. A failed verify is
+    /// a whole-intent terminal (`WriteStatus::Failed`): no `Accepted`, no
+    /// pending write recorded, no `Effect::PublishEvent`.
     fn on_publish(&mut self, intent: WriteIntent, sink: Box<dyn ReceiptSink>) -> Vec<Effect> {
         let id = self.alloc_receipt_id();
         let WriteIntent {
@@ -539,6 +549,19 @@ impl<S: EventStore> EngineCore<S> {
             Durability::Ephemeral => None,
             _ => Some(sink),
         };
+
+        if let WritePayload::Signed(event) = &payload {
+            if let Err(err) = event.verify() {
+                let status = WriteStatus::Failed(err.to_string());
+                return match sink {
+                    Some(sink) => {
+                        sink.on_status(status.clone());
+                        vec![Effect::EmitReceipt(id, status)]
+                    }
+                    None => Vec::new(),
+                };
+            }
+        }
 
         let mut effects = Vec::new();
         if let Some(sink) = &sink {
