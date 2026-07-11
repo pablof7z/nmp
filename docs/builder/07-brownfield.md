@@ -1,122 +1,123 @@
 # Adding NMP to an app you already own
 
-**Status: BUILT** — the coexistence patterns use the real Swift SDK and Rust
-surface. A desktop-JVM Kotlin `Flow` projection is also built; Android/AAR/
-Compose and TypeScript remain incomplete.
+NMP is an ordinary long-lived dependency. Put it wherever the app already keeps
+services, then fold query snapshots and receipt facts into the app's existing
+state.
 
-After this chapter you'll know exactly where the engine object lives in an app that already has its own state, networking, and UI — and you'll have proof, from the SDK's own shape, that NMP demands no wrapper, no rewrite, and no surrender of your architecture.
+No NMP type needs to own the scene graph.
 
----
+## Hold the engine in app-owned state
 
-## The one adoption fact: NMP is a library, not a framework
-
-The engine is a plain object you construct and hold. It is not a scene, not an app delegate, not an environment you inject, not a base class you inherit. Adopting it is `import NMP` plus one `let`. Everything else in your app stays exactly as it is.
-
-This is a *design guarantee*, not a style preference — the SDK is shaped so that the framework-shaped alternatives are impossible to write. There is no `NMPProvider`, no `NMPApp`, no `@NMPEnvironment`, because those types don't exist. The Falsifier's kill condition is permanent: *if embedding the engine makes your app NMP-shaped, the SDK is wrong.* So you can add it to one screen of a large existing app and leave the other forty untouched.
-
-## Where the engine object lives
-
-The engine is `Sendable` and cheap to hold. Two placements are idiomatic; pick by your existing architecture, not by anything NMP prefers.
-
-### On your own model object (the Falsifier's choice)
-
-The Falsifier puts it on a plain `@Observable` class the app authored. Nothing about `AppModel` is an NMP concept — the engine is just a property:
+The exact spellings remain provisional, but the dependency shape is simple:
 
 ```swift
 @Observable
-final class AppModel {           // YOUR class, your shape, your rules
-    let engine: NMPEngine
+final class LibraryModel {
+    let nmp: NMPEngine
+    var rows: [NMPRow] = []
 
-    init() throws {
-        engine = try NMPEngine(config: NMPConfig(
-            storePath: cachePath,
-            indexerRelays: ["wss://purplepag.es", "wss://relay.primal.net"]))
+    init(cacheURL: URL) throws {
+        nmp = try NMPEngine(configuration: .persistent(cacheURL))
     }
 }
 ```
 
-If you already have an `AppState` / `Store` / view-model layer, the engine drops onto it the same way, beside your existing properties. It coexists with whatever else that object holds — REST clients, a Core Data stack, a Combine pipeline — because it shares nothing with them.
+`LibraryModel` is the app's type. It may also hold a REST client, its own
+database, feature flags, or any other dependency. NMP neither knows nor cares.
 
-### As a dependency you inject (DI containers)
+An app that already uses dependency injection can register the engine there
+instead. Construct one engine per local trust domain and persistent store; do
+not build an NMP-specific provider hierarchy around it.
 
-Nothing stops you registering `NMPEngine` in your existing DI container and resolving it where needed:
+## Observe in the app's natural scope
 
-```swift
-// Whatever DI you already use — NMP has no opinion.
-container.register(NMPEngine.self) { _ in
-    try! NMPEngine(config: .init(storePath: path, indexerRelays: indexers))
-}.inObjectScope(.container)      // one instance for the app's lifetime
-```
-
-Construct it once (a single store path wants a single owner), then treat it as a normal long-lived service. There is no NMP-mandated lifecycle to reconcile with your container's — `deinit` calls `shutdown()` as a safety net, so even a container that forgets to tear it down doesn't leak the engine thread.
-
-### The no-provider-wrapper proof
-
-Here's the evidence the SDK forces this on you rather than merely allowing it. Look at the Falsifier's entire app entry point — a plain SwiftUI `App` with no NMP type anywhere in the scene graph:
+A view model, reducer effect, SwiftUI task, Kotlin coroutine, or Rust task can
+own an observation:
 
 ```swift
-@main
-struct FalsifierApp: App {
-    @State private var model: AppModel?
-    var body: some Scene {
-        WindowGroup {
-            if let model { ContentView(model: model) }
-            else { ProgressView().task { model = try? AppModel() } }
-        }
+func observeLibrary() async throws {
+    let demand = NMPDemand(
+        selection: .filter(kinds: [9999]),
+        source: .authorOutboxes,
+        access: .public
+    )
+
+    for await snapshot in try nmp.observe(demand) {
+        rows = snapshot.rows
+        sourceEvidence = snapshot.acquisition
     }
 }
 ```
 
-No `.environment(engine)`, no `NMPProvider { }`, no modifier NMP requires. A view reaches the engine because *you* passed your own `model` down, using whatever propagation your app already uses (`@Environment`, an initializer argument, a singleton — NMP doesn't see the difference). The read path is likewise just a `.task` on a view you already have:
+Dropping the final observation owner withdraws its demand. NMP performs the
+reference counting, dependency repair, REQ close, and reconnect work. The app
+does not mirror subscription lifecycle or keep expanded author and relay sets
+alive.
 
-```swift
-.task(id: model.kinds) {
-    guard let query = try? model.engine.observe(myFilter) else { return }
-    for await batch in query { self.rows = batch.rows }   // into YOUR @State
-}
-```
+Use the platform's normal rules when updating UI state. For example, a Swift
+consumer running off the main actor must hop to `MainActor` before changing
+UI-bound properties; NMP does not invent another executor model.
 
-Demand is torn down when that `.task` is cancelled and drops the iterator — which happens on your view's natural lifecycle, not on any schedule NMP imposes.
+## Keep app data and NMP data in their owning stores
 
-## Coexisting with your existing state and networking
+NMP's persistent replica contains Nostr events, provenance, scoped acquisition
+evidence, pending write obligations, attempts, and receipts. The app's database
+continues to own product-specific records.
 
-NMP owns *its* store (the SQLite cache at `storePath`) and *its* sockets (routed from your two indexers). It does not touch your networking stack, your persistence, or your other sockets. Three coexistence facts follow:
+Rows crossing the facade are plain values. The app may map them into its own
+view models, combine them with server data, or retain presentation state. It
+must not create a second authoritative Nostr cache or an optimistic write
+overlay that competes with the canonical NMP store.
 
-- **Two stores, no conflict.** NMP's cache is its own file. Keep your existing database for your own domain data; let NMP's watermark-backed cache serve Nostr rows. They never contend.
-- **Delivered rows are just data.** `Row` is a plain `Sendable`/`Hashable` value of raw tokens. Fold it into your existing view models, map it into your own domain types, merge it with data from your REST API — it's ordinary Swift after it crosses the boundary. NMP has no opinion about what you do with a row.
-- **Your sockets stay yours.** NMP has no `relays:` parameter and no way to hand it a connection. It routes exclusively from the indexer config plus what it discovers. Your existing WebSocket/HTTP code is invisible to it and vice versa.
+One engine instance is one local trust domain. Switching the current pubkey does
+not partition or wipe public cached events. An app serving mutually untrusted
+local users must invoke the explicit destructive-reset operation between them.
 
-## Migrating alongside another Nostr library
+## Migrate one ownership slice at a time
 
-If you're moving off NDK / Applesauce / a hand-rolled relay pool, you don't cut over in one commit. Run both, screen by screen:
+An existing Nostr client can run beside NMP during migration:
 
-1. **Add the engine beside your existing client.** Both can be live at once; they don't share state. Your old code keeps serving the screens you haven't migrated.
-2. **Migrate one query at a time.** Replace a hand-managed subscription with an `observe(NMPFilter)`. The classic thing you *delete* here is the machinery you used to hand-maintain: watching kind:3 and re-issuing REQs when follows changed is now a single `Derived` binding the engine re-resolves for you. That whole loop goes away.
-3. **Move writes to intents.** Swap your sign-then-send code for
-   `publish(WriteIntent)` and consume the receipt stream. The current SDK can
-   register a local signer. The target ships standard platform secure providers
-   and also accepts custom remote/hardware providers; the durable event/outbox
-   store never becomes a raw-secret vault.
-4. **Verify each migrated screen on the diagnostics surface** before deleting the old path. The diagnostics screen shows the exact filters and per-kind event counts for the NMP-served screen, so you can confirm parity with the old client's behavior by *reading*, not by hoping. When the counts look right, delete the legacy path for that screen.
+1. Add one engine without changing the app's architecture.
+2. Move one read workflow to a live query.
+3. Confirm its compiled demand and source evidence in diagnostics.
+4. Delete the old subscription and local expansion logic for that workflow.
+5. Move its writes to intents and consume the receipt facts.
 
-Because the two libraries share nothing, a half-migrated app can be a stable
-state. Keep one app-owned source for the current pubkey and feed that input to
-NMP. Only dependent NMP queries reroot. Signer registration/default/override is
-a separate write concern; an accepted write never follows a later pubkey
-change.
+Avoid leaving two live owners for the same workflow indefinitely. A temporary
+side-by-side comparison is useful; two permanent caches, retry loops, or relay
+planners create ambiguous authority.
 
-## Rust and other platforms
+Do not fill gaps in an unfinished NMP surface with app-owned subscription
+repair, relay expansion, signer persistence, or durable retry. Keep the old
+owner for that workflow until the supported facade can replace it end to end.
 
-Embedding the Rust `Handle` in an existing Rust app is the same story: `EngineThread::spawn(...)` returns a `Clone + Send` `Handle` you store wherever your app keeps services. It owns two interior threads and nothing of yours; `handle.shutdown()` + `engine.join()` is the clean teardown, and until then it's just a value you clone into whatever tasks need it.
+## Account and signer inputs stay separate
 
-> **Kotlin JVM built; Android/TS incomplete.** `Packages/NMPKotlin` proves cold
-> `Flow` and deterministic cancellation without an NMP container. Android still
-> needs AAR/Keystore/Compose falsification; TypeScript is not committed. The
-> no-wrapper boundary applies to every projection.
+The app may keep its existing account model. Feed the current pubkey into NMP as
+a reactive input for queries that reference it. Literal multi-account queries
+remain live when that value changes.
 
-The through-line: NMP is additive. You keep your architecture, your networking, and your other libraries; you gain two nouns and a diagnostics screen; and the SDK's shape means you can never accidentally invert that relationship and end up living inside NMP.
+For writes, the common path uses the signer registered for the current pubkey.
+An explicit per-write identity override supports podcast, disposable, hardware,
+or delegated identities without changing the reactive account input. The chosen
+identity is pinned at acceptance and cannot drift after an account switch.
+
+## What adoption must not require
+
+A brownfield integration should not add:
+
+- an `NMPApp`, `NMPProvider`, or NMP-owned state container;
+- scene-phase callbacks that reopen subscriptions;
+- app-generated relay lists for each filter;
+- a timer that polls engine state;
+- app-owned copies of derived binding expansions; or
+- a second optimistic event list wired directly to the write path.
+
+If one of those seems necessary, inspect the permanent diagnostics surface and
+the [current implementation status](03-status-map.md). The right response may
+be an upstream NMP gap rather than downstream application machinery.
 
 ---
 
 <!-- nav-footer -->
-<sub>← [Your first app in 20 lines](06-first-app.md) · [Index](README.md) · [Packaging & distribution](08-packaging.md) →</sub>
+<sub>[Index](README.md) · [Packaging](08-packaging.md) →</sub>

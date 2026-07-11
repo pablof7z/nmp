@@ -1,184 +1,183 @@
 # Testing an app that embeds NMP
 
-**Status: BUILT** (the fake-engine seam `NMPEngine.init(ffi:)` over `NmpEngineProtocol` is real, as are the bounded live tests. Anchored to `Packages/NMP/Sources/NMP/Engine.swift`, `Packages/NMP/Sources/NMPFFI/nmp_ffi.swift`, and `Packages/NMP/Tests/NMPTests/`.)
+Most application tests should not start a relay or reach through NMP's FFI
+layer. Test app-owned state transitions with plain public snapshot, row,
+receipt, and diagnostic values; reserve a smaller integration tier for the real
+engine.
 
-After this chapter you'll be able to unit-test an app that embeds NMP without a live relay: you'll inject a fake engine that emits deterministic rows, receipts, and diagnostics; assert your view logic against golden snapshots; and keep exactly one bounded live tier for the wire path. The point is that **your app's logic is testable in milliseconds** because the engine is an injectable object, not an ambient singleton.
+The public test-support package is still provisional. Do not build application
+tests around `@testable import`, generated FFI observer protocols, or mechanism
+crates.
 
-## The seam: `NMPEngine.init(ffi:)`
+## Test the app's fold as app code
 
-`NMPEngine` wraps a value conforming to `NmpEngineProtocol`. The public initializer constructs the real FFI engine; a second, internal initializer takes any conformer:
+NMP snapshots are values. A reducer or view model can consume a scripted
+sequence without knowing how the engine produced it:
 
 ```swift
-// Packages/NMP/Sources/NMP/Engine.swift (real)
-public final class NMPEngine: Sendable {
-    let ffi: NmpEngineProtocol
-    public init(config: NMPConfig) throws { ffi = try /* real FFI engine */ }
-    init(ffi: NmpEngineProtocol) { self.ffi = ffi }   // for tests / fakes
+let first = QuerySnapshot(
+    rows: [row(id: "a", kind: 9999)],
+    cache: .persistent,
+    acquisition: [
+        .init(relay: relayA, reconciledThrough: nil, status: .connecting)
+    ],
+    shortfall: [])
+
+let second = QuerySnapshot(
+    rows: [row(id: "a", kind: 9999), row(id: "b", kind: 9999)],
+    cache: .persistent,
+    acquisition: [
+        .init(relay: relayA, reconciledThrough: timestamp, status: .requesting),
+        .init(relay: relayB, reconciledThrough: nil, status: .disconnected)
+    ],
+    shortfall: [])
+
+model.apply(first)
+model.apply(second)
+
+XCTAssertEqual(model.visibleIDs, ["a", "b"])
+XCTAssertEqual(model.unavailableSources, [relayB])
+```
+
+The spelling is illustrative. The important boundary is that the test asserts
+the app's interpretation of local rows and scoped evidence. It never fabricates
+`synced`, `healthy`, or global completeness.
+
+If a feature directly consumes an asynchronous observation, the app may inject
+its own narrow interface or async sequence. That is an ordinary application
+testing decision, not an NMP container:
+
+```swift
+protocol LibrarySnapshots {
+    func snapshots() -> AsyncStream<QuerySnapshot>
 }
 ```
 
-`NmpEngineProtocol` is the entire contract you must fake — six methods:
+Keep this interface shaped around the feature's needs. Do not mirror the entire
+NMP facade merely to make a large mock.
 
-```swift
-public protocol NmpEngineProtocol: AnyObject, Sendable {
-    func addAccount(secretKey: String) throws -> String
-    func observe(query: FfiFilter, observer: RowObserver) throws -> NmpQueryHandle
-    func observeDiagnostics(observer: DiagnosticsObserver) -> NmpDiagnosticsHandle
-    func publish(intent: FfiWriteIntent, observer: ReceiptObserver) throws
-    func setActiveAccount(pubkey: String?) throws
-    func shutdown()
-}
+## Script receipt facts, not a success boolean
+
+A write-facing feature should be tested against the transitions it presents:
+
+```text
+Accepted
+AwaitingSigner(pubkey)
+Signed(eventId)
+Routed(relayA, relayB)
+Acked(relayA)
+Rejected(relayB, reason)
 ```
 
-Note the shape: `observe`/`publish`/`observeDiagnostics` each take an **observer** the engine drives. That is your injection point. A fake conforms to `NmpEngineProtocol`, captures the observer, and calls `on_batch` / `on_status` / `on_snapshot` with whatever deterministic sequence your test needs. The Swift SDK's own bridges (`RowBridge`, `ReceiptBridge`, `DiagnosticsBridge`) then turn those callbacks into the same `AsyncSequence`/`Receipt` your production code consumes — so your app code under test is byte-for-byte the real thing.
+Useful app tests include:
 
-`init(ffi:)` is `internal`, so your test target imports the package with `@testable import NMP` to reach it — exactly how the SDK's own tests reach it.
+- the pending row renders immediately after durable `Accepted`;
+- signer absence is presented without hiding or rolling back the row;
+- one relay ACK is not displayed as universal convergence;
+- an at-most-once `OutcomeUnknown` is not offered a blind retry button;
+- detaching the UI does not imply cancellation; and
+- reattaching to a receipt reconstructs the same durable facts.
 
-## A fake engine that emits deterministic rows
+The app does not inject a row through a write mock. Its test sequence models the
+store snapshot and receipt as independent observations, matching the production
+ownership boundary.
 
-```swift
-@testable import NMP
-import NMPFFI
+## Deterministic engine integration
 
-final class FakeEngine: NmpEngineProtocol, @unchecked Sendable {
-    // Script the batches this fake will deliver to whoever observes.
-    var scriptedBatches: [(deltas: [FfiRowDelta], coverage: FfiCoverage)] = []
-    private(set) var lastActivePubkey: String?
+NMP needs a supported test surface that can instantiate the canonical facade
+with:
 
-    func observe(query: FfiFilter, observer: RowObserver) throws -> NmpQueryHandle {
-        // Drive the observer synchronously with the scripted sequence.
-        for batch in scriptedBatches {
-            observer.onBatch(deltas: batch.deltas, coverage: batch.coverage)
-        }
-        observer.onClosed()
-        return FakeQueryHandle()      // a no-op handle; nothing to tear down
-    }
+- an in-memory or temporary persistent store;
+- an injected clock and deterministic randomness where time/jitter matter;
+- scripted relay and signer capabilities;
+- bounded observation channels; and
+- the same validation, resolver, router, and outbox code used in production.
 
-    func setActiveAccount(pubkey: String?) throws { lastActivePubkey = pubkey }
-    func addAccount(secretKey: String) throws -> String { "deadbeef…" }
-    func observeDiagnostics(observer: DiagnosticsObserver) -> NmpDiagnosticsHandle { … }
-    func publish(intent: FfiWriteIntent, observer: ReceiptObserver) throws { … }
-    func shutdown() {}
-}
-```
+That surface must remain a test harness, not a public mechanism-assembly API.
+Apps should be able to drive relay frames, signer results, disconnects, AUTH
+challenges, and clock advances without importing FFI records or constructing an
+`EngineCore` themselves.
 
-Then wrap it and exercise your real app code:
+Until this target surface lands, treat internal SDK fakes as repository tests,
+not a stable consumer contract. The honest shipping state is tracked in
+[Current implementation status](03-status-map.md).
 
-```swift
-func testFeedFoldsRowsInArrivalOrder() async throws {
-    let fake = FakeEngine()
-    fake.scriptedBatches = [
-        (deltas: [.added(row(id: "a", kind: 9999, content: "first"))],  coverage: .unknown),
-        (deltas: [.added(row(id: "b", kind: 9999, content: "second"))], coverage: .completeUpTo(1_700_000_000)),
-    ]
-    let engine = NMPEngine(ffi: fake)          // the fake seam
+## Prove grammar and module boundaries
 
-    var seen: [[Row]] = []
-    var finalCoverage: Coverage = .unknown
-    for await batch in try engine.observe(NMPFilter(kinds: [9999])) {
-        seen.append(batch.rows)
-        finalCoverage = batch.coverage
-    }
+Engine-level contract tests must show that:
 
-    // Golden assertions on YOUR fold, deterministic, no network:
-    XCTAssertEqual(seen.map { $0.map(\.id) }, [["a"], ["a", "b"]])  // accumulation
-    // Current API only: this is the scripted plan watermark, not global truth.
-    XCTAssertEqual(finalCoverage, .completeUpTo(1_700_000_000))
-}
-```
+- a nested `Derived` demand uses its own source/access context even when the
+  outer demand names a different protocol host or AUTH identity;
+- changing inner or outer context recompiles only dependent work and never
+  aliases their acquisition evidence;
+- every ASCII letter `A-Z` and `a-z` is accepted as an indexed filter tag key;
+- arbitrary event tag names such as `alt`, `-`, and application-defined strings
+  round-trip and can be projected without becoming generic filter keys;
+- no whitelist grants one protocol tag special treatment; and
+- the NIP-29 remembered-groups surface consumes NIP-51's typed kind `10009`
+  values without claiming `10009` or kind `30002`, and the underlying list
+  demand never runs through the selected group host.
 
-Because the SDK's `RowBridge` accumulates deltas into full snapshots, your test
-asserts the same current shape the UI sees. Target tests should script compact
-per-source acquisition and shortfall evidence instead of interpreting aggregate
-coverage as authoritative.
+## Diagnostics make good golden evidence
 
-## Injecting deterministic receipts
+The permanent diagnostic snapshot is a structured projection, so it is useful
+for deterministic assertions:
 
-The write path is the same pattern against `ReceiptObserver`. Script a `WriteStatus` sequence to test how your UI presents an in-flight publish:
+- per-relay subscription count;
+- exact wire-filter JSON;
+- lane and reverse-coverage counts;
+- events received by relay and kind;
+- source status, EOSE, AUTH, errors, and watermarks; and
+- explicit graph, route, or result shortfall.
 
-```swift
-func publish(intent: FfiWriteIntent, observer: ReceiptObserver) throws {
-    observer.onStatus(status: .accepted)
-    observer.onStatus(status: .signed(eventId: "abc…"))
-    observer.onStatus(status: .routed(relays: ["wss://a", "wss://b"]))
-    observer.onStatus(status: .acked(relay: "wss://a"))
-    observer.onStatus(status: .gaveUp(relay: "wss://b"))
-}
-```
+Golden tests should compare semantic records or canonical JSON, not screenshots
+of a health score. NMP deliberately exposes no health score.
 
-Now you can assert your UI shows "sent to 1 of 2" without a relay in sight — and prove you never confuse *enqueued* with *converged* (bug-ledger #9; see *[Writing: intents, receipts, and the durability guarantee lattice](14-writing.md)*).
+## Crash and restart proofs belong to NMP
 
-## Golden-diagnostics assertions
+An app fake cannot prove the durable write contract. NMP's owning test suites
+must kill and reopen the real persistence boundary at every relevant point and
+prove:
 
-Because diagnostics is a pure projection of real numbers, it makes an excellent golden-test surface: script a `DiagnosticsObserver` snapshot and assert your diagnostics screen (or your "is my feed routed?" logic) reads it correctly.
+- failed acceptance exposes no pending row or `Accepted` receipt;
+- successful acceptance restores the frozen body, pending row, receipt, signer
+  identity, routing state, and displaced candidates together;
+- signer detachment and reattachment resume the same obligation;
+- signature promotion preserves exact body, author, id, and valid signature;
+- cancellation, deletion, expiry, and replaceable supersession cannot strand an
+  open intent;
+- attempts are persisted before dispatch and retain ordinal/eligibility;
+- at-most-once ambiguity is never blindly resent; and
+- receipt facts remain reattachable after open work becomes terminal.
 
-```swift
-func observeDiagnostics(observer: DiagnosticsObserver) -> NmpDiagnosticsHandle {
-    observer.onSnapshot(snapshot: FfiDiagnosticsSnapshot(
-        relays: [ FfiRelayDiagnostics(
-            relay: "wss://relay.example",
-            wireSubCount: 1,
-            authorsServed: 2,
-            byLane: [],
-            filters: ["{\"kinds\":[9999],\"authors\":[\"…\"]}"],
-            eventsByKind: [FfiKindCount(kind: 9999, count: 7)],
-            coverage: [FfiFilterCoverage(filter: "…", coverage: .completeUpTo(1_700_000_000))]
-        )],
-        uncoveredAuthorCount: 0,
-        droppedMergeRules: []
-    ))
-    return FakeDiagnosticsHandle()
-}
-```
+These are facade-level contract tests, not tests of table helpers in isolation.
 
-The SDK's own `DiagnosticsTests` show the shape of a real construction test: they assert a freshly built engine yields an immediate, well-formed **empty** snapshot (`relays.count == 0`), and that an unroutable literal author with no indexer surfaces as `uncoveredAuthorCount == 1` and *zero fabricated relays*. These are golden assertions over real numbers — copy the pattern for your own "empty vs unknown vs unroutable" UI states.
+## Bound every asynchronous test
 
-## No-live-relay unit tests: the discipline
+Tests must never poll with `sleep` and check loops. Use the platform's timeout
+or task-race primitive so a missing event fails with a bounded diagnostic.
 
-Two rules keep your unit tier fast and non-flaky, both borrowed from the SDK's own tests:
+A small live-relay tier may prove the real network path. Keep it separate from
+deterministic CI evidence, cap every wait, and report an unavailable public
+relay as an environmental skip rather than training the suite to tolerate
+random failures. Live tests supplement, but never replace, scripted transport
+and crash-recovery falsifiers.
 
-1. **Never poll, always bound.** Race any stream consumption against a hard timeout with a `withTaskGroup` so a test can never hang, even if a fake misbehaves. The SDK's `firstSnapshot`/`firstNonEmptyBatch` helpers are the template — one task consumes the stream, one sleeps and returns `nil`, the group takes whichever finishes first and cancels the rest.
-2. **A fake drives observers synchronously.** Your fake calls `onBatch`/`onStatus`/`onSnapshot` inline, so there's no scheduler nondeterminism — the sequence your test sees is exactly the sequence you scripted.
+## Suggested test matrix
 
-With those two rules, the whole app-logic tier runs with no network, in milliseconds, deterministically.
+| Tier | What it proves | Network |
+|---|---|---|
+| App fold | Product interpretation of public values | none |
+| Scripted async | Observation and receipt UI behavior | none |
+| Facade integration | Real store, graph, routing, signing, and cancellation | deterministic harness |
+| Crash/restart | Atomicity and durable recovery | local process/database |
+| Platform parity | Rust behavior projects identically to Swift and Kotlin | none |
+| Live smoke | Packaging through a real relay | bounded, optional |
 
-## The bounded live tier
-
-You still want *one* tier that proves the real wire path — Swift → FFI → engine → relay — but it must be bounded so it can never hang CI. The SDK's `LiveRelayTests` is the exact model:
-
-- Construct the real engine from **only** indexer relays (never a `relays:` param — there isn't one).
-- `setActiveAccount` to a well-known read-only pubkey; observe a real derived follow-feed.
-- Bound every network wait (~15–30s) and **`XCTSkip`** (don't fail) if the network didn't cooperate: "Package build + construction tests still pass independently of this network condition." A live tier that *fails* on a flaky relay would train you to ignore it; a live tier that *skips* keeps signal honest.
-- Cross-check planes: the current live Falsifier happens to assert kind:1
-  counts because that is its fixture. Add kind-diverse and protocol-module
-  cross-checks as those surfaces land.
-
-## Target contract tests beyond a fake stream
-
-Fakes are useful for app folding, but they cannot prove the promoted durable
-contracts. Their owning suites must also cover:
-
-- process death immediately after durable `Accepted`, followed by pending-row
-  and receipt reconstruction;
-- signer provider detachment/reattachment and exact response validation;
-- equal selections under incompatible source/AUTH contexts;
-- explicit per-limit shortfall and bounded slow-observer behavior;
-- NIP-module ownership collisions and byte-identical immutable composition;
-- destructive reset clearing all engine-owned local trust-domain state; and
-- Swift/Kotlin projection parity over the canonical Rust facade.
-
-## The shape of a healthy test suite
-
-| Tier | Uses | Speed | Fails on network? |
-|---|---|---|---|
-| App-logic unit | `NMPEngine(ffi: FakeEngine)` — scripted rows/receipts/diagnostics | ms | never (no network) |
-| Golden diagnostics | scripted `FfiDiagnosticsSnapshot` | ms | never |
-| Construction/shape | real engine, no subscriptions | ms | never |
-| Bounded live | real engine + real relays, timeout-guarded | seconds | **skips**, never hangs/fails |
-
-Most of your tests live in the top rows. The seam that makes it possible is one internal initializer — `NMPEngine(ffi:)` — and one protocol you fake. Because your production app consumes the *same* SDK bridges over your fake's callbacks, a green unit suite is real evidence about real code, not a mock of it.
+The testing rule matches the architecture rule: test through the narrow public
+contract, and keep NMP's internal machinery out of application code.
 
 ---
 
 <!-- nav-footer -->
-<sub>← [Cost & performance](24-performance.md) · [Index](README.md) · [Troubleshooting & FAQ](26-troubleshooting.md) →</sub>
+<sub>[Index](README.md) · [Troubleshooting](26-troubleshooting.md) →</sub>

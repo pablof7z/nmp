@@ -1,163 +1,133 @@
-# NMP public-interface guidelines and builder-manual TOC
+# Builder guide design rules
 
-- **Date:** 2026-07-11
-- **Status:** governed provisional guidance. Behavioral invariants are agreed;
-  public names and shapes remain changeable under the review gate below.
-- **Canonical owners:** [`VISION.md`](../VISION.md) and the focused specs in
-  [`docs/design/`](../design/). The README owns current milestone truth.
+This file governs the published builder guide. It is an editorial contract,
+not another architecture authority. `README.md`, `docs/VISION.md`, the focused
+contracts under `docs/design/`, and the open GitHub issues own product truth.
 
-## Part A - public-interface guidelines
+## 1. Write the coherent target
 
-### A.0 The frame
+Conceptual chapters describe the provisional v2 developer experience as one
+system. They do not alternate sentence by sentence between the current API and
+the intended API.
 
-NMP is an embeddable Nostr sync-and-routing engine, not an app framework. Its
-workload surface is two nouns: a live query and a write intent. Current-pubkey
-inputs, signer providers, operator configuration, diagnostics, and protocol
-modules are a small control/extension plane around those nouns; none owns the
-app's state, navigation, lifecycle, or account UX.
+One banner on the guide landing page states that public names are illustrative.
+The [current implementation status](03-status-map.md) and
+[`docs/known-gaps.md`](../known-gaps.md) state what ships. A chapter may call out
+a current incompatibility when a developer could otherwise damage data or ship
+an incorrect claim, but implementation history is not the narrative spine.
 
-Everything the engine uses to acquire, route, key, admit, or retry work crosses
-the boundary as a closed, typed, introspectable value. Arbitrary app code runs
-after delivery.
+## 2. Preserve the two nouns
 
-### A.1 Product primitives
+Every app workload is one of:
 
-| Surface | Current truth | Target invariant | App ownership |
-|---|---|---|---|
-| **Live query** | A `Filter`/`Binding` graph is built. Source/access context is not yet in the public descriptor. | Demand identity is selection + source authority + access context. Results are rows plus scoped acquisition evidence. | Which queries exist; how rows/evidence fold into app state. |
-| **Write intent** | Signing, routing, and in-process receipts are built. Restart durability and pending rows are not. | Durable `Accepted` atomically owns the frozen body, expected pubkey, receipt, and canonical pending row. | What and when to publish; optional identity override; presentation of evidence. |
-| **Current pubkey** | `setActiveAccount` currently also moves one active signer. | A reactive/default input. It reroots dependent bindings; publish uses its signer by default but may override and pins identity at acceptance. | Account list, selection UX, login/logout policy. |
-| **Signer providers** | Local Rust signer exists; NIP-46/platform providers are incomplete. | NMP resolves providers by identity. Core persists obligations, not raw secrets; platform SDKs ship standard secure providers. | Identity import/removal/backup/consent and custom provider choice. |
-| **Diagnostics** | Filters, lanes, counts, and watermarks are built. | Permanent raw source/AUTH/error/retry/limit proof without aggregate health judgments. | Rendering and redaction policy choices exposed by the SDK. |
-| **Protocol modules** | Ownership/routing foundations exist; module composition is not built. | Opt-in modules own only protocol-defined schemas and may contribute typed context to foreign drafts without claiming their kinds. | Which modules to enable and how typed results enter the product. |
+- a live query observed as the platform's native reactive primitive; or
+- a write intent observed through receipt facts.
 
-One engine is one shared local cache/trust domain. Account switching is not a
-privacy wipe. A mutually untrusted logout uses the explicit destructive reset
-tracked by issue #53.
+Identity inputs, capabilities, diagnostics, and protocol modules configure or
+explain those nouns. They do not become an NMP session, resource hierarchy,
+container, provider, app reducer, or lifecycle framework.
 
-### A.2 Reactive declarations and protocol queries
+## 3. Keep core content-neutral
 
-The closed binding grammar remains the acquisition foundation:
+No quickstart, helper catalog, or chapter structure may imply that kind:1, a
+timeline, follows, profiles, or any other content family is the center of NMP.
 
-```text
-Binding  := Literal(set)
-          | Reactive(CurrentPubkey)
-          | Derived(inner: Filter, project: Selector)
-          | SetOp(Union | Intersect | Diff, [Binding])
-Selector := Authors | Ids | Tag(char) | AddressCoord
-```
+- Core examples use caller-selected kinds or a clearly app-owned example kind.
+- Protocol examples name their owner, such as NIP-02, NIP-29, or NIP-68.
+- A reusable helper expands to the closed public grammar and is never a hidden
+  subscription lifecycle.
+- Every nested `Derived` query names its own source/access context; it never
+  inherits the outer demand's context implicitly.
+- Indexed filter tag keys are one ASCII letter, while event/projection tag
+  names are arbitrary strings. Never introduce a blessed tag whitelist.
+- A protocol module owns only the exact schemas and semantics its protocol
+  defines.
 
-A reusable helper can construct and return this graph. The expansion must stay
-printable and equivalent to writing the value directly. A richer protocol
-query may return typed protocol resources, but it still lowers to ordinary
-demand and cannot introduce a second subscription lifecycle, cache, or app
-closure.
+Use multiple kinds and protocol shapes across the guide. Diversity is evidence
+that the core abstraction is genuinely generic.
 
-Arbitrary typed reactive inputs beyond current pubkey remain an explicit
-decision (#48). Do not invent blessed global inputs for one app's state.
+## 4. Show values in, code after
 
-### A.3 Protocol modules, not content batteries
+Anything that changes engine demand, source authority, access, routing,
+admission, signing identity, or persistence crosses the boundary as a closed,
+typed, printable value. Do not show app closures in those positions.
 
-No content kind is the center of NMP. Core exposes no privileged text-note,
-home-feed, or kind:1 recipe layer.
+Arbitrary code is welcome after delivery: fold snapshots, rank rows, format
+content, choose labels, navigate, and render in the app's own architecture.
 
-An opt-in module may own protocol-defined schemas, codecs, validation, state
-reconstruction, semantic operations, reusable declarations, and typed routing
-context. It may not:
+## 5. Never imply global completeness
 
-- claim unrelated content kinds because they participate in its protocol;
-- register app closures into demand/routing/admission;
-- own an app container, reducer, navigation, or lifecycle;
-- maintain a second store, relay pool, outbox, or signing path;
-- mutate an already signed event.
+Use the snapshot vocabulary consistently:
 
-Composition uses immutable unsigned drafts. Each module adds only its owned
-contribution, then core freezes and signs once. A bound NIP-29 group may add its
-`h` context and host authority to a foreign draft without becoming that draft's
-schema owner.
+- canonical rows from the local cache;
+- cache revision/provenance evidence;
+- acquisition facts for currently planned sources and access contexts; and
+- explicit shortfall when demand has no routable candidate or a local limit
+  prevented intended work.
 
-### A.4 Query evidence and boundedness
+Do not write `syncHealth`, `globally synced`, `authoritative empty`, or any
+equivalent promise. EOSE and watermarks are scoped source facts.
 
-EOSE and watermarks are facts about a concrete source/request, never proof of
-global Nostr state. Do not teach `synced`, global `complete`, `syncHealth`, or
-authoritative-empty interpretations.
+## 6. Make writes locally reactive through the store
 
-Query and diagnostics observations are latest-complete-local-state streams:
-intermediate frames may coalesce after all underlying deltas are accumulated.
-Write facts are persisted and reattachable. Every graph, wire, relay, result,
-queue, and transport limit either preserves semantics, rejects explicitly, or
-emits shortfall evidence. Silent first-N truncation is forbidden.
+Durable `Accepted` means one crash-atomic persistence boundary owns the frozen
+body, signer identity, receipt, obligation, and canonical pending row. Matching
+queries see that row through ordinary store invalidation. The write path never
+pushes an optimistic row directly to an observer.
 
-### A.5 Cross-platform and Rust boundaries
+Every durability class has observable, reattachable receipt status. A
+non-durable write may forgo resuming its publication obligation after process
+loss, but its minimal receipt does not silently disappear.
 
-- One invariant-preserving Rust facade is the supported product surface for
-  direct Rust apps and `nmp-ffi`.
-- Swift `AsyncSequence` and Kotlin `Flow` are native projections of the same
-  values and cancellation/backpressure semantics.
-- Mechanism crates remain testable internals, not a second supported app
-  assembly contract.
-- Platform SDK sugar may improve spelling, never add expressiveness absent from
-  the canonical values.
-- No provider/container, scene-phase hook, or mandatory app lifecycle exists.
+## 7. Separate current pubkey from signer identity
 
-### A.6 Governed provisional changes
+`$currentPubkey` is a reactive query input and ergonomic default signer. A
+write may override the signer identity without changing current pubkey. Once an
+intent is accepted, the chosen identity is pinned.
 
-Before v2, public breaking changes are allowed and expected. They are not
-casual. A public-shape change requires:
+The app owns its account list and identity policy. One engine has one shared
+cache trust domain; switching accounts does not partition stored rows.
 
-1. Evidence showing what the current shape cannot express or proves wrongly.
-2. Impact analysis across Rust, FFI, Swift, Kotlin, persistence, diagnostics,
-   and protocol modules.
-3. Explicit human signoff.
-4. Synchronized projection and falsifier updates.
-5. Removal of the superseded path rather than a compatibility alias.
+## 8. Treat protocol modules as semantic owners
 
-Stable behavioral invariants are not permission to freeze today's names or
-enum layout before the falsifiers have earned that promise.
+An opt-in module may provide builders, parsers, state reconstruction, derived
+query fragments, semantic operations, and typed source/routing context for the
+exact protocol it owns. It may not add a second store, engine, signer path,
+subscription manager, or app framework.
 
-## Part B - builder manual
+Composition is immutable. A NIP-29 group operation may add an `h` tag and host
+relay context to a NIP-68 photo draft without claiming ownership of the photo
+kind. Core freezes and signs the final value once.
 
-### Mental model
+Cross-module dependency does not transfer ownership. NIP-51 owns kind `10009`;
+NIP-29 may compose its typed values into remembered group/host operations but
+claims neither `10009` nor generic kind `30002` relay sets.
 
-1. [Why NMP exists](01-why-nmp.md)
-2. [The mental model](02-mental-model.md)
-3. [Current status map and glossary](03-status-map.md)
-4. [A first app](04-ten-minute-timeline.md)
-5. [The two nouns](05-two-nouns.md)
+## 9. Use native platform idioms
 
-### Reading and evidence
+The semantic values agree across Rust, Swift, and Kotlin. Observation and
+ownership follow each platform:
 
-6. [Live query grammar](09-binding-grammar.md)
-7. [Consuming results](10-consuming-results.md)
-8. [Query evidence](11-coverage.md)
-9. [Collection mode](12-collection-mode.md)
-10. [Delivery-side transforms](13-delivery-transforms.md)
+- Rust: one facade plus `Stream`/receiver and `Drop`;
+- Swift: `AsyncSequence`, optional `@Observable` convenience, and ARC;
+- Kotlin: cold `Flow` and coroutine cancellation.
 
-### Writing and identity
+Do not promise a platform merely because the values are serializable.
 
-11. [Durable writes and receipts](14-writing.md)
-12. [Replaceable edits](15-editing-replaceable.md)
-13. [Identity and multi-account](16-identity.md)
-14. [Relays and source authority](17-relays.md)
-15. [Offline and sync](19-offline-sync.md)
-16. [Capabilities](20-capabilities.md)
+## 10. Keep examples honest without freezing spelling
 
-### Operation and extension
+Every target code block is illustrative. Prefer small, internally consistent
+spellings over hedging each line. State uncertainty once near the example.
 
-17. [Provenance](21-provenance.md)
-18. [Diagnostics](22-diagnostics.md)
-19. [Threading and lifecycle](23-threading-lifecycle.md)
-20. [Performance and boundedness](24-performance.md)
-21. [Testing](25-testing.md)
-22. [Troubleshooting](26-troubleshooting.md)
-23. [Protocol modules and reusable declarations](27-recipes-and-choosing.md)
-24. [Patterns and anti-patterns](28-patterns.md)
-25. [What NMP does not do](29-not-do.md)
-26. [Platform guides](30-platform-guides.md)
-27. [Gallery](31-gallery.md)
-28. [Extending NMP](32-extending.md)
-29. [Versioning and stability](33-versioning.md)
+When an implementation frame changes a public concept, update the guide in the
+same PR only after the governed change record explains the evidence,
+cross-surface impact, persistence impact, and superseded path.
 
-Every chapter must distinguish current implementation from target contract.
-Historical reviews and milestone plans preserve what was believed and proven at
-their time; they are evidence records, not current public guidance.
+## 11. Navigation and size
+
+- Every chapter has one H1 and a short purpose statement.
+- Use relative links and a previous/index/next footer.
+- Keep every documentation file at or below 800 lines.
+- Prefer one canonical explanation and link to it from adjacent chapters.
+- Keep the shortest path from landing page to first query and first write under
+  seven chapters.
