@@ -29,16 +29,32 @@ public struct LaneCount: Sendable, Hashable {
     }
 }
 
+/// A proven, retained `[from, through]` interval -- the engine-global
+/// DIAGNOSTICS watermark (`nmp_store::coverage::CoverageInterval` mirror).
+/// Deliberately distinct from the scoped, per-query `AcquisitionEvidence`
+/// surface (`Row.swift`) -- never reused as a query-level verdict
+/// (`docs/design/scoped-evidence-49-12-plan.md` §4).
+public struct CoverageInterval: Sendable, Hashable {
+    public let from: UInt64
+    public let through: UInt64
+
+    init(_ ffi: FfiCoverageInterval) {
+        from = ffi.from
+        through = ffi.through
+    }
+}
+
 /// One filter's proven coverage state at one relay. `filter` is the EXACT
 /// wire JSON this coverage state is for -- the same rendering as the
-/// parallel entry in `RelayDiagnostics.filters`.
+/// parallel entry in `RelayDiagnostics.filters`. `coverage` is `nil` --
+/// "no row = not covered", unchanged from the store's own rule.
 public struct FilterCoverage: Sendable, Hashable {
     public let filter: String
-    public let coverage: Coverage
+    public let coverage: CoverageInterval?
 
     init(_ ffi: FfiFilterCoverage) {
         filter = ffi.filter
-        coverage = Coverage(ffi.coverage)
+        coverage = ffi.coverage.map(CoverageInterval.init)
     }
 }
 

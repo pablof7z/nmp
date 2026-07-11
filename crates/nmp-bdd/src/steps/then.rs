@@ -1,13 +1,12 @@
 //! `Then` — an observable outcome, always one of the four channels
 //! (approach doc §1.3): rows on a feed, receipt states, diagnostics facts,
-//! coverage words. Every assertion below reads ONLY through
+//! acquisition-evidence facts. Every assertion below reads ONLY through
 //! `NmpWorld`'s public observers (`feed_*`/`receipt_*`/`diagnostics_*`/
 //! `relay_contacted`/`relay_untouched_since_snapshot`) -- never anything
 //! engine-internal.
 
 use cucumber::then;
 
-use nmp_engine::core::QueryCoverage;
 use nmp_engine::outbox::WriteStatus;
 
 use crate::steps::parse_people;
@@ -94,12 +93,26 @@ async fn feed_is_empty(w: &mut NmpWorld) {
     assert!(stays_empty, "expected my feed to stay empty");
 }
 
-#[then(regex = r#"^the query reports its results are unknown -- not empty$"#)]
-async fn coverage_is_unknown(w: &mut NmpWorld) {
-    let unknown = w.feed_eventually(|_, coverage| matches!(coverage, QueryCoverage::Unknown));
+#[then(regex = r#"^the query does not claim its empty result is complete$"#)]
+async fn empty_result_is_not_claimed_complete(w: &mut NmpWorld) {
+    // #49: there is no `Unknown` verdict and no authoritative-empty claim to
+    // read. An empty feed is honest only while a planned source is still
+    // unproven -- at least one source carries no `reconciled_through`
+    // watermark (or the subtree surfaces a shortfall), so nothing presents
+    // the emptiness as complete. The absence of any aggregate/`isComplete`
+    // field is itself structural (there is no such surface to assert on).
+    let not_claimed_complete = w.feed_eventually(|rows, evidence| {
+        rows.is_empty()
+            && (evidence
+                .sources
+                .iter()
+                .any(|s| s.reconciled_through.is_none())
+                || !evidence.shortfall.is_empty())
+    });
     assert!(
-        unknown,
-        "expected the query's coverage to be Unknown (nothing proven yet)"
+        not_claimed_complete,
+        "expected the empty feed to carry an unproven planned source \
+         (no authoritative-empty / global-complete claim)"
     );
 }
 

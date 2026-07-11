@@ -1,7 +1,10 @@
 # Query demand and acquisition evidence
 
-- **Status:** TARGET CONTRACT - architecture agreed; the current `Filter` plus
-  aggregate `Coverage` surface does not yet satisfy it.
+- **Status:** PARTIAL CONTRACT. The current `Filter` selection graph now ships
+  with per-current-plan `AcquisitionEvidence` across Rust, FFI, Swift, and
+  Kotlin; the former query-level aggregate is gone. Full
+  `Selection + SourceAuthority + AccessContext` identity, persistence, and
+  context-safe wire sharing remain TARGET under #49.
 - **Owns:** live-query identity, reusable derived demand, snapshot evidence, and
   the boundary between ordinary observations and diagnostics.
 

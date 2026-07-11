@@ -1,7 +1,7 @@
 //! The PURE synchronous reducer (plan §2 position 1, §3.4). `EngineCore`
 //! owns the M1 resolver `Engine<S>`, the M2 `Router`, the write-outbox
 //! state, and the coverage-attribution bookkeeping (`attribution.rs`,
-//! `coverage_query.rs`). Its entire surface is:
+//! `evidence.rs`). Its entire surface is:
 //!
 //! ```ignore
 //! impl<S: EventStore> EngineCore<S> {
@@ -19,13 +19,15 @@
 //! Coverage attribution implements
 //! `docs/consults/2026-07-11-fable-coverage-attribution.md` (the ruling)
 //! EXACTLY: send-time snapshots + the FIFO intersection rule live in
-//! [`attribution`]; the per-query `CompleteUpTo`/`Unknown` aggregation
-//! lives in [`coverage_query`]. Both are engine-owned per the ruling — the
-//! store (`nmp-store`) only stores whatever interval it is handed.
+//! [`attribution`]; the per-query, per-source acquisition evidence (`rows +
+//! compact facts, never a collapsed global verdict` —
+//! `docs/design/scoped-evidence-49-12-plan.md`, folding #12 into #49) lives
+//! in [`evidence`]. Both are engine-owned — the store (`nmp-store`) only
+//! stores whatever interval it is handed.
 
 mod attribution;
-mod coverage_query;
 mod diagnostics;
+mod evidence;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -66,8 +68,8 @@ const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 use attribution::AttributionState;
-pub use coverage_query::QueryCoverage;
 pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
+pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
@@ -146,9 +148,12 @@ pub enum EngineMsg {
 }
 
 /// The row/wire/receipt vocabulary the reducer emits (plan §3.4). `EmitRows`
-/// carries the query-level [`QueryCoverage`] alongside its rows (ruling §6:
-/// coverage is a property of the WHOLE query, aggregated across every atom's
-/// covering relay set — not a per-row fact).
+/// carries the query's [`AcquisitionEvidence`] alongside its rows
+/// (`docs/design/scoped-evidence-49-12-plan.md`): per-source acquisition
+/// facts over the query's FULL subtree (interior `Derived` atoms included,
+/// #12), never a single collapsed query-global verdict — an app reads
+/// which source has proven what, it is never handed a settled/complete
+/// judgment.
 #[derive(Debug)]
 pub enum Effect {
     /// -> `Pool::send` per (relay, current handle).
@@ -180,7 +185,7 @@ pub enum Effect {
         RelayUrl,
         nmp_store::CoverageInterval,
     ),
-    EmitRows(HandleId, Vec<RowDelta>, QueryCoverage),
+    EmitRows(HandleId, Vec<RowDelta>, AcquisitionEvidence),
     /// The engine-global diagnostics projection (M5 plan §1.2 step 3),
     /// pushed at the end of every `recompile()` and after every EOSE
     /// (coverage watermarks can advance with no recompile at all). Read-only
@@ -205,13 +210,16 @@ pub enum Effect {
 /// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
 /// the `QueryHandle` itself (dropping it would withdraw the subscription —
 /// see `nmp_resolver::QueryHandle`'s `Drop` impl), the app-facing sink, and
-/// the last-emitted row-id/coverage pair (so `EmitRows` fires only when
+/// the last-emitted row-id/evidence pair (so `EmitRows` fires only when
 /// something actually changed, not on every unrelated recompile).
+/// `AcquisitionEvidence` derives `PartialEq` precisely so this
+/// change-detection compare stays a plain value comparison, as the former
+/// query-evidence aggregate's did.
 struct HandleState {
     _handle: QueryHandle,
     sink: Box<dyn RowSink>,
     last_rows: BTreeSet<EventId>,
-    last_coverage: Option<QueryCoverage>,
+    last_evidence: Option<AcquisitionEvidence>,
 }
 
 /// Per-receipt bookkeeping the reducer retains from `Publish` through to the
@@ -260,6 +268,17 @@ pub struct EngineCore<S: EventStore> {
     /// `RelayUrl` — this is EngineCore's own memory of which URL currently
     /// occupies which pool slot, populated on `RelayConnected`.
     slot_to_url: HashMap<u32, RelayUrl>,
+    /// Relays CURRENTLY connected — feeds `AcquisitionEvidence.sources[_]
+    /// .status` (`Requesting` iff a member here covers the atom;
+    /// `Disconnected` iff it was a member of `ever_connected_relays` but
+    /// isn't a member here; `Connecting` otherwise). Additive bookkeeping:
+    /// `slot_to_url`'s own semantics (populated on connect, never cleared on
+    /// disconnect) are untouched by this.
+    connected_relays: BTreeSet<RelayUrl>,
+    /// Every relay that has connected at least once, ever — distinguishes
+    /// `Disconnected` (was connected, dropped) from `Connecting` (never yet
+    /// connected) for the same evidence computation.
+    ever_connected_relays: BTreeSet<RelayUrl>,
     clock: Timestamp,
     next_receipt: u64,
     /// Write outbox (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
@@ -322,6 +341,8 @@ impl<S: EventStore> EngineCore<S> {
             handles: HashMap::new(),
             attribution: AttributionState::new(),
             slot_to_url: HashMap::new(),
+            connected_relays: BTreeSet::new(),
+            ever_connected_relays: BTreeSet::new(),
             clock: Timestamp::from(0u64),
             next_receipt: 0,
             pending: HashMap::new(),
@@ -369,7 +390,7 @@ impl<S: EventStore> EngineCore<S> {
             self.router.diagnostics(),
             self.router.plan(),
             &self.events_by_relay_kind,
-            |relay, filter| self.get_coverage(filter, relay),
+            |relay, key| self.resolver.store().get_coverage(key, relay),
         )
     }
 
@@ -490,13 +511,19 @@ impl<S: EventStore> EngineCore<S> {
         let id = qh.id();
         let mut effects = Vec::new();
         self.recompile(&mut effects);
+        // A new query can change the capped greedy source plan for EVERY
+        // existing query, even when their rows are unchanged. Refresh the
+        // survivors against the newly-finalized plan before installing the
+        // new handle; otherwise their "current-plan" evidence can retain a
+        // source that the router just dropped (or omit one it just added).
+        self.refresh_all_handles(&mut effects);
         self.handles.insert(
             id,
             HandleState {
                 _handle: qh,
                 sink,
                 last_rows: BTreeSet::new(),
-                last_coverage: None,
+                last_evidence: None,
             },
         );
         self.refresh_handle(id, &mut effects);
@@ -508,6 +535,9 @@ impl<S: EventStore> EngineCore<S> {
         self.handles.remove(&id);
         let mut effects = Vec::new();
         self.recompile(&mut effects);
+        // Removing one query can free capped-plan capacity and therefore
+        // change the planned sources of every surviving handle.
+        self.refresh_all_handles(&mut effects);
         effects
     }
 
@@ -864,6 +894,13 @@ impl<S: EventStore> EngineCore<S> {
 
     fn on_relay_connected(&mut self, handle: TransportRelayHandle, url: RelayUrl) -> Vec<Effect> {
         self.slot_to_url.insert(handle.slot, url.clone());
+        // Feeds `AcquisitionEvidence.sources[_].status` (`evidence.rs`):
+        // this relay is now `Requesting`, never again `Connecting` for the
+        // lifetime of this `EngineCore` (`ever_connected_relays` is
+        // append-only -- a later drop reads `Disconnected`, not
+        // `Connecting`, per the doc's "was connected, then dropped" fact).
+        self.connected_relays.insert(url.clone());
+        self.ever_connected_relays.insert(url.clone());
         // Reconnect (new generation): clear stale attribution, then replay
         // + re-snapshot every currently-planned REQ for this relay (ruling
         // §2: "a replayed sub on the new generation gets fresh snapshots").
@@ -893,6 +930,11 @@ impl<S: EventStore> EngineCore<S> {
                 probe.initial_message_hex,
             ));
         }
+        // A relay coming online can flip a handle's `AcquisitionEvidence`
+        // (`Connecting` -> `Requesting`) with no coverage/row change at all
+        // -- refresh so that becomes observable via `EmitRows`, same as an
+        // EOSE-driven watermark advance below.
+        self.refresh_all_handles(&mut effects);
         effects
     }
 
@@ -908,7 +950,18 @@ impl<S: EventStore> EngineCore<S> {
             // NEXT `recompile()`/reconnect naturally re-opens whatever
             // demand still wants this shape.
             self.neg_sessions.retain(|_, session| session.relay != url);
+            // Feeds `AcquisitionEvidence.sources[_].status`: this relay is
+            // no longer connected, but `ever_connected_relays` is untouched
+            // -- a subsequent evidence computation reads `Disconnected`,
+            // never `Connecting`, and any `reconciled_through` this relay
+            // already earned survives (the #49 "offline cached rows remain
+            // usable" acceptance criterion -- watermark and link status are
+            // deliberately orthogonal fields, never one enum).
+            self.connected_relays.remove(&url);
         }
+        // Same reasoning as `on_relay_connected`: a link-status flip alone
+        // must become observable via `EmitRows`.
+        self.refresh_all_handles(&mut effects);
         effects
     }
 
@@ -970,9 +1023,10 @@ impl<S: EventStore> EngineCore<S> {
                         effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
                     }
                 }
-                // A watermark advancing can flip a handle's QueryCoverage
-                // (ruling §6) even with no new rows at all — refresh so
-                // that becomes observable via EmitRows, same as an ingest.
+                // A watermark advancing can flip a handle's
+                // AcquisitionEvidence (a source's `reconciled_through`) even
+                // with no new rows at all — refresh so that becomes
+                // observable via EmitRows, same as an ingest.
                 self.refresh_all_handles(&mut effects);
                 // Same watermark advance can also flip the diagnostic
                 // surface's own per-(filter, relay) coverage even though
@@ -1359,12 +1413,11 @@ impl<S: EventStore> EngineCore<S> {
     /// (ruling §3), so the relay's ongoing live tail still needs an open
     /// REQ once the backlog is settled.
     ///
-    /// Coverage crediting (ledger #7) is NOT immediate when a backfill is
-    /// needed: recording "complete" before the backfilled events are
-    /// actually ingested would be exactly the "authoritative-empty that is
-    /// really a hole" failure the ruling exists to prevent (a reader could
-    /// observe `CompleteUpTo` on a store that is still, transiently,
-    /// missing precisely the events negentropy just proved are missing).
+    /// Evidence crediting (ledger #7) is NOT immediate when a backfill is
+    /// needed: recording a reconciled watermark before the backfilled events
+    /// are actually ingested would attach evidence to a store
+    /// that is still, transiently, missing precisely the events negentropy
+    /// just proved are missing.
     /// `pending_neg_credit` defers the credit to the backfill sub's OWN
     /// EOSE (`on_relay_frame`), by which point the events are already
     /// ingested (EVENT frames precede EOSE, NIP-01). An empty `need_ids`
@@ -1470,23 +1523,23 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    /// Recompute `id`'s current row set + query coverage; emit (and
+    /// Recompute `id`'s current row set + acquisition evidence; emit (and
     /// synchronously deliver to its sink) `Effect::EmitRows` only if either
     /// changed since the last refresh -- and, when something DID change, the
     /// row payload is ALWAYS just the incremental added/removed delta
     /// against `state.last_rows`, never the full current set (see
     /// `RowDelta`'s doc: this is what keeps a long-running subscription's
     /// total delivered row volume ~O(distinct rows) instead of O(rows²)).
-    /// Coverage can change with no row change at all (a watermark advancing)
-    /// -- that case still emits, carrying an EMPTY row delta alongside the
-    /// new coverage.
+    /// Evidence can change with no row change at all (a watermark advancing,
+    /// or a source's link status flipping) -- that case still emits,
+    /// carrying an EMPTY row delta alongside the new evidence.
     fn refresh_handle(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
-        let (current, coverage) = self.rows_and_coverage_for(id);
+        let (current, evidence) = self.rows_and_evidence_for(id);
         let Some(state) = self.handles.get_mut(&id) else {
             return;
         };
         let current_ids: BTreeSet<EventId> = current.keys().copied().collect();
-        if current_ids == state.last_rows && state.last_coverage == Some(coverage) {
+        if current_ids == state.last_rows && state.last_evidence.as_ref() == Some(&evidence) {
             return;
         }
         let mut delta: Vec<RowDelta> = Vec::new();
@@ -1501,29 +1554,38 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         state.last_rows = current_ids;
-        state.last_coverage = Some(coverage);
+        state.last_evidence = Some(evidence.clone());
         state.sink.on_rows(delta.clone());
-        effects.push(Effect::EmitRows(id, delta, coverage));
+        effects.push(Effect::EmitRows(id, delta, evidence));
     }
 
-    /// The query's FULL current matching row set (by id) + its aggregate
-    /// coverage -- an internal snapshot `refresh_handle` diffs against the
-    /// handle's own remembered `last_rows` to compute the outgoing delta.
-    /// This snapshot itself is never handed to a caller/effect directly.
-    fn rows_and_coverage_for(
+    /// The query's FULL current matching row set (by id) + its
+    /// [`AcquisitionEvidence`] -- an internal snapshot `refresh_handle`
+    /// diffs against the handle's own remembered `last_rows` to compute the
+    /// outgoing delta. This snapshot itself is never handed to a caller/
+    /// effect directly. Rows are computed over `root_atoms` alone (delivery
+    /// shape unchanged); evidence is computed over `subtree_atoms` (#12: the
+    /// query's FULL subtree, interior `Derived` atoms included).
+    fn rows_and_evidence_for(
         &self,
         id: HandleId,
-    ) -> (BTreeMap<EventId, nostr::Event>, QueryCoverage) {
-        let atoms = self.resolver.root_atoms(id);
+    ) -> (BTreeMap<EventId, nostr::Event>, AcquisitionEvidence) {
+        let root_atoms = self.resolver.root_atoms(id);
         let mut by_id: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
-        for atom in &atoms {
+        for atom in &root_atoms {
             for se in self.resolver.store().query(&atom.to_nostr()) {
                 by_id.entry(se.event.id).or_insert(se.event);
             }
         }
-        let coverage =
-            coverage_query::query_coverage(&atoms, self.router.plan(), self.resolver.store());
-        (by_id, coverage)
+        let subtree_atoms = self.resolver.subtree_atoms(id);
+        let evidence = evidence::acquisition_evidence(
+            &subtree_atoms,
+            self.router.plan(),
+            self.resolver.store(),
+            &self.connected_relays,
+            &self.ever_connected_relays,
+        );
+        (by_id, evidence)
     }
 }
 

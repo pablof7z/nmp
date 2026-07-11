@@ -28,7 +28,8 @@ nostr = "0.44.4"
 # (network-controlled filter contents feed this via `Binding::Derived`; a
 # 64-bit FNV hash is trivially, constructibly collidable and this value is
 # both the demand/refcount key AND (via `CoverageKey`) the durable redb
-# watermark key -- a forged collision there would forge a `CompleteUpTo`).
+# watermark key -- a forged collision there would attach source evidence to
+# the wrong filter).
 blake3 = "1"
 nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-ownership = { path = "crates/nmp-ownership" }

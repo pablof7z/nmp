@@ -11,22 +11,26 @@
 use std::collections::{BTreeMap, HashMap};
 
 use nmp::{
-    DiagnosticsSnapshot, Durability as GDurability, FilterCoverageEntry, Lane, QueryCoverage,
-    RelayDiagnosticsSnapshot, RowDelta, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
-    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
+    AcquisitionEvidence, AuthPhase, CoverageInterval, DiagnosticsSnapshot,
+    Durability as GDurability, FilterCoverageEntry, Lane, RelayDiagnosticsSnapshot, RowDelta,
+    ShortfallFact, SourceEvidence, SourceStatus, WriteIntent as GWriteIntent,
+    WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
     Binding as GBinding, Derived as GDerived, Filter as GFilter, IdentityField as GIdentityField,
     IndexedTagName, Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
 };
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nostr::{
+    Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent,
+};
 
 use crate::types::{
-    FfiBinding, FfiCoverage, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
-    FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting, FfiWriteStatus,
+    FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCoverageInterval, FfiDerived,
+    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiFilterCoverage, FfiIdentityField,
+    FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow, FfiRowDelta, FfiSelector,
+    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSourceEvidence, FfiSourceStatus, FfiWriteIntent,
+    FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every way a value crossing this boundary can fail to parse -- typed
@@ -327,12 +331,70 @@ pub fn row_delta_to_ffi(d: &RowDelta) -> FfiRowDelta {
     }
 }
 
-pub fn coverage_to_ffi(c: QueryCoverage) -> FfiCoverage {
-    match c {
-        QueryCoverage::CompleteUpTo(ts) => FfiCoverage::CompleteUpTo {
-            unix_seconds: ts.as_secs(),
+fn auth_phase_to_ffi(p: AuthPhase) -> FfiAuthPhase {
+    match p {
+        AuthPhase::AwaitingPolicy => FfiAuthPhase::AwaitingPolicy,
+        AuthPhase::AwaitingSignature => FfiAuthPhase::AwaitingSignature,
+    }
+}
+
+fn source_status_to_ffi(s: SourceStatus) -> FfiSourceStatus {
+    match s {
+        SourceStatus::Requesting => FfiSourceStatus::Requesting,
+        SourceStatus::Connecting => FfiSourceStatus::Connecting,
+        SourceStatus::Disconnected => FfiSourceStatus::Disconnected,
+        SourceStatus::AwaitingAuth { phase } => FfiSourceStatus::AwaitingAuth {
+            phase: auth_phase_to_ffi(phase),
         },
-        QueryCoverage::Unknown => FfiCoverage::Unknown,
+        SourceStatus::AuthDenied => FfiSourceStatus::AuthDenied,
+        SourceStatus::Error => FfiSourceStatus::Error,
+    }
+}
+
+fn source_evidence_to_ffi(s: SourceEvidence) -> FfiSourceEvidence {
+    FfiSourceEvidence {
+        relay: s.relay.to_string(),
+        reconciled_through: s.reconciled_through.map(|ts| ts.as_secs()),
+        status: source_status_to_ffi(s.status),
+    }
+}
+
+/// `ShortfallFact`'s `atom: ConcreteFilter` renders to the EXACT wire JSON
+/// (`ConcreteFilter::to_nostr().as_json()`) -- the same rendering discipline
+/// `diagnostics_snapshot_to_ffi`/`relay_diagnostics_to_ffi` already use for
+/// every other `ConcreteFilter` crossing this boundary, never a fabricated
+/// summary.
+fn shortfall_fact_to_ffi(f: ShortfallFact) -> FfiShortfallFact {
+    match f {
+        ShortfallFact::NoPlannedSource { atom } => FfiShortfallFact::NoPlannedSource {
+            atom: atom.to_nostr().as_json(),
+        },
+        ShortfallFact::NoResolvedDemand => FfiShortfallFact::NoResolvedDemand,
+        ShortfallFact::LocalLimit { atom } => FfiShortfallFact::LocalLimit {
+            atom: atom.to_nostr().as_json(),
+        },
+    }
+}
+
+/// `nmp::AcquisitionEvidence -> FfiAcquisitionEvidence` (the scoped,
+/// per-query surface `RowsMsg`/`RowObserver::on_batch` carries -- ratified
+/// codex-nova names, see `types.rs`'s own doc). Replaces the deleted
+/// query-level collapse: every source's facts map
+/// faithfully, never rolled up into a verdict.
+pub fn evidence_to_ffi(e: AcquisitionEvidence) -> FfiAcquisitionEvidence {
+    FfiAcquisitionEvidence {
+        sources: e.sources.into_iter().map(source_evidence_to_ffi).collect(),
+        shortfall: e.shortfall.into_iter().map(shortfall_fact_to_ffi).collect(),
+    }
+}
+
+/// `nmp::CoverageInterval -> FfiCoverageInterval` -- the engine-global
+/// DIAGNOSTICS watermark mirror, deliberately distinct from
+/// [`evidence_to_ffi`]'s scoped query surface.
+fn coverage_interval_to_ffi(i: CoverageInterval) -> FfiCoverageInterval {
+    FfiCoverageInterval {
+        from: i.from.as_secs(),
+        through: i.through.as_secs(),
     }
 }
 
@@ -409,7 +471,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
             .into_iter()
             .map(|entry: FilterCoverageEntry| FfiFilterCoverage {
                 filter: entry.filter,
-                coverage: coverage_to_ffi(entry.coverage),
+                coverage: entry.coverage.map(coverage_interval_to_ffi),
             })
             .collect(),
     }
@@ -571,6 +633,118 @@ mod tests {
 
     fn pk_hex() -> String {
         "a".repeat(64)
+    }
+
+    #[test]
+    fn acquisition_evidence_projects_every_fact_without_a_rollup() {
+        let atom = nmp_grammar::ConcreteFilter {
+            kinds: Some(std::collections::BTreeSet::from([9999])),
+            authors: Some(std::collections::BTreeSet::from([pk_hex()])),
+            ..nmp_grammar::ConcreteFilter::default()
+        };
+        let statuses = [
+            SourceStatus::Requesting,
+            SourceStatus::Connecting,
+            SourceStatus::Disconnected,
+            SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingPolicy,
+            },
+            SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingSignature,
+            },
+            SourceStatus::AuthDenied,
+            SourceStatus::Error,
+        ];
+        let sources = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| SourceEvidence {
+                relay: RelayUrl::parse(&format!("wss://source-{index}.example.com")).unwrap(),
+                reconciled_through: (index % 2 == 0).then(|| Timestamp::from(index as u64 + 10)),
+                status,
+            })
+            .collect();
+        let ffi = evidence_to_ffi(AcquisitionEvidence {
+            sources,
+            shortfall: vec![
+                ShortfallFact::NoPlannedSource { atom: atom.clone() },
+                ShortfallFact::NoResolvedDemand,
+                ShortfallFact::LocalLimit { atom: atom.clone() },
+            ],
+        });
+
+        assert_eq!(ffi.sources.len(), 7);
+        assert_eq!(ffi.sources[0].status, FfiSourceStatus::Requesting);
+        assert_eq!(ffi.sources[0].reconciled_through, Some(10));
+        assert_eq!(ffi.sources[1].status, FfiSourceStatus::Connecting);
+        assert_eq!(ffi.sources[1].reconciled_through, None);
+        assert_eq!(ffi.sources[2].status, FfiSourceStatus::Disconnected);
+        assert_eq!(
+            ffi.sources[3].status,
+            FfiSourceStatus::AwaitingAuth {
+                phase: FfiAuthPhase::AwaitingPolicy
+            }
+        );
+        assert_eq!(
+            ffi.sources[4].status,
+            FfiSourceStatus::AwaitingAuth {
+                phase: FfiAuthPhase::AwaitingSignature
+            }
+        );
+        assert_eq!(ffi.sources[5].status, FfiSourceStatus::AuthDenied);
+        assert_eq!(ffi.sources[6].status, FfiSourceStatus::Error);
+
+        let atom_json = atom.to_nostr().as_json();
+        assert_eq!(
+            ffi.shortfall,
+            vec![
+                FfiShortfallFact::NoPlannedSource {
+                    atom: atom_json.clone()
+                },
+                FfiShortfallFact::NoResolvedDemand,
+                FfiShortfallFact::LocalLimit { atom: atom_json },
+            ]
+        );
+    }
+
+    #[test]
+    fn diagnostics_keeps_exact_intervals_distinct_from_query_evidence() {
+        let relay = RelayUrl::parse("wss://diagnostics.example.com").unwrap();
+        let ffi = diagnostics_snapshot_to_ffi(DiagnosticsSnapshot {
+            relays: vec![RelayDiagnosticsSnapshot {
+                relay: relay.clone(),
+                wire_sub_count: 2,
+                authors_served: 1,
+                by_lane: vec![(Lane::AppRelay, 2)],
+                filters: vec!["{\"kinds\":[9999]}".to_string()],
+                events_by_kind: vec![(9999, 3)],
+                coverage: vec![
+                    FilterCoverageEntry {
+                        filter: "proven".to_string(),
+                        coverage: Some(CoverageInterval {
+                            from: Timestamp::from(4),
+                            through: Timestamp::from(9),
+                        }),
+                    },
+                    FilterCoverageEntry {
+                        filter: "unproven".to_string(),
+                        coverage: None,
+                    },
+                ],
+            }],
+            uncovered_author_count: 7,
+            dropped_merge_rules: vec!["limit"],
+        });
+
+        assert_eq!(ffi.relays[0].relay, relay.to_string());
+        assert_eq!(
+            ffi.relays[0].coverage[0].coverage,
+            Some(FfiCoverageInterval {
+                from: 4,
+                through: 9
+            })
+        );
+        assert_eq!(ffi.relays[0].coverage[1].coverage, None);
     }
 
     #[test]

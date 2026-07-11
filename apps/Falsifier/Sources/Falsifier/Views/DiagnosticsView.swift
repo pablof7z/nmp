@@ -77,11 +77,9 @@ struct DiagnosticsView: View {
         }
     }
 
-    private func coverageLabel(_ coverage: Coverage) -> String {
-        switch coverage {
-        case .unknown: return "coverage: unknown"
-        case .completeUpTo: return "coverage: complete"
-        }
+    private func coverageLabel(_ coverage: CoverageInterval?) -> String {
+        guard let coverage else { return "coverage: unproven" }
+        return "coverage: through \(coverage.through)"
     }
 
     private func observe() async {

@@ -117,7 +117,7 @@ list *is* the product surface — a feature, not a cost.
 - **Re-exports** so an app depends on `nmp` alone: the grammar
   (`Filter`/`Binding`/`Derived`/`Selector`/`SetOp`/`IdentityField`/
   `IndexedTagName`, `LiveQuery`), the write plane (`WriteIntent`/`WritePayload`/
-  `Durability`/`WriteRouting`), read outputs (`RowDelta`/`QueryCoverage`/
+  `Durability`/`WriteRouting`), read outputs (`RowDelta`/`AcquisitionEvidence`/
   `RowsMsg`/`WriteStatus`/`DiagnosticsSnapshot`), and `nostr::{PublicKey, Event,
   ...}` as needed. `TagName` was renamed `IndexedTagName` and its whitelist
   removed (#64) — it is the wire/local INDEXED filter key only (`Filter.tags`,
@@ -207,7 +207,7 @@ runs it twice:
    builds the same `nmp::Engine`), driven through the FFI types + `RowObserver`/
    `ReceiptObserver`.
 
-Assert identical: accumulated feed rows, `QueryCoverage`, ordered `WriteStatus`
+Assert identical: accumulated feed rows, `AcquisitionEvidence`, ordered `WriteStatus`
 receipt sequence, and `DiagnosticsSnapshot` shape. **Must include the
 load-bearing case:** publishing a tampered `WritePayload::Signed` fails
 identically on both surfaces (`EngineError::InvalidSignedEvent` ≙

@@ -96,8 +96,8 @@ impl Subscription {
         }
     }
 
-    /// Block for the next `RowsMsg` batch (raw rows + this query's aggregate
-    /// coverage). `Err` once the engine thread has shut down and the
+    /// Block for the next `RowsMsg` batch (raw rows + this query's scoped
+    /// acquisition evidence). `Err` once the engine thread has shut down and the
     /// channel disconnects.
     pub fn recv(&self) -> Result<RowsMsg, RecvError> {
         self.rows.recv()

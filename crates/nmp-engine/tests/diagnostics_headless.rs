@@ -243,12 +243,16 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
 }
 
 /// Per-filter coverage (M5 plan §1.1's "coverage per (filter, relay)"):
-/// `Unknown` before any EOSE, `CompleteUpTo` immediately after -- and an
-/// `EmitDiagnostics` fires from the EOSE arm itself (which never calls
-/// `recompile()`), proving the diagnostic surface observes coverage change
-/// points that are not a recompile.
+/// unproven (`None`) before any EOSE, a proven interval (`Some`) immediately
+/// after -- and an `EmitDiagnostics` fires from the EOSE arm itself (which
+/// never calls `recompile()`), proving the diagnostic surface observes
+/// coverage change points that are not a recompile. Diagnostics is engine-
+/// global and intentionally distinct from the query-facing
+/// `AcquisitionEvidence` surface (`docs/design/scoped-evidence-49-12-plan.md`
+/// §4) -- this asserts its own local fact (`Option<CoverageInterval>`), not
+/// a query-level verdict.
 #[test]
-fn diagnostics_coverage_flips_unknown_to_complete_up_to_on_eose_and_pushes_reactively() {
+fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactively() {
     let me = Keys::generate();
     let me_hex = me.public_key().to_hex();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
@@ -267,11 +271,8 @@ fn diagnostics_coverage_flips_unknown_to_complete_up_to_on_eose_and_pushes_react
     let r0 = snap.relays.iter().find(|r| r.relay == relay0).unwrap();
     assert_eq!(r0.coverage.len(), 1);
     assert!(
-        matches!(
-            r0.coverage[0].coverage,
-            nmp_engine::core::QueryCoverage::Unknown
-        ),
-        "no EOSE has arrived yet -- coverage must be Unknown, never fabricated"
+        r0.coverage[0].coverage.is_none(),
+        "no EOSE has arrived yet -- coverage must be unproven, never fabricated"
     );
 
     let wire0 = wire_sub_string(&sub0);
@@ -292,10 +293,74 @@ fn diagnostics_coverage_flips_unknown_to_complete_up_to_on_eose_and_pushes_react
     let snap = core.diagnostics_snapshot();
     let r0 = snap.relays.iter().find(|r| r.relay == relay0).unwrap();
     assert!(
-        matches!(
-            r0.coverage[0].coverage,
-            nmp_engine::core::QueryCoverage::CompleteUpTo(_)
-        ),
-        "after EOSE the same filter's coverage must flip to CompleteUpTo"
+        r0.coverage[0].coverage.is_some(),
+        "after EOSE the same filter's coverage must flip to a proven interval"
+    );
+}
+
+#[test]
+fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let a_hex = a.public_key().to_hex();
+    let b_hex = b.public_key().to_hex();
+    let relay = RelayUrl::parse("wss://coalesced.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a_hex.clone(), [relay.clone()])
+        .with_write(b_hex.clone(), [relay.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay);
+
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &a_hex),
+        Box::new(NullSink),
+    ));
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &b_hex),
+        Box::new(NullSink),
+    ));
+    let sub = sub_id_for(&effects, &relay).clone();
+
+    let before = core.diagnostics_snapshot();
+    let entry = &before.relays[0];
+    assert_eq!(entry.coverage.len(), 1, "AuthorUnion must be one wire REQ");
+    assert!(entry.filters[0].contains(&a_hex));
+    assert!(entry.filters[0].contains(&b_hex));
+    assert!(entry.coverage[0].coverage.is_none());
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(25)));
+    // The same sub-id has two in-flight REQs: the original single-author
+    // request and its AuthorUnion overwrite. The first EOSE can only credit
+    // their safe intersection (A); the second terminates the wide request
+    // and credits both absorbed atom keys.
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire_sub_string(&sub)),
+    ));
+    assert!(
+        core.diagnostics_snapshot().relays[0].coverage[0]
+            .coverage
+            .is_none(),
+        "one absorbed atom is still unproven after only the older REQ's EOSE"
+    );
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire_sub_string(&sub)),
+    ));
+
+    let after = core.diagnostics_snapshot();
+    assert_eq!(
+        after.relays[0].coverage[0].coverage,
+        Some(nmp_store::CoverageInterval {
+            from: Timestamp::from(0),
+            through: Timestamp::from(25),
+        }),
+        "the wide request is proven through the common interval of its absorbed narrow atoms"
     );
 }

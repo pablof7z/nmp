@@ -26,7 +26,7 @@ import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.conflate
-import uniffi.nmp_ffi.FfiCoverage
+import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiRowDelta
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpQueryHandle
@@ -69,7 +69,7 @@ fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> 
 
         val observer =
             object : RowObserver {
-                override fun onBatch(deltas: List<FfiRowDelta>, coverage: FfiCoverage) {
+                override fun onBatch(deltas: List<FfiRowDelta>, evidence: FfiAcquisitionEvidence) {
                     val snapshot =
                         lock.withLock {
                             for (delta in deltas) {
@@ -86,7 +86,7 @@ fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> 
                             }
                             order.mapNotNull { byId[it] }
                         }
-                    trySendBlocking(RowBatch(snapshot, Coverage.from(coverage)))
+                    trySendBlocking(RowBatch(snapshot, AcquisitionEvidence.from(evidence)))
                 }
 
                 override fun onClosed() {

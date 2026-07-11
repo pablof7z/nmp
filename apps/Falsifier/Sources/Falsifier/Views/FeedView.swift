@@ -11,13 +11,13 @@ struct FeedView: View {
     let model: AppModel
 
     @State private var rows: [Row] = []
-    @State private var coverage: Coverage = .unknown
+    @State private var evidence: AcquisitionEvidence?
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    LabeledContent("Coverage", value: coverageText)
+                    LabeledContent("Evidence", value: evidenceText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -57,22 +57,27 @@ struct FeedView: View {
         }
     }
 
-    private var coverageText: String {
-        switch coverage {
-        case .unknown: return "unknown"
-        case .completeUpTo(let ts): return "complete up to \(formatted(ts))"
+    // Per-source facts only -- never a rolled-up completeness verdict
+    // (`docs/design/scoped-evidence-49-12-plan.md` §4). This falsifier's own
+    // rendering choice, not an NMP-provided aggregate.
+    private var evidenceText: String {
+        guard let evidence else {
+            return "no evidence yet"
         }
+        let sourceCount = evidence.sources.count
+        let shortfallCount = evidence.shortfall.count
+        return "\(sourceCount) source(s), \(shortfallCount) shortfall fact(s)"
     }
 
     private func observe() async {
         rows = []
-        coverage = .unknown
+        evidence = nil
         guard let query = try? model.engine.observe(FeedFilters.follows(kinds: model.kinds)) else {
             return
         }
         for await batch in query {
             rows = batch.rows.sorted { $0.createdAt > $1.createdAt }
-            coverage = batch.coverage
+            evidence = batch.evidence
         }
     }
 
