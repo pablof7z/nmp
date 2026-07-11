@@ -56,11 +56,17 @@ crate-type = ["staticlib", "lib"]   # staticlib → the xcframework; lib → rou
 
 Either way the app imports exactly one module (`NMP`) and sees zero `Ffi`-prefixed types.
 
-## Rust — crate + feature flags (BUILT)
+## Rust — one supported facade (TARGET)
 
-A Rust consumer depends on the crates directly (`nmp-engine`, `nmp-grammar`, `nmp-signer`, `nmp-store`, `nmp-router`, `nmp-transport`, `nmp-resolver`) and holds the `Handle`. There's no binding layer — the two nouns are the native API. This is the leanest possible build: you link the core and nothing else.
+A Rust consumer must enter through one invariant-preserving facade: the same
+facade `nmp-ffi` projects to Swift and Kotlin. Mechanism crates such as the
+resolver, router, store, and transport are implementation units, not an
+alternative supported app assembly path. The current workspace still exposes
+the `Handle` and individual crates directly; consolidating that surface is
+target work.
 
-The Rust build is also where the **modularity principle becomes a packaging lever** (see below): protocol-specific functionality is gated behind Cargo features / separate crates, so a Rust binary that never reacts never compiles reaction code.
+Protocol-specific functionality may use separate crates/features, but each
+module calls the same facade rather than assembling its own engine.
 
 ## Android / Compose — cargo-ndk + AAR (PLANNED-shape)
 
@@ -88,7 +94,9 @@ The rule: **the binding layer and the core binary are versioned and released tog
 
 - The bindings are *regenerated from the very binary they'll ship with* (step 3 of the Swift script reads metadata out of the compiled staticlib), so a hand-edited or stale `nmp_ffi.swift` can't silently drift — it's overwritten on every build.
 - A binary-distributed `binaryTarget` pins the xcframework by version (and checksum, for a remote URL). Bump the core → rebuild the xcframework → bump the package version → regenerate bindings, as one atomic release. There is no supported path where an app resolves a binding at one version and a core at another.
-- New or changed FFI surface follows the same discipline as any grammar change: it's a deliberate, versioned event, not an incidental PR. The FFI seam is where the "nouns are the invariant" contract is physically enforced.
+- New or changed FFI surface is deliberate and reviewed with its Rust, Swift,
+  Kotlin, persistence, and diagnostics impact. FFI projects the canonical
+  facade; it does not define a second behavior contract.
 
 Treat "the binding and the core came from the same build" as an invariant your release process guarantees, and the mismatch class of bug never reaches a user.
 
@@ -96,10 +104,13 @@ Treat "the binding and the core came from the same build" as an invariant your r
 
 Two budgets matter for an embedded engine: the **binary size** it adds to your app, and the **startup cost** to construct it. Construction is cheap — `NMPEngine(config:)` spins up the engine's interior threads and (with a `storePath`) opens the SQLite store; there's no network round-trip on the critical path, and cold-start reads serve from the persisted cache immediately. The size budget is where your choices show up, and that's the **modularity principle** as a packaging fact:
 
-> **You compose only the modules you enable.** The engine core is the two nouns plus the hard concerns (store, routing/outbox, sync, coverage, identity, diagnostics, capability seams). Everything protocol-specific and non-primitive — reactions, reposts, follow packs, highlights, long-form, lists — is **opt-in**. A minimal timeline app that never reacts links **zero** reaction code, and adding follow-pack support taxes only the apps that enable it.
+> **You compose only the protocol modules you enable.** Core remains
+> content-agnostic; a module contributes only its protocol-owned schemas,
+> validation, reconstruction, operations, and routing context.
 
-- **Rust (BUILT today):** this is a Cargo-feature / separate-crate boundary. Enable a protocol crate/feature → its recipes and kind handling compile in; leave it out → it's absent from the binary. The dead-code you never enabled is never linked.
-- **Swift/Kotlin/web (PLANNED module mechanism):** the *intended* shape is that each per-NIP module is a separable package/target you add explicitly. Enabling it is how its recipes (`.reactions(to:)`, `.react()`) and kinds appear; not enabling it keeps them out of your app's binary. See *Extending NMP: protocol modules & recipes* for the design preview and *The two nouns and the ownership table* for the principle in full.
+- **Rust:** intended as separate protocol crates/features over the facade.
+- **Swift/Kotlin/web:** intended as corresponding optional products projecting
+  the same semantics. Exact package mechanics remain provisional.
 
 The practical upshot: your binary size is roughly *core + exactly the protocol modules you chose*, and it doesn't grow because some *other* app needed highlights or long-form. The expensive, permanent thing — the core and the two nouns — stays small on every platform; the protocol surface is à la carte. That's the same win the old NMP genuinely had (an app that didn't care about reactions didn't pack them), now stated as a durable packaging rule rather than an accident of crate layout.
 

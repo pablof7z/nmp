@@ -3,6 +3,10 @@
 - **Date:** 2026-07-11
 - **Status:** Design note (pre-build), the load-bearing back-half of milestone
   MR. Fans out to builders. Writes no code.
+- **Promotion correction:** the landed `nmp-ownership` facts below remain
+  authoritative. The unbuilt Unit E plan applies only to schema-wide policy for
+  exact claimed schemas. It is superseded wherever it implies that a contextual
+  protocol owns a foreign event kind; §1.5 records the corrected boundary.
 - **Source of truth (do not re-litigate):** `docs/design/routing-and-ownership.md`
   Parts B/C + §9 RESOLVED decisions; `docs/design/routing-build-plan.md` §3
   (Unit E), §7.1 resolutions (Q6, Q7). Where those are silent, §5 below
@@ -53,8 +57,8 @@
 ### 1.1 The problem restated precisely
 
 `nmp-router` (which must mint the default `Automatic` regime) and every future
-`nmp-mod-*` crate (nip17 → `VerifiedPrivateInbox`, nip29 → `HostPinned`, drafts →
-`Automatic`-over-recoverable) need `RoutePolicy` values. They **cannot build one
+`nmp-mod-*` crate (nip17 → `VerifiedPrivateInbox`, NIP-29's own exact schemas →
+`HostPinned`, drafts → `Automatic`-over-recoverable) need `RoutePolicy` values. They **cannot build one
 by literal** — the `route_class` field demands a `RouteClass`, and no code
 outside `nmp-ownership` can produce or name one. There is no partial escape: the
 sealing is on the *value*, so the only door is a function `nmp-ownership` itself
@@ -74,8 +78,8 @@ impl RoutePolicy {
     /// app lanes OFF; fail CLOSED; class VerifiedPrivateInbox. read == write.
     pub fn verified_private_inbox(list_kind: u16) -> RoutePolicy { … }
 
-    /// NIP-29 shape: source = module-pinned host lane; app lanes OFF; fail
-    /// CLOSED; class HostPinned.
+    /// Host-pinned shape for schemas the module itself owns: source =
+    /// module-pinned host lane; app lanes OFF; fail CLOSED; class HostPinned.
     pub fn host_pinned(lane: PinnedLane) -> RoutePolicy { … }
 
     /// Drafts shape (owner-recoverable): source = user's kind:`list_kind`
@@ -145,8 +149,8 @@ answer:**
    seam, not the app publish surface.** A `RoutePolicy`/`RouteClass` value *does
    nothing* until attached to a `KindClaim` (`route_policy: Some(..)`,
    `kind_claim.rs:25`) and handed to the engine builder as a module registration
-   at construction. The two-noun app surface (publish = event + durability;
-   read = live query; ledger #3 — no `relays:`) has **no parameter that accepts
+   at construction. The two-operation app surface (publish = write intent;
+   read = live query; ledger #3 — no untyped route override) has **no parameter that accepts
    a policy**. For a self-minted policy to route anything, the app must register
    a claim at engine-construction — i.e. **act as a protocol module**. "An app
    calls `verified_private_inbox`" collapses to "the app authored an inline
@@ -197,6 +201,25 @@ authority is minted only inside a registered, audited `KindClaim`; the sealed
 constructors guarantee a closed, leak-safe vocabulary, not a caller whitelist;
 and the module/app line is a workspace-audit boundary, not a Rust-visibility
 one.*
+
+### 1.5 Promoted boundary: context contribution without schema ownership
+
+Unit E's claim table answers: "what is the schema-wide routing policy for kinds
+this module owns?" It does not answer: "what protocol context is this one draft
+being published into?"
+
+NIP-29 makes the distinction concrete. Its crate claims only the exact NIP-29
+management/state event schemas. When a group publishes a foreign-owned unsigned
+draft, NIP-29 may return a new draft with the required `h` tag plus typed
+group-host context for that one intent. It does **not** claim the foreign kind or
+install `HostPinned` as that kind's global policy. The core validates the
+composition, resolves the default signer or an explicit override, signs once,
+and uses the ordinary outbox/receipt path. A pre-signed event cannot be mutated
+to acquire missing context.
+
+This contextual-publication seam is outside the historical E1/E2 decomposition.
+Builders must specify and falsify it separately rather than stretching
+`KindClaim` or `RoutePolicy` to cover it.
 
 ---
 

@@ -1,175 +1,121 @@
-# Platform SDK guides: iOS, Rust, Android, TS, TUI
+# Platform projections of one facade
 
-**Status: BUILT for Swift and Rust** (real, running SDKs — examples below are the current API). **PLANNED-shape for Android, TypeScript, and TUI** — those sections show the *intended* idiom, clearly marked; the SDKs aren't built yet.
+**Status: CURRENT + TARGET.** Swift `AsyncSequence`, direct Rust, and the
+desktop-JVM Kotlin `Flow` package are built and live-proven. Full Android/AAR/
+Compose remains open. Public target records remain governed and provisional;
+TypeScript/TUI are not v2 commitments.
 
-After this chapter you'll know the idiomatic delivery, ownership/teardown idiom, and sugar layers for each platform — and you'll be able to read just the one section for the platform you ship on. Read exactly one; the nouns are identical across all five, only the reactive wrapper and the ownership edge change.
+The architectural invariant is one Rust facade that preserves NMP's store,
+demand, routing, write, evidence, and diagnostics rules. FFI and native SDKs
+project it; they do not assemble mechanism crates differently or invent a
+second lifecycle.
 
-## The invariant across all platforms
+## Cross-platform rules
 
-Before the per-platform sections, hold this: **the nouns are the invariant; the delivery is the dialect.** `NMPFilter`/`Binding`/`Selector`, `WriteIntent`/durability/routing, `Row`/`Coverage`, receipt states, and diagnostics rows are the *same serializable values* on every platform, defined once at the FFI seam. What varies is only (a) the platform's canonical reactive primitive and (b) how teardown rides the platform's natural ownership edge. Three rules hold everywhere:
+1. Live query and write intent are the two workload nouns.
+2. Native reactive handles are primary: `AsyncSequence` on Swift, `Flow` on
+   Kotlin, and the canonical Rust stream/receiver surface.
+3. Query and diagnostics observations are bounded latest-state streams.
+4. Receipt facts are durable and reattachable, not an unbounded observer log.
+5. Handle ownership controls observation scope; no NMP provider or scene-phase
+   framework is required.
+6. Demand, draft/context, receipt, evidence, and diagnostics values have one
+   semantic definition across projections.
+7. Standard platform signer providers may wrap Keychain/Keystore, while the
+   app owns identity policy and custom providers.
 
-1. **Detachable handle first, view-binding sugar second.** The reactive handle (`AsyncSequence`/`Flow`/async iterator/`Stream`) is the primary API. `@Observable`/`StateFlow`/signal adapters are thin optional layers on top — never the primary surface (the SwiftData retrofit lesson: a view-only binding as the primary API is a trap that takes years to undo).
-2. **Teardown rides ownership, and explicit `cancel()` is never required.** Dropping the handle drops the demand. The engine's teardown-with-grace debounce makes every platform's natural drop safe.
-3. **No imposed lifecycle.** One construction call; every feature is a method on that object. No provider/container/scene-phase wrapper on any platform.
+## Swift today
 
----
-
-## iOS / Swift — BUILT
-
-**Delivery: `AsyncSequence`.** `engine.observe(filter)` returns an `NMPQuery`, which *is* an `AsyncSequence<RowBatch>`. Iterate it directly; each element is the full accumulated snapshot (the bridge folds `Added`/`Removed` deltas for you).
-
-```swift
-import NMP
-
-let engine = try NMPEngine(config: NMPConfig(
-    storePath: storeURL.path,
-    indexerRelays: ["wss://purplepag.es", "wss://relay.primal.net"]
-))
-
-// Read: iterate the AsyncSequence. Presentation is yours.
-let query = try engine.observe(FeedFilters.follows(kinds: [1]))
-for await batch in query {
-    self.rows = batch.rows.sorted { $0.createdAt > $1.createdAt }
-    self.coverage = batch.coverage        // branch on .unknown vs .completeUpTo
-}
-```
-
-**Teardown: deinit/ARC.** Demand drops when the last strong reference to the underlying handle is released — the query goes out of scope, or its iteration `Task` is cancelled and drops the iterator. In SwiftUI, bind the loop to a view's lifetime with `.task` / `.task(id:)` and you never call `cancel()`:
+The current SDK exposes `NMPEngine`, `NMPFilter`, `NMPQuery: AsyncSequence`,
+`Receipt`, and `NMPDiagnostics: AsyncSequence`:
 
 ```swift
-.task(id: model.kinds) {          // re-observes when kinds change; old query torn down
-    await observe()               // editing a filter = a NEW value, never mutating a running query
+let query = try engine.observe(selection)
+for await snapshot in query {
+    rows = snapshot.rows
+    currentCoverage = snapshot.coverage // current aggregate API, not global truth
+}
+
+for await diagnostics in engine.observeDiagnostics() {
+    diagnosticState = diagnostics
 }
 ```
 
-**Identity & writes.**
-```swift
-let pubkey = try await engine.addAccount(secretKey: nsecOrHex)   // key crosses once, lives engine-side
-try engine.setActiveAccount(pubkey)                             // re-roots every reactive query
+The bridge applies every row delta, frame-coalesces output, and buffers newest
+state. SwiftUI's `.task` supplies ordinary observation scope and main-actor
+delivery. No app-side debounce is required for the built replay fix.
 
-let receipt = try await engine.publish(WriteIntent(
-    pubkey: pubkey, createdAt: now, kind: 1, content: "gm",
-    durability: .durable, routing: .authorOutbox))
-for await status in receipt.status {                            // convergence lives in the STREAM
-    print(status)                                              // .accepted → .signed → .acked(relay:) …
-}
-```
+Current `addAccount`/`setActiveAccount` uses a local engine-side signer. The
+target projects `setCurrentPubkey`, standard secure signer providers, default
+publish identity plus explicit override, durable `AwaitingSigner`, and
+source-scoped query evidence.
 
-**Sugar layer.** Fold `batch.rows` into `@State`/`@Observable` (as the Falsifier does). An `@Observable` snapshot adapter is a thin layer *on top of* the `AsyncSequence`, never a replacement for it.
+## Direct Rust today and target facade
 
-**Gotcha.** An unbounded query (no `limit`) replaying deep history can peg the main thread on first observe, because each delta currently re-delivers the full snapshot and drives a SwiftUI re-render. Add a `limit` to bound your own query; the deeper fix (batching/coalescing on the wire and internal discovery scoping) is tracked in [`docs/known-gaps.md`](../known-gaps.md).
+The current `Handle` exposes raw grammar values, row deltas, receipt statuses,
+and latest-wins diagnostics. Consumers block on receive or bridge receivers
+into their own event loop; production code does not spin on `try_recv` plus a
+timer.
 
----
+The target makes one canonical invariant-preserving facade the supported Rust
+entry point. Mechanism crates remain internal composition units. That facade is
+also what UniFFI projects, so a direct Rust app cannot bypass durability,
+context, limits, or diagnostics rules that Swift/Kotlin receive.
 
-## Rust — BUILT
+## Kotlin JVM today and Android target
 
-**Delivery: a `Handle` + channels.** `EngineThread::spawn(...)` returns a `Handle`; `handle.subscribe(query)` returns a query handle plus a `Receiver` of `(deltas, coverage)`. This is the lowest-level view of the nouns — the fastest place to see them with no UI framework in the way, and the substrate the TUI renders.
+`Packages/NMPKotlin` now exposes cold `Flow` values through the same UniFFI
+facade. `callbackFlow` plus deterministic `awaitClose { handle.cancel() }`
+proved a clean lifecycle; `Flow.conflate()` supplies bounded newest-state
+delivery for the current projection. The package is JVM-only, not an Android
+AAR or Compose integration.
 
-```rust
-use nmp_engine::runtime::EngineThread;
-use nmp_engine::core::RowDelta;
-use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting};
-
-let (engine_thread, handle) = EngineThread::spawn(store, directory, ROUTER_CAP, PoolConfig::default());
-handle.add_signer(signer);
-handle.set_active_account(Some(target));
-
-let (_query_handle, rows_rx) = handle.subscribe(my_follows);   // my_follows: LiveQuery
-while let Ok((deltas, coverage)) = rows_rx.recv_timeout(remaining) {
-    for delta in deltas {
-        match delta {
-            RowDelta::Added(event) => { /* accumulate; format is yours */ }
-            RowDelta::Removed(id)  => { /* drop id */ }
-        }
-    }
-    // coverage: Unknown vs CompleteUpTo(_)
-}
-```
-
-**Writes** return a receipt receiver you drain for `WriteStatus`:
-```rust
-let receipt_rx = handle.publish(WriteIntent {
-    payload: WritePayload::Unsigned(unsigned),
-    durability: Durability::Durable,
-    routing: WriteRouting::AuthorOutbox,
-});
-while let Ok(status) = receipt_rx.try_recv() { println!("[receipt] {status:?}"); }
-```
-
-**Teardown: `Drop`.** Dropping `_query_handle` withdraws demand. `handle.shutdown(); engine_thread.join();` stops the engine cleanly. Note the Rust side works in the *raw* grammar types (`Filter`, `Binding::Derived`, `Selector::Tag`, `IdentityField::ActivePubkey`) rather than an ergonomic wrapper — see `nmp-demo/src/main.rs` for a complete end-to-end program.
-
-**Diagnostics.** `handle.observe_diagnostics()` returns a *latest-value-wins* receiver — drain it on its own thread (never poll, per D8) and read the shared slot. It carries per-relay wire-sub count, exact filter JSON, events-by-kind, and coverage.
-
----
-
-## Android / Kotlin — PLANNED-shape
-
-The Kotlin SDK is the M6 cross-platform proof; it is **not built yet**. The intended idiom:
-
-**Delivery: cold `Flow`.** `engine.observe(filter)` returns a cold `Flow<RowBatch>`. The *caller* applies `stateIn(scope, WhileSubscribed())` — the Room idiom verbatim — so the engine never invents an observer type.
+The promoted target extends those built mechanics with source evidence, signer
+providers, durable receipts, and the canonical facade:
 
 ```kotlin
-// PLANNED-shape — not yet shipped.
-val rows: StateFlow<List<Row>> =
-    engine.observe(FeedFilters.follows(kinds = listOf(1)))
-        .map { it.rows.sortedByDescending(Row::createdAt) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+// TARGET shape; names provisional.
+engine.observe(demand)
+    .collect { snapshot ->
+        render(snapshot.rows)
+        renderSourceEvidence(snapshot.acquisition)
+    }
+
+engine.publish(draft, asIdentity = optionalOverride)
+    .receiptFacts()
+    .collect(::renderReceipt)
 ```
 
-**Teardown: collection scope.** Demand drops when the collecting coroutine's scope ends (`WhileSubscribed` is the refcount edge the engine's teardown-with-grace listens to). No explicit close.
+The future Android SDK owns bounded newest-state buffering and a standard
+Keystore-backed signer provider. App coroutine scope controls observation. The platform test must prove
+provider reattachment, slow-consumer boundedness, exact module composition, and
+facade parity rather than merely compiling generated bindings.
 
-**Writes:** `engine.publish(intent)` returns a `Flow<WriteStatus>` you collect for convergence — same states as Swift's `Receipt.status`.
+## Other consumers
 
----
+A CLI/TUI can consume the canonical Rust facade by blocking on engine events
+and forwarding them into one application event loop. It must not implement a
+fixed-rate `try_recv` polling loop.
 
-## TypeScript / web — PLANNED-shape (unconfirmed for v2)
+TypeScript/web remains uncommitted. Serializability is useful, but it is not a
+reason to promise another SDK before the promoted Swift/Kotlin contract earns
+full parity.
 
-The TS SDK is **not built** and web is likely out of v2 — confirm before starting one. The two-noun surface is wasm-compatible by construction (serializable values), so deferral costs nothing structural. Intended idiom:
+## Parity gate
 
-**Delivery: async iterator.**
-```ts
-// PLANNED-shape — not yet shipped, and web may be out of v2.
-for await (const batch of engine.observe(followsFilter([1]))) {
-  setRows([...batch.rows].sort((a, b) => b.createdAt - a.createdAt));
-  setCoverage(batch.coverage);      // "unknown" | { completeUpTo: number }
-}
-```
+A public capability is cross-platform only when its behavioral tests agree on:
 
-**Teardown:** `break`ing the `for await` (or an `AbortController`) drops the iterator and the demand. A signal/store adapter (framework-specific) is the thin sugar layer on top.
+- descriptor identity and printed expansion;
+- cached rows plus source/shortfall evidence;
+- pending/signed row identity and receipt persistence;
+- signer default, override, pinning, and reattachment;
+- protocol-module unsigned bytes and contextual route facts;
+- bounded slow-observer behavior; and
+- permanent diagnostics facts.
 
----
-
-## TUI / CLI — PLANNED-shape (Rust handle is BUILT; the render loop is the pattern)
-
-`nmp-demo` is a real, running CLI consumer built on the Rust `Handle` above — that part is BUILT. A *full-screen TUI* (ratatui-style render loop) is the intended shape, not yet a shipped SDK:
-
-**Delivery: render the Rust handle as text.** The TUI is the Rust `Handle` with a draw loop. Drain the row and diagnostics receivers into your app model; redraw on change.
-
-```rust
-// PLANNED-shape for a full TUI; the receivers themselves are BUILT (see nmp-demo).
-loop {
-    if let Ok((deltas, coverage)) = rows_rx.try_recv() { model.apply(deltas, coverage); }
-    if let Some(diag) = latest_diag.lock().unwrap().clone() { model.diag = diag; }
-    terminal.draw(|f| render(f, &model))?;              // format tokens → text HERE
-    if event::poll(tick)? { if handle_input()? { break; } }
-}
-```
-
-**Teardown:** drop the handles, then `handle.shutdown(); engine_thread.join();`. The TUI is the manual's recommended place to *see* the nouns without a UI framework in the way — diagnostics render as a plain table.
-
----
-
-## Parity is tracked, not assumed
-
-A capability "exists" for a platform only when its SDK is built or it's explicitly marked platform-pending here. Today: **Swift and Rust are BUILT**; Android is M6; TS is unconfirmed for v2; a full TUI is a render-loop pattern over the BUILT Rust handle. When you read a worked example elsewhere in this manual, the Swift and Rust versions are runnable; the Kotlin/TS/TUI versions show the idiom and are marked accordingly.
-
-## What to read next
-
-- *[Your first app in 20 lines](06-first-app.md)* — the same nouns per platform, side by side.
-- *[Threading, the main-thread contract & app lifecycle](23-threading-lifecycle.md)* — the ownership-edge details each idiom relies on.
-- *[Consuming results](10-consuming-results.md)* — folding batches into your own state on any platform.
+Generated types alone are not parity.
 
 ---
 
 <!-- nav-footer -->
-<sub>← [What NMP does NOT do](29-not-do.md) · [Index](README.md) · [Example gallery](31-gallery.md) →</sub>
+<sub>← [What NMP does not own](29-not-do.md) · [Index](README.md) · [Example gallery](31-gallery.md) →</sub>

@@ -4,14 +4,19 @@
 
 After this chapter you'll know exactly which parts of NMP are running today and which are design-preview, so you never build on something that isn't there — and you'll have a glossary that grounds every Nostr and NMP term the rest of the manual uses.
 
-NMP is a **day-0 greenfield rebuild**. Everything is provisional until a v2.0 ships (not before Aug 2026); nothing is self-compatibility-binding before then. This manual inherits the project's truth-anchor discipline: every chapter states whether its subject is BUILT, PARTIAL, or PLANNED, and never claims a mechanism holds before running code proves it.
+NMP is a greenfield rewrite. Public shapes are provisional until v2, but they
+are governed rather than casually mutable. Every chapter distinguishes current
+proof from target contract; every public change requires evidence, impact
+review, human signoff, synchronized projections, and removal of the old path.
 
 ## What the labels mean
 
 - **BUILT** — running and independently verified. Examples in the chapter are real and runnable (against the Swift SDK or the Rust `Handle`/`nmp-demo` CLI today).
 - **PARTIAL** — some of it works; the chapter says exactly which part, and marks the rest.
 - **PLANNED** — design preview. The chapter shows the *intended* shape, clearly labeled "not yet shipped." You can design against it, but you can't run it yet.
-- **PLANNED-shape** — the concept is BUILT on one platform but the *idiom* shown for another (Kotlin `Flow`, TS async iterator, TUI) isn't built for that platform yet. Only **Swift and Rust** SDKs are BUILT today.
+- **PLANNED-shape** — the concept is built elsewhere but the shown platform
+  projection is not. Swift, direct Rust, and a minimal desktop-JVM Kotlin/Flow
+  package are built; Android/AAR/Compose, TS, and a full TUI are not.
 
 ## Milestone state (the ground truth)
 
@@ -25,11 +30,18 @@ From the README's status table — the single source of truth for build state:
 | M3 — Store + transport + write outbox | **PROVED** (independently verified) |
 | M4 — Swift SDK boundary | **PROVED** (live-proven through Swift) |
 | M5 — iOS falsifier app | **built & running** on the simulator (live feed from 2 indexers); the thesis-gate *judgment* — "library or framework?" — is the owner's pending call |
-| M6 — Android (Kotlin/Flow) | not started |
+| M6 — Android | minimal JVM Kotlin/Flow falsifier landed (#54); Android/AAR/Compose not started |
 
-Concretely, this means: the reactive binding grammar is proven general at two depths; routing and widen-only coalescing are proven; the store persists and stays authoritative offline (cold-start offline reads return `CompleteUpTo`; never-synced returns `Unknown`); durable writes get per-relay acks; and a Swift `AsyncSequence` SDK reads like a native library over a live relay. A Rust demo CLI (`nmp-demo`) runs the whole engine against the *live* Nostr network — self-bootstrapping outbox from two indexer relays, thousands of real notes, no fixtures.
+Concretely, the current grammar, routing, store, transport, receipt stream, and
+Swift `AsyncSequence` boundary are proved. The promoted target contract is not
+all built: aggregate coverage must become source-scoped evidence, durable
+acceptance must persist a pending row and reattachable receipt, signer selection
+needs an override, and protocol modules still need a cross-platform shape.
 
-The permanent per-relay/per-kind **diagnostic surface** the MVP requires has landed (engine + FFI, live-proven; the Falsifier's diagnostics screen ships today — see *[Diagnostics & debugging](22-diagnostics.md)*). The **falsifier app** is built and runs on the simulator with a live feed from two indexer relays; what's still open on M5 is the *thesis-gate judgment* — whether a normal iOS developer experiences NMP as a library, not a framework (the owner's call on the running app). **Not yet built:** **Android** (M6). **Disproved so far:** nothing.
+The permanent diagnostic surface and iOS Falsifier are built. The M5 human
+library-vs-framework verdict remains open. A desktop-JVM Kotlin package now
+proves the current two-noun `Flow` mapping and cancellation path against live
+relays; it is not the full Android milestone.
 
 ## Chapter status map
 
@@ -45,9 +57,9 @@ Every chapter's subject, with its status. Use this as the index of what you can 
 ### Part II — Get running
 | Ch | Subject | Status |
 |---|---|---|
-| 04 | Build a working timeline in 10 minutes (iOS) | **BUILT** ★ |
+| 04 | Current Falsifier timeline (iOS) | **BUILT** ★ |
 | 05 | The two nouns & the ownership table | **BUILT** |
-| 06 | Your first app in 20 lines (per-platform shape) | **BUILT** (Swift + Rust; Kotlin/TS PLANNED-shape) ★ |
+| 06 | Your first app in 20 lines (per-platform shape) | **BUILT** (Swift + Rust + JVM Kotlin); other projections provisional ★ |
 | 07 | Adding NMP to an app you already own | **BUILT** ★ |
 | 08 | Packaging, build & distribution | **BUILT** (Swift/Rust; wasm PLANNED) |
 
@@ -56,47 +68,49 @@ Every chapter's subject, with its status. Use this as the index of what you can 
 |---|---|---|
 | 09 | Live queries & the binding grammar | **BUILT** ★ |
 | 10 | Consuming results: rows, snapshots, presentation ownership | **BUILT** ★ |
-| 11 | Coverage: empty vs unknown | **BUILT** ★ |
+| 11 | Query evidence: cache + per-source acquisition | **PARTIAL** (watermarks BUILT; target public evidence shape PLANNED) ★ |
 | 12 | Feeds & the Collection observation mode | **PLANNED** (Tier-A pending; design-preview) |
 | 13 | Delivery-side transforms (WoT, custom sort) | **PLANNED** |
 
 ### Part IV — Writing
 | Ch | Subject | Status |
 |---|---|---|
-| 14 | Writing: intents, receipts, durability lattice | **BUILT** (pre-signed publish across FFI PARTIAL) ★ |
+| 14 | Writing: accepted intent, local state, relay evidence | **PARTIAL** (current receipt path BUILT; crash-safe acceptance/retry/reattachment PLANNED) ★ |
 | 15 | Editing replaceable state safely | **PARTIAL** (safe pattern documentable now; structural fix PLANNED) |
 
 ### Part V — The hard concerns
 | Ch | Subject | Status |
 |---|---|---|
-| 16 | Identity & multi-account | **BUILT** ★ |
-| 17 | Relays: outbox, indexers, roles | **BUILT** (live-proven) |
+| 16 | Identity, default signing, explicit overrides | **PARTIAL** (reactive current pubkey BUILT; decoupled signer override/reset PLANNED) ★ |
+| 17 | Compiled routes and typed protocol context | **PARTIAL** (author outbox BUILT; contextual module contribution TARGET) |
 | 18 | "Where did my query go?" — tracing demand | **BUILT** ★ |
-| 19 | Offline & sync: negentropy, watermarks | **BUILT** |
+| 19 | Offline, reconnect, and acquisition evidence | **PARTIAL** (sync/watermarks BUILT; durable retry and target evidence PLANNED) |
 | 20 | Capabilities: signer, AUTH, encrypt/decrypt | **PARTIAL** (local nsec signer BUILT; NIP-46, NIP-42 AUTH, decrypt path PLANNED) |
 | 21 | Provenance; why private events can't be republished | **BUILT** |
 
 ### Part VI — Operate
 | Ch | Subject | Status |
 |---|---|---|
-| 22 | Diagnostics & debugging | **BUILT** (engine + FFI diagnostic surface landed and live-proven; the Falsifier diagnostics screen ships today) ★ |
-| 23 | Threading, main-thread contract, lifecycle | **BUILT** |
-| 24 | Cost & performance: pay-as-you-go | **BUILT** |
+| 22 | Permanent diagnostics | **PARTIAL** (current facts BUILT; AUTH/retry/limit facts TARGET) ★ |
+| 23 | Threading and bounded delivery | **PARTIAL** (Swift bounded; end-to-end target open) |
+| 24 | Cost, coalescing, and limits | **PARTIAL** |
 | 25 | Testing an app that embeds NMP | **BUILT** |
 | 26 | Troubleshooting & FAQ | **BUILT** |
 
 ### Part VII — Reference & judgment
 | Ch | Subject | Status |
 |---|---|---|
-| 27 | The batteries: recipes catalog + choosing | **PARTIAL** (recipe *shape* settled; per-NIP module mechanism PLANNED) |
-| 28 | Patterns & anti-patterns (the bug-class ledger as DX) | **BUILT** |
-| 29 | What NMP does NOT do (and why) | **BUILT** |
-| 30 | Platform SDK guides (iOS, Android, Rust, TS, TUI) | **BUILT** for iOS + Rust/TUI; Android/TS PLANNED ★ |
+| 27 | Protocol modules, reusable declarations, app policy | **PLANNED** |
+| 28 | Guarantees and bug classes | **CURRENT + TARGET** |
+| 29 | What NMP does not own | **ARCHITECTURE CONTRACT** |
+| 30 | Platform projections | **BUILT** for Swift, Rust, and JVM Kotlin; Android/TS/TUI incomplete ★ |
 | 31 | Example gallery + graduating from the falsifier | **BUILT** (falsifier itself M5) |
-| 32 | Extending NMP: protocol modules & recipes | **PLANNED** |
-| 33 | Versioning & stability | **BUILT** |
+| 32 | Extending NMP with protocol modules | **PLANNED** |
+| 33 | Governed provisional public surface | **CURRENT POLICY** |
 
-One honest note the table above encodes: **Chapter 27 (recipes)** and the **modularity mechanism** (per-NIP modules / feature flags) are settled in *principle* but the packaging mechanism isn't finalized — the shape is right, the switch isn't wired. (Chapter 22's diagnostic surface, by contrast, is fully BUILT: engine, FFI, and the shipping Falsifier screen.)
+The ownership boundary for protocol modules is settled; package names,
+registration, and SDK projections are deliberately provisional. The diagnostic
+surface is built but still lacks several target source/AUTH/limit facts.
 
 ## Glossary — Nostr terms
 
@@ -110,7 +124,9 @@ Terms from the protocol itself. If you're migrating from NDK or Applesauce these
 - **outbox (model)** — NIP-65's routing rule: each user publishes a relay list (kind:10002) declaring their **write relays**; to read someone's events you go to *their* write relays, not a shared pool. Correct fan-out is the outbox model applied with a covering set and a cap.
 - **replaceable** — an event kind where a newer event *supersedes* older ones (by `created_at`, lexicographically-smallest-`id` tiebreak) rather than adding to them. Profiles, follow lists, relay lists, and all addressable kinds are replaceable. Storing stale copies is a classic bug.
 - **negentropy** — a set-reconciliation protocol (NIP-77) that lets a client and relay efficiently compute *which events each is missing* without re-sending everything. NMP syncs negentropy-first against relays whose NIP-77 support it has probed.
-- **gift-wrap** — the NIP-59 envelope (kind:1059) that wraps an encrypted event inside another encrypted, ephemerally-signed event, hiding metadata (sender, kind, timing) — the basis for private DMs and private lists. Decryption needs the key, which is why NMP has an engine-internal decrypt capability.
+- **gift-wrap** — the NIP-59 envelope (kind:1059) that wraps encrypted protocol
+  data. Decryption is a typed provider operation; raw secret material does not
+  belong in event/outbox persistence.
 - **npub / nsec / hex** — encodings of keys. A **pubkey** is 32 bytes; `npub1…` is its bech32 display form, and 64-char **hex** is its raw form. `nsec1…` is a *secret* key. The engine works in hex and emits hex; turning it into an `npub` or a display name is presentation — your job.
 
 ## Glossary — NMP terms
@@ -121,16 +137,28 @@ Terms this engine introduces. These are the working vocabulary of the whole manu
 - **write intent** (the write noun) — a durable, acknowledged write: an unsigned template + a **durability class** + a **routing class**. Returns a streaming receipt. Never a fire-and-forget publish.
 - **Binding** — what a filter field value can be: `Literal(set) | Reactive(ActivePubkey) | Derived(inner: Filter, project: Selector) | SetOp(Union|Intersect|Diff, [Binding])`. The grammar that makes a query *reactive on the demand side*.
 - **Selector** — the closed vocabulary for projecting a `Derived` binding's inner rows into an outer field: `Authors | Ids | Tag(char) | AddressCoord`. **Closed and introspectable — never an app closure.** Extend-don't-escape: a need outside it extends the vocabulary (a design event), never admits code.
-- **Reactive(ActivePubkey)** — "whoever the active signer is, right now." The single place account context lives; identity switching re-roots every binding that mentions it.
-- **coverage** — the trust state delivered alongside rows: `Unknown | CompleteUpTo(watermark)`. `Unknown` = "can't yet know" (show a spinner); `CompleteUpTo` = "provably complete to this point" (an empty result here is *authoritative*). The difference between "empty" and "unknown," kept as distinct types.
-- **watermark** — the proof carried by `CompleteUpTo`: the marker showing a (filter, relay) window has been synced completely. A cache miss is authoritative only when a watermark proves it.
-- **capability** — a pluggable engine-side ability you configure but the engine *invokes*: the **signer**, the **encrypt/decrypt** key-holder, the **AUTH policy** (a declarative value, not a callback). You choose which one exists; the engine chooses when it runs.
-- **recipe** — a blessed convenience: a pure, *printable* function returning a `Filter`/`WriteIntent`/observation descriptor built entirely from public values, encoding a **protocol fact** (kinds/tags/NIP shape), that a second unrelated app would write identically. `.profile(pubkey)`, `.reactions(to:)`, `.textNote(content:)`. Never the *only* door to what it wraps; always deletable. Ships in a NIP module, not core.
-- **module** — an opt-in unit of non-core protocol meaning (a per-NIP crate / feature flag / registerable unit). You link only the modules you enable; a minimal app carries zero reaction code. The *modularity principle* — pay only for the NIPs you use.
+- **Reactive(ActivePubkey)** — the current-pubkey input. Only descriptors that
+  depend on it re-root when it changes; it is also the default signer selection,
+  not global authority over all writes or queries.
+- **query evidence** — cache facts plus acquisition state for the current source
+  plan. It does not claim global completeness or interpret a relay's EOSE for
+  the app.
+- **watermark** — a persisted fact about one filter window at one relay. Useful
+  for resumption and avoiding redundant acquisition; never proof of global state.
+- **capability/provider** — a bounded typed operation the engine invokes, such
+  as sign or decrypt. Standard platform providers may own secure key storage;
+  opaque app callbacks never decide routing or demand.
+- **reusable declaration** — a helper returning a closed, inspectable query or
+  binding value. It may package protocol facts without becoming a core content
+  content default.
+- **module** — an opt-in owner of one protocol's schemas, validation, state
+  reconstruction, semantic operations, and typed routing context. It owns only
+  protocol-defined events, not arbitrary content that participates in it.
 - **lane** — a typed reason a relay is in a route: NIP-65, hint, provenance, or user-configured. The compiler routes over lane-typed facts; you never pass a `relays:` list (there is no such parameter).
 - **diagnostic surface** — the read-only projection of engine state: per relay and per kind, the exact filters sent, events received, and coverage proven. The acceptance test made visible; how you debug NMP (by *reading*, not printf).
 - **Collection observation mode** — an opt-in *mode* of the live query (not a third noun) adding engine-maintained ordering, a bounded window, and `loadMore` pagination over the same demand node. PLANNED. `OrderKey`/`RowKey` are closed vocabularies, never app comparators.
-- **re-root** — what account-switching does: replace the identity root of the binding graph, tearing the old account's demand down (reverse-of-open, exactly-once) *before* activating the new — so no stale subscription survives to leak into.
+- **re-root** — re-resolve graph nodes that depend on a changed reactive input;
+  withdraw only demand that no remaining descriptor references.
 - **demand** — the resolved set of "what to actually subscribe to," computed by the engine from your live queries. You declare intent; the engine owns demand. Refcounted: identical descriptors share one graph node; the last observer dropping withdraws demand (debounced).
 
 ## What to read next

@@ -1,8 +1,12 @@
 # Live queries & the binding grammar
 
-**Status: BUILT** — the grammar, the resolver, and the Swift/Rust surfaces are shipped and exercised by live tests. Every example below is the real current API.
+**Status: CURRENT + TARGET.** The four-case binding grammar is built. The
+current-pubkey binding is the only built reactive input; broader reusable
+declarations and the query's source/access context remain provisional.
 
-After this chapter you can express a *reactive* read — "notes from whoever I follow," "the groups I'm a member of," "my follows minus my mutes" — as a single plain value, hand it to `observe`, and let the engine keep it live as your contact list, group memberships, and active account change underneath it. You never watch a `kind:3`, re-issue a `REQ`, or hand-maintain a set. That whole job moves behind the boundary.
+After this chapter you can express derived demand as one closed value and let
+the engine keep it live as store inputs and the current pubkey change. No
+content kind or feed composition is privileged by the grammar.
 
 ## The read noun is a filter whose fields are bindings
 
@@ -10,7 +14,7 @@ A live query is a Nostr `Filter` — `kinds`, `authors`, `ids`, `#`-tags, `since
 
 ```
 Binding = Literal(set)                     // a fixed hex/tag-value set
-        | Reactive(ActivePubkey)           // re-resolves when the active account changes
+        | Reactive(ActivePubkey)           // re-resolves when current pubkey changes
         | Derived(inner: Filter, project: Selector)   // rows of an inner query, projected to a value set
         | SetOp(op, [Binding])             // union / intersect / diff over child bindings
 ```
@@ -29,15 +33,18 @@ public indirect enum NMPBinding: Sendable, Hashable {
 
 Because a filter is a value, "editing a running query" does not exist and is not needed: you construct a *new* `NMPFilter` and observe it. Dropping the old handle withdraws its demand; the engine shares graph nodes between any two identical descriptors, so re-observing something already live is free.
 
-## Example 1 — `$myFollows` (depth-1)
+## Example 1 — a reusable NIP-02-derived author set
 
-The canonical reactive read: notes authored by whoever the active account's `kind:3` contact list currently names. This is the falsifier's own flagship query, and it lives in *app* code — NMP exposes only the algebra, never anything named "follows" (see *The batteries: recipes catalog*).
+This example proves generic derivation; it does not define a canonical NMP feed.
+A NIP-02 module or app package may expose the derived binding commonly called
+`myFollows`, provided it returns this closed expansion rather than hiding app
+code inside the graph.
 
 ```swift
 // apps/Falsifier/Sources/Falsifier/FeedFilters.swift
 static func follows(kinds: [UInt16]) -> NMPFilter {
     NMPFilter(
-        kinds: kinds,
+        kinds: kinds, // the caller chooses any content kinds
         authors: .derived(
             inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
             project: .tag("p")
@@ -47,7 +54,10 @@ static func follows(kinds: [UInt16]) -> NMPFilter {
 }
 ```
 
-Read it inside-out. The inner filter is `kind:3` events by `Reactive(ActivePubkey)` — *your* contact list, re-rooted automatically whenever you switch accounts. `project: .tag("p")` says "take the `p`-tag values of the matched rows" — the pubkeys you follow. The outer filter asks for `kinds` notes authored by that projected set.
+Read it inside-out. The inner filter is `kind:3` events by
+`Reactive(ActivePubkey)` — the current pubkey's contact list. `project:
+.tag("p")` selects its `p`-tag values. The outer filter asks for whatever event
+kinds the caller supplied, authored by that projected set.
 
 The same value in Rust:
 
@@ -67,11 +77,15 @@ Filter {
 }
 ```
 
-What the engine does with it is the point. When your `kind:3` names A, B, C, the resolver opens one *inner* atom (`kind:3` by you) plus one *content* atom per follow (`kind:1` by A, by B, by C). When a newer `kind:3` drops C and adds D, the demand delta is exactly `Close(kind:1 by C)` then `Open(kind:1 by D)` — one atom closed, one opened, everything else untouched. The set-diff, not the event, gates the fan-out: a newer `kind:3` listing the *same* members produces an **empty** delta. This is *recompile-not-reopen*, and it is why the app never sees — and never has to manage — the intermediate follow set.
+When the contact list drops C and adds D, the demand delta withdraws C's
+no-longer-referenced content demand and opens D's. Unchanged authors and any
+other live descriptor still referencing C remain untouched.
 
-## Example 2 — the groups I'm in (depth-2, NIP-29)
+## Example 2 — protocol-aware group discovery (illustrative)
 
-Reactivity nests. "The groups I'm a member of" is a NIP-29 shape: group-metadata events (`kinds 39000/39001/39002`) whose `#d` (the group id) comes from an inner query — the `kind:39002` membership lists (`#p` tags a member) that name *me*.
+The raw grammar can express nested dependencies, but a production NIP-29
+module should expose typed group references that retain host-relay and protocol
+meaning. This snippet demonstrates derivation only; it is not the final module API.
 
 ```swift
 // NIP-29 groups-I'm-in, in the same NMPFilter algebra
@@ -104,13 +118,16 @@ let mutes: NMPBinding = .derived(
     inner: NMPFilter(kinds: [10000], authors: .reactive(.activePubkey)),
     project: .tag("p")
 )
-let feed = NMPFilter(
-    kinds: [1],
+let selection = NMPFilter(
+    kinds: [9999], // arbitrary caller-selected outer kind
     authors: .setOp(.diff, [follows, mutes])       // follows − mutes
 )
 ```
 
-`Diff` is "first operand minus the union of the rest"; `Union` and `Intersect` round out the algebra. When you mute someone you already follow, the delta is a single `Close(kind:1 by that author)` — surgical, engine-side, with no app-visible expansion at any point. Publish a mute, and your feed narrows itself.
+`Diff` is "first operand minus the union of the rest"; `Union` and `Intersect`
+round out the algebra. When one projected pubkey leaves the result, only its
+no-longer-referenced outer demand closes. The engine does not branch on the
+outer kind.
 
 ## The closed-Selector rule: values in, code after
 
@@ -122,13 +139,27 @@ Selector = Authors | Ids | Tag(name) | AddressCoord
 
 `Authors` projects each matched event's author; `Ids` its id; `Tag(name)` a single-letter tag's values; `AddressCoord` the `(kind, author, d)` coordinate (which fans out into one co-pinned atom per coordinate). That is all a projection can be. There is deliberately **no** `Derived(inner, project: { event in … })` — no app closure on the demand side, on any platform, ever.
 
-This is not a restriction the manual asks you to respect; it is a shape the API has. The reason is mechanical: the engine hashes, dedups, refcounts, coalesces, and routes demand off these descriptors. Two apps that build the same `follows` filter share one graph node *because the value compares equal*. One opaque closure anywhere in that path and the whole demand-sharing, surgical-delta, cross-account-reroot story collapses — the closure can't be hashed, can't be compared, can't be introspected on the diagnostics screen. This is the governing rule of the entire read surface: **values in, code after.** App code is welcome, but only *after* delivery, folding delivered rows into your view (see *Delivery-side transforms* and *Consuming results*).
+This is not a restriction the manual asks you to respect; it is a shape the API
+has. The engine hashes, dedups, refcounts, coalesces, and routes demand off these
+descriptors. Two equal fragments can share because their values compare equal.
+One opaque closure would make demand sharing, surgical deltas, and
+dependency-scoped rerooting unhashable and unexplainable. This is the governing
+rule: **values in, code after.** App code remains welcome after delivery.
 
 So what do you do when your projection isn't in the vocabulary? You do **not** reach for a closure — the API won't take one. You extend the vocabulary. Adding a `Selector` variant (or making `kinds` bindable, or adding an `IdentityField`) is a deliberate design event with an adversarial gate, precisely because the vocabulary is forever and every consumer depends on its being closed. In practice the four selectors plus `SetOp` cover the real Nostr read shapes — the resolver's contract suite builds `$myFollows`, NIP-29 groups, follows−mutes, address-coordinate lists, and an unrelated bookmarks shape (`kind:10003` `e`-tags) with *zero* engine changes between them, which is the generality witness that the closed set is wide enough.
 
-## Where this leaves you
+## A live query is more than its selection
 
-You now have the whole read grammar. Everything else in Part III is about the *other* side of the boundary: what the engine hands back (*Consuming results*), how to tell "empty" from "not yet known" (*Coverage: empty vs unknown*), and the two PLANNED surfaces that add ordering and post-delivery app code on top (*Feeds & the Collection observation mode*, *Delivery-side transforms*). None of them change the grammar — they consume it.
+The `Filter`/`Binding` value describes selection. The canonical query descriptor
+also carries source authority and access context because those affect routing,
+coalescing, and acquisition evidence. Identical selection subgraphs may share,
+but full wire demand shares only when context is compatible.
+
+`$myFollows` is a reusable derived binding, not a new reactive input. A richer
+helper such as a NIP-29 current-user-groups query belongs to that protocol
+module. Whether apps can register additional named reactive values beyond
+`ActivePubkey` remains a provisional surface-design question; no opaque closure
+enters the grammar in either case.
 
 ---
 

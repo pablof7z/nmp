@@ -1,128 +1,115 @@
-# The batteries: recipes, and choosing recipe vs compose vs own
+# Protocol modules, reusable declarations, and app policy
 
-**Status: PARTIAL** — the grammar every recipe desugars to is BUILT (you can write all of these by hand today, and the Falsifier does). The *named recipe layer itself* and the *per-NIP modules* it ships in are PLANNED: this chapter shows the intended shape, clearly marked, and shows the real hand-written values each recipe is sugar for.
+**Status: TARGET.** The closed filter grammar is built. Opt-in protocol-module
+packaging and semantic module operations are not yet shipped. This chapter
+records the ownership boundary; examples are directional, not frozen API.
 
-After this chapter you'll know what a "battery" is in NMP (a thin, value-returning shortcut over the two nouns), why every recipe ships in its NIP's opt-in module rather than in core, and how to decide — for any given need — whether to reach for a recipe, compose primitives yourself, or own the whole thing in your app.
+## No content kind is privileged
 
-## What a recipe is (and is not)
+NMP core is a generic sync-and-routing engine. It does not ship a favored
+`textNote`, `homeFeed`, `myFollowsNotes`, or other content-kind battery. Kind:1
+is one event kind among many, not the center of the extension model.
 
-A recipe is a pure function that returns one of the public values you already know: an `NMPFilter` (a live query) or a `WriteIntent`. Nothing more. It encodes a *protocol fact* — a kind number, a tag convention, a NIP-defined filter shape — so you don't have to remember it. It is not a new noun, not a new capability, and not a privileged path into the engine.
+Reusable conveniences are still welcome, but they belong to one of three
+categories with different ownership.
 
-The litmus, which you should apply to any battery you're offered or tempted to write: **could this exact function live in a third-party package with zero special access to the engine?** If yes, it's a legitimate recipe. If it needs a private engine hook, it's mechanism (and belongs behind the surface). If two unrelated apps would write its *body* differently, it's product policy (and belongs in your app, not in NMP).
+## 1. Reusable closed declarations
 
-Because a recipe returns a value, everything the engine does to a hand-built value it also does to a recipe's output: hashing, dedup, coalescing, routing, coverage. A recipe cannot smuggle in a bug the grammar forbids, because it *is* the grammar.
+A helper may package an existing, closed descriptor without hiding its
+expansion. For example, a NIP-02 module can provide the binding commonly called
+`myFollows`:
 
-## The crucial rule: recipes live in the NIP's module, not in core
-
-This is the load-bearing constraint of this chapter, and it is the [modularity principle](32-extending.md) in action.
-
-> **A recipe for a NIP ships in that NIP's opt-in module. Enabling the module is how you get the recipe. An app that never reacts links zero reaction code.**
-
-Core is the two nouns plus the hard concerns (store, routing, sync, coverage, identity, diagnostics, the capability seams). Reactions, reposts, highlights, long-form, follow packs, comments, lists — everything protocol-specific and non-primitive — lives in its own module. `.reactions(to:)` is not a method on the engine; it appears *because you enabled the reactions module*. A minimal reader that shows kind:1 notes and nothing else carries no reaction code, no repost code, no list code. Adding NIP-51 lists to your app must not tax an app that never touches them.
-
-This was the previous NMP's one genuine win worth keeping: the reactions NIP crate encoded what reactions *mean*, and apps that didn't care never packed `.react()`. NMP v2 keeps that shape deliberately.
-
-**Where this stands today:** the module mechanism (per-NIP crate / Cargo feature / registerable module) is not built yet — see [Extending NMP](32-extending.md). Today the engine core ships the general `NMPFilter`/`NMPBinding` algebra and nothing named "follows" or "reaction." The Falsifier proves the point from the other direction: it writes its *own* `follows(kinds:)` recipe app-side (`FeedFilters.swift`), because NMP core deliberately exposes no such helper. That app-owned function is exactly the shape a blessed recipe takes — the only open question is *where it lives* (your app, a community package, or an official NIP module), never *whether it's allowed to exist*.
-
-## The catalog (intended shape)
-
-Each recipe below is shown as the value it desugars to — the real, current grammar. Every recipe can **print its expansion**: you can always ask "what filter did this actually build?" and get the value back, because the wrapped primitive stays public (boundary test 4). None of these is ever the *only* door to what it wraps.
-
-### Read recipes (`NMPFilter`)
-
-**`.profile(of: pubkey)`** — kind:0 for one author. Module: core-adjacent identity NIP.
-```swift
-// .profile(of: "3bf0…459d") desugars to:
-NMPFilter(kinds: [0], authors: .literal(["3bf0…459d"]))
-```
-
-**`.follows(of: binding)`** — the kind:3 → `Tag(p)` derivation. Module: NIP-02.
-```swift
-// .follows(of: .reactive(.activePubkey)) desugars to:
-.derived(
-    inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-    project: .tag("p")
+```text
+Derived(
+  inner: Filter(kinds:[3], authors: Reactive(ActivePubkey)),
+  project: Tag(p)
 )
-// This is a *binding* (an author set), used as a filter field:
-NMPFilter(kinds: [1], authors: .follows(of: .reactive(.activePubkey)), limit: 200)
-```
-This is the Falsifier's `FeedFilters.follows(kinds:)` verbatim — a recipe in everything but its shipping location.
-
-**`.reactions(to: eventId)`** — reactions targeting one event. Module: NIP-25 (opt-in).
-```swift
-// .reactions(to: "abcd…") desugars to:
-NMPFilter(kinds: [7], tags: ["e": .literal(["abcd…"])])
-```
-Enable the NIP-25 module and this appears; don't, and your binary carries no kind:7 knowledge.
-
-**`.thread(root: eventId)`** — the NIP-10 filter *membership* shape (events tagging the root). Module: NIP-10.
-```swift
-// .thread(root: "abcd…") desugars to:
-NMPFilter(kinds: [1], tags: ["e": .literal(["abcd…"])])
-```
-Note what this recipe is *not*: it is membership only. It does not order replies, nest them, or decide "what counts as a conversation." Those are product decisions each app answers differently, so they never ship as a recipe (boundary test 2).
-
-**`followsMinusMutes(of: binding)`** — named compound over `SetOp`. Module: NIP-02 + NIP-51.
-```swift
-// desugars to:
-.setOp(.diff, [
-    .follows(of: .reactive(.activePubkey)),                       // NIP-02
-    .derived(inner: NMPFilter(kinds: [10_000], authors: .reactive(.activePubkey)),
-             project: .tag("p"))                                  // NIP-51 mute list
-])
 ```
 
-### Write recipes (`WriteIntent`)
+This is not a new reactive primitive and not an app closure. NMP still sees the
+entire value, so it can hash, deduplicate, route, re-root, and explain it.
 
-**`.textNote(content:)`** — a kind:1 note. Module: core-adjacent.
-```swift
-// .textNote(content: "gm") desugars to (durability/routing stay VISIBLE):
-WriteIntent(pubkey: me, createdAt: now, kind: 1, tags: [],
-            content: "gm", durability: .durable, routing: .authorOutbox)
+Apps and third-party packages may define equivalent helpers. The core does not
+need to bless one feed assembled from that binding.
+
+## 2. Protocol-owned semantic functionality
+
+An opt-in NIP module owns the protocol facts defined by that NIP:
+
+- its event schemas and owned event kinds;
+- codecs and validation;
+- state reconstruction rules;
+- typed references and semantic operations;
+- reusable query declarations;
+- protocol routing context.
+
+For example, a NIP-29 module may expose group creation, administration, member
+state, and a typed group reference containing its host relay. It owns NIP-29's
+management/state events. It does **not** own every content kind that can be
+published inside a group.
+
+The module may contextually publish a foreign draft:
+
+```text
+photo = Nip68.buildPhoto(asset)
+receipt = group.publish(photo)
 ```
 
-**`.reaction(to: event, content: "+")`** — a kind:7 reaction. Module: NIP-25.
-```swift
-WriteIntent(pubkey: me, createdAt: now, kind: 7,
-            tags: [["e", event.id], ["p", event.pubkey]],
-            content: "+", durability: .durable, routing: .authorOutbox)
-```
+`Nip68` owns the photo draft. The bound NIP-29 group adds only the NIP-29
+context it owns, such as the correct `h` tag and host-relay routing. Core then
+selects a signer once, signs once, stores once, and publishes once.
 
-A write recipe fills kind and tags per the NIP; it never hides durability or routing — you still choose those, because they are correctness-bearing properties, not protocol trivia (see [Writing](14-writing.md)).
+## 3. App policy
 
-### What is NOT a recipe, ever
+The app owns choices that are not protocol facts:
 
-- **Anything with ordering, windowing, cursors, or row identity.** That is the [Collection observation mode](12-collection-mode.md)'s closed vocabulary — cursor correctness can't ride on a helper (candidate ledger #13).
-- **A one-call `follow()` that mutates your contact list.** The read-modify-write "wiped my follows" bug (see [Editing replaceable state safely](15-editing-replaceable.md)) would return in blessed packaging. NMP ships the *filter and template* recipes but not the stale-state-blind mutation.
-- **Any display/formatting helper** (ledger #12): the vocabulary for presentation is absent from the engine and the recipe layer does not re-add it.
-- **Any relay-picking convenience.** There is no `relays:` parameter (ledger #3) and no recipe may reintroduce one.
+- what appears in a feed;
+- ranking, ordering, and nesting;
+- moderation and presentation policy;
+- which queries exist and how long they live;
+- how protocol results fold into app state.
 
-## Choosing: recipe vs compose vs own
+A reusable helper can live in app code without becoming an NMP promise. "Many
+apps need it" is evidence for convenience, not permission to specialize core.
 
-Here is the decision tree. Walk it top to bottom for any need.
+## Composition rules
 
-**1. Is it a pure protocol fact — kinds, tags, a NIP-defined filter shape?**
-   - Yes → **use a recipe** (enable the NIP module), or write the recipe yourself if none exists. It should desugar to a value and print its expansion.
-   - No → go to 2.
+Protocol composition uses immutable unsigned drafts:
 
-**2. Would a second, unrelated app write this *identically*, down to the parameter list?**
-   - Yes, but there's no recipe for it → **compose primitives** yourself from `NMPFilter`/`NMPBinding`/`WriteIntent`, and consider contributing it as a recipe. This is the Falsifier's position: it composes `follows(kinds:)` from the raw algebra because the sugar doesn't exist yet.
-   - No — the *body* would differ between apps → go to 3.
+1. A schema module constructs a draft containing only the fields it owns.
+2. A contextual module returns a new draft containing only its contribution.
+3. The core freezes the final body at acceptance, selects the default or
+   overridden signer, signs once, and publishes through the declared protocol
+   route.
 
-**3. Is it a product decision — what your feed contains, how replies rank, what a mention renders as, which notes to mute?**
-   - Yes → **own it.** This is your app's job. Fold delivered rows into your own state and apply arbitrary code *after* delivery (see [Delivery-side transforms](13-delivery-transforms.md)). NMP will never bless an answer here, because a blessed answer would be one app's policy pretending to be framework — exactly the line the previous design's feed layer died on.
+No module may mutate an already-signed event. No module may register opaque
+closures into demand, routing, ordering, or admission. Contextual routing must
+remain typed and introspectable.
 
-The five boundary tests are the same tree stated formally. A candidate battery must pass **all five**: (1) desugars to public values; (2) protocol fact, not product decision; (3) a second unrelated app writes it identically; (4) never the only door — the primitive stays public and the expansion prints; (5) deletable without breaking any [bug-ledger](28-patterns.md) guarantee. Fail any one and it's not a recipe — it's either engine mechanism or your app's code.
+## Relay rule
 
-## Why this keeps feeling batteries-included anyway
+The app does not hand NMP an expanded relay list for ordinary queries or
+author-outbox writes. That would move routing correctness back into app code.
 
-The promise of "your first app in 20 lines" is delivered by *recipes over a small grammar*, not by a big surface. TanStack Query won the same way: a tiny core contract, an ecosystem of thin value-level conveniences, and nobody builds "a TanStack Query app." A recipe you never enable costs you nothing — not binary size, not surface area, not a correctness seam. A recipe you do enable is a deprecable function, never a permanent widening of the grammar. That asymmetry — grammar forever, recipes disposable — is what keeps the expensive category small while the convenient category grows freely.
+A protocol module may carry a relay because the protocol makes that relay part
+of the semantic object: a NIP-29 group host, an inbox set, or another typed
+source authority. That is protocol context, not a generic relay override.
 
-## What to read next
+## Choosing the owner
 
-- *[Extending NMP](32-extending.md)* — how a new NIP module (and its recipes) gets added under the five tests and the modularity rule.
-- *[Patterns & anti-patterns](28-patterns.md)* — the guarantees every recipe inherits for free.
-- *[Live queries & the binding grammar](09-binding-grammar.md)* — the algebra all read recipes desugar to.
+Use this decision order:
+
+1. **Is it generic store/sync/routing/signing machinery?** It belongs in core.
+2. **Is it a fact or state machine defined by a NIP/protocol?** It belongs in
+   the opt-in protocol module that owns that specification.
+3. **Is it a closed declaration over existing public values?** It may be a
+   reusable helper in that module or in a third-party package.
+4. **Would different products reasonably choose different behavior?** It
+   belongs in the app after delivery.
+
+The primitive path remains public and explainable, but a semantic module
+operation need not pretend to be only a one-line filter recipe. Some protocols
+correctly own multi-event state, validation, and contextual routing.
 
 ---
 

@@ -1,97 +1,100 @@
-# Cost & performance: the pay-as-you-go mental model
+# Cost, coalescing, and boundedness
 
-**Status: BUILT** (the refcounted-demand and delta-accumulation behavior is real — anchored to `nmp-router/src/coalesce.rs`, the Swift `RowBridge` in `Packages/NMP/Sources/NMP/Query.swift`, and the `Handle` in `nmp-engine/src/runtime/mod.rs`. The modularity/feature-flag mechanism is PLANNED-shape and marked as such.)
+**Status: CURRENT + TARGET.** Refcounted demand, safe wire coalescing, router
+caps, Swift newest-frame delivery, and latest-wins diagnostics are built. The
+cross-platform/end-to-end boundedness and shortfall contract is still target
+work.
 
-After this chapter you'll have a concrete cost model for NMP: what a query actually costs, why two identical queries cost the same as one, what happens when the last observer of a query goes away, and the one delta-batching cost you must manage yourself for very large feeds. You'll also see how the modularity principle keeps your *binary* small — you link only the protocol modules you enable.
+After this chapter you will know what an observation costs, when demand can
+share, and how NMP reports a limit without silently changing the query.
 
-## The mental model: pay as you go
+## Pay for declared demand
 
-The design promise is "two calls for a small app, twenty for a full client; zero architecture either way." The cost model matches that shape: **you pay for the demand you declare, and nothing else.** There is no ambient sync, no background firehose, no fixed per-app tax. An app observing one query costs one query's worth of routing and wire subscriptions. An app observing none costs a store and an idle engine thread.
+NMP has no ambient content firehose. A live query costs:
 
-Concretely, a query's cost has three parts:
+1. binding resolution and recompilation when inputs change;
+2. compiled wire demand against planned sources;
+3. canonical store matching and snapshot production; and
+4. compact evidence plus optional diagnostic detail.
 
-1. **Wire subscriptions** — the `REQ`s the engine opens on relays to satisfy your demand. You can see exactly how many, and to whom, in the diagnostics `wireSubCount` and `filters` (see *[Diagnostics & debugging](22-diagnostics.md)*). This is the real network cost.
-2. **Resolution/re-eval** — for a `Derived` or `Reactive` binding, the engine re-evaluates the binding graph when its inputs change (a new kind:3, an account switch) and surgically re-routes: it closes exactly the departed authors and opens exactly the new ones, with zero churn on the unchanged. You pay for *changes*, not for standing still.
-3. **Delivery** — accumulating deltas and handing you snapshots. Cheap per event; the one place it can bite at scale is covered below.
+Protocol modules add only the code and semantic operations an app enables. The
+core remains usable without a preferred content module.
 
-## Identical demand is shared: refcounted queries
+## Sharing follows semantic compatibility
 
-The single most important cost fact: **identical queries share.** Demand is refcounted, keyed on the query descriptor. If three views each `observe` the same filter, the engine does not open three sets of wire subscriptions — it opens one, and fans the delivered rows out to all three observers. The wire cost is paid once.
+Current refcounting shares identical filters, and the router may widen filters
+only under a proved rule such as author union. The target semantic descriptor
+is broader:
 
-This goes further than exact-match sharing. The router runs a *widen-only* coalescer: two filters identical in every field except `authors` merge into a single `REQ` for the union of both author sets (the `AuthorUnion` rule), because a superset filter matches strictly more events. So a query for "Alice's notes" and a query for "Bob's notes" can collapse into one wire subscription for `authors:[Alice, Bob]`, with the engine demultiplexing the results back to the right observers. The correctness contract is explicit — a merge is only allowed if it provably widens (`matches(merge(a,b)) ⊇ matches(a) ∪ matches(b)`); a rule not proven to widen is dropped and its filters ship separately. Exact-canonical dedup is the trivially-correct floor beneath all of it.
-
-The practical consequence for you: **don't hand-optimize by trying to share query objects across your views.** Declare the demand each view honestly needs. If two views need the same thing, the engine already coalesces them on the wire — you get the sharing for free, keyed on the value, without threading a shared handle through your app. Values-in means the engine can hash, dedup, and coalesce; that's a benefit you'd forfeit by passing around opaque shared subscriptions.
-
-## Last-observer-drop: teardown is refcount-driven
-
-The mirror image of sharing: when the *last* observer of a demand goes away, the underlying wire subscription is torn down. Teardown rides ownership — deinit/ARC in Swift, `Drop` in Rust, flow-collection scope in Kotlin. When your `NMPQuery` (or its iterator) is released, the Rust side's `Drop` unsubscribes automatically; when the query was the last one contributing that demand, the `REQ` closes on the wire. No `cancel()` call is required (though it exists for explicit early teardown).
-
-So the cost of a screen you navigate away from is reclaimed automatically, as long as you let the handle go out of scope. The engine also applies a teardown-with-grace debounce, so briefly dropping and re-adding the same demand (a view reappearing) doesn't thrash the wire. The lever you own is *how long you keep handles alive* — the same lever as lifecycle (see *[Threading, the main-thread contract & app lifecycle](23-threading-lifecycle.md)*).
-
-## The one cost you manage: a full snapshot per delta
-
-Here is the honest sharp edge. The Swift `RowBridge` accumulates row deltas into a full snapshot and yields the *entire current row set* on every batch:
-
-```swift
-// Packages/NMP/Sources/NMP/Query.swift (real)
-func onBatch(deltas: [FfiRowDelta], coverage: FfiCoverage) {
-    lock.lock()
-    for delta in deltas { /* apply Added/Removed to byId + order */ }
-    let snapshot = order.compactMap { byId[$0] }   // full list, every time
-    lock.unlock()
-    continuation.yield(RowBatch(rows: snapshot, coverage: Coverage(coverage)))
-}
+```text
+Demand = Selection + SourceAuthority + AccessContext
 ```
 
-This is deliberate — each element you receive is a complete, self-consistent snapshot, so you never reconstruct state from partial deltas and never see a torn read. For a feed of tens or low hundreds of rows, this is a non-issue: rebuilding a small array per batch is trivial.
+Equal selections may share local matching and binding-resolution work. Wire
+demand and acquisition evidence may share only when source authority and access
+context are compatible. Two equal filters under different AUTH contexts must
+not accidentally borrow each other's proof.
 
-But for a **large feed** — thousands of rows, arriving in a burst during initial sync — yielding a full snapshot per delta means your consumer re-processes the whole array on every yield. If your `for await` loop does an O(n) sort and a full SwiftUI diff each time, you can spend real CPU on redundant work while a burst lands.
+Apps should declare the demand each view needs. They do not need to pass one
+shared query object around merely to save wire subscriptions; the engine owns
+deduplication, coalescing, reference counts, and last-observer teardown.
 
-The mitigation is **batch/coalesce on your side**, and you already have the tools:
+## Latest-state delivery is bounded
 
-```swift
-// Coalesce bursts: only act on the latest snapshot per animation frame.
-var latest: RowBatch?
-for await batch in query {
-    latest = batch
-    // Debounce: yield to the runloop, then take only the freshest.
-    await Task.yield()
-    guard let b = latest else { continue }
-    latest = nil
-    rows = b.rows.sorted { $0.createdAt > $1.createdAt }
-    coverage = b.coverage
-}
-```
+Swift's current `RowBridge` incorporates every delta into the latest local
+state, then frame-coalesces delivery and buffers only the newest snapshot. The
+app does not need to implement its own debounce to prevent historical replay
+from building a render backlog.
 
-Because each batch is already the full picture, **dropping intermediate batches is always safe** — the next one supersedes it entirely. That's exactly what makes coalescing correct here: you can throw away every snapshot but the last one in a burst and lose nothing. For the Collection observation mode (PLANNED — *[Feeds & the Collection observation mode](12-collection-mode.md)*), the engine will additionally own bounded windows and stable ordering, moving this work behind the boundary; until then, coalesce large feeds in your consumer.
+Skipping an intermediate query or diagnostic frame is safe because the next
+frame supersedes it and contains the newest complete local state. It would not
+be safe to drop a durable receipt fact unless that fact was already persisted
+and replayable, which is why receipt durability is part of the target contract.
 
-Diagnostics needs none of this — its stream is already latest-wins at the source, dropping stale snapshots for you.
+The remaining gap is below the platform adapters: current Rust row/receipt
+channels and transport ingestion are not yet one end-to-end bounded system.
+The JVM Kotlin projection already uses `Flow.conflate()` for newest-state
+delivery; that does not by itself close the engine-wide contract.
 
-## Modularity: you link only what you enable
+## Limits must be explicit
 
-Cost isn't only runtime — it's *binary weight*, and NMP's modularity principle governs it. The engine core is the two nouns plus the hard concerns (store, routing/outbox, sync, coverage, identity, diagnostics, capability seams). **Everything protocol-specific and non-primitive — reactions, reposts, follow packs, highlights, long-form, lists — is opt-in and modular.** A minimal app that never reacts links *zero* reaction code; adding follow-pack support must not tax every other app.
+NMP may cap relay fan-out, connections, graph depth, derived cardinality, wire
+filter size, observation windows, scheduler concurrency, and retained history.
+Every cap must choose one honest outcome:
 
-```swift
-// PLANNED-shape: you pay for the NIPs you enable.
-// Enable a protocol module → its recipes and kinds appear:
-import NMPReactions        // now .reaction(to:) and .reactions(to:) exist
-// Don't import it → that code isn't in your binary at all.
-```
+- exact semantics-preserving chunking/coalescing;
+- cached/local results plus explicit shortfall evidence;
+- typed rejection before acceptance; or
+- backpressure/disconnection with a diagnostic reason.
 
-The mechanism (per-NIP crate, Cargo `feature` flag, or registerable module) is being finalized; the *principle* is durable and load-bearing: **you pay only for the NIPs you enable.** This is the old NMP's genuine win, kept — apps that didn't care about reactions never packed `.react()`. When you package per platform (*[Packaging, build & distribution](08-packaging.md)*), you compose only the modules you enabled, and that composition is what determines binary size.
+It may never silently take the first N values and present them as the whole
+result. A caller-requested `limit` is also distinct from an engine-imposed
+shortfall.
 
-## The summary cost table
+## Protocol code is opt-in and exact
 
-| You do | You pay |
+An enabled NIP module contributes only the exact schemas, builders, parsers,
+queries, operations, and context facts defined by that protocol. It does not
+bring a preferred timeline or broad content category into core. A minimal app
+that enables no protocol module still has raw live query and write intent.
+
+The exact Cargo, SwiftPM, and Kotlin packaging is provisional. Whatever shape
+lands must preserve one invariant-enforcing facade and pay-for-what-you-enable
+without a module-registration lifecycle in the app.
+
+## Cost summary
+
+| Action | Cost / bound |
 |---|---|
-| Observe a query | one coalesced set of wire subs (shared with any identical/mergeable demand) |
-| Observe the same query twice | nothing extra — refcounted, one wire cost |
-| Let a query handle go out of scope | teardown, automatically; wire sub closes when it was the last observer |
-| Observe a huge feed during a sync burst | full-snapshot-per-delta CPU — coalesce on your side (dropping intermediate batches is safe) |
-| Never use reaction/repost/etc. | zero bytes for those NIPs (PLANNED modularity) |
-| Background the app | nothing — demand survives; foreground replays |
+| Observe compatible demand twice | shared resolution/wire work; two native observers |
+| Drop the final observer | demand withdrawal and debounced wire close |
+| Receive a large replay in Swift | every delta incorporated; newest snapshots frame-delivered |
+| Hit a router/graph/result cap | explicit shortfall, exact chunking, or typed rejection |
+| Enable a protocol module | only that protocol's semantic surface and dependencies |
+| Detach from a target receipt | no write cancellation; persisted facts remain reattachable |
 
-The through-line: declare honest demand as values, let the engine share and reclaim it, and the only thing left for you to tune is coalescing very large delivery bursts — which is safe precisely because every batch is already the whole truth.
+The performance rule is the correctness rule: bound work explicitly, coalesce
+only superseded state, and expose every semantic shortfall.
 
 ---
 

@@ -24,11 +24,11 @@ let feed = try engine.observeCollection(
 
 for await view in feed {                  // view: an ordered, windowed CollectionView
     render(view.rows)                     // already ordered; only the window is materialized
-    hasMore = view.hasMore                // derived from coverage, not a guess
+    acquisition = view.acquisition        // scoped source facts, not a global verdict
 }
 ```
 
-## Pagination is widen-only, and `has_more` is just coverage
+## Pagination is widen-only, and exhaustion is not globally knowable
 
 Two subtleties that keep Collection honest against the bug-ledger.
 
@@ -39,7 +39,13 @@ Two subtleties that keep Collection honest against the bug-ledger.
 await feed.loadMore()     // e.g. lowers `since` / raises `limit` on the shared node
 ```
 
-**`has_more` / `exhausted` / `gap` are not new concepts** — they are *Coverage: empty vs unknown* surfacing under a feed-friendly name. "Is there older content to load?" is answered from the same `CompleteUpTo(watermark)` vs `Unknown` variant you already know: if the window's lower edge is proven complete, the feed is `exhausted`; if it's `Unknown`, there may be more (`has_more`); a proven hole between covered regions is a `gap`. You are not learning a new trust model; you are reading the coverage model through the feed's window. Everything from the coverage chapter applies unchanged.
+**Collection may report scoped source evidence; it must not manufacture a
+global `hasMore` or `exhausted` verdict.** A relay reaching EOSE proves that one
+request ended at that relay. It cannot prove that no matching event exists on
+another relay NMP did not plan or cannot reach. A collection view may tell you
+that all currently planned sources reached their requested lower bound, that a
+source is AUTH-blocked, or that an engine limit caused a shortfall. The app
+decides what that evidence means for its own "load more" UI.
 
 ## Heterogeneous feeds: a *list* of queries, merged result-side
 
@@ -76,7 +82,12 @@ One boundary this mode does *not* cross: **NMP owns the virtualizable collection
 
 ## What to do today
 
-Until this ships, build feeds the way *Consuming results* shows: a plain `observe`, sort in the `for await` loop, and cap the query with `limit:` so the accumulated set can't grow unbounded. Keep your sort and window logic in one place, framed as "app render policy over delivered rows" — that is exactly the seam that will slot onto `OrderKey`/`window` when Collection lands, so nothing you write now is wasted. And keep reading coverage: `has_more` is just `CompleteUpTo` vs `Unknown` wearing a feed's clothes.
+Until this ships, build feeds the way *Consuming results* shows: a plain
+`observe`, sort in the `for await` loop, and request a bounded result where
+that matches your product. Keep sort and window logic framed as app render
+policy over delivered rows. Treat today's aggregate `Coverage` value as the
+current narrow API only; do not turn it into a claim that the feed is globally
+exhausted. The target snapshot carries scoped source and shortfall evidence.
 
 ---
 

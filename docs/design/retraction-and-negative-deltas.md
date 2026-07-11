@@ -1,13 +1,19 @@
 # Retraction & negative deltas — the removal family
 
 - **Date:** 2026-07-11
-- **Status:** Design (pre-build). Answers the "supersession retraction blindness" item in
+- **Status:** Design with the store/resolver retraction substrate now partially
+  landed. Answers the "supersession retraction blindness" item in
   `docs/known-gaps.md` and triage item #6 in
   `docs/reviews/2026-07-11-external-feedback-triage.md`; composes with issues #2 (local
   echo), #3 (durable intents), #6 (async signer / optimistic pipeline), #14 (verify gate).
+- **Promotion correction:** write compensation is **pre-signature only**. A
+  durable `Accepted` intent atomically creates a canonical pending row; cancel or
+  terminal signing failure retracts it and may restore what it displaced. Once
+  signing promotes that same row, relay ACK/rejection/timeout changes only the
+  durable receipt. It never retracts the signed row or resurrects a predecessor.
 - **Scope:** how the engine emits *negative* deltas — an event leaving the replica — for
-  all four triggers (replaceable supersession, kind:5 deletion, NIP-40 expiry,
-  optimistic-write rejection) through ONE lane, with zero new app-facing concepts.
+  four triggers (replaceable supersession, kind:5 deletion, NIP-40 expiry,
+  pre-signature intent termination) through ONE lane, with zero new app-facing concepts.
 
 ---
 
@@ -25,7 +31,8 @@ half:
   `memory_store.rs:91`), and `refresh_all_handles` runs after every ingest — so a
   superseded event **already retracts correctly from root-level live queries**.
 
-What is missing is everything upstream of that diff:
+At the time this design was written, everything upstream of that diff was
+missing. This is historical problem evidence; §6 records what has since landed:
 
 1. **The dirty-mark is add-only.** `Engine::ingest_observed`
    (`crates/nmp-resolver/src/engine.rs:404`) pushes only the *arriving* event into
@@ -35,10 +42,10 @@ What is missing is everything upstream of that diff:
    the `Derived` node recomputes and the shrink falls out — by luck of shape overlap,
    not by design. When the *removed* event matched an inner filter the *new* one does
    not (a kind:39002 member-list update that no longer `#p`-tags me; a kind:5 whose own
-   kind matches nothing; an expiry or rejection where **no event arrives at all**), no
+   kind matches nothing; an expiry or pre-signature termination where **no event arrives at all**), no
    seed is planted and the derived set keeps the ghost member forever.
-2. **The store never removes except by supersession.** No kind:5 processing, no
-   expiration index, no removal door for a rejected local echo (grep-verified: zero
+2. **The store then never removed except by supersession.** No kind:5 processing, no
+   expiration index, no removal door for a terminated pending row (grep-verified: zero
    hits for deletion/expiry in `crates/`).
 3. **`InsertOutcome::Superseded { replaced: EventId }` carries only the id** — but the
    dirty-mark needs to `match_event` the removed event against inner filters, and the
@@ -123,7 +130,7 @@ zero new code** — the existing `Metrics` witness (`atoms_opened + atoms_closed
 the retracted member — the reverse of the open path, through the same pipe.
 
 A second entry point covers removals that arrive with **no inbound event** (expiry,
-rejection):
+pre-signature termination):
 
 ```rust
 // nmp-resolver
@@ -153,7 +160,7 @@ The refresh diff emits `RowDelta::Removed` for:
 | Replaceable supersession | `InsertOutcome::Superseded { replaced }` — widened variant | ingest commit |
 | kind:5 deletion | processed **inside `insert`** (§2): door tombstones + drops targets, returns them | ingest commit |
 | NIP-40 expiry | `store.expire_due(now)` from `tick()` (§3) | `resolver.retract` |
-| Optimistic rejection | engine `store.remove(id, Rejected)` on terminal `Rejected`/`Failed` (§4) | `resolver.retract` |
+| Pre-signature intent termination | engine removes the pending row on cancel, explicit signer denial, unrecoverable signer/protocol failure, or protocol expiry (§4) | `resolver.retract` |
 
 One lane, four feeders. The tripwire from VISION §4 ("a *second* mechanism for
 expressing read demand") is respected: retraction is not a mechanism for expressing
@@ -250,7 +257,7 @@ This also closes `known-gaps.md`'s "No time driver for liveness/timeout sweeps".
 
 ---
 
-## 4. Optimistic local echo & rejection — store citizen, not overlay, not loser
+## 4. Accepted pending rows & pre-signature compensation — store citizen, not overlay
 
 ### 4.1 The verdict: the pending row lives IN the one store
 
@@ -258,7 +265,7 @@ Issue #2/#6 already lean this way; this design confirms it and names why the
 alternative is the trap.
 
 **A delivery overlay** (engine shows transient rows over the store, retracts on
-rejection) *is* the second-system store: it would need its own filter matching (which
+pre-signature termination) *is* the second-system store: it would need its own filter matching (which
 overlay rows match which query?), its own participation in `Derived` evaluation (an
 optimistic kind:3 edit must re-resolve follows or optimism is a lie), its own dedup
 against the relay echo, its own provenance, its own GC exemption, its own persistence
@@ -267,36 +274,52 @@ different semantics — the framework-reborn shape Brainstorm's UNDO probe warne
 
 **Store-resident** costs almost nothing because the store was already built right:
 
-- The echoed row enters through the ordinary door with a new provenance variant —
+- The accepted row enters through the ordinary door with local provenance —
   `Provenance` grows a `local: Option<LocalOrigin>` alongside `seen` (issue #2's
-  `Local` origin; a row *field*, exactly ledger #5's shape). The store has **no notion
-  of "pending"** — no second query path, no committed/pending authority split. What
-  makes a two-tier store a trap is two *delivery/authority* tiers; a provenance value
-  is data on a row.
-- **Relay-echo reconciliation is already built**: when the relay echoes the event back,
+  `Local` origin; a row *field*, exactly ledger #5's shape). The canonical row
+  also carries typed signature state, conceptually `Pending(intent_id)` or
+  `Signed(signature)`. That state is data on the one row, not a second query
+  path or committed/pending authority split.
+- **`Accepted` is one durable commit.** The frozen unsigned event body, expected
+  author, durable intent/receipt state, pending row, and any displaced predecessor
+  become durable atomically. A restart may observe all of them or none of them;
+  it must never recover an obligation without its row, or a row without its
+  obligation.
+- **Relay-echo reconciliation remains ordinary dedup**: after signing and publish,
+  when a relay echoes the event back,
   `insert` hits dedup-by-id first and merges `RelayObserved` provenance into the local
   row (`Duplicate { provenance_grew: true }`) — the app's "sending…" chip resolves off
   provenance, the receipt stream stays the sole ack authority. An overlay would need
   bespoke code for precisely this hand-off.
-- Pre-signature echo (issue #6, `Accepted`-time) composes: a NIP-01 event id is the
+- Pre-signature visibility (issue #6, `Accepted`-time) composes: a NIP-01 event id is the
   hash of `[0, pubkey, created_at, kind, tags, content]` — **the signature is not an
   input** — so the row's id is final before the signer answers; signing completes the
   row in place with zero id churn. The verify gate (issue #14) guards the
   *relay-ingest* boundary, not the store door, so an engine-authored unsigned-pending
-  row does not fight it.
+  row does not fight it. A valid signer response atomically promotes the same
+  row to `Signed(signature)`; there is no remove/add churn and no second write
+  path.
 - GC: pending rows must survive collection — the engine (which already constructs the
   `ClaimSet`) adds a claim per in-flight `PendingWrite`. An engine-composed claim, not
   a store concept.
 
-**Rejection** (terminal `Rejected` from every relay, or whole-intent `Failed` from the
-signer) = `store.remove(event_id, Rejected)` → `resolver.retract(vec![row])` → the same
-negative-delta lane as §1. This is *why* retraction and optimism are one family: the
-echo is only safe to build because the retraction lane exists.
+**Pre-signature termination** (explicit cancellation, signer denial, an
+unrecoverable invalid signer response/protocol failure, or protocol expiry) =
+`store.remove(event_id, Rejected)` → `resolver.retract(vec![row])` → the same
+negative-delta lane as §1. Temporary signer absence, a disconnected NIP-46
+session, or a timeout is not terminal for a durable intent: it remains
+`AwaitingSigner(pubkey)` and resumes when a matching signer is attached.
 
-### 4.2 Resurrection: compensating re-insert, never un-supersede
+**After signing there is no compensating retraction.** Per-relay `Acked`,
+`Rejected`, `GaveUp`, and outcome-unknown states are delivery evidence on the
+receipt only. The signed event remains a canonical local fact and continues to
+participate in every matching query, replaceable/delete/expiry semantics, and
+ordinary relay-provenance merge.
 
-The sharp corner: an optimistic **replaceable edit** (kind:0) supersedes the current
-winner at insert; a rejection must bring the predecessor back; the one-door store has
+### 4.2 Pre-signature resurrection: compensating re-insert, never un-supersede
+
+The sharp corner: an accepted **replaceable edit** supersedes the current
+winner at insert; pre-signature termination must bring the predecessor back; the one-door store has
 no un-supersede — and must never grow one.
 
 The answer falls out of §1.1's widening: `InsertOutcome::Superseded { replaced:
@@ -306,14 +329,15 @@ supersession**. The engine stashes it on the pending write it already tracks:
 ```rust
 struct PendingWrite {
     …existing fields…,
-    /// The row this optimistic insert displaced, if any — held only until
-    /// this write reaches a terminal state.
+    /// The row this pending insert displaced, if any — held only until
+    /// this write is signed or terminates before signing.
     displaced: Option<StoredEvent>,
 }
 ```
 
-- **On acceptance** (first `Acked`): drop the stash. The predecessor lost for real.
-- **On rejection**: `store.remove(own_event_id, Rejected)` (frees the address slot,
+- **On signature promotion**: drop the stash. The predecessor lost for real;
+  later relay outcomes cannot restore it.
+- **On pre-signature termination**: `store.remove(own_event_id, Rejected)` (frees the address slot,
   clears `addr_index`), then re-`insert` the displaced event **through the same one
   door**. It wins its address back by ordinary supersession rules — first-at-address.
   No un-supersede operation ever exists; resurrection is a compensating action replaying
@@ -321,20 +345,19 @@ struct PendingWrite {
   lane, so live queries see `Removed(optimistic)` + `Added(predecessor)` and a
   `Derived` over kind:3 re-resolves — the follow you optimistically added disappears
   from the feed graph too.
-- **Chained edits** (edit twice before the first resolves): each `PendingWrite` stashes
+- **Chained pending edits** (edit twice before the first signs): each `PendingWrite` stashes
   what *it* displaced; the door arbitrates every unwind. Rejecting the newer edit
   restores the older pending one (its event is the stash). Rejecting the *older* one
   while the newer still holds the address: `remove(older_id)` is a no-op (that id is no
   longer stored) and the re-offered grand-predecessor comes back `Stale` against the
   newer winner — nothing churns, which is correct. No LIFO bookkeeping, no state
   machine: door semantics resolve every ordering.
-- **Restart** (issue #3): the persisted intent journal must carry `displaced` alongside
-  the intent — one more field on the lane #3 already needs; noted there, not designed
-  here.
+- **Restart** (issue #3): `displaced` is part of the same atomic durable
+  `Accepted` record as the intent and pending row. Recovery can therefore resume
+  signing or compensate without reconstructing an undo history from guesses.
 - Tombstone interaction: `remove(…, Rejected)` writes **no tombstone** — the retracted
-  optimistic row was never network-published as far as we know; if some relay did
-  accept it, its echo re-arrives, fails the dangling `event_to_receipt` lookup, and is
-  just an event again (and for replaceables, loses `Stale` to the restored winner).
+  pending row was never signed and therefore could not have been validly
+  published. Signed rows never enter this compensation branch.
 
 ---
 
@@ -343,8 +366,9 @@ struct PendingWrite {
 The rule, stated as the invariant it already almost is: **`record_coverage` merges; only
 `gc` lowers; retraction touches no coverage row.**
 
-- A watermark asserts *fetch-completeness* — "this relay was fully synced for this
-  shape through T" — not row presence. Supersession, deletion, and expiry are *more*
+- A watermark records scoped acquisition evidence — "this relay emitted EOSE or
+  completed reconciliation for this planned shape through T" — not global
+  completeness and not row presence. Supersession, deletion, and expiry are *more*
   knowledge about the window, not less: the local set still equals "everything **valid**
   in the proven window."
 - **Why GC shrinks but retraction doesn't** (the distinction that makes this sound):
@@ -355,51 +379,54 @@ The rule, stated as the invariant it already almost is: **`record_coverage` merg
   re-admission** (tombstone check / expired-at-insert check), so a hypothetical
   re-fetch of the window converges to the same store state. The watermark's claim
   remains true. `covered_through` does not move.
-- Authoritative-empty stays honest: after a kind:5 deletes the only matching note,
-  `0 rows + CompleteUpTo(T)` is the *correct* answer — empty is the truth, and door
-  refusal is what keeps it stable.
-- The optimistic row never interacts with coverage at all: coverage is keyed per
+- Empty rows remain honest evidence: after a kind:5 deletes the only matching
+  row, the snapshot may carry `0 rows` plus the retained per-relay watermark.
+  The app interprets that evidence; NMP does not promote it to a global
+  "complete" or "authoritative empty" claim.
+- The local row never interacts with relay coverage at all: coverage is keyed per
   (shape, **relay**) and a `Local`-provenance row was never attributed to any relay's
   proven interval; its retraction is invisible to the planner's `covered_through + 1`
   flooring.
-- Falsifier for CI: retract each way (supersede / delete / expire / reject), assert
+- Falsifier for CI: retract each way (supersede / delete / expire /
+  pre-signature terminate), assert
   every coverage row is bit-identical before/after; assert `gc` remains the only
   lowering path by construction (no other caller of the shrink helpers).
 
 ---
 
-## 6. BUILT vs NEW
+## 6. LANDED substrate vs promoted remaining work
 
-**Already built (the half-present primitive):**
+**Landed substrate (preserve; this promotion does not rewrite it):**
 
 - `RowDelta::Removed` + `refresh_handle`'s full-set diff — the entire app-facing
   retraction contract; ships today, zero FFI change.
-- One-door supersession already removes rows; root queries already retract on it.
-- The generic `match_event` dirty-seed loop — needs one more iterator, not a redesign.
-- `recompute_node` re-queries the store → shrink falls out; atom set-diff → surgical
-  `Close`; `Metrics` witnesses replace-not-rebuild.
-- `tick()` + `EngineMsg::Tick` + the neg-liveness sweep (built, undrivien).
+- The symmetric store door, kind:5 tombstones, persistent NIP-40 expiration
+  index, and removal-returning APIs.
+- Resolver `react(inserted, removed)` / `retract` dirty-seed, engine feed-through,
+  and the resulting surgical close/`RowDelta::Removed` behavior.
+- `tick()` + `EngineMsg::Tick` + the neg-liveness/expiry mechanism (the live
+  deadline driver remains separate).
 - `PendingWrite` registry, receipt terminals (`Rejected`/`Failed`), dedup-first
   provenance merge (the echo-reconciliation path), `ClaimSet`.
 
-**New:**
+**Remaining under the promoted contract:**
 
-- `InsertOutcome::Superseded { replaced: StoredEvent }` (widen) + `Refused(reason)`.
-- Store: kind:5 processing in `insert` + persistent tombstones; expiration index (both
-  backends, persisted in redb) + `expire_due`/`next_expiration`; `remove(id,
-  RetractReason)`.
-- Resolver: `removed` in the dirty-seed; `retract(Vec<Event>)` entry point; shared
-  `react(inserted, removed)`.
-- Engine: `next_deadline()` (min over store expirations + neg deadlines); expiry arm in
-  `tick`; `displaced` stash + rejection compensating-action; local-echo insert (lands
-  with issue #2; this doc defines its retraction half); retraction counters in
-  diagnostics (per `RetractReason`, per relay-visible cause).
-- Runtime: `recv_timeout` deadline-armed loop (closes the known-gaps time-driver item).
+- One atomic durable `Accepted` transaction containing the frozen event body,
+  intent/receipt state, canonical `Pending(intent_id)` row, and displaced stash.
+- `AwaitingSigner(pubkey)`, signer reattachment, exact signer-response
+  validation, and atomic in-place promotion to `Signed(signature)`.
+- Pre-signature cancel/terminal-failure compensation only; signed relay outcomes
+  remain receipt-only.
+- Engine `next_deadline()` + runtime `recv_timeout` deadline driver, extended as
+  the single scheduler for retry eligibility rather than per-intent timers.
+- Retraction counters in diagnostics for real removal causes; relay rejection is
+  explicitly not one of them after signing.
 - Headless falsifiers: (a) derived-set retraction where the new winner does NOT match
   the inner filter (the smoking-gun case); (b) kind:5 targeting a `Derived` member +
   tombstoned redelivery; (c) synthetic-clock expiry incl. expired-at-insert refusal and
-  boot-time catch-up; (d) rejected replaceable edit resurrects predecessor, incl. the
-  chained-edit orderings; (e) coverage bit-identical across all four; (f) metrics
+  boot-time catch-up; (d) pre-signature-cancelled replaceable edit resurrects its
+  predecessor while a signed-but-relay-rejected edit does not, incl. chained-edit
+  orderings; (e) coverage evidence bit-identical across all four; (f) metrics
   witness: only the retracted member's atoms churn.
 
 ---

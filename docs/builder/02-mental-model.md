@@ -1,8 +1,11 @@
 # The mental model in one diagram
 
-**Status: BUILT** (conceptual — the shape described here is proven through M4; see [`README.md`](../../README.md).)
+**Status: CURRENT + TARGET.** The two-operation engine is built. Query evidence,
+durable acceptance, signer overrides, and protocol-module composition are the
+target contract and are not all implemented yet.
 
-After this chapter you'll hold the whole engine in your head as one picture: **values in → engine → rows + coverage out → your code after.** You'll know the two nouns everything traces back to, and the modularity principle that keeps the core tiny and protocol meaning opt-in.
+After this chapter you'll hold the whole engine in your head as one picture:
+**values in -> engine -> snapshots + receipts out -> your code after.**
 
 ## The one diagram
 
@@ -17,14 +20,17 @@ After this chapter you'll hold the whole engine in your head as one picture: **v
    │  write intent │──────▶ │  watermarks · dedup     │ ─────▶ │  render      │
    └───────────────┘        └────────────────────────┘ receipt└──────────────┘
         │                            ▲        │                       ▲
-        │  identity (one input)      │        │  diagnostics          │
+        │  reactive inputs +        │        │  diagnostics          │
         └────────────────────────────┘        └───────────────────────┘
-              "current signer is A… now B"       read-only projection:
+              current pubkey; signer override       read-only projection:
                                                  per relay / per kind —
                                                  asked / arrived / proven
 ```
 
-Read it left to right. You hand the engine **values** — a live query, a write intent, and one input (who the active signer is). The engine does the entire brutal-machinery job (see *[Why NMP exists](01-why-nmp.md)*) and hands back **rows plus a coverage state** for reads, and a **streaming receipt** for writes. Everything *after* delivery — folding rows into your view model, formatting a hex pubkey into a name, deciding layout — is your code, and you may use arbitrary code there.
+Read it left to right. You hand the engine closed values: a live-query
+descriptor, a write intent, reactive inputs such as the current pubkey, and
+registered capabilities. It returns query snapshots with source-scoped
+evidence and durable receipt facts. Everything after delivery is app code.
 
 That sentence is the governing rule of the entire system:
 
@@ -48,21 +54,32 @@ A live query is a Nostr `Filter` whose field values are **`Binding`s** instead o
 
 ```
 Binding  := Literal(set)                                  // a fixed set of values
-          | Reactive(ActivePubkey)                        // "whoever the active signer is, right now"
+          | Reactive(ActivePubkey)                        // the current-pubkey input
           | Derived(inner: Filter, project: Selector)     // the projected output of ANOTHER filter
           | SetOp(Union | Intersect | Diff, [Binding])    // compose bindings
 Selector := Authors | Ids | Tag(char) | AddressCoord      // CLOSED — how to project the inner filter's rows
 ```
 
-You hand this value to `observe`, and rows stream back as your platform's native reactive primitive — a Swift `AsyncSequence`, a Kotlin `Flow`, a Rust `Handle`. When any live input changes (a follow list, the active account), the engine re-evaluates the binding and surgically re-routes the wire, keeping the handle open (**replace-not-rebuild, recompile-not-reopen**). You never see the expanded intermediate set; you see final rows. Full treatment in *[Live queries & the binding grammar](09-binding-grammar.md)*.
+You hand this selection, together with its source authority and access context,
+to `observe`. When a dependency changes, the engine re-evaluates only dependent
+graph nodes and surgically re-routes the wire. Literal concurrent-account
+queries do not change merely because the current pubkey does.
 
 ### Noun 2 — the write intent (the write noun)
 
-A write intent is a durable, acknowledged operation: an unsigned template plus a **durability class** (`durable | ephemeral | at-most-once`) and a **routing class** (`authorOutbox | toInboxes | privateNarrow`). You hand it to the engine and get back a **receipt whose status streams** — from accepted, through signed and routed, to per-relay acked. Enqueued is never confused with converged; signing and publishing are orthogonal; the app never picks relays and the types don't let it confuse "sent" with "acknowledged." Full treatment in *[Writing: intents, receipts, and the durability guarantee lattice](14-writing.md)*.
+A write intent is a durable or explicitly non-durable operation over an
+immutable draft. Durable acceptance persists the obligation and its pending
+cache record atomically. The current-pubkey signer is the default; an explicit
+identity override handles podcast, disposable, hardware, or remote signers.
+The receipt reports durable per-relay facts and can be reattached after restart.
 
-### And one input, not a third noun
+### Inputs and capabilities are not extra app architecture
 
-**Identity is an input, not a noun.** The whole identity contract is: `addAccount`, then `setActiveAccount(pubkey?)`. You state a fact — "the current signer is A… now B" — and the engine derives everything downstream: the account's relay lists, its outboxes, its follow expansion, which key signs. `Reactive(ActivePubkey)` in any query is simply "whatever you last set." Switching accounts re-roots the entire binding graph, tearing the old account's demand down *before* activating the new, so cross-account leakage has no path. There is no session model, no login flow, no account vector in the engine — that's all your UX. See *[Identity & multi-account](16-identity.md)*.
+`ActivePubkey` is a reactive input and the default signer selection, not a
+global authority over all work. Changing it re-roots descriptors that depend on
+it. Already-accepted writes retain their captured signer, and an explicit
+signer override need not become current. The app still owns account UX and
+which queries exist.
 
 Three things that look like they might be nouns, and aren't: **capabilities** (signer, encrypt/decrypt, AUTH policy) are plug points you configure; **diagnostics** are a read-only projection; the **Collection observation mode** is a mode of the read noun, not a separate one. The recurring failure this guards against is a "resource" or "session" or "module" concept creeping in beside the two nouns — that's the old fragmentation returning. If something you're building starts to feel like a third noun, stop and re-read this section.
 
@@ -77,15 +94,12 @@ You can build apps without opening this box, but here's what's inside so you tru
 
 You watch all of it through diagnostics — which is the acceptance test rendered on screen, permanently. Debugging NMP is *reading*, not printf. See *[Coverage: empty vs unknown](11-coverage.md)* for coverage specifically and *[Diagnostics & debugging](22-diagnostics.md)* for the surface. Read the engine internals to build *trust*; skip them to build *apps*.
 
-## Coverage: empty and unknown are different types
+## Evidence, not global completeness
 
-One piece of the "out" side deserves its own callout because it changes how you write every read. Alongside rows, a query delivers a **coverage** state:
-
-```
-Coverage := Unknown | CompleteUpTo(watermark)
-```
-
-`Unknown` means "we can't yet prove anything about this window" — don't render an empty-state, render a spinner. `CompleteUpTo(watermark)` means "this window is provably complete up to this point" — an empty result here is an *authoritative* empty; render "no results." A cache miss is only authoritative when a watermark proves it; a non-empty result is never proof of completeness. Keeping these two apart is the difference between a trustworthy "nothing here" and a bug where a stale cache shows a user an empty screen. Every read example in this manual shows what it does with `Coverage`; the full treatment is *[Coverage: empty vs unknown](11-coverage.md)*.
+A query cannot prove the complete global Nostr result. Its snapshot reports
+cached rows plus evidence about the currently planned sources: cache state,
+connection/AUTH status, EOSE/watermarks, failures, and local limits. The app
+interprets those facts. Exact per-relay proof remains in diagnostics.
 
 ## The modularity principle: a tiny core, opt-in protocol meaning
 
@@ -93,13 +107,17 @@ The two nouns govern the API *surface*. A second principle governs *code weight*
 
 > **The engine core is the two nouns plus the hard concerns — store, routing/outbox, sync/negentropy, coverage, identity, diagnostics, the capability seams. Everything protocol-specific and non-primitive is opt-in and modular. You carry only what you use.**
 
-Reactions, reposts, follow packs, highlights, long-form, lists, comments — none of these are in the core. Each lives in its own opt-in module (a per-NIP crate, a feature flag, a registerable module — the exact mechanism is being finalized; treat it as **PLANNED-shape**). The principle is what matters and it's load-bearing: **a minimal app that never reacts links zero reaction code; adding follow-pack support must not tax every other app.**
-
-The shape you'll see: enable a NIP module and its recipes and kinds appear — you can now say `.react(to:)` or `.reactions(to:)`; don't enable it and that vocabulary is simply absent, and so is its weight. This was the old design's one genuine win worth keeping: the reactions crate encoded what reactions *mean*, and apps that didn't care didn't pack it.
+Each protocol module owns only the schemas, validation, reconstruction,
+semantic operations, and routing context defined by that protocol. No content
+kind is core-adjacent or privileged. Modules may compose immutable drafts: a
+NIP-29 group can add its `h` tag and host-relay context to a photo draft without
+owning the photo kind.
 
 This reframes three things you'll meet later in the manual:
 
-- **Recipes** (the "batteries" — `.profile(pubkey)`, `.reactions(to:)`, `.textNote(content:)`) don't live in core. Each ships in its NIP module; *enabling the module is how you get the recipe.* A recipe is only ever a pure, printable composition of the two nouns — a protocol *fact* (kinds, tags, NIP shapes), never a product *decision* (what a feed contains, how things rank or render). See *[The batteries](27-recipes-and-choosing.md)* and the boundary tests in the design guidelines.
+- **Reusable declarations and semantic operations** live in opt-in protocol
+  modules or app packages, never in a favored content catalog in core. See
+  *[Protocol modules and reusable declarations](27-recipes-and-choosing.md)*.
 - **Extending NMP** = adding a protocol module. That's the primary extension path — not forking the engine, not registering a closure that parameterizes engine behavior. See *[Extending NMP](32-extending.md)*.
 - **Packaging** = composing exactly the modules you enable, which is what determines your binary size. See *[Packaging, build & distribution](08-packaging.md)*.
 
