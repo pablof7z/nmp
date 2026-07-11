@@ -5,50 +5,50 @@
 //! Flow:
 //! 1. Parse an npub/hex pubkey (default: a well-known active npub) and
 //!    optional `--nsec`/`--secs`.
-//! 2. Configure `nmp_router::LiveDirectory` with ONLY the two hardcoded
-//!    operator indexer relays -- no write relay pre-resolved for anyone.
-//!    Spawn `EngineThread` with that directory, `set_active_pubkey(target)`,
-//!    and `subscribe` the $myFollows LiveQuery (kind:1 authored by whoever
-//!    the target's kind:3 currently names, reactively).
+//! 2. Construct `nmp::Engine::new` with ONLY the two hardcoded operator
+//!    indexer relays configured -- no write relay pre-resolved for anyone.
+//!    Set the active account to `target` and `observe` the $myFollows
+//!    `LiveQuery` (kind:1 authored by whoever the target's kind:3 currently
+//!    names, reactively).
 //! 3. The ENGINE ITSELF (M5's self-bootstrapping outbox --
-//!    `nmp_engine::core::EngineCore`'s internal kind:10002 auto-discovery)
-//!    notices the target -- and, as its kind:3 resolves, every follow --
-//!    has no known write relays yet, opens its OWN discovery reads against
-//!    the two indexers, and re-routes each author's kind:1 atom to their
-//!    real write relay the moment that author's relay list arrives. This
-//!    app never resolves a single relay itself: it only configures the two
-//!    indexers and subscribes (no bootstrap phase, no pre-resolution --
-//!    see `docs/known-gaps.md`'s former "RelayDirectory" gap).
-//! 4. Print every row as it streams in, plus whatever diagnostic the
-//!    `Handle` surface actually exposes (see the running summary for what
-//!    that is and is not).
+//!    `nmp_engine::core::EngineCore`'s internal kind:10002 auto-discovery,
+//!    reached here only through the `nmp` facade) notices the target -- and,
+//!    as its kind:3 resolves, every follow -- has no known write relays yet,
+//!    opens its OWN discovery reads against the two indexers, and re-routes
+//!    each author's kind:1 atom to their real write relay the moment that
+//!    author's relay list arrives. This app never resolves a single relay
+//!    itself, and never touches a mechanism crate (`nmp-store`/`nmp-router`/
+//!    `nmp-transport`/`nmp-resolver`) directly: it only configures the two
+//!    indexers through `nmp::EngineConfig` and subscribes (no bootstrap
+//!    phase, no pre-resolution -- see `docs/known-gaps.md`'s former
+//!    "RelayDirectory" gap).
+//! 4. Print every row as it streams in, plus whatever diagnostic the facade
+//!    surface actually exposes (see the running summary for what that is and
+//!    is not).
 //! 5. Stop after `--secs` (default 20), print a summary, shut down clean.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp_engine::core::{DiagnosticsSnapshot, RowDelta};
-use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting};
-use nmp_engine::runtime::EngineThread;
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
-use nmp_resolver::LiveQuery;
-use nmp_router::LiveDirectory;
-use nmp_signer::LocalKeySigner;
-use nmp_store::MemoryStore;
-use nmp_transport::PoolConfig;
-use nostr::{Keys, PublicKey, RelayUrl};
+use nmp::{
+    Binding, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, Filter, IdentityField,
+    Kind, LiveQuery, PublicKey, RowDelta, RowsMsg, Selector, Timestamp, UnsignedEvent, WriteIntent,
+    WritePayload, WriteRouting,
+};
+use nostr::Keys;
 
 /// fiatjaf -- a well-known, consistently-active npub with many follows, so
 /// a read-only run against it reliably has live data to show.
 const DEFAULT_NPUB: &str = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
 
-/// The router's per-atom relay-coverage cap (`nmp_router::Router::compile`'s
-/// `cap` param) -- mirrors the value `nmp-engine`'s own runtime integration
-/// test uses; not an app-tunable in this demo.
-const ROUTER_CAP: usize = 10;
+/// The two operator indexer relays this demo configures `nmp::EngineConfig`
+/// with -- the entire relay fact set it ever supplies. Every author's write
+/// relays, including the target's own, are discovered live by the engine
+/// from here on (see the module doc).
+const INDEXER_RELAYS: [&str; 2] = ["wss://purplepag.es", "wss://relay.primal.net"];
 
 struct Args {
     pubkey: String,
@@ -126,41 +126,31 @@ fn main() {
     println!("nmp-demo -- NMP engine end-to-end falsifier (Rust CLI)");
     println!("target pubkey : {}", target.to_hex());
     println!("run duration  : {}s", args.secs);
+    println!("indexer relays: {}", INDEXER_RELAYS.join(", "));
 
-    let indexers: Vec<RelayUrl> = ["wss://purplepag.es", "wss://relay.primal.net"]
-        .iter()
-        .map(|u| RelayUrl::parse(u).expect("hardcoded indexer URL must parse"))
-        .collect();
-    println!(
-        "indexer relays: {}",
-        indexers
-            .iter()
-            .map(RelayUrl::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    // No bootstrap phase: `LiveDirectory` starts knowing NOTHING beyond the
-    // indexer set. Every author's write relays -- including the target's
-    // own -- are discovered by the engine itself, live, from here on (M5's
-    // self-bootstrapping outbox: `nmp_engine::core::EngineCore`'s internal
-    // kind:10002 auto-discovery, routed through these same two indexers via
-    // the router's existing discovery-kind eligibility).
-    let directory = LiveDirectory::builder().indexers(indexers.clone()).build();
+    // No bootstrap phase: `Engine::new` starts knowing NOTHING beyond the
+    // indexer set below. Every author's write relays -- including the
+    // target's own -- are discovered by the engine itself, live, from here
+    // on (M5's self-bootstrapping outbox, reached only through the facade
+    // now -- see the module doc).
+    let engine = match Engine::new(EngineConfig {
+        indexer_relays: INDEXER_RELAYS.iter().map(|u| u.to_string()).collect(),
+        ..EngineConfig::default()
+    }) {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("nmp-demo: could not construct the engine: {e}");
+            std::process::exit(2);
+        }
+    };
     println!(
         "\n-- no bootstrap phase: the engine discovers write relays live from the \
          indexers above as demand needs them --"
     );
 
-    let signer = match &args.nsec {
-        Some(nsec) => match Keys::parse(nsec) {
-            Ok(keys) => {
-                println!(
-                    "signer: loaded from --nsec ({})",
-                    keys.public_key().to_hex()
-                );
-                LocalKeySigner::new(keys)
-            }
+    match &args.nsec {
+        Some(nsec) => match engine.add_account(nsec) {
+            Ok(pubkey) => println!("signer: loaded from --nsec ({})", pubkey.to_hex()),
             Err(e) => {
                 eprintln!("nmp-demo: --nsec did not parse as a valid secret key: {e}");
                 std::process::exit(2);
@@ -168,54 +158,67 @@ fn main() {
         },
         None => {
             println!("signer: ephemeral (read-only run; pass --nsec to also demo publish)");
-            LocalKeySigner::generate()
         }
-    };
-
-    // `_engine_thread`: this process exits directly once its report is
-    // printed rather than joining the engine thread's own clean shutdown
-    // (see the note at the end of `main` -- a popular account's backlog can
-    // keep it busy well past `--secs`, for reasons unrelated to what this
-    // demo is falsifying); the OS reclaims the detached thread on exit.
-    let (_engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        directory,
-        ROUTER_CAP,
-        PoolConfig::default(),
-    );
-    handle.add_signer(signer);
+    }
 
     // Read-side identity is the TARGET we're viewing. M4 §5 couples the read
     // root and the active signing capability behind ONE verb
     // (`set_active_account`) so a real account switch can never leave them
     // pointing at different accounts -- but browsing a target you hold no
-    // key for is still legal: the registry simply has no signer registered
-    // under `target`, so any publish attempted while viewing it terminates
+    // key for is still legal: if `--nsec`'s own pubkey differs from
+    // `target`, the registry simply has no signer registered under
+    // `target`, so any publish attempted while viewing it terminates
     // `WriteStatus::Failed` (no active signer) rather than silently signing
     // under the wrong key.
-    handle.set_active_account(Some(target));
+    engine
+        .set_active_account(Some(target))
+        .expect("engine is open just after construction");
 
     let my_follows = build_follow_feed_query();
 
     println!("\n-- subscribing to the follow-feed (kind:1 by target's kind:3 contacts) --\n");
-    let (_query_handle, rows_rx) = handle.subscribe(my_follows);
+    let subscription = engine
+        .observe(my_follows)
+        .expect("engine is open just after construction");
+
+    // `Subscription::recv()` is a blocking call -- the facade has no
+    // `recv_timeout` (unlike the raw `Handle`'s row channel this app drove
+    // directly before #52). Forward it onto its own `mpsc` channel from a
+    // dedicated thread, the same pattern the diagnostics drain below already
+    // uses, so `--secs` can still bound how long THIS app waits without
+    // blocking on a facade primitive that has no notion of a deadline
+    // itself.
+    let (rows_tx, rows_rx) = mpsc::channel::<RowsMsg>();
+    // `_rows_thread`: not joined, for the same reason `_diag_thread` below
+    // isn't (see the note at the end of `main`) -- this process reads
+    // `rows_rx` directly and exits; the OS reclaims the detached thread (and
+    // the `Subscription` it owns, whose `Drop` unsubscribes) on exit.
+    let _rows_thread = thread::spawn(move || {
+        while let Ok(msg) = subscription.recv() {
+            if rows_tx.send(msg).is_err() {
+                break; // main thread stopped listening; nothing left to forward
+            }
+        }
+    });
 
     // Live diagnostics (M5 plan §1): the engine-owned, read-only surface
     // exposing exactly what's on the wire -- per-relay wire-sub count, the
     // EXACT filter JSON currently sent, and events actually received per
     // (relay, kind). A dedicated thread drains `observe_diagnostics`'s
-    // "latest value wins" receiver (never a poll loop, D8) into a shared
+    // "latest value wins" stream (never a poll loop, D8) into a shared
     // slot this app reads from once the timed run ends, so the final
     // printed snapshot reflects the run's steady state, not just whatever
     // happened to be current at subscribe time.
-    let (diag_handle, diag_rx) = handle.observe_diagnostics();
+    let diagnostics = engine
+        .observe_diagnostics()
+        .expect("engine is open just after construction");
     let latest_diag: Arc<Mutex<Option<DiagnosticsSnapshot>>> = Arc::new(Mutex::new(None));
     let latest_diag_writer = Arc::clone(&latest_diag);
     // `_diag_thread`: not joined -- this process reads `latest_diag`'s
     // current value directly and exits (see the note at the end of `main`),
     // so there is nothing to wait on here either.
     let _diag_thread = thread::spawn(move || {
-        while let Some(snapshot) = diag_rx.recv() {
+        while let Some(snapshot) = diagnostics.recv() {
             *latest_diag_writer
                 .lock()
                 .expect("diag snapshot mutex poisoned") = Some(snapshot);
@@ -228,23 +231,18 @@ fn main() {
     // for an ephemeral key).
     let mut receipt_rx = None;
     if let Some(pk) = signer_pubkey_if_real(&args.nsec) {
-        let content = format!(
-            "nmp-demo end-to-end falsifier run @ {}",
-            nostr::Timestamp::now()
-        );
-        let unsigned = nostr::UnsignedEvent::new(
-            pk,
-            nostr::Timestamp::now(),
-            nostr::Kind::TextNote,
-            vec![],
-            content,
-        );
+        let content = format!("nmp-demo end-to-end falsifier run @ {}", Timestamp::now());
+        let unsigned = UnsignedEvent::new(pk, Timestamp::now(), Kind::TextNote, vec![], content);
         println!("-- publishing a demo text note as --nsec's own pubkey --");
-        receipt_rx = Some(handle.publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-        }));
+        receipt_rx = Some(
+            engine
+                .publish(WriteIntent {
+                    payload: WritePayload::Unsigned(unsigned),
+                    durability: Durability::Durable,
+                    routing: WriteRouting::AuthorOutbox,
+                })
+                .expect("engine is open just after construction"),
+        );
     }
 
     let deadline = Instant::now() + Duration::from_secs(args.secs);
@@ -260,7 +258,7 @@ fn main() {
     // delivered across the whole run -- with the fix, this should track the
     // distinct-note count (each note delivered ~once), not blow up
     // quadratically as the feed grows.
-    let mut known_notes: BTreeMap<nostr::EventId, nostr::Event> = BTreeMap::new();
+    let mut known_notes: BTreeMap<nmp::EventId, nmp::Event> = BTreeMap::new();
     let mut raw_delta_entries = 0usize;
     let mut total_batches = 0usize;
     let mut kind_counts: BTreeMap<u16, usize> = BTreeMap::new();
@@ -301,7 +299,7 @@ fn main() {
                 // Every fresh subscribe delivers one (possibly empty) batch;
                 // coverage on its own is still worth surfacing once it
                 // changes, since it's the only aggregate liveness signal
-                // this Handle currently exposes (see summary).
+                // this Subscription currently exposes (see summary).
                 if last_coverage_printed.as_deref() != Some(coverage_str.as_str()) {
                     println!("[coverage] {coverage_str}");
                     last_coverage_printed = Some(coverage_str);
@@ -329,7 +327,7 @@ fn main() {
     println!("distinct authors seen          : {}", authors_seen.len());
     println!("rows by kind (distinct)        : {kind_counts:?}");
     println!(
-        "row batches delivered on Handle::subscribe's channel : {total_batches} \
+        "row batches delivered on Engine::observe's channel : {total_batches} \
          (raw Added+Removed delta-entry count across all batches, now that \
          `EmitRows` delivers incremental deltas rather than the full \
          current row set on every refresh: {raw_delta_entries})"
@@ -348,8 +346,8 @@ fn main() {
         );
     }
     // Read whatever diagnostics snapshot the drain thread has captured so
-    // far -- deliberately BEFORE cancelling/joining it. `--secs` bounds how
-    // long this app waits for ROWS, not how long the engine thread takes to
+    // far -- deliberately BEFORE shutting down. `--secs` bounds how long
+    // this app waits for ROWS, not how long the engine thread takes to
     // finish draining its own inbox of already-in-flight relay frames (a
     // popular account's backlog can keep the engine busy well past the
     // nominal deadline -- a separate, pre-existing per-event recompile cost,
@@ -406,16 +404,16 @@ fn main() {
         None => println!("no diagnostics snapshot was ever received during this run"),
     }
 
-    // Best-effort teardown: `Cmd::Shutdown` is enqueued behind whatever the
-    // engine thread's own inbox still has backlogged (see the note above --
-    // a popular account's already-in-flight relay frames can take a while
-    // to fully drain), so waiting on `engine_thread.join()` here would block
-    // this report on that same unrelated drain. The report above is this
-    // run's actual deliverable; once it's printed there is nothing further
-    // this process needs to wait on, so it exits directly rather than
-    // joining a shutdown that may be queued behind a long backlog.
-    diag_handle.cancel();
-    handle.shutdown();
+    // Best-effort teardown: `Engine::shutdown` is enqueued behind whatever
+    // the engine thread's own inbox still has backlogged (see the note above
+    // -- a popular account's already-in-flight relay frames can take a while
+    // to fully drain). The report above is this run's actual deliverable;
+    // once it's printed there is nothing further this process needs to wait
+    // on, so it exits directly once `shutdown` returns rather than joining
+    // the detached `_rows_thread`/`_diag_thread` (their `Subscription`/
+    // `DiagnosticsSubscription` disconnect and drop cleanly once `shutdown`
+    // tears the engine thread down -- see `Engine`'s own doc).
+    engine.shutdown();
     std::process::exit(0);
 }
 

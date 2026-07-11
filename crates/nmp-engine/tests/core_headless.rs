@@ -1577,3 +1577,180 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
          expiry (150) and must win the min"
     );
 }
+
+// ---- issue #19: ToInboxes routes through NIP-65 READ relays -------------
+//
+// `EngineCore::resolve_routes`'s `ToInboxes` branch must fan a p-tagged
+// inbox write out to each recipient's `read_relays` (lane `Nip65Read`) and
+// NOTHING else — never a recipient's `write_relays`/`extra_relays`, and
+// never a public fallback. A recipient whose inbox relays are unknown
+// (never-seen kind:10002, or a write-only relay list) fails the WHOLE
+// intent CLOSED with a typed `Failed`, before any `PublishEvent`. The
+// read/write/unmarked *ingestion* split is proven at the parse+ingest
+// level in `nmp_engine::core`'s `nip65_read_write_split_tests` (unmarked =
+// both; write-marked excluded from read; one kind:10002 winner fills both
+// sets); these tests own the *routing* half of the acceptance contract.
+
+/// Read-only routing: a recipient advertising a distinct read relay, write
+/// relay, AND extra relay routes an inbox write to ONLY the read relay. The
+/// write/extra relays — the old flagged fallback — must never appear on the
+/// wire. (Composed with the unmarked-parse tests, this also covers the
+/// unmarked case: an unmarked `r` tag lands in the read set, which is
+/// exactly what this branch consumes.)
+#[test]
+fn to_inboxes_routes_to_recipient_read_relays_only() {
+    let author = Keys::generate();
+    let recipient = Keys::generate();
+    let read_relay = RelayUrl::parse("wss://recipient-inbox.example.com").unwrap();
+    let write_relay = RelayUrl::parse("wss://recipient-outbox.example.com").unwrap();
+    let extra_relay = RelayUrl::parse("wss://recipient-hint.example.com").unwrap();
+
+    // The recipient's read set is DISTINCT from its write/extra sets, so a
+    // wrong-lane read cannot masquerade as correct.
+    let dir = FixtureDirectory::new()
+        .with_read(recipient.public_key().to_hex(), [read_relay.clone()])
+        .with_write(recipient.public_key().to_hex(), [write_relay.clone()])
+        .with_extra(
+            recipient.public_key().to_hex(),
+            nmp_router::Lane::Hint,
+            [extra_relay.clone()],
+        );
+    let mut core = new_core(dir);
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 1, "inbox dm")),
+            durability: Durability::Durable,
+            routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, u) = find_sign_request(&effects);
+    let signed = u.sign_with_keys(&author).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, Ok(signed)));
+
+    let published: BTreeSet<RelayUrl> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::PublishEvent(relay, _) => Some(relay.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        published,
+        BTreeSet::from([read_relay.clone()]),
+        "an inbox write must reach ONLY the recipient's NIP-65 read relay, \
+         never its write/extra relays -- got {published:?}"
+    );
+
+    // The receipt's Routed status must carry the same read-only set.
+    let routed = sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|s| match s {
+            WriteStatus::Routed(relays) => Some(relays.clone()),
+            _ => None,
+        })
+        .expect("must reach a Routed status");
+    assert_eq!(
+        routed,
+        BTreeSet::from([read_relay]),
+        "Routed status must expose exactly the read-relay set"
+    );
+}
+
+/// Write-only recipient: a recipient whose kind:10002 declares only
+/// write-marked relays has an EMPTY read set, so an inbox write to it fails
+/// CLOSED — no `PublishEvent` to the write relay, a typed `Failed` receipt.
+#[test]
+fn to_inboxes_write_only_recipient_fails_closed() {
+    let author = Keys::generate();
+    let recipient = Keys::generate();
+    let write_relay = RelayUrl::parse("wss://recipient-outbox.example.com").unwrap();
+
+    // Recipient is KNOWN, but only via write relays: read set is empty.
+    let dir = FixtureDirectory::new().with_write(recipient.public_key().to_hex(), [write_relay]);
+    let mut core = new_core(dir);
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 1, "inbox dm")),
+            durability: Durability::Durable,
+            routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, u) = find_sign_request(&effects);
+    let signed = u.sign_with_keys(&author).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, Ok(signed)));
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PublishEvent(..))),
+        "a write-only recipient's inbox write must never reach a relay -- \
+         especially not its write relay -- got {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id)),
+        "must fail CLOSED with a typed Failed, not silently drop the write"
+    );
+    assert!(matches!(
+        sink.0.lock().unwrap().last(),
+        Some(WriteStatus::Failed(_))
+    ));
+}
+
+/// Unknown recipient: a recipient the directory has never seen a kind:10002
+/// for fails CLOSED — the fail-closed status lands before any
+/// `PublishEvent`, and one unknown recipient in a set poisons the whole
+/// intent so a KNOWN co-recipient's relay is never written either (no
+/// partial-leak inbox delivery).
+#[test]
+fn to_inboxes_unknown_recipient_fails_the_whole_intent_closed() {
+    let author = Keys::generate();
+    let known = Keys::generate();
+    let unknown = Keys::generate();
+    let known_inbox = RelayUrl::parse("wss://known-inbox.example.com").unwrap();
+
+    // `known` has an inbox relay; `unknown` is absent entirely.
+    let dir = FixtureDirectory::new().with_read(known.public_key().to_hex(), [known_inbox]);
+    let mut core = new_core(dir);
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 1, "group inbox dm")),
+            durability: Durability::Durable,
+            routing: WriteRouting::ToInboxes(vec![known.public_key(), unknown.public_key()]),
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, u) = find_sign_request(&effects);
+    let signed = u.sign_with_keys(&author).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, Ok(signed)));
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PublishEvent(..))),
+        "one unknown recipient must fail the WHOLE intent closed -- the \
+         known co-recipient's relay must NOT be written either -- got {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id)),
+        "must fail CLOSED with a typed Failed"
+    );
+    assert!(matches!(
+        sink.0.lock().unwrap().last(),
+        Some(WriteStatus::Failed(_))
+    ));
+}
