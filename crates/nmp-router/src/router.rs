@@ -18,6 +18,32 @@ use crate::plan::{diff_plans, RelayPlan, SubId, WireDelta, WireReq};
 use crate::route::{self, AtomClass, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall};
 
+/// One relay's not-yet-coalesced bag entry: a materialized (filter,
+/// single-lane provenance, absorbed coverage-key) triple. Every lane
+/// (outbox-solved, indexer, app, fallback, pinned) produces these on its way
+/// into the coalesce/wire pipeline (`compile`, step 4-5).
+type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+
+/// Push `(filter, provenance, coverage_key(filter))` into `bag[relay]` for
+/// every `(relay, provenance)` pair in `routes` — the shared materialization
+/// step `compile` uses for every lane. A no-op when `routes` is empty (no
+/// configured relays for that lane, or the lane's gate didn't fire).
+fn push_routes(
+    bag: &mut BTreeMap<RelayUrl, Vec<BagEntry>>,
+    filter: &ConcreteFilter,
+    routes: Vec<(RelayUrl, RouteProvenance)>,
+) {
+    if routes.is_empty() {
+        return;
+    }
+    let key = coverage_key(filter);
+    for (relay, prov) in routes {
+        bag.entry(relay)
+            .or_default()
+            .push((filter.clone(), vec![prov], BTreeSet::from([key])));
+    }
+}
+
 pub struct Router {
     #[allow(dead_code)] // carried for API completeness / future limit-enforcement (M3)
     limits: RelayLimits,
@@ -61,25 +87,26 @@ impl Router {
             }
         }
 
-        // Step 2 + 3: route (coverage-solve outbox groups / pinned lookup)
-        // and materialize each relay's bag of (filter, provenance, absorbed)
-        // entries. `absorbed` is the coverage-attribution ruling's per-atom
-        // `CoverageKey` (§2): each entry here is exactly one pre-coalesce
-        // demand atom (one author, for outbox; the pinned atom itself, for
-        // pinned), so it contributes exactly one key, later unioned by
-        // `coalesce_with` alongside provenance as same-skeleton atoms merge.
-        type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+        // Step 2 + 3: route (coverage-solve outbox groups / pinned lookup),
+        // apply the additive indexer/app/fallback lanes OUTSIDE the solve
+        // (Unit B, `routing-and-ownership.md` §2.1/§2.2 — never counted
+        // toward `k`), and materialize each relay's bag of (filter,
+        // provenance, absorbed) entries. `absorbed` is the coverage-
+        // attribution ruling's per-atom `CoverageKey` (§2): each entry here
+        // is exactly one pre-coalesce demand atom (one author, for outbox;
+        // the full/shortfall author set, for an additive lane; the pinned
+        // atom itself, for pinned), so it contributes exactly one key, later
+        // unioned by `coalesce_with` alongside provenance as same-skeleton
+        // atoms merge.
         let mut bag: BTreeMap<RelayUrl, Vec<BagEntry>> = BTreeMap::new();
         let mut uncovered_authors: BTreeMap<PubkeyHex, Shortfall> = BTreeMap::new();
 
         for (skeleton, authors) in &outbox_groups {
-            let (candidates, indexer_relays) =
-                route::build_candidates(authors, dir, &self.discovery, skeleton);
+            let candidates = route::build_candidates(authors, dir);
             let coverage = solver::solve(&CoverageInput {
                 candidates: candidates.clone(),
                 k: 2,
                 cap,
-                indexer_eligible_relays: indexer_relays,
             });
             uncovered_authors.extend(coverage.shortfall.clone());
 
@@ -90,6 +117,25 @@ impl Router {
                     .or_default()
                     .push((filter, vec![prov], BTreeSet::from([key])));
             }
+
+            // Additive indexer + app lanes: both route the group's FULL
+            // author set, so they share the same (filter, key).
+            let mut additive = route::indexer_lane_routes(dir, &self.discovery, skeleton, authors);
+            additive.extend(route::app_lane_routes(dir, authors));
+            push_routes(&mut bag, &skeleton.with_authors(authors.clone()), additive);
+
+            // Additive fallback lane: routes exactly the shortfall authors,
+            // iff no appRelay is configured. `Coverage.shortfall` above has
+            // already recorded the shortfall regardless of whether this
+            // lane fires — fallback is a lane, not coverage.
+            let shortfall_authors: BTreeSet<PubkeyHex> =
+                coverage.shortfall.keys().cloned().collect();
+            let fallback = route::fallback_lane_routes(dir, &shortfall_authors);
+            push_routes(
+                &mut bag,
+                &skeleton.with_authors(shortfall_authors),
+                fallback,
+            );
         }
 
         for atom in &pinned_atoms {
@@ -101,6 +147,11 @@ impl Router {
                     BTreeSet::from([key]),
                 ));
             }
+
+            // App lane routes every atom, including authorless/pinned ones
+            // (closes #7 — the authorless-routing-lane gap).
+            let app = route::app_lane_routes(dir, &BTreeSet::new());
+            push_routes(&mut bag, atom, app);
         }
 
         // Step 4 + 5: per relay, dedup + widen-only coalesce, then assign
@@ -151,6 +202,7 @@ impl Router {
 mod tests {
     use super::*;
     use crate::facts::{test_relay, FixtureDirectory, Lane};
+    use crate::solver::ShortfallReason;
 
     fn pk(c: char) -> PubkeyHex {
         c.to_string().repeat(64)
@@ -240,12 +292,12 @@ mod tests {
     /// exclusive): a relay that is BOTH an author's own kind:10002 write
     /// relay AND one of the operator's configured indexers must receive
     /// BOTH that author's content kinds (kind:1) AND discovery-kind reads
-    /// (kind:3/kind:0/kind:1xxxx) -- `route::build_candidates` looks up
-    /// `write_relays`/`indexers` independently and unions the results into
-    /// one candidate list per author (never a one-role-per-relay
-    /// dedup/exclusion), so the SAME relay legitimately shows up as a
-    /// covering candidate for both an author's outbox group AND their
-    /// discovery group.
+    /// (kind:3/kind:0/kind:1xxxx) -- `compile` solves the content group from
+    /// `write_relays` (`build_candidates`) and, independently, applies the
+    /// discovery group's `indexer_lane_routes` OUTSIDE the solve (Unit B),
+    /// so the SAME relay legitimately shows up as a covering candidate for
+    /// both an author's outbox group AND their discovery group without
+    /// either lane excluding the other.
     #[test]
     fn additive_relay_roles_union_not_exclusive() {
         let shared = test_relay(0);
@@ -280,10 +332,10 @@ mod tests {
             "the indexer role must still route the author's discovery kind: {covered_kinds:?}"
         );
 
-        // `shared` qualifies via BOTH lanes (`route::build_candidates` looks
-        // up `write_relays`/`indexers` independently and appends both into
-        // one candidate list, never excluding one because of the other) --
-        // `route::lane_of`'s own doc records this is a deliberate,
+        // `shared` qualifies via BOTH lanes (the content group's own-relay
+        // solve picks it up via `write_relays`; the discovery group's
+        // additive `indexer_lane_routes` picks it up independently, outside
+        // the solve) -- `route::lane_of`'s own doc records this is a deliberate,
         // documented tie-break (write_relays listed first => Nip65Write
         // wins the label when a relay qualifies both ways), not a dedup
         // that drops the indexer role's eligibility. What matters -- and
@@ -327,6 +379,195 @@ mod tests {
             indexer_only_lanes.contains(&Lane::IndexerDiscovery),
             "an indexer-only relay covering the discovery atom must still be \
              labeled IndexerDiscovery: {indexer_only_lanes:?}"
+        );
+    }
+
+    /// Unit B's headline pre-fix falsifier (`routing-build-plan.md` Unit B /
+    /// issue #29): today `build_candidates` folds a configured indexer into
+    /// a discovery-kind atom's own candidate list, so an author with ONE own
+    /// write relay reaches `k=2` (indexer counted) and no shortfall is ever
+    /// reported -- fallback can never fire, and "this author is under-
+    /// covered" is invisible. Post-fix the indexer is an additive lane
+    /// applied OUTSIDE the solve; the solver's input is the author's own
+    /// relays only, so this author never reaches `k` and the shortfall must
+    /// surface (even though the indexer still legitimately routes the
+    /// discovery atom, just not as a k-counting candidate).
+    #[test]
+    fn solver_counts_only_own_relays_toward_k() {
+        let a = pk('a');
+        let indexer = test_relay(99);
+        let dir = FixtureDirectory::new()
+            .with_write(a.clone(), [test_relay(0)])
+            .with_indexer(indexer.clone());
+        let mut router = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        // kind:0 -- discovery-kind, the only shape under which the OLD code
+        // ever folded the indexer into the candidate list at all.
+        let demand = BTreeSet::from([cf(0, &[a.as_str()])]);
+        let _ = router.compile(&demand, &dir, 10);
+
+        let shortfall = router
+            .diagnostics()
+            .uncovered_authors
+            .get(&a)
+            .expect("the indexer must NOT count toward k -- author must be under-min");
+        assert_eq!(shortfall.reason, ShortfallReason::FewerCandidatesThanK);
+        assert_eq!(shortfall.achieved, 1);
+
+        // The indexer still routes the discovery atom (additive lane) --
+        // narrowing the solver's input doesn't remove the route, only its
+        // contribution to `k`.
+        assert!(router.plan().reqs.contains_key(&indexer));
+    }
+
+    /// The app lane routes EVERY atom -- author-bearing (all authors) and
+    /// authorless/pinned alike (this closes #7, the authorless-routing-lane
+    /// gap: an atom with no other pinned fact previously had zero routes) --
+    /// and it is purely additive: it never satisfies the k-min for an
+    /// author-bearing atom.
+    #[test]
+    fn app_lane_routes_all_authors_and_authorless_additively_never_toward_k() {
+        let a = pk('a');
+        let app_relay = test_relay(50);
+        let dir = FixtureDirectory::new()
+            .with_write(a.clone(), [test_relay(0)]) // deliberately under-min
+            .with_app([app_relay.clone()]);
+        let mut router = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        let authored = cf(1, &[a.as_str()]);
+        // No pinned fact registered for this atom -- the app lane is its
+        // ONLY possible route.
+        let authorless = ConcreteFilter {
+            kinds: Some(BTreeSet::from([39_000u16])),
+            ..ConcreteFilter::default()
+        };
+        let demand = BTreeSet::from([authored.clone(), authorless.clone()]);
+        let _ = router.compile(&demand, &dir, 10);
+
+        let app_reqs = &router.plan().reqs[&app_relay];
+        assert!(app_reqs.iter().any(|r| r.filter == authored));
+        assert!(app_reqs.iter().any(|r| r.filter == authorless));
+        assert!(app_reqs
+            .iter()
+            .flat_map(|r| r.provenance.iter())
+            .all(|p| p.lane == Lane::AppRelay));
+
+        // Additive, never toward k: 'a' still shows FewerCandidatesThanK
+        // despite having a route to the app relay.
+        let shortfall = router
+            .diagnostics()
+            .uncovered_authors
+            .get(&a)
+            .expect("an appRelay route must not satisfy k");
+        assert_eq!(shortfall.reason, ShortfallReason::FewerCandidatesThanK);
+    }
+
+    /// Both branches of the fallback lane (`routing-and-ownership.md`
+    /// §2.1/§2.2 item 5): it fires for an under-min author when no appRelay
+    /// is configured, and is suppressed entirely once one is -- in both
+    /// cases the shortfall stays REPORTED (fallback is a lane, not
+    /// coverage).
+    #[test]
+    fn fallback_fires_for_under_min_authors_and_is_suppressed_by_apprelay() {
+        let a = pk('a');
+        let fallback_relay = test_relay(60);
+        let demand = BTreeSet::from([cf(1, &[a.as_str()])]);
+
+        // Branch 1: no appRelay configured -- fallback fires.
+        let dir = FixtureDirectory::new()
+            .with_write(a.clone(), [test_relay(0)]) // under-min
+            .with_fallback([fallback_relay.clone()]);
+        let mut router = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        let _ = router.compile(&demand, &dir, 10);
+        let plan = router.plan();
+        assert!(
+            plan.reqs.contains_key(&fallback_relay),
+            "fallback must fire for the under-min author when no appRelay is configured"
+        );
+        assert!(plan.reqs[&fallback_relay]
+            .iter()
+            .flat_map(|r| r.provenance.iter())
+            .all(|p| p.lane == Lane::Fallback));
+        assert_eq!(
+            router.diagnostics().uncovered_authors[&a].reason,
+            ShortfallReason::FewerCandidatesThanK
+        );
+
+        // Branch 2: an appRelay is ALSO configured -- fallback is suppressed
+        // entirely, even though the author is STILL under-min.
+        let app_relay = test_relay(70);
+        let dir2 = FixtureDirectory::new()
+            .with_write(a.clone(), [test_relay(0)])
+            .with_fallback([fallback_relay.clone()])
+            .with_app([app_relay.clone()]);
+        let mut router2 = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        let _ = router2.compile(&demand, &dir2, 10);
+        let plan2 = router2.plan();
+        assert!(
+            !plan2.reqs.contains_key(&fallback_relay),
+            "an appRelay must suppress the fallback lane entirely"
+        );
+        assert!(plan2.reqs.contains_key(&app_relay));
+        assert_eq!(
+            router2.diagnostics().uncovered_authors[&a].reason,
+            ShortfallReason::FewerCandidatesThanK,
+            "shortfall stays reported even when appRelay/fallback top the author up"
+        );
+    }
+
+    /// Regression guard on the moved logic (Unit B relocated the indexer
+    /// lane from `build_candidates` into `compile`'s `indexer_lane_routes`)
+    /// -- re-asserts the invariant the old route.rs-level
+    /// `indexer_candidates_only_for_discovery_kinds` test pinned survives
+    /// the move: an indexer relay routes discovery-kind atoms only, and
+    /// NEVER becomes a content-atom fallback even when the SAME author has
+    /// zero own relays for both atoms.
+    #[test]
+    fn indexer_lane_still_discovery_only_never_content_fallback() {
+        let a = pk('a');
+        let indexer = test_relay(99);
+        let dir = FixtureDirectory::new().with_indexer(indexer.clone());
+        let mut router = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        let discovery_atom = cf(3, &[a.as_str()]);
+        let content_atom = cf(1, &[a.as_str()]);
+        let demand = BTreeSet::from([discovery_atom.clone(), content_atom.clone()]);
+        let _ = router.compile(&demand, &dir, 10);
+
+        let plan = router.plan();
+        let indexer_reqs = &plan.reqs[&indexer];
+        assert!(indexer_reqs.iter().all(|r| r.filter == discovery_atom));
+        assert!(indexer_reqs
+            .iter()
+            .flat_map(|r| r.provenance.iter())
+            .all(|p| p.lane == Lane::IndexerDiscovery));
+
+        // Both atoms are NoCandidates (the author has zero own relays for
+        // either) -- but the content atom's shortfall is never topped up by
+        // the indexer: it never appears at `indexer` at all.
+        assert_eq!(
+            router.diagnostics().uncovered_authors[&a].reason,
+            ShortfallReason::NoCandidates
         );
     }
 }
