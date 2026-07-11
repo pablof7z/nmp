@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use nmp_engine::core::{DiagnosticsSnapshot, QueryCoverage, RowDelta};
+use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsMsg};
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
@@ -79,24 +79,25 @@ pub fn my_follows_query() -> LiveQuery {
 }
 
 /// One accumulated feed: folds every `Added`/`Removed` delta this channel
-/// has delivered so far into a live row set + the query's latest coverage --
-/// exactly what a real app must do (`Handle::subscribe`'s wire is deltas,
-/// never snapshots). Persists across multiple `Then` steps in one scenario.
+/// has delivered so far into a live row set + the query's latest acquisition
+/// evidence -- exactly what a real app must do (`Handle::subscribe`'s wire is
+/// deltas, never snapshots). Persists across multiple `Then` steps in one
+/// scenario.
 struct FeedState {
     _handle: QueryHandle,
     rx: std::sync::mpsc::Receiver<RowsMsg>,
     rows: BTreeMap<EventId, nostr::Event>,
-    coverage: QueryCoverage,
+    evidence: AcquisitionEvidence,
 }
 
 impl FeedState {
     fn drain_available(&mut self) {
-        while let Ok((deltas, coverage)) = self.rx.try_recv() {
-            self.apply(deltas, coverage);
+        while let Ok((deltas, evidence)) = self.rx.try_recv() {
+            self.apply(deltas, evidence);
         }
     }
 
-    fn apply(&mut self, deltas: Vec<RowDelta>, coverage: QueryCoverage) {
+    fn apply(&mut self, deltas: Vec<RowDelta>, evidence: AcquisitionEvidence) {
         for delta in deltas {
             match delta {
                 RowDelta::Added(event) => {
@@ -107,7 +108,7 @@ impl FeedState {
                 }
             }
         }
-        self.coverage = coverage;
+        self.evidence = evidence;
     }
 
     /// Block (bounded) until `pred` holds against the accumulated state,
@@ -554,7 +555,7 @@ impl NmpWorld {
             _handle: handle_id,
             rx,
             rows: BTreeMap::new(),
-            coverage: QueryCoverage::Unknown,
+            evidence: AcquisitionEvidence::default(),
         });
     }
 
@@ -718,12 +719,12 @@ impl NmpWorld {
 
     pub fn feed_eventually(
         &mut self,
-        pred: impl Fn(&[nostr::Event], QueryCoverage) -> bool,
+        pred: impl Fn(&[nostr::Event], &AcquisitionEvidence) -> bool,
     ) -> bool {
         let feed = self.feed.as_mut().expect("nmp-bdd: no feed is open");
         feed.eventually(EVENTUALLY, |f| {
             let rows: Vec<nostr::Event> = f.rows.values().cloned().collect();
-            pred(&rows, f.coverage)
+            pred(&rows, &f.evidence)
         })
     }
 
