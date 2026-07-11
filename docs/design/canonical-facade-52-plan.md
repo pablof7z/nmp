@@ -333,3 +333,193 @@ deeper-outbox alternative (§7 Q2).
   Swift/Kotlin hand-written ergonomic wrappers: those remain *projections* of the
   one Rust surface via UniFFI, and the §5 governance review is what keeps them in
   lockstep.
+
+---
+
+## Fable checkpoint (verdict)
+
+**GO — with required changes.** The plan's load-bearing finding is real, its
+structure is sound, and the governance mechanism is the lightest enforceable
+one. One decision (Q2) overrides the plan's placement, and it changes the unit
+map: the verify moves to the engine acceptance boundary, which adds one small
+unit that edits `nmp-engine/src/core/mod.rs`.
+
+### Verified against code (not taken on assertion)
+
+The security crux checks out end-to-end:
+
+- `nmp-ffi/src/convert.rs:472-474` is the **only** `Event::verify` on the
+  publish path anywhere in the workspace; `grep verify crates/nmp-engine/src/`
+  returns zero code hits.
+- `EngineCore::on_publish` (core/mod.rs:530) emits `WriteStatus::Accepted`
+  **before it even matches on the payload**, then routes
+  `WritePayload::Signed(event)` straight into `on_signed` (core/mod.rs:565) →
+  `resolve_routes` → `Effect::PublishEvent(relay, event)` per relay. A
+  direct-Rust `handle.publish(WriteIntent { payload: Signed(forged), .. })`
+  publishes a forged event verbatim today. Confirmed, not asserted.
+- `WriteStatus::Failed(String)` (outbox/mod.rs) is already documented as the
+  "whole-intent terminal reached BEFORE any relay was ever contacted — a
+  signer rejection" variant — the exact precedent a verify-rejection needs.
+- `build-ffi-signed-publish` **merged** (#41, commit 7af2f53), so the plan's
+  Unit-B/Q2 "overlaps active work" caveat is stale.
+
+### The five decisions
+
+**Q1 — Facade home: new `crates/nmp` crate. Ratified as recommended.**
+The whole point of #52 is that "supported surface" stops being a documentation
+claim. Only a separate crate makes it a *dependency-graph* fact: an app's
+`Cargo.toml` names `nmp` and nothing else, and the committed surface snapshot
+of `nmp` **is** the entire product — auditable, diffable, gateable. Expanding
+`nmp-engine` instead would leave the mechanism crates one `use` away with no
+visible trail, and would pollute the engine's documented "pure reducer + async
+edge, nothing else" identity (lib.rs:1-19) with app-assembly concerns
+(store selection, nsec parsing, router caps). The extra workspace member is
+the cost of enforceability; pay it. Nothing prevents an app from *also*
+depending on `nmp-engine` — that is unavoidable with published crates and is
+exactly what #52's "explicitly unstable, not an alternative app contract"
+wording anticipates; docs + governance mark everything below `nmp` unstable.
+
+**Q2 — Signed-verify placement: the acceptance boundary, NOT the facade.
+This overrides the plan.** The ONE verify lives in `EngineCore::on_publish`,
+on the `WritePayload::Signed` arm, **before `WriteStatus::Accepted` is
+emitted**. Rejection is fail-closed: the intent terminates as
+`WriteStatus::Failed` (typed reason), never reaches `on_signed`, never
+produces a `PublishEvent` effect. Rationale, in order of force:
+
+1. *Facade placement recreates the exact bug class #52 exists to kill, one
+   layer down.* `Handle` is public in `nmp-engine`; `nmp-bdd` spawns
+   `EngineThread` directly (world.rs:503); in-crate engine tests and any
+   `from_parts` holder drive raw `Handle::publish`. With facade-only verify,
+   "the guarantee depends on entry point" is still true — the entry points
+   just moved. Acceptance is where every publish path converges; it is the
+   only placement that makes #52's headline literally, unconditionally true.
+2. *It is the only placement that composes with the #2/#3 crash-safe Accepted
+   boundary.* Under #2/#3, "durable Accepted atomically owns" the frozen
+   event, and crash recovery replays from the journal. If a forged event can
+   reach acceptance, the journal durably owns garbage and recovery republishes
+   it with no verify in the replay path. Verify-before-Accepted gives the
+   crash-safe design a free invariant: *everything the journal owns is
+   publishable verbatim*. This must be recorded as an input invariant to the
+   #2/#3 design: for the pre-signed lane, "frozen unsigned event, expected
+   pubkey" extends to "or a **verified** signed event."
+3. *The deferral reason is gone.* The plan parked the deeper move only
+   because of the `build-ffi-signed-publish` overlap; #41 merged.
+4. *Purity and cost are non-issues.* `Event::verify` is deterministic,
+   IO-free schnorr verification — it fits the pure-reducer discipline, and
+   `nmp-transport` already runs the same check per inbound event at far
+   higher volume. Trust posture becomes symmetric: events are verified
+   wherever they enter the engine's custody, inbound (transport ingest) and
+   outbound-presigned (acceptance) alike.
+
+Consequences (these are the required changes, not options):
+
+- **No duplicate verify at the facade or FFI.** Per the no-parallel-path rule,
+  `nmp-ffi`'s `convert.rs:472-474` verify and the
+  `FfiError::InvalidSignedEvent` variant are **deleted** in Unit B
+  (superseded-path-removed), and `signed_event_from_ffi` becomes parse-only as
+  planned. String-shape parse failures (`InvalidEventId`, `InvalidSignature`
+  as *parse* error, `InvalidTag`) stay synchronous at the FFI boundary —
+  those are marshaling, not the invariant.
+- **The failure surfaces on the receipt stream**, as the first and only
+  status: `WriteStatus::Failed(..)` with no preceding `Accepted` — "Accepted"
+  now *means* "the engine took ownership," which is exactly the #2/#3
+  semantics. Facade `publish` stays a thin forwarder returning
+  `Receiver<WriteStatus>`; drop `InvalidSignedEvent`/`InvalidSignature` from
+  the sync `EngineError` set (§1 list shrinks to `InvalidSecretKey`,
+  `StoreOpenFailed`, + construction errors).
+- **This changes #41's just-merged FFI behavior** (sync typed error → stream
+  `Failed`). That is a governed public-surface change: it becomes the **first
+  real entry in `docs/surface-change-log.md`** — failure evidence is the
+  direct-Rust bypass verified above; superseded path is the convert.rs verify;
+  updated falsifiers are #41's tests reshaped to assert the stream terminal.
+  Fitting that the governance protocol's inaugural entry is the change that
+  motivated the epic.
+- **Ephemeral intents:** verify runs for ALL durability classes (rejection
+  must precede the wire), but an Ephemeral intent has no sink, so a forged
+  ephemeral publish fails *silently* — same as ephemeral route failures
+  today. Document this explicitly in the facade `publish` doc; optionally
+  count rejections in `DiagnosticsSnapshot` (nice-to-have, not gating).
+
+**Q3 — `from_parts` + `unstable-mechanism` feature: accepted.** #52 says
+"internal **or explicitly unstable**" — it demands a marked boundary, not
+impossibility. A `#[doc(hidden)]` constructor behind a named cargo feature is
+the strongest marking Rust offers short of visibility hacks: enabling it is a
+greppable, reviewable line in a consumer's `Cargo.toml`. And with Q2 resolved
+at acceptance, the hatch is no longer even a *security* hole — a
+`from_parts`-built (or raw-`EngineThread`) engine still verifies at
+acceptance; the hatch is only a *stability* exception, which is exactly what
+the feature name declares. Do NOT rewrite `nmp-bdd` to loopback-URLs-only:
+heavy churn, zero invariant gain, and `nmp-bdd` is in-workspace test infra
+that may legitimately keep mechanism deps. `from_parts` exists so no
+*out-of-workspace* consumer ever needs them.
+
+**Q4 — Surface-snapshot tooling: `cargo-public-api`, pinned, not
+hand-rolled.** The governance gate is only as strong as the snapshot's
+fidelity. A hand-rolled `pub`-item grep misses enum-variant additions, field
+changes, trait impls, and re-export resolution — precisely the quiet drifts
+the gate exists to catch; a gameable snapshot makes §5 theater.
+`cargo-public-api` diffs the true rustdoc-derived surface. Contain its cost:
+pin the tool version (`cargo install --locked cargo-public-api@<ver>`) and
+the nightly toolchain it needs for rustdoc JSON, in the `surface-governance`
+job only — the rest of CI stays stable-toolchain. The FFI surface snapshot
+stays as planned (generated `gen/nmp_ffi.swift` declaration surface /
+uniffi metadata — mechanical, not hand-rolled).
+
+**Q5 — Parity home: new `crates/nmp-parity`. Ratified.** Parity is a
+product-level harness (two entry points, one scenario), not a cucumber step
+catalog; `nmp-bdd` is shared, actively touched infrastructure — collision
+avoidance is decisive. Requirement: reuse `nmp-bdd`'s `ScriptedRelay` via an
+exported helper (public-but-`#[doc(hidden)]` module or tiny shared test
+crate); do not fork it.
+
+### Contract validation
+
+- **"One invariant-preserving surface" — honored, with Q2 strengthening it.**
+  With facade-only verify it would NOT have been (raw `Handle` bypass);
+  with acceptance-verify, no reachable path — facade, FFI, `from_parts`, raw
+  `EngineThread`, in-crate test — can publish or journal an unverified
+  pre-signed event. The `from_parts` hatch is a stability exception only.
+- **Governance is genuinely enforced and is the lightest thing that works.**
+  The same-PR git-diff check (snapshots + change-log must move together)
+  turns the protocol into a gate; the human signoff is PR review of that
+  paired diff. It is gameable only by a reviewer approving a garbage log
+  entry — i.e., by the signoff itself failing, which no mechanism prevents.
+  Cheap strengthening the builder should include: require the change-log diff
+  to have **added lines** (`git diff --numstat`), not merely be touched, and
+  run the gate with `fetch-depth: 0` so `origin/master...HEAD` resolves.
+- **Unit decomposition — sound, with one amendment.** The plan's claim "no
+  unit needs `core/mod.rs`" was true only under facade-placement; Q2 voids it.
+  Amended unit map:
+  - **New Unit A0 (small, first):** `nmp-engine/src/core/mod.rs` — verify on
+    the `Signed` arm of `on_publish` before `Accepted`; core falsifier test
+    (tampered event → `Failed` terminal, no `Accepted`, no `PublishEvent`
+    effect). ~tens of lines. **This is the contested core seam** — sequence
+    it before everything else and coordinate with `design-crashsafe-accepted-2-3`
+    (their journal design inherits verified-at-acceptance as an invariant)
+    and any routing-unit work touching `core/mod.rs`.
+  - Unit A: facade as planned, minus the verify; `EngineError` trimmed.
+  - Unit B: as planned, plus deleting the convert.rs verify +
+    `InvalidSignedEvent` variant and reshaping #41's falsifiers; the
+    "coordinate with `build-ffi-signed-publish`" note is stale (merged) —
+    B is unblocked.
+  - Units C/D/E/F unchanged; D's load-bearing parity case becomes: tampered
+    `Signed` publish yields the identical `WriteStatus::Failed`-first receipt
+    stream on both surfaces.
+  - **Order: A0 → A → (B ∥ C) → D; E after A+B; F after E.**
+
+### Residual risk
+
+1. **Core-seam collision** — A0 edits `core/mod.rs` while #2/#3 is being
+   designed against the same acceptance seam. Mitigation: A0 is tiny and
+   lands first; the #2/#3 designer is notified that verify-before-Accepted is
+   now a fixed input invariant.
+2. **FFI behavior change on a just-merged surface** (#41 sync error → stream
+   terminal) ripples into Swift/Kotlin falsifiers. Bounded, and it exercises
+   the new governance protocol end-to-end on its first real change.
+3. **`cargo-public-api` nightly-rustdoc dependency** can break on toolchain
+   bumps; pinning contains it, and the failure mode is a red governance job,
+   never a silent gate bypass — fail-closed, acceptable.
+4. Ephemeral forged publishes fail silently (no sink). Documented behavior,
+   consistent with ephemeral route failures; diagnostics counter optional.
+
+— Fable, design checkpoint, 2026-07-11.
