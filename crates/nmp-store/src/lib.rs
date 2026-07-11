@@ -15,6 +15,13 @@
 //! GC (`gc`) evicts only regular (non-addressed) events matched by no live
 //! claim, lowering any coverage row it invalidates in the same step.
 //!
+//! Retraction (`docs/design/retraction-and-negative-deltas.md`, issue #28):
+//! kind:5 (NIP-09) deletion runs inside `insert` and writes PERMANENT
+//! tombstones (§7 owner decision — never GC-claimed) so a later redelivery
+//! of a deleted event is `Refused(Tombstoned)`; NIP-40 `expiration` is
+//! tracked in a persistent index so `expire_due`/`next_expiration` are
+//! index-backed, not O(stored rows).
+//!
 //! Explicitly out of scope for M3 step A1 (owned by later steps): signature
 //! verification, the engine's send-time attribution snapshots (this crate
 //! only stores whatever interval it is told to record).
@@ -122,6 +129,16 @@ pub enum InsertOutcome {
     /// Refused at the door: never stored, nothing to retract
     /// (retraction-and-negative-deltas.md §1.1/§2/§3).
     Refused(RefuseReason),
+    /// A kind:5 (NIP-09) deletion event, stored normally like any other
+    /// regular event — kind:5 is outside M1's replaceable/addressable set,
+    /// so its own storage is always plain `Inserted` by construction, and
+    /// this variant is returned in place of `Inserted` only for that one
+    /// case. `deleted` holds every currently-held target this deletion
+    /// actually removed (author-verified against this event's own pubkey),
+    /// handed back whole — the only moment the door can return them,
+    /// mirroring `Superseded { replaced }` (retraction-and-negative-
+    /// deltas.md §2).
+    Kind5Processed { deleted: Vec<StoredEvent> },
 }
 
 /// Why an [`EventStore::insert`] refused an event outright, before it ever
@@ -134,10 +151,8 @@ pub enum RefuseReason {
     AlreadyExpired,
     /// The event's id (or, for an addressable/replaceable target, its
     /// address) was tombstoned by an earlier verified kind:5 deletion from
-    /// the same author. Not produced anywhere yet — the kind:5 processing
-    /// unit (a separate #23 child) is what constructs this variant; it
-    /// lands here now so that unit's match sites compile against a stable
-    /// shape.
+    /// the same author (retraction-and-negative-deltas.md §2, §7:
+    /// tombstone retention is PERMANENT — never GC-claimed).
     Tombstoned,
 }
 
@@ -161,8 +176,15 @@ pub trait EventStore {
     /// judged against `from.at`) is `Refused` before anything else runs —
     /// never stored, nothing to retract. Otherwise dedup-by-id FIRST — on a
     /// hit, merge `from` into the existing row's provenance and return
-    /// `Duplicate{provenance_grew}` with NO index churn; otherwise run
-    /// replaceable/addressable supersession (unchanged M1 semantics).
+    /// `Duplicate{provenance_grew}` with NO index churn. Next, a tombstone
+    /// check (retraction-and-negative-deltas.md §2): an id (or address, at
+    /// or before its permanently-recorded deletion ceiling) tombstoned by an
+    /// earlier verified kind:5 is `Refused(Tombstoned)`, never stored.
+    /// Otherwise run replaceable/addressable supersession (unchanged M1
+    /// semantics). A kind:5 event is stored like any other regular event
+    /// and, in the same call, drops every currently-held target it names
+    /// whose author matches its own (NIP-09 author-only, enforced
+    /// structurally) — see `Kind5Processed`.
     fn insert(&mut self, event: Event, from: RelayObserved) -> InsertOutcome;
 
     /// Query current winners only (never a superseded/stale event), matched
@@ -177,15 +199,16 @@ pub trait EventStore {
     fn remove(&mut self, id: EventId, reason: RetractReason) -> Option<StoredEvent>;
 
     /// Drain every row whose NIP-40 `expiration` is `<= now`, removing each
-    /// one and returning the full rows. Minimal seam for this unit: reads
-    /// expiration straight off whatever is currently stored (no persistent
-    /// expiration index yet — that is the NIP-40 unit's job), so this is
-    /// honest but O(stored rows) per call.
+    /// one (through the same [`EventStore::remove`] door) and returning the
+    /// full rows. Index-backed (retraction-and-negative-deltas.md §3.1): a
+    /// persistent `(expiry_ts -> {id})` index is maintained on every insert
+    /// and every removal, so this drains in `O(log n + due)`, not a full
+    /// scan.
     fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent>;
 
     /// The earliest NIP-40 `expiration` deadline among currently stored
-    /// rows, or `None` if nothing carries one. Same minimal-seam caveat as
-    /// [`EventStore::expire_due`].
+    /// rows, or `None` if nothing carries one. Index-backed: peeks the
+    /// minimum of the same persistent expiration index `expire_due` drains.
     fn next_expiration(&self) -> Option<Timestamp>;
 
     /// Record that `relay` has proven `proven` for `filter`'s window-erased
