@@ -1376,13 +1376,7 @@ dependencies = [
 name = "nmp-demo"
 version = "0.1.0"
 dependencies = [
- "nmp-engine",
- "nmp-grammar",
- "nmp-resolver",
- "nmp-router",
- "nmp-signer",
- "nmp-store",
- "nmp-transport",
+ "nmp",
  "nostr 0.44.4",
 ]
 

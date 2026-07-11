@@ -11,10 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 nostr.workspace = true
-nmp-grammar.workspace = true
-nmp-store.workspace = true
-nmp-resolver.workspace = true
-nmp-router.workspace = true
-nmp-transport.workspace = true
-nmp-signer.workspace = true
-nmp-engine.workspace = true
+nmp.workspace = true
