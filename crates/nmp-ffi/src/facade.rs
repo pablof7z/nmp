@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::convert::{
-    coverage_to_ffi, diagnostics_snapshot_to_ffi, filter_from_ffi, parse_pubkey, row_delta_to_ffi,
+    diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey, row_delta_to_ffi,
     write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
 };
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
@@ -41,8 +41,8 @@ use crate::types::{FfiFilter, FfiWriteIntent};
 pub struct NmpEngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
     /// -> a persistent `RedbStore` opened at that path (the same file
-    /// reopened across restarts is what makes a cold, offline read
-    /// authoritative -- ledger #7).
+    /// reopened across restarts is what preserves source-scoped evidence for
+    /// a cold, offline read -- ledger #7).
     pub store_path: Option<String>,
     pub indexer_relays: Vec<String>,
     /// Operator app relay set (`Lane::AppRelay`). Default empty.
@@ -120,9 +120,9 @@ impl NmpEngine {
         let cancel = subscription.cancel_handle();
 
         thread::spawn(move || {
-            while let Ok((deltas, coverage)) = subscription.recv() {
+            while let Ok((deltas, evidence)) = subscription.recv() {
                 let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
-                observer.on_batch(ffi_deltas, coverage_to_ffi(coverage));
+                observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
             }
             observer.on_closed();
         });
@@ -327,7 +327,7 @@ mod tests {
         fn on_batch(
             &self,
             _deltas: Vec<crate::types::FfiRowDelta>,
-            _coverage: crate::types::FfiCoverage,
+            _evidence: crate::types::FfiAcquisitionEvidence,
         ) {
         }
 

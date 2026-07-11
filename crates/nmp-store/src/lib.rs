@@ -768,9 +768,9 @@ pub trait EventStore {
         proven: CoverageInterval,
     );
 
-    /// The proven interval for `key` at `relay`, or `None` if no row exists
-    /// — "no row = not covered" (harvest rule, unchanged). `None` is
-    /// authoritative-unknown, never treated as authoritative-empty.
+    /// The proven interval for `key` at `relay`, or `None` if no row exists.
+    /// `None` means this relay has no persisted interval for this key; it
+    /// makes no wider claim.
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval>;
 
     /// Claim-based bounded GC (ruling §5): evicts every regular

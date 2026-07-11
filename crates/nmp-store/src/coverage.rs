@@ -52,8 +52,8 @@ impl CoverageKey {
     /// The raw 32-byte BLAKE3 digest, for use as (part of) a durable
     /// storage key. Widened from a 64-bit FNV hash (see
     /// `nmp_grammar::DescriptorHash`'s doc): this is the durable redb
-    /// coverage-watermark key, so a collision here would forge a
-    /// `CompleteUpTo` for a filter never actually fetched.
+    /// coverage-watermark key, so a collision here would attach a proven
+    /// interval to a filter never actually fetched.
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
@@ -306,7 +306,7 @@ mod tests {
     }
 
     /// `CoverageKey` is the DURABLE redb watermark key (ledger #7): a forged
-    /// collision here forges a `CompleteUpTo`. Pin its width at 32 bytes
+    /// collision here attaches evidence to the wrong filter. Pin its width at 32 bytes
     /// (256-bit BLAKE3, via `DescriptorHash`) -- NOT the 8-byte FNV-64 value
     /// it replaced -- so a future change can't silently narrow it back down.
     #[test]

@@ -17,20 +17,26 @@ use std::collections::{BTreeMap, HashMap};
 
 use nostr::{JsonUtil, RelayUrl};
 
-use nmp_grammar::ConcreteFilter;
-use nmp_router::{Diagnostics, Lane, RelayPlan};
-use nmp_store::CoverageInterval;
-
-use super::QueryCoverage;
+use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
+use nmp_store::{CoverageInterval, CoverageKey};
 
 /// One filter's proven coverage state at one relay (parallel to
 /// [`RelayDiagnosticsSnapshot::filters`] — same order, same rendering).
+/// Diagnostics is engine-global and unscoped BY DESIGN (M5 plan §1) — it is
+/// deliberately distinct from the *query* surface's scoped
+/// [`super::AcquisitionEvidence`] (`docs/design/scoped-evidence-49-12-plan.md`
+/// §4), so this no longer reuses that query-facing type: it keeps its own
+/// diagnostics-local fact, the exact per-(relay, filter) proven interval
+/// (or its absence), never a query-level verdict.
 #[derive(Debug, Clone)]
 pub struct FilterCoverageEntry {
     /// The exact wire JSON this coverage state is for — identical rendering
     /// to the corresponding entry in [`RelayDiagnosticsSnapshot::filters`].
     pub filter: String,
-    pub coverage: QueryCoverage,
+    /// `Some(interval)` -- this relay has a proven `[from, through]` row for
+    /// this exact filter's shape; `None` -- unproven ("no row = not
+    /// covered", unchanged from the store's own rule).
+    pub coverage: Option<CoverageInterval>,
 }
 
 /// One relay's full diagnostics: wire-sub count, lane breakdown, reverse
@@ -58,7 +64,7 @@ pub struct RelayDiagnosticsSnapshot {
 /// The engine-global diagnostics snapshot (M5 plan §1.1) — "the acceptance
 /// test rendered on screen, permanently." One snapshot covers every
 /// currently-planned relay; there is no separate per-query diagnostics (that
-/// is [`super::QueryCoverage`], already delivered alongside every
+/// is [`super::AcquisitionEvidence`], already delivered alongside every
 /// `Effect::EmitRows`).
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsSnapshot {
@@ -76,7 +82,7 @@ pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_relay_kind: &HashMap<RelayUrl, BTreeMap<u16, u64>>,
-    get_coverage: impl Fn(&RelayUrl, &ConcreteFilter) -> Option<CoverageInterval>,
+    get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
 ) -> DiagnosticsSnapshot {
     let mut relays = Vec::new();
     for (relay, rd) in &diag.per_relay {
@@ -95,13 +101,9 @@ pub(crate) fn build(
             .flatten()
             .map(|req| {
                 let text = req.filter.to_nostr().as_json();
-                let state = match get_coverage(relay, &req.filter) {
-                    Some(interval) => QueryCoverage::CompleteUpTo(interval.through),
-                    None => QueryCoverage::Unknown,
-                };
                 FilterCoverageEntry {
                     filter: text,
-                    coverage: state,
+                    coverage: request_coverage(relay, req, &get_coverage),
                 }
             })
             .collect();
@@ -128,4 +130,27 @@ pub(crate) fn build(
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
     }
+}
+
+/// The exact common interval proven for a (possibly coalesced) wire request.
+/// Attribution persists evidence under every narrow atom key in
+/// `WireReq::absorbed`, never under the widened filter's own hash. A wide
+/// AuthorUnion/KindUnion request is therefore proven only over the
+/// intersection shared by ALL absorbed atoms; an absent atom row or disjoint
+/// intervals yields `None` rather than fabricating a wire-filter watermark.
+fn request_coverage(
+    relay: &RelayUrl,
+    req: &WireReq,
+    get_coverage: &impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
+) -> Option<CoverageInterval> {
+    let mut keys = req.absorbed.iter().copied();
+    let first = get_coverage(relay, keys.next()?)?;
+    keys.try_fold(first, |common, key| {
+        let next = get_coverage(relay, key)?;
+        let intersection = CoverageInterval {
+            from: common.from.max(next.from),
+            through: common.through.min(next.through),
+        };
+        (intersection.from <= intersection.through).then_some(intersection)
+    })
 }

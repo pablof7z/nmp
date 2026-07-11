@@ -22,7 +22,11 @@
 //! - naming every `DiagnosticsSnapshot` output type, not just some of them
 //!   ([`describe_snapshot`]/[`describe_relay`]/[`describe_coverage_entry`]) --
 //!   `DiagnosticsSnapshot`, `RelayDiagnosticsSnapshot`, `FilterCoverageEntry`,
-//!   `QueryCoverage`, and `Lane` are each named as an explicit type, not just
+//!   `CoverageInterval` (the engine-global diagnostics watermark type
+//!   `FilterCoverageEntry.coverage` now carries), and `Lane` are each named
+//!   explicitly. The distinct query-facing `AcquisitionEvidence` type is named
+//!   by [`describe_evidence`], so both halves of the read surface are closure-
+//!   checked from an `nmp`-only dependency rather than merely imported.
 //!   imported and left unused past one field read.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`
@@ -31,9 +35,10 @@
 //! the two nouns are not just nameable but usable.
 
 use nmp::{
-    Derived, DiagnosticsSnapshot, Durability, Filter, FilterCoverageEntry, IdentityField,
-    IndexedTagName, Kind, Lane, LiveQuery, PublicKey, QueryCoverage, RelayDiagnosticsSnapshot,
-    Selector, Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    AcquisitionEvidence, CoverageInterval, Derived, DiagnosticsSnapshot, Durability, Filter,
+    FilterCoverageEntry, IdentityField, IndexedTagName, Kind, Lane, LiveQuery, PublicKey,
+    RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload,
+    WriteRouting,
 };
 
 /// The reactive index kind an app might declare its own membership list
@@ -96,19 +101,39 @@ pub fn build_unsigned_intent(author: PublicKey, content: &str) -> WriteIntent {
     }
 }
 
-/// Names `FilterCoverageEntry` AND `QueryCoverage` as explicit types (not
+/// Names `FilterCoverageEntry` AND `CoverageInterval` as explicit types (not
 /// merely a field read through `Debug`) -- proves both resolve from `nmp`
-/// alone.
+/// alone. `CoverageInterval` is the engine-global DIAGNOSTICS watermark type
+/// `FilterCoverageEntry.coverage` carries post-#49 -- deliberately distinct
+/// from the scoped, per-query `AcquisitionEvidence` [`describe_evidence`]
+/// names below (`docs/design/scoped-evidence-49-12-plan.md` §4: the two
+/// surfaces are never conflated).
 pub fn describe_coverage_entry(entry: &FilterCoverageEntry) -> String {
-    let coverage: &QueryCoverage = &entry.coverage;
+    let coverage: &Option<CoverageInterval> = &entry.coverage;
     format!("{}: {coverage:?}", entry.filter)
+}
+
+/// Names `AcquisitionEvidence` as an explicit type -- the scoped, per-query
+/// evidence `nmp::Subscription::recv`'s `RowsMsg` carries alongside every
+/// row batch (never engine-global, never a completeness verdict). Mirrors
+/// [`describe_coverage_entry`]'s "explicit type, not just a `Debug` field
+/// read" proof for the diagnostics side, but for the query-observation
+/// side instead -- so removing `AcquisitionEvidence` from `nmp`'s
+/// re-exports breaks this crate too, not just the diagnostics half of the
+/// facade surface.
+pub fn describe_evidence(evidence: &AcquisitionEvidence) -> String {
+    format!(
+        "{} source(s), {} shortfall fact(s)",
+        evidence.sources.len(),
+        evidence.shortfall.len()
+    )
 }
 
 /// Names `RelayDiagnosticsSnapshot` and `Lane` as explicit types, and calls
 /// through to [`describe_coverage_entry`] for every one of its coverage
 /// entries -- so removing ANY of `RelayDiagnosticsSnapshot`/`Lane`/
-/// `FilterCoverageEntry`/`QueryCoverage` from `nmp`'s re-exports breaks this
-/// crate, not just a claim in a doc comment.
+/// `FilterCoverageEntry`/`CoverageInterval` from `nmp`'s re-exports breaks
+/// this crate, not just a claim in a doc comment.
 pub fn describe_relay(snapshot: &RelayDiagnosticsSnapshot) -> String {
     let lanes: Vec<Lane> = snapshot.by_lane.iter().map(|(lane, _)| *lane).collect();
     let coverage: Vec<String> = snapshot
