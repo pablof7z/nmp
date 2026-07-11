@@ -40,8 +40,8 @@ pub use coalesce::{AuthorUnion, DiscardSecondOperand, KindUnion, MergeRule, Rule
 pub use deliver::deliver;
 pub use diag::{Diagnostics, RelayDiagnostics};
 pub use facts::{
-    test_relay, DiscoveryKinds, FixtureDirectory, Lane, LanedRelay, PubkeyHex, RelayDirectory,
-    RelayLimits, RelayUrl,
+    test_relay, DiscoveryKinds, FixtureDirectory, Lane, LanedRelay, LiveDirectory, PubkeyHex,
+    RelayDirectory, RelayLimits, RelayUrl,
 };
 pub use plan::{diff_plans, RelayPlan, SubId, WireDelta, WireOp, WireReq};
 pub use route::{RouteKind, RouteProvenance, Skeleton};

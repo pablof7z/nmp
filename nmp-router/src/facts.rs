@@ -49,7 +49,9 @@ impl LanedRelay {
 
 /// The injected mailbox/relay-fact surface. In M2 every method is a fixture
 /// lookup (no network). M3 backs this with live NIP-65 / probing behind the
-/// SAME trait.
+/// SAME trait; M5 ([`LiveDirectory`]) is the first REAL live implementation
+/// (the engine feeds it kind:10002 facts at runtime via
+/// [`RelayDirectory::ingest_write_relays`]).
 pub trait RelayDirectory {
     /// An author's write relays (NIP-65 kind:10002 write entries), lane-tagged.
     fn write_relays(&self, author: &PubkeyHex) -> Vec<LanedRelay>;
@@ -60,6 +62,23 @@ pub trait RelayDirectory {
     /// Pinned relays for a NON-author atom (NIP-29 group host, DM inbox, …).
     /// Empty => unroutable.
     fn pinned_relays(&self, atom: &ConcreteFilter) -> Vec<LanedRelay>;
+
+    /// Feed a freshly-ingested NIP-65 write-relay fact for `author` into
+    /// this directory, REPLACING whatever it previously held for them
+    /// (kind:10002 is a NIP-01 replaceable event -- the caller is expected
+    /// to have already resolved the current winner, e.g. via
+    /// `EventStore::query`, before calling this: a directory has no event-
+    /// ordering/staleness logic of its own). An empty `relays` means the
+    /// author's current kind:10002 declares no write relays at all --
+    /// still recorded (as "known, zero relays"), not the same as never
+    /// having ingested one.
+    ///
+    /// Default: a no-op. A static/fixture directory (`FixtureDirectory`,
+    /// any app-owned snapshot directory) has nothing to update; only a
+    /// directory that supports live updates (`LiveDirectory`) overrides
+    /// this. Additive by design: every existing `RelayDirectory` impl in
+    /// the workspace keeps compiling unchanged.
+    fn ingest_write_relays(&mut self, _author: PubkeyHex, _relays: Vec<LanedRelay>) {}
 }
 
 /// Configurable relay limits — the kill measurement (test 16) asserts the
@@ -233,6 +252,57 @@ pub fn test_relay(n: usize) -> RelayUrl {
     RelayUrl::parse(&format!("wss://relay{n}.example.com")).expect("valid test relay url")
 }
 
+/// The engine's own live, updatable [`RelayDirectory`] (M5, "the self-
+/// bootstrapping outbox" — replaces `FixtureDirectory`/an app-owned static
+/// snapshot as `EngineCore`'s injected directory). Starts knowing ONLY its
+/// configured indexer set; write relays begin empty for every author and
+/// are filled in over time via [`RelayDirectory::ingest_write_relays`] as
+/// the engine ingests each author's kind:10002 — never resolved up front,
+/// never touched by an app.
+#[derive(Debug, Clone, Default)]
+pub struct LiveDirectory {
+    write: BTreeMap<PubkeyHex, Vec<LanedRelay>>,
+    indexers: Vec<RelayUrl>,
+}
+
+impl LiveDirectory {
+    /// `indexers` is the operator's fixed discovery-relay set (e.g. the two
+    /// hardcoded indexers `nmp-demo` configures) — the ONLY relays a
+    /// discovery-kind atom (kind:10002 among them) may ever route to.
+    pub fn new(indexers: impl IntoIterator<Item = RelayUrl>) -> Self {
+        Self {
+            write: BTreeMap::new(),
+            indexers: indexers.into_iter().collect(),
+        }
+    }
+}
+
+impl RelayDirectory for LiveDirectory {
+    fn write_relays(&self, author: &PubkeyHex) -> Vec<LanedRelay> {
+        self.write.get(author).cloned().unwrap_or_default()
+    }
+
+    fn extra_relays(&self, _author: &PubkeyHex) -> Vec<LanedRelay> {
+        Vec::new()
+    }
+
+    fn indexers(&self) -> Vec<RelayUrl> {
+        self.indexers.clone()
+    }
+
+    fn pinned_relays(&self, _atom: &ConcreteFilter) -> Vec<LanedRelay> {
+        Vec::new()
+    }
+
+    fn ingest_write_relays(&mut self, author: PubkeyHex, relays: Vec<LanedRelay>) {
+        if relays.is_empty() {
+            self.write.remove(&author);
+        } else {
+            self.write.insert(author, relays);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +338,57 @@ mod tests {
                 assert!(all_urls.insert(r.url), "expected no overlap across authors");
             }
         }
+    }
+
+    #[test]
+    fn live_directory_starts_empty_but_ingests_write_relays_at_runtime() {
+        let mut dir = LiveDirectory::new([test_relay(9)]);
+        assert!(dir.write_relays(&pk('a')).is_empty(), "no fact fed in yet");
+        assert_eq!(dir.indexers(), vec![test_relay(9)]);
+
+        dir.ingest_write_relays(
+            pk('a'),
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)],
+        );
+        let relays = dir.write_relays(&pk('a'));
+        assert_eq!(
+            relays,
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)]
+        );
+    }
+
+    #[test]
+    fn live_directory_ingest_replaces_not_merges() {
+        let mut dir = LiveDirectory::new(Vec::new());
+        dir.ingest_write_relays(
+            pk('a'),
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)],
+        );
+        dir.ingest_write_relays(
+            pk('a'),
+            vec![LanedRelay::new(test_relay(1), Lane::Nip65Write)],
+        );
+        assert_eq!(
+            dir.write_relays(&pk('a')),
+            vec![LanedRelay::new(test_relay(1), Lane::Nip65Write)],
+            "a fresh kind:10002 REPLACES the prior write-relay set, never merges"
+        );
+    }
+
+    #[test]
+    fn default_ingest_write_relays_is_a_no_op_for_fixture_directory() {
+        // Additive-trait-method contract: FixtureDirectory never overrides
+        // `ingest_write_relays`, so calling it must not panic and must not
+        // change what `write_relays` reports.
+        let mut dir = FixtureDirectory::new().with_write(pk('a'), [test_relay(0)]);
+        dir.ingest_write_relays(
+            pk('a'),
+            vec![LanedRelay::new(test_relay(5), Lane::Nip65Write)],
+        );
+        assert_eq!(
+            dir.write_relays(&pk('a')),
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)]
+        );
     }
 
     #[test]
