@@ -32,6 +32,16 @@ pub enum Lane {
     GroupHost,
     /// kind:10050 DM inbox (pinned; full private-route provenance is M3).
     DmInbox,
+    /// The author's kind:10002 READ relay (`routing-and-ownership.md` §2.4 --
+    /// the p-tag inbox fan-out consumes THIS set, never `Nip65Write`'s).
+    Nip65Read,
+    /// Operator-configured app relay (`appRelay`, §2.1) -- every kind, every
+    /// author, always, additive; never counted toward the 2-relay-min.
+    AppRelay,
+    /// Operator-configured fallback relay (§2.1) -- fires per-author only
+    /// when that author's own-relay coverage is under the 2-relay-min AND no
+    /// `AppRelay` is configured; never counted toward the 2-relay-min itself.
+    Fallback,
 }
 
 /// A relay tagged with the lane that supplied it.
@@ -62,6 +72,44 @@ pub trait RelayDirectory {
     /// Pinned relays for a NON-author atom (NIP-29 group host, DM inbox, …).
     /// Empty => unroutable.
     fn pinned_relays(&self, atom: &ConcreteFilter) -> Vec<LanedRelay>;
+
+    /// Operator-configured app relay set (`Lane::AppRelay`, §2.1 of
+    /// `routing-and-ownership.md`) -- every kind, every author, always,
+    /// additive, never counted toward the 2-relay-min.
+    ///
+    /// Default: empty. Additive by design: every existing `RelayDirectory`
+    /// impl in the workspace keeps compiling unchanged (mirrors
+    /// `ingest_write_relays`'s additive pattern above). Only a directory
+    /// that is actually configured with an app relay overrides this.
+    fn app_relays(&self) -> Vec<RelayUrl> {
+        Vec::new()
+    }
+
+    /// Operator-configured fallback relay set (`Lane::Fallback`, §2.1).
+    /// Applied outside the coverage solve, per-author, only when that
+    /// author's own-relay coverage falls under the 2-relay-min AND no
+    /// `app_relays` is configured (`app_relays` suppresses fallback
+    /// entirely) -- the caller (`nmp-router`) owns that composition; this
+    /// accessor only reports the configured set.
+    ///
+    /// Default: empty.
+    fn fallback_relays(&self) -> Vec<RelayUrl> {
+        Vec::new()
+    }
+
+    /// An author's READ relays (NIP-65 kind:10002 read-marked + unmarked
+    /// entries, lane `Nip65Read`) -- distinct from `write_relays`: an
+    /// unmarked `r` tag is BOTH read and write, but a `"write"`-marked entry
+    /// is excluded here (§2.4). This is what the p-tag inbox fan-out
+    /// (`resolve_routes`'s `Default` write policy) consumes for a
+    /// recipient, never `write_relays`.
+    ///
+    /// Default: empty. Additive by design, mirroring `write_relays`'s own
+    /// injected-fact shape -- only a directory that actually tracks the
+    /// read/write split overrides this.
+    fn read_relays(&self, _author: &PubkeyHex) -> Vec<LanedRelay> {
+        Vec::new()
+    }
 
     /// True iff this directory has ever recorded a write-relay FACT for
     /// `author` — "known, possibly zero" vs "never resolved". Distinguishes
@@ -102,6 +150,18 @@ pub trait RelayDirectory {
     /// this. Additive by design: every existing `RelayDirectory` impl in
     /// the workspace keeps compiling unchanged.
     fn ingest_write_relays(&mut self, _author: PubkeyHex, _relays: Vec<LanedRelay>) {}
+
+    /// Feed a freshly-ingested NIP-65 READ-relay fact for `author` into this
+    /// directory, REPLACING whatever it previously held for them -- the
+    /// read-side mirror of `ingest_write_relays`, fed from the SAME
+    /// kind:10002 winner in one `ingest_relay_list_winner` pass (§2.4: the
+    /// read/write split is parsed off one event, never a second discovery
+    /// sub).
+    ///
+    /// Default: a no-op, for the same reason `ingest_write_relays` defaults
+    /// to one -- a static/fixture directory has nothing to update; only
+    /// `LiveDirectory` overrides this.
+    fn ingest_read_relays(&mut self, _author: PubkeyHex, _relays: Vec<LanedRelay>) {}
 }
 
 /// Configurable relay limits — the kill measurement (test 16) asserts the
@@ -168,6 +228,9 @@ pub struct FixtureDirectory {
     extra: BTreeMap<PubkeyHex, Vec<LanedRelay>>,
     indexers: Vec<RelayUrl>,
     pinned: BTreeMap<ConcreteFilter, Vec<LanedRelay>>,
+    read: BTreeMap<PubkeyHex, Vec<LanedRelay>>,
+    app: Vec<RelayUrl>,
+    fallback: Vec<RelayUrl>,
 }
 
 impl FixtureDirectory {
@@ -229,6 +292,34 @@ impl FixtureDirectory {
         self.with_pinned(atom, vec![LanedRelay::new(relay, Lane::DmInbox)])
     }
 
+    /// Add NIP-65 READ relays for `author` (lane `Nip65Read`) -- the fixture
+    /// mirror of `with_write`.
+    pub fn with_read(
+        mut self,
+        author: impl Into<PubkeyHex>,
+        relays: impl IntoIterator<Item = RelayUrl>,
+    ) -> Self {
+        let author = author.into();
+        self.read.entry(author).or_default().extend(
+            relays
+                .into_iter()
+                .map(|url| LanedRelay::new(url, Lane::Nip65Read)),
+        );
+        self
+    }
+
+    /// Register operator app relays (`Lane::AppRelay`, §2.1).
+    pub fn with_app(mut self, relays: impl IntoIterator<Item = RelayUrl>) -> Self {
+        self.app.extend(relays);
+        self
+    }
+
+    /// Register operator fallback relays (`Lane::Fallback`, §2.1).
+    pub fn with_fallback(mut self, relays: impl IntoIterator<Item = RelayUrl>) -> Self {
+        self.fallback.extend(relays);
+        self
+    }
+
     // ---- adversarial-mailbox generators (M2 plan §3 solver tests) -------
 
     /// `authors.len()` authors, each with its own DISJOINT pair of write
@@ -277,6 +368,22 @@ impl RelayDirectory for FixtureDirectory {
     fn pinned_relays(&self, atom: &ConcreteFilter) -> Vec<LanedRelay> {
         self.pinned.get(atom).cloned().unwrap_or_default()
     }
+
+    fn app_relays(&self) -> Vec<RelayUrl> {
+        self.app.clone()
+    }
+
+    fn fallback_relays(&self) -> Vec<RelayUrl> {
+        self.fallback.clone()
+    }
+
+    fn read_relays(&self, author: &PubkeyHex) -> Vec<LanedRelay> {
+        self.read.get(author).cloned().unwrap_or_default()
+    }
+
+    // `ingest_read_relays` is NOT overridden: a static fixture has nothing
+    // to update at runtime, so it relies on the trait's default no-op --
+    // mirrors `ingest_write_relays`'s own precedent on this same type.
 }
 
 /// A deterministic fixture relay URL (`wss://relay{n}.example.com`), used by
@@ -295,17 +402,59 @@ pub fn test_relay(n: usize) -> RelayUrl {
 #[derive(Debug, Clone, Default)]
 pub struct LiveDirectory {
     write: BTreeMap<PubkeyHex, Vec<LanedRelay>>,
+    read: BTreeMap<PubkeyHex, Vec<LanedRelay>>,
     indexers: Vec<RelayUrl>,
+    app: Vec<RelayUrl>,
+    fallback: Vec<RelayUrl>,
 }
 
 impl LiveDirectory {
-    /// `indexers` is the operator's fixed discovery-relay set (e.g. the two
-    /// hardcoded indexers `nmp-demo` configures) — the ONLY relays a
-    /// discovery-kind atom (kind:10002 among them) may ever route to.
-    pub fn new(indexers: impl IntoIterator<Item = RelayUrl>) -> Self {
-        Self {
+    /// Start a [`LiveDirectoryBuilder`] (owner-resolved Q5,
+    /// `routing-build-plan.md` §7.1: the lane list is still growing --
+    /// three lanes land in this milestone alone -- so a builder is the one
+    /// edit that absorbs future lanes without churning every construction
+    /// site again).
+    pub fn builder() -> LiveDirectoryBuilder {
+        LiveDirectoryBuilder::default()
+    }
+}
+
+/// Builder for [`LiveDirectory`]. See [`LiveDirectory::builder`].
+#[derive(Default)]
+pub struct LiveDirectoryBuilder {
+    indexers: Vec<RelayUrl>,
+    app: Vec<RelayUrl>,
+    fallback: Vec<RelayUrl>,
+}
+
+impl LiveDirectoryBuilder {
+    /// The operator's fixed discovery-relay set (e.g. the two hardcoded
+    /// indexers `nmp-demo` configures) — the ONLY relays a discovery-kind
+    /// atom (kind:10002 among them) may ever route to.
+    pub fn indexers(mut self, indexers: impl IntoIterator<Item = RelayUrl>) -> Self {
+        self.indexers = indexers.into_iter().collect();
+        self
+    }
+
+    /// The operator's app relay set (`Lane::AppRelay`, §2.1).
+    pub fn app_relays(mut self, app: impl IntoIterator<Item = RelayUrl>) -> Self {
+        self.app = app.into_iter().collect();
+        self
+    }
+
+    /// The operator's fallback relay set (`Lane::Fallback`, §2.1).
+    pub fn fallback_relays(mut self, fallback: impl IntoIterator<Item = RelayUrl>) -> Self {
+        self.fallback = fallback.into_iter().collect();
+        self
+    }
+
+    pub fn build(self) -> LiveDirectory {
+        LiveDirectory {
             write: BTreeMap::new(),
-            indexers: indexers.into_iter().collect(),
+            read: BTreeMap::new(),
+            indexers: self.indexers,
+            app: self.app,
+            fallback: self.fallback,
         }
     }
 }
@@ -325,6 +474,18 @@ impl RelayDirectory for LiveDirectory {
 
     fn pinned_relays(&self, _atom: &ConcreteFilter) -> Vec<LanedRelay> {
         Vec::new()
+    }
+
+    fn app_relays(&self) -> Vec<RelayUrl> {
+        self.app.clone()
+    }
+
+    fn fallback_relays(&self) -> Vec<RelayUrl> {
+        self.fallback.clone()
+    }
+
+    fn read_relays(&self, author: &PubkeyHex) -> Vec<LanedRelay> {
+        self.read.get(author).cloned().unwrap_or_default()
     }
 
     fn ingest_write_relays(&mut self, author: PubkeyHex, relays: Vec<LanedRelay>) {
@@ -350,6 +511,12 @@ impl RelayDirectory for LiveDirectory {
     /// entry at all.
     fn knows_write_relays(&self, author: &PubkeyHex) -> bool {
         self.write.contains_key(author)
+    }
+
+    /// The read-side mirror of `ingest_write_relays` -- REPLACES, never
+    /// merges, same kind:10002-is-replaceable contract.
+    fn ingest_read_relays(&mut self, author: PubkeyHex, relays: Vec<LanedRelay>) {
+        self.read.insert(author, relays);
     }
 }
 
@@ -392,7 +559,7 @@ mod tests {
 
     #[test]
     fn live_directory_starts_empty_but_ingests_write_relays_at_runtime() {
-        let mut dir = LiveDirectory::new([test_relay(9)]);
+        let mut dir = LiveDirectory::builder().indexers([test_relay(9)]).build();
         assert!(dir.write_relays(&pk('a')).is_empty(), "no fact fed in yet");
         assert_eq!(dir.indexers(), vec![test_relay(9)]);
 
@@ -409,7 +576,7 @@ mod tests {
 
     #[test]
     fn live_directory_ingest_replaces_not_merges() {
-        let mut dir = LiveDirectory::new(Vec::new());
+        let mut dir = LiveDirectory::builder().build();
         dir.ingest_write_relays(
             pk('a'),
             vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)],
@@ -433,7 +600,7 @@ mod tests {
     /// can stop discovering them; an author never ingested at all is not.
     #[test]
     fn live_directory_distinguishes_known_empty_from_never_resolved() {
-        let mut dir = LiveDirectory::new(Vec::new());
+        let mut dir = LiveDirectory::builder().build();
         assert!(
             !dir.knows_write_relays(&pk('a')),
             "never ingested -- must NOT be considered known"
@@ -479,6 +646,82 @@ mod tests {
         assert_eq!(
             dir.write_relays(&pk('a')),
             vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)]
+        );
+    }
+
+    /// Unit A's additive-trait contract, mirroring
+    /// `default_ingest_write_relays_is_a_no_op_for_fixture_directory` above:
+    /// a `FixtureDirectory` that never called `with_app`/`with_fallback`
+    /// reports empty for `app_relays`/`fallback_relays`/`read_relays`, and
+    /// `ingest_read_relays` (never overridden by `FixtureDirectory`, so it
+    /// runs the trait's default no-op) doesn't panic and doesn't change
+    /// anything -- every existing `RelayDirectory` impl in the workspace
+    /// keeps compiling and behaving unchanged.
+    #[test]
+    fn defaulted_accessors_are_empty_for_fixture_and_dont_break_existing_impls() {
+        let mut dir = FixtureDirectory::new().with_write(pk('a'), [test_relay(0)]);
+        assert!(dir.app_relays().is_empty());
+        assert!(dir.fallback_relays().is_empty());
+        assert!(dir.read_relays(&pk('a')).is_empty());
+
+        dir.ingest_read_relays(
+            pk('a'),
+            vec![LanedRelay::new(test_relay(5), Lane::Nip65Read)],
+        );
+        assert!(
+            dir.read_relays(&pk('a')).is_empty(),
+            "ingest_read_relays is the trait's default no-op for a static fixture"
+        );
+        assert_eq!(
+            dir.write_relays(&pk('a')),
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Write)],
+            "unrelated existing facts are untouched"
+        );
+    }
+
+    #[test]
+    fn fixture_directory_with_read_app_fallback_builders() {
+        let dir = FixtureDirectory::new()
+            .with_read(pk('a'), [test_relay(0)])
+            .with_app([test_relay(1)])
+            .with_fallback([test_relay(2)]);
+
+        assert_eq!(
+            dir.read_relays(&pk('a')),
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Read)]
+        );
+        assert_eq!(dir.app_relays(), vec![test_relay(1)]);
+        assert_eq!(dir.fallback_relays(), vec![test_relay(2)]);
+    }
+
+    #[test]
+    fn live_directory_builder_wires_app_and_fallback_relays() {
+        let dir = LiveDirectory::builder()
+            .indexers([test_relay(9)])
+            .app_relays([test_relay(1)])
+            .fallback_relays([test_relay(2)])
+            .build();
+
+        assert_eq!(dir.indexers(), vec![test_relay(9)]);
+        assert_eq!(dir.app_relays(), vec![test_relay(1)]);
+        assert_eq!(dir.fallback_relays(), vec![test_relay(2)]);
+    }
+
+    #[test]
+    fn live_directory_ingest_read_relays_replaces_not_merges() {
+        let mut dir = LiveDirectory::builder().build();
+        dir.ingest_read_relays(
+            pk('a'),
+            vec![LanedRelay::new(test_relay(0), Lane::Nip65Read)],
+        );
+        dir.ingest_read_relays(
+            pk('a'),
+            vec![LanedRelay::new(test_relay(1), Lane::Nip65Read)],
+        );
+        assert_eq!(
+            dir.read_relays(&pk('a')),
+            vec![LanedRelay::new(test_relay(1), Lane::Nip65Read)],
+            "a fresh kind:10002 REPLACES the prior read-relay set, never merges"
         );
     }
 

@@ -169,7 +169,7 @@ fn content_atom_reroutes_from_indexer_discovery_to_authors_write_relay_after_100
     let indexer = RelayUrl::parse("wss://indexer.example.com").unwrap();
     let write_r = RelayUrl::parse("wss://a-writes-here.example.com").unwrap();
 
-    let dir = LiveDirectory::new([indexer.clone()]);
+    let dir = LiveDirectory::builder().indexers([indexer.clone()]).build();
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
     let mut plan = PlanModel::default();
 
@@ -298,7 +298,7 @@ fn relay_list_parse_excludes_explicit_read_only_relays() {
     let write_r = RelayUrl::parse("wss://a-writes-here.example.com").unwrap();
     let read_only_r = RelayUrl::parse("wss://a-reads-here.example.com").unwrap();
 
-    let dir = LiveDirectory::new([indexer.clone()]);
+    let dir = LiveDirectory::builder().indexers([indexer.clone()]).build();
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
     let mut plan = PlanModel::default();
 
@@ -359,7 +359,7 @@ fn discovery_grows_reactively_as_the_follow_set_grows() {
     let b = Keys::generate();
     let indexer = RelayUrl::parse("wss://indexer.example.com").unwrap();
 
-    let dir = LiveDirectory::new([indexer.clone()]);
+    let dir = LiveDirectory::builder().indexers([indexer.clone()]).build();
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
     let mut plan = PlanModel::default();
 
