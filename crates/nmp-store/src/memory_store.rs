@@ -17,10 +17,11 @@ use crate::{
     RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 
-/// A permanent tombstone's durable fact: which kind:5 event did the
-/// deleting, and (so a later insert attempt can be author-checked without a
-/// separate lookup) that kind:5's own author. Retention is PERMANENT
+/// An address-tombstone's durable fact: which kind:5 event set the
+/// deletion ceiling, and (diagnostics only — the ceiling comparison alone
+/// decides refusal) that kind:5's own author. Retention is PERMANENT
 /// (retraction-and-negative-deltas.md §7 owner decision) — never GC-claimed.
+/// Id-tombstones do NOT use this: see `MemoryStore::deleted_ids`'s doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TombstoneRecord {
     deleting_event_id: EventId,
@@ -50,8 +51,20 @@ pub struct MemoryStore {
     addr_index: HashMap<AddressKey, EventId>,
     coverage: HashMap<(CoverageKey, RelayUrl), CoverageRow>,
     /// Permanent kind:5 tombstones for individual event ids
-    /// (retraction-and-negative-deltas.md §2/§7). Never GC-claimed.
-    deleted_ids: HashMap<EventId, TombstoneRecord>,
+    /// (retraction-and-negative-deltas.md §2/§7), keyed `(target id,
+    /// deleting author)` -- value is the deleting kind:5's own id
+    /// (diagnostics only). NOT collapsed to one record per target id: the
+    /// target's real author is unknown until it actually arrives, so an
+    /// unauthorized third party can always name an id that's already been
+    /// (or will be) legitimately deleted by its real author. If a single
+    /// slot per id were overwritable, that unauthorized kind:5 would
+    /// silently replace -- and so undo -- the real author's permanent,
+    /// authorized deletion the moment the real target is redelivered. Every
+    /// distinct claiming author gets its own permanent entry instead; a
+    /// redelivered target is refused iff ITS OWN author is among the
+    /// claimants, regardless of how many other (irrelevant) authors also
+    /// named that id. Never GC-claimed.
+    deleted_ids: HashMap<(EventId, PublicKey), EventId>,
     /// Permanent kind:5 tombstones for replaceable/addressable addresses:
     /// the highest deleting-event `created_at` seen for that address (the
     /// "ceiling") plus the record of the deletion that set it. A candidate
@@ -103,15 +116,14 @@ impl MemoryStore {
     /// For an id-tombstone, this is where the deferred NIP-09 author-only
     /// check happens for a target that was NOT held at deletion time (the
     /// `deleted_ids` entry was written speculatively, before this event
-    /// ever arrived): `event.pubkey` must match the recorded deleting
-    /// event's own author, or the tombstone does not apply to THIS event
-    /// (a forged or wrong-author deletion naming this id has no authority
-    /// over the real author's actual event).
+    /// ever arrived): refused iff `event.pubkey` itself is among the
+    /// authors who have claimed this id (`deleted_ids` is keyed per-author,
+    /// not collapsed to one slot -- see its doc for why). A wrong-author
+    /// claim on this same id never suppresses this event: it simply isn't
+    /// in the set.
     fn tombstone_refuses(&self, event: &Event) -> bool {
-        if let Some(rec) = self.deleted_ids.get(&event.id) {
-            if rec.deleting_author == event.pubkey {
-                return true;
-            }
+        if self.deleted_ids.contains_key(&(event.id, event.pubkey)) {
+            return true;
         }
         if let Some(key) = address_key_for(event) {
             if let Some((ceiling, _)) = self.deleted_addrs.get(&key) {
@@ -131,10 +143,6 @@ impl MemoryStore {
     /// drop the row if currently held. Returns every row actually dropped.
     fn process_kind5_deletions(&mut self, deleting: &Event) -> Vec<StoredEvent> {
         let mut deleted = Vec::new();
-        let record = TombstoneRecord {
-            deleting_event_id: deleting.id,
-            deleting_author: deleting.pubkey,
-        };
 
         let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
         for target_id in target_ids {
@@ -147,10 +155,13 @@ impl MemoryStore {
                     deleted.push(removed);
                 }
             }
-            // Tombstone recorded regardless of hold state right now -- a
+            // Claim recorded regardless of hold state right now -- a
             // target not yet held is checked, deferred, by
-            // `tombstone_refuses` at the moment it actually arrives.
-            self.deleted_ids.insert(target_id, record);
+            // `tombstone_refuses` at the moment it actually arrives. NEVER
+            // overwrite another author's existing claim on this same id
+            // (see `deleted_ids`'s doc) -- accumulate.
+            self.deleted_ids
+                .insert((target_id, deleting.pubkey), deleting.id);
         }
 
         let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
@@ -165,6 +176,10 @@ impl MemoryStore {
                 continue;
             };
 
+            let record = TombstoneRecord {
+                deleting_event_id: deleting.id,
+                deleting_author: deleting.pubkey,
+            };
             let raises_ceiling = self
                 .deleted_addrs
                 .get(&key)

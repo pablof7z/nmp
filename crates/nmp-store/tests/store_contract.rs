@@ -833,6 +833,90 @@ fn kind5_before_target_arrives_still_tombstones_then_refuses() {
 }
 
 #[test]
+fn unauthorized_kind5_cannot_resurrect_authorized_deletion() {
+    // The smoking-gun falsifier: id-tombstones must be keyed per claiming
+    // author, never collapsed to one overwritable slot per id -- else an
+    // unauthorized third party naming an already-deleted id can silently
+    // undo the real author's permanent, authorized deletion.
+    for_each_backend(|store| {
+        let author = keys();
+        let attacker = keys();
+        let target = regular_event_at(&author, "delete me", 100);
+        let target_id = target.id;
+        store.insert(target.clone(), observed("wss://r1", 1));
+
+        // The real author deletes it -- authorized, permanent.
+        let real_deletion = deletion_event(&author, vec![Tag::event(target_id)], 200);
+        match store.insert(real_deletion, observed("wss://r1", 2)) {
+            InsertOutcome::Kind5Processed { deleted } => assert_eq!(deleted.len(), 1),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // An unrelated, unauthorized third party ALSO names the same id in
+        // its own kind:5 -- structurally powerless (author-only), and must
+        // not be able to overwrite or shadow the real author's claim.
+        let attacker_deletion = deletion_event(&attacker, vec![Tag::event(target_id)], 300);
+        match store.insert(attacker_deletion, observed("wss://r1", 3)) {
+            InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        // The real author's authorized, permanent deletion must still
+        // hold -- the attacker's claim must never resurrect it.
+        assert_eq!(
+            store.insert(target, observed("wss://r2", 4)),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        );
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+    });
+}
+
+#[test]
+fn kind5_id_claims_are_independent_per_author() {
+    // Positive companion to the falsifier above: distinct (id, author)
+    // claims never interfere with each other in either direction.
+    for_each_backend(|store| {
+        let author = keys();
+        let bystander = keys();
+
+        // `bystander` deletes an id it actually authored -- authorized.
+        let bystanders_own = regular_event_at(&bystander, "bystander's own", 50);
+        let bystanders_own_id = bystanders_own.id;
+        store.insert(bystanders_own.clone(), observed("wss://r1", 1));
+        let bystanders_deletion =
+            deletion_event(&bystander, vec![Tag::event(bystanders_own_id)], 60);
+        store.insert(bystanders_deletion, observed("wss://r1", 1));
+
+        // `bystander` ALSO (unauthorized) names `author`'s target id in a
+        // separate kind:5 -- structurally powerless.
+        let authors_target = regular_event_at(&author, "author's own", 100);
+        let authors_target_id = authors_target.id;
+        store.insert(authors_target.clone(), observed("wss://r1", 2));
+        let unauthorized = deletion_event(&bystander, vec![Tag::event(authors_target_id)], 200);
+        match store.insert(unauthorized, observed("wss://r1", 3)) {
+            InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        // `author`'s own event, which `author` never deleted, is
+        // unaffected by `bystander`'s unrelated, unauthorized claim on the
+        // same id.
+        let results = store.query(&Filter::new().id(authors_target_id));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event, authors_target);
+
+        // `bystander`'s own legitimate deletion is still correctly
+        // tombstoned -- the fix didn't break the authorized case.
+        assert!(store.query(&Filter::new().id(bystanders_own_id)).is_empty());
+        assert_eq!(
+            store.insert(bystanders_own, observed("wss://r2", 4)),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        );
+    });
+}
+
+#[test]
 fn kind5_a_tag_deletes_addressable_target_and_ceiling_blocks_older_redelivery() {
     for_each_backend(|store| {
         let k = keys();

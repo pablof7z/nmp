@@ -22,7 +22,7 @@ use std::path::Path;
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
-use nostr::{Event, EventId, Filter, JsonUtil, Kind, RelayUrl, Timestamp};
+use nostr::{Event, EventId, Filter, JsonUtil, Kind, PublicKey, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -40,8 +40,15 @@ const EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
 const ADDR_INDEX: TableDefinition<&str, &str> = TableDefinition::new("addr_index");
 const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
 /// Permanent kind:5 tombstones for individual event ids
-/// (retraction-and-negative-deltas.md §2/§7). Key: event id hex. Never
-/// GC-claimed.
+/// (retraction-and-negative-deltas.md §2/§7). Key: `"{id_hex}:{author_hex}"`
+/// -- one row PER CLAIMING AUTHOR, never collapsed to one row per id: the
+/// target's real author is unknown until it actually arrives, so an
+/// unauthorized third party can always name an id someone else has already
+/// (or will later) legitimately delete. A single overwritable row per id
+/// would let that unauthorized claim silently replace -- and so undo -- the
+/// real author's permanent, authorized deletion. Value: the deleting
+/// kind:5's own id hex (diagnostics only; the key alone decides refusal).
+/// Never GC-claimed.
 const TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("tombstones");
 /// Permanent kind:5 tombstones for replaceable/addressable addresses. Key:
 /// [`crate::address_key::AddressKey::to_redb_key`]. Value carries the
@@ -60,13 +67,6 @@ const EXPIRATION_INDEX: TableDefinition<&str, &str> = TableDefinition::new("expi
 struct StoredEventRecord {
     event_json: String,
     provenance: BTreeMap<RelayUrl, Timestamp>,
-}
-
-/// The `tombstones` table's JSON value.
-#[derive(Debug, Serialize, Deserialize)]
-struct TombstoneRecord {
-    deleting_event_id: String,
-    deleting_author: String,
 }
 
 /// The `addr_tombstones` table's JSON value.
@@ -92,26 +92,31 @@ fn expiration_key_upper_bound(ts: Timestamp) -> String {
     format!("{:020}:{}", ts.as_secs(), "f".repeat(64))
 }
 
+/// The `tombstones` table's key for one (target id, claiming author) pair —
+/// see [`TOMBSTONES`]'s doc for why this is composite, not just the id.
+fn id_tombstone_key(id: &EventId, author: &PublicKey) -> String {
+    format!("{}:{}", id.to_hex(), author.to_hex())
+}
+
 /// Read-side tombstone check shared by `insert`
 /// (retraction-and-negative-deltas.md §2): `true` iff `event` must be
 /// `Refused(Tombstoned)`. Mirrors `MemoryStore::tombstone_refuses` exactly,
 /// including the deferred NIP-09 author-only check for an id-tombstone
-/// written before its target ever arrived.
+/// written before its target ever arrived: refused iff `event.pubkey`
+/// itself claimed this exact id, regardless of any OTHER author's
+/// (irrelevant) claim on the same id.
 fn tombstone_refuses(
     tombstones: &redb::Table<'_, &str, &str>,
     addr_tombstones: &redb::Table<'_, &str, &str>,
     event: &Event,
 ) -> bool {
-    let id_hex = event.id.to_hex();
-    if let Some(guard) = tombstones
-        .get(id_hex.as_str())
+    let key = id_tombstone_key(&event.id, &event.pubkey);
+    if tombstones
+        .get(key.as_str())
         .expect("redb: get tombstone")
+        .is_some()
     {
-        let rec: TombstoneRecord =
-            serde_json::from_str(guard.value()).expect("redb: decode tombstone");
-        if rec.deleting_author == event.pubkey.to_hex() {
-            return true;
-        }
+        return true;
     }
     if let Some(key) = address_key_for(event) {
         let key_str = key.to_redb_key();
@@ -215,16 +220,14 @@ fn process_kind5_deletions(
         {
             deleted.push(removed);
         }
-        // Tombstone recorded regardless of hold state right now -- a
-        // target not yet held is checked, deferred, by
-        // `tombstone_refuses` at the moment it actually arrives.
-        let record = TombstoneRecord {
-            deleting_event_id: deleting_id_hex.clone(),
-            deleting_author: deleting_author_hex.clone(),
-        };
-        let encoded = serde_json::to_string(&record).expect("redb: encode tombstone");
+        // Claim recorded regardless of hold state right now -- a target
+        // not yet held is checked, deferred, by `tombstone_refuses` at the
+        // moment it actually arrives. NEVER collapse another author's
+        // existing claim on this same id (composite key -- see
+        // `TOMBSTONES`'s doc): each claiming author gets its own row.
+        let key = id_tombstone_key(&target_id, &deleting.pubkey);
         tombstones
-            .insert(target_id.to_hex().as_str(), encoded.as_str())
+            .insert(key.as_str(), deleting_id_hex.as_str())
             .expect("redb: insert tombstone");
     }
 
