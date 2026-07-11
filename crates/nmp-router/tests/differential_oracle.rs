@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{Binding, ConcreteFilter, Derived, Filter, IdentityField, Selector, TagName};
+use nmp_grammar::{Binding, ConcreteFilter, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::testkit::{kind1, kind3, Harness};
 use nmp_resolver::LiveQuery;
 use nostr::filter::MatchEventOptions;
@@ -35,7 +35,7 @@ fn my_follows_filter() -> Filter {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('p').unwrap()),
+            project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     }

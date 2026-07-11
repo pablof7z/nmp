@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::TagName;
+use nmp_grammar::IndexedTagName;
 
 /// Opaque node identifier. A plain incrementing counter (not the `slotmap`
 /// crate) — M1's graphs are small and bounded (depth ≤ 3), so a `HashMap`
@@ -22,7 +22,7 @@ pub(crate) type NodeId = u64;
 pub(crate) enum FieldSlot {
     Authors,
     Ids,
-    Tag(TagName),
+    Tag(IndexedTagName),
 }
 
 /// A single resolved value produced by a `BindingNode`. Two shapes:

@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, TagName};
+use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::{LiveDirectory, WireOp};
 use nmp_store::MemoryStore;
@@ -85,7 +85,7 @@ fn follow_feed_query() -> LiveQuery {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('p').unwrap()),
+            project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     })

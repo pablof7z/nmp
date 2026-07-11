@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::tag_name::TagName;
+use crate::indexed_tag_name::IndexedTagName;
 
 /// A fully-resolved filter — NO bindings. The unit of the demand set and
 /// refcount/dedup key.
@@ -21,7 +21,7 @@ pub struct ConcreteFilter {
     /// Resolved event-id hex set.
     pub ids: Option<BTreeSet<String>>,
     /// Resolved per-tag value sets.
-    pub tags: BTreeMap<TagName, BTreeSet<String>>,
+    pub tags: BTreeMap<IndexedTagName, BTreeSet<String>>,
     /// Inclusive lower bound on `created_at`.
     pub since: Option<u64>,
     /// Inclusive upper bound on `created_at`.
@@ -74,7 +74,7 @@ impl std::fmt::Display for DescriptorHash {
 /// attacker could exploit to construct a collision at the FRAMING level
 /// even with a strong underlying hash — e.g. `authors:["ab"], ids:["c"]`
 /// colliding with `authors:["a"], ids:["bc"]`). Tag keys are rendered as
-/// single-character strings rather than via `TagName`'s own (non-`Serialize`)
+/// single-character strings rather than via `IndexedTagName`'s own (non-`Serialize`)
 /// type -- no derive needed on `ConcreteFilter` itself.
 fn canonical_encoding(f: &ConcreteFilter) -> Vec<u8> {
     let tags: BTreeMap<String, &BTreeSet<String>> = f
@@ -104,7 +104,7 @@ impl ConcreteFilter {
     /// the grammar's valid single-letter tags. Both are construction invariants of
     /// `ConcreteFilter` (its hex strings always originate from
     /// `PublicKey::to_hex`/`EventId::to_hex` round-trips, and its tag keys
-    /// are always `TagName`s, which are pre-validated) — a panic here means
+    /// are always `IndexedTagName`s, which are pre-validated) — a panic here means
     /// a genuine invariant violation upstream, not a reachable user input
     /// error, so it is not silently swallowed.
     pub fn to_nostr(&self) -> nostr::Filter {
@@ -138,7 +138,7 @@ impl ConcreteFilter {
 
         for (tag, values) in &self.tags {
             let single_letter = nostr::SingleLetterTag::from_char(tag.as_char())
-                .unwrap_or_else(|e| panic!("TagName {tag} invariant violated: {e}"));
+                .unwrap_or_else(|e| panic!("IndexedTagName {tag} invariant violated: {e}"));
             f = f.custom_tags(single_letter, values.iter().cloned());
         }
 
@@ -181,7 +181,7 @@ mod tests {
                 let mut m = BTreeMap::new();
                 if !tags_d.is_empty() {
                     m.insert(
-                        TagName::new('d').unwrap(),
+                        IndexedTagName::new('d').unwrap(),
                         tags_d.into_iter().map(String::from).collect(),
                     );
                 }
@@ -261,7 +261,7 @@ mod tests {
             tags: {
                 let mut m = BTreeMap::new();
                 m.insert(
-                    TagName::new('d').unwrap(),
+                    IndexedTagName::new('d').unwrap(),
                     BTreeSet::from(["g1".to_string()]),
                 );
                 m

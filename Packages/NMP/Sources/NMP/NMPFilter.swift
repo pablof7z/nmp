@@ -18,8 +18,12 @@ public enum NMPIdentityField: Sendable, Hashable {
 public enum NMPSelector: Sendable, Hashable {
     case authors
     case ids
-    /// Exactly one character from the closed tag-name set (`p e a d E t q h`).
-    case tag(Character)
+    /// An arbitrary event-tag key (#64) -- projects already-acquired events
+    /// locally, so it is NOT restricted to `NMPFilter.tags`' single-letter
+    /// wire alphabet. `"-"`, `"poop"`, `"alt"`, or any other
+    /// multi-character/punctuation tag name an event actually carries is a
+    /// legal key here; case and spelling are matched exactly.
+    case tag(String)
     case addressCoord
 }
 
@@ -86,7 +90,7 @@ extension NMPSelector {
         switch self {
         case .authors: return .authors
         case .ids: return .ids
-        case .tag(let c): return .tag(name: String(c))
+        case .tag(let name): return .tag(name: name)
         case .addressCoord: return .addressCoord
         }
     }
@@ -95,7 +99,7 @@ extension NMPSelector {
         switch ffi {
         case .authors: self = .authors
         case .ids: self = .ids
-        case .tag(let name): self = .tag(name.first ?? " ")
+        case .tag(let name): self = .tag(name)
         case .addressCoord: self = .addressCoord
         }
     }

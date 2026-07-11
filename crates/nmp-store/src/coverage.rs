@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash, TagName};
+use nmp_grammar::{ConcreteFilter, DescriptorHash, IndexedTagName};
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -255,8 +255,8 @@ impl From<&ShapeRecord> for ConcreteFilter {
                         .next()
                         .expect("ShapeRecord tag keys are always single characters (see From<&ConcreteFilter>)");
                     (
-                        TagName::new(c).expect(
-                            "ShapeRecord tag keys were validated TagNames when persisted",
+                        IndexedTagName::new(c).expect(
+                            "ShapeRecord tag keys were validated IndexedTagNames when persisted",
                         ),
                         v.clone(),
                     )
@@ -388,7 +388,7 @@ mod tests {
     fn shape_record_round_trips_through_conversion() {
         let mut tags = StdBTreeMap::new();
         tags.insert(
-            TagName::new('d').unwrap(),
+            IndexedTagName::new('d').unwrap(),
             StdBTreeSet::from(["g1".to_string()]),
         );
         let original = ConcreteFilter {

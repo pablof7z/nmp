@@ -44,8 +44,12 @@ sealed class NMPSelector {
 
     object Ids : NMPSelector()
 
-    /** Exactly one character from the closed tag-name set (`p e a d E t q h`). */
-    data class Tag(val name: Char) : NMPSelector()
+    /** An arbitrary event-tag key (#64) -- projects already-acquired events
+     * locally, so it is NOT restricted to `NMPFilter.tags`' single-letter
+     * wire alphabet. `"-"`, `"poop"`, `"alt"`, or any other
+     * multi-character/punctuation tag name an event actually carries is a
+     * legal key here; case and spelling are matched exactly. */
+    data class Tag(val name: String) : NMPSelector()
 
     object AddressCoord : NMPSelector()
 
@@ -53,7 +57,7 @@ sealed class NMPSelector {
         when (this) {
             is Authors -> FfiSelector.Authors
             is Ids -> FfiSelector.Ids
-            is Tag -> FfiSelector.Tag(name.toString())
+            is Tag -> FfiSelector.Tag(name)
             is AddressCoord -> FfiSelector.AddressCoord
         }
 
@@ -62,7 +66,7 @@ sealed class NMPSelector {
             when (ffi) {
                 is FfiSelector.Authors -> Authors
                 is FfiSelector.Ids -> Ids
-                is FfiSelector.Tag -> Tag(ffi.name.firstOrNull() ?: ' ')
+                is FfiSelector.Tag -> Tag(ffi.name)
                 is FfiSelector.AddressCoord -> AddressCoord
             }
     }

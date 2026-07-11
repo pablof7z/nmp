@@ -15,7 +15,7 @@ use nmp_engine::outbox::{
 };
 use nmp_grammar::{
     Binding as GBinding, Derived as GDerived, Filter as GFilter, IdentityField as GIdentityField,
-    Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp, TagName,
+    IndexedTagName, Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
 };
 use nmp_router::Lane;
 use nostr::secp256k1::schnorr::Signature;
@@ -32,9 +32,14 @@ use crate::types::{
 /// states, never a panic (plan §2/§6).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiError {
-    /// A `FfiSelector::Tag`/`FfiFilter.tags` key was not exactly one
-    /// character from the closed set (`p, e, a, d, E, t, q, h`).
-    InvalidTagName {
+    /// A `FfiFilter.tags` key was not exactly one ASCII letter (`a`-`z` or
+    /// `A`-`Z`) -- the wire/local INDEXED filter alphabet (NIP-01
+    /// `#<letter>` queries). This is NOT a judgment that the string is a
+    /// malformed event tag (see [`Self::InvalidTag`] for that) -- a
+    /// multi-character or punctuation name is perfectly valid *event* data,
+    /// it simply cannot be a generic filter key. `FfiSelector::Tag`'s `name`
+    /// is never checked against this rule (#64).
+    NonIndexableFilterTag {
         got: String,
     },
     InvalidPublicKey {
@@ -85,7 +90,9 @@ pub enum FfiError {
 impl std::fmt::Display for FfiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidTagName { got } => write!(f, "invalid tag name: {got:?}"),
+            Self::NonIndexableFilterTag { got } => {
+                write!(f, "not indexable as a filter key: {got:?}")
+            }
             Self::InvalidPublicKey { got } => write!(f, "invalid public key hex: {got:?}"),
             Self::InvalidEventId { got } => write!(f, "invalid event id hex: {got:?}"),
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
@@ -101,14 +108,19 @@ impl std::fmt::Display for FfiError {
 
 impl std::error::Error for FfiError {}
 
-pub fn tag_name_from_ffi(s: &str) -> Result<TagName, FfiError> {
+/// Parse an `FfiFilter.tags` key -- the wire/local INDEXED filter alphabet
+/// only. Exactly one ASCII letter (`a`-`z`/`A`-`Z`) is accepted; anything
+/// else (empty, multi-character, digit, punctuation) fails with a typed
+/// [`FfiError::NonIndexableFilterTag`], never a whitelist rejection. This is
+/// NOT used for `FfiSelector::Tag`'s `name` -- that is an arbitrary
+/// event-tag key and passes through unchecked (#64).
+pub fn indexed_tag_name_from_ffi(s: &str) -> Result<IndexedTagName, FfiError> {
     let mut chars = s.chars();
     let only = chars.next();
     match (only, chars.next()) {
-        (Some(c), None) => {
-            TagName::new(c).ok_or_else(|| FfiError::InvalidTagName { got: s.to_string() })
-        }
-        _ => Err(FfiError::InvalidTagName { got: s.to_string() }),
+        (Some(c), None) => IndexedTagName::new(c)
+            .ok_or_else(|| FfiError::NonIndexableFilterTag { got: s.to_string() }),
+        _ => Err(FfiError::NonIndexableFilterTag { got: s.to_string() }),
     }
 }
 
@@ -128,7 +140,11 @@ fn selector_from_ffi(s: FfiSelector) -> Result<GSelector, FfiError> {
     Ok(match s {
         FfiSelector::Authors => GSelector::Authors,
         FfiSelector::Ids => GSelector::Ids,
-        FfiSelector::Tag { name } => GSelector::Tag(tag_name_from_ffi(&name)?),
+        // Arbitrary event-tag key (#64) -- NOT run through
+        // `indexed_tag_name_from_ffi`. Selector::Tag projects already-
+        // acquired events locally; it never inherits the wire filter's
+        // single-letter restriction, so every string is accepted verbatim.
+        FfiSelector::Tag { name } => GSelector::Tag(name),
         FfiSelector::AddressCoord => GSelector::AddressCoord,
     })
 }
@@ -137,9 +153,7 @@ fn selector_to_ffi(s: GSelector) -> FfiSelector {
     match s {
         GSelector::Authors => FfiSelector::Authors,
         GSelector::Ids => FfiSelector::Ids,
-        GSelector::Tag(t) => FfiSelector::Tag {
-            name: t.as_char().to_string(),
-        },
+        GSelector::Tag(name) => FfiSelector::Tag { name },
         GSelector::AddressCoord => FfiSelector::AddressCoord,
     }
 }
@@ -245,7 +259,7 @@ pub fn filter_from_ffi(f: FfiFilter) -> Result<GFilter, FfiError> {
     let mut tags = BTreeMap::new();
     for (k, v) in f.tags {
         tags.insert(
-            tag_name_from_ffi(&k)?,
+            indexed_tag_name_from_ffi(&k)?,
             binding_from_ffi(v, LiteralField::Tag)?,
         );
     }
@@ -602,7 +616,7 @@ mod tests {
             ..FfiFilter::default()
         };
 
-        let grammar = filter_from_ffi(ffi.clone()).expect("h is a governed tag name");
+        let grammar = filter_from_ffi(ffi.clone()).expect("h is a valid ASCII-letter tag key");
         assert_eq!(filter_to_ffi(grammar), ffi);
     }
 
@@ -652,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_tag_name_is_a_typed_error_not_a_panic() {
+    fn multi_character_filter_tag_key_is_a_typed_non_indexable_error_not_a_panic() {
         let mut tags = HashMap::new();
         tags.insert(
             "zz".to_string(),
@@ -666,10 +680,52 @@ mod tests {
         };
         assert_eq!(
             filter_from_ffi(ffi),
-            Err(FfiError::InvalidTagName {
+            Err(FfiError::NonIndexableFilterTag {
                 got: "zz".to_string()
             })
         );
+    }
+
+    /// Every ASCII letter, both cases, is a valid `FfiFilter.tags` key --
+    /// structural, not a hand-picked subset. `x`/`Z` in particular are NOT
+    /// in the old hard-coded M1 whitelist; round-tripping them here proves
+    /// the fix is syntax-based, not another expanded list (#64 acceptance
+    /// evidence).
+    #[test]
+    fn every_ascii_letter_is_a_valid_filter_tag_key_round_trip() {
+        for c in ('a'..='z').chain('A'..='Z') {
+            let mut tags = HashMap::new();
+            tags.insert(
+                c.to_string(),
+                FfiBinding::Literal {
+                    values: vec!["v".to_string()],
+                },
+            );
+            let ffi = FfiFilter {
+                tags,
+                ..FfiFilter::default()
+            };
+            let grammar = filter_from_ffi(ffi.clone())
+                .unwrap_or_else(|e| panic!("{c:?} must be a valid filter tag key: {e}"));
+            assert_eq!(filter_to_ffi(grammar), ffi);
+        }
+    }
+
+    /// `FfiSelector::Tag`'s `name` is an arbitrary event-tag key, never
+    /// checked against the indexed-filter single-letter rule: `"-"`,
+    /// `"poop"`, and `"alt"` must round-trip unchanged, not be rejected as
+    /// "unknown" (#64 acceptance evidence).
+    #[test]
+    fn selector_tag_accepts_arbitrary_event_tag_names_unchecked() {
+        for name in ["-", "poop", "alt"] {
+            let ffi = FfiSelector::Tag {
+                name: name.to_string(),
+            };
+            let grammar = selector_from_ffi(ffi.clone())
+                .unwrap_or_else(|e| panic!("{name:?} must be a valid Selector::Tag key: {e}"));
+            assert_eq!(grammar, GSelector::Tag(name.to_string()));
+            assert_eq!(selector_to_ffi(grammar), ffi);
+        }
     }
 
     /// The core regression test for the panic-turned-typed-error: a

@@ -50,7 +50,7 @@ class LiveRelayTest {
                 authors =
                     NMPBinding.Derived(
                         inner = NMPFilter(kinds = listOf(3u), authors = NMPBinding.Reactive(NMPIdentityField.ActivePubkey)),
-                        project = NMPSelector.Tag('p'),
+                        project = NMPSelector.Tag("p"),
                     ),
                 limit = 50u,
             )

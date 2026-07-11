@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::{QueryCoverage, RowDelta};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, RowsMsg};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp, TagName};
+use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
@@ -514,7 +514,7 @@ fn follows_minus_mutes_filter() -> Filter {
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        project: Selector::Tag(TagName::new('p').unwrap()),
+        project: Selector::Tag("p".to_string()),
     }));
     let mutes = Binding::Derived(Box::new(Derived {
         inner: Filter {
@@ -522,7 +522,7 @@ fn follows_minus_mutes_filter() -> Filter {
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        project: Selector::Tag(TagName::new('p').unwrap()),
+        project: Selector::Tag("p".to_string()),
     }));
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
