@@ -71,12 +71,12 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 
 | Milestone | State |
 |---|---|
-| M0 — Founding gate | **PASSED** (conditional; amendments applied) |
-| M1 — Grammar engine spike | **PROVED** — 12/12 contract tests green; independently verified honest |
-| M2 — Compiler/router + coalescing | **PROVED** — 91 tests green; kill did not fire; independently verified honest |
-| M3 — Store + transport + write outbox | **PROVED** — 170 tests green; runs end-to-end vs a real relay; offline authority verified honest |
-| M4 — Swift SDK boundary | **PROVED** — Swift `AsyncSequence` SDK; `swift test` sees real notes live; reads like a native library |
-| M5 — iOS falsifier app | planning — engine self-bootstraps outbox from 2 indexers (live-proven through Swift); diagnostic surface + app next |
+| M0 — Founding gate | **PASSED** (amendments applied) |
+| M1 — Grammar engine spike | **PROVED** (independently verified) |
+| M2 — Compiler/router + coalescing | **PROVED** (independently verified) |
+| M3 — Store + transport + write outbox | **PROVED** (independently verified) |
+| M4 — Swift SDK boundary | **PROVED** (live-proven through Swift) |
+| M5 — iOS falsifier app | planning (diagnostic surface + the app) |
 | M6 — Android | not started |
 
 **Proved so far (running code, each independently verified by a separate Opus review — detail in [`docs/reviews/`](docs/reviews/)):**
