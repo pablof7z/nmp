@@ -13,6 +13,12 @@
 //                   deinit-tied teardown, and @Observable sugar over NMPFFI.
 //   NMPTests     -- XCTest target exercising NMP's public surface, including
 //                   one bounded live-relay test (§ below).
+//
+// `swift build`/`swift test` do NOT work straight after a clean `git clone`
+// -- `nmp_ffiFFI`'s binaryTarget and NMPFFI's generated source must be built
+// once first. See README.md in this directory for the one-command fix
+// (#18); CI proves that exact path on every push via the `swift-package`
+// job in .github/workflows/ci.yml.
 import PackageDescription
 
 let package = Package(

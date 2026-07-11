@@ -28,7 +28,13 @@ public struct NMPQuery: AsyncSequence, Sendable {
 
     init(engine: NmpEngineProtocol, filter: FfiFilter) throws {
         var continuation: AsyncStream<RowBatch>.Continuation!
-        let stream = AsyncStream<RowBatch> { continuation = $0 }
+        // `.bufferingNewest(1)`: belt-and-suspenders alongside `RowBridge`'s
+        // own frame coalescing below -- if a consumer ever falls behind the
+        // ~60Hz delivery cadence, only the latest coalesced snapshot sits in
+        // the stream's buffer, so the backlog can never grow (#17).
+        let stream = AsyncStream<RowBatch>(bufferingPolicy: .bufferingNewest(1)) {
+            continuation = $0
+        }
         let bridge = RowBridge(continuation: continuation)
         self.handle = try nmpRethrowing { try engine.observe(query: filter, observer: bridge) }
         self.stream = stream
@@ -66,6 +72,15 @@ public struct NMPQuery: AsyncSequence, Sendable {
 /// Drains a live subscription's row-delta batches into an `AsyncStream`
 /// (M4 plan §4c). Not exposed publicly -- an implementation detail of
 /// `NMPQuery`.
+///
+/// Accumulation (deltas -> the current live snapshot) happens synchronously
+/// on every `onBatch` call, so no delta is ever missed. DELIVERY into the
+/// stream is coalesced through `FrameCoalescer` (#17/docs/known-gaps.md):
+/// during historical replay `onBatch` can fire far faster than any consumer
+/// can re-render, so only the latest accumulated snapshot is actually
+/// yielded, at most once per ~60Hz tick -- the accumulated state itself is
+/// always fully caught up, only the *delivery* of intermediate states is
+/// dropped.
 private final class RowBridge: RowObserver, @unchecked Sendable {
     private let continuation: AsyncStream<RowBatch>.Continuation
     private let lock = NSLock()
@@ -75,6 +90,11 @@ private final class RowBridge: RowObserver, @unchecked Sendable {
     // is an app concern (feed doctrine), not this bridge's.
     private var order: [String] = []
     private var byId: [String: Row] = [:]
+    // Captures `continuation` only (not `self`) -- avoids a retain cycle
+    // between this bridge and its own coalescer.
+    private lazy var coalescer = FrameCoalescer<RowBatch> { [continuation = self.continuation] batch in
+        continuation.yield(batch)
+    }
 
     init(continuation: AsyncStream<RowBatch>.Continuation) {
         self.continuation = continuation
@@ -98,10 +118,14 @@ private final class RowBridge: RowObserver, @unchecked Sendable {
         }
         let snapshot = order.compactMap { byId[$0] }
         lock.unlock()
-        continuation.yield(RowBatch(rows: snapshot, coverage: Coverage(coverage)))
+        coalescer.push(RowBatch(rows: snapshot, coverage: Coverage(coverage)))
     }
 
     func onClosed() {
+        // Deliver whatever accumulated state is still pending before
+        // finishing, so a burst that lands right as the subscription closes
+        // is never silently dropped.
+        coalescer.flushNow()
         continuation.finish()
     }
 }
