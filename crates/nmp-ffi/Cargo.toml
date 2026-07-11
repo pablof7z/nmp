@@ -6,9 +6,14 @@ license.workspace = true
 publish.workspace = true
 
 # M4 plan §2: staticlib for the iOS xcframework, plain lib for the round-trip
-# unit tests / the `uniffi-bindgen` bin target below to link against.
+# unit tests / the `uniffi-bindgen` bin target below to link against. cdylib
+# added for #40 (Kotlin/Flow falsifier) -- UniFFI's Kotlin bindings load the
+# core through JNA, which needs a dynamic library (JVM has no static-linking
+# story); Swift's own build path (scripts/build-swift-xcframework.sh) still
+# only ever asks cargo for the staticlib slices, so this is additive and
+# Swift-neutral.
 [lib]
-crate-type = ["staticlib", "lib"]
+crate-type = ["staticlib", "cdylib", "lib"]
 name = "nmp_ffi"
 
 # `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \

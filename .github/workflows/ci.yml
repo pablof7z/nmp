@@ -52,3 +52,30 @@ jobs:
       - name: swift test
         run: swift test
         working-directory: Packages/NMP
+
+  # Clean-clone Kotlin/JVM falsifier smoke test (#40): `Packages/NMPKotlin`
+  # depends on uniffi-bindgen-generated Kotlin bindings + a compiled native
+  # cdylib that are deliberately NOT committed (see
+  # `.gitignore`/`Packages/NMPKotlin/README.md`), same discipline as
+  # `swift-package` above. Desktop JVM only -- this is the #40 falsifier,
+  # not the M6 Android AAR (which needs cargo-ndk cross-compilation and is
+  # gated on the M5 human verdict).
+  kotlin-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build Kotlin bindings + native lib (host triple)
+        run: scripts/build-kotlin-jvm.sh
+
+      - name: gradlew test
+        run: ./gradlew test --console=plain
+        working-directory: Packages/NMPKotlin
