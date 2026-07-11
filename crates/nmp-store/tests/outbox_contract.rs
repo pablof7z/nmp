@@ -1,17 +1,24 @@
 //! The durable write-outbox door contract (issues #2/#3, Unit U1 —
 //! `docs/design/crashsafe-accepted-2-3-plan.md` + its Fable checkpoint
-//! verdict R1-R8, plus the post-build architecture-review corrections on
-//! `IntentId` allocation and receipt retention). Mirrors
-//! `store_contract.rs`'s convention of running shared-contract tests
-//! against BOTH `MemoryStore` and a fresh `RedbStore`; recovery/atomicity
-//! tests that specifically need a durable reopen are `RedbStore`-only.
+//! verdict R1-R8, plus post-build architecture-review corrections:
+//! `IntentId`/receipt-id store allocation, `Ephemeral` receipt-only
+//! persistence, intent-KEYED `promote_signed`/`compensate_write` (an
+//! intent's own `OUTBOX_INTENTS` row is the source of truth for its frozen
+//! body, independent of whether a live `EVENTS` row currently exists for
+//! it — covers `Duplicate`/`Stale` intents, chained local supersession,
+//! relay supersession, kind:5 deletion, and NIP-40 expiry uniformly),
+//! kind:5 immediate local delete on `accept_write`, and fallible
+//! persistence doors. Mirrors `store_contract.rs`'s convention of running
+//! shared-contract tests against BOTH `MemoryStore` and a fresh
+//! `RedbStore`; recovery/atomicity tests that specifically need a durable
+//! reopen are `RedbStore`-only.
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, EventStore,
-    IntentSigState, LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState, RedbStore,
-    RefuseReason, SigState, WriteDurability,
+    InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState,
+    RedbStore, RefuseReason, RelayObserved, RetractReason, SigState, WriteDurability,
 };
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag, Timestamp};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 fn keys() -> Keys {
     Keys::generate()
@@ -49,18 +56,21 @@ fn compose(keys: &Keys, kind: Kind, content: &str, created_at: u64) -> (Event, E
     compose_with_tags(keys, kind, content, created_at, Vec::new())
 }
 
-/// An `AcceptWrite` for `frozen`, tagged with `receipt_id`. `IntentId` is
-/// deliberately NOT a parameter here — the store allocates it (architecture
-/// review correction; see `nmp_store::IntentId`'s doc) and hands it back on
-/// every journaled `AcceptOutcome` variant via `.journaled_intent_id()`.
-fn accept(
-    receipt_id: u64,
-    frozen: Event,
-    expected_pubkey: nostr::PublicKey,
-    accepted_at: u64,
-) -> AcceptWrite {
+fn deletion_event(keys: &Keys, targets: Vec<Tag>, created_at: u64) -> Event {
+    EventBuilder::new(Kind::EventDeletion, "")
+        .tags(targets)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .expect("sign deletion event")
+}
+
+/// An `AcceptWrite` for `frozen`. Neither `IntentId` nor a receipt id is a
+/// parameter here — the store allocates BOTH (architecture review
+/// correction; see `nmp_store::IntentId`'s doc) and hands them back on
+/// every journaled `AcceptOutcome` variant via `.journaled_intent_id()`/
+/// `.journaled_receipt_id()`.
+fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
-        receipt_id,
         frozen,
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
@@ -69,6 +79,15 @@ fn accept(
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
     }
+}
+
+/// `accept_write`, unwrapping the persistence `Result` — every test here
+/// exercises a healthy in-process store, so a persistence failure would
+/// itself be the bug under test.
+fn do_accept(store: &mut dyn EventStore, accept: AcceptWrite) -> AcceptOutcome {
+    store
+        .accept_write(accept)
+        .expect("accept_write persistence")
 }
 
 /// Run `body` against both backends, exactly like `store_contract.rs`'s
@@ -93,9 +112,9 @@ fn accept_write_inserts_pending_row_and_journal_in_one_txn() {
         let (frozen, _signed) = compose(&k, Kind::TextNote, "hello", 100);
         let frozen_id = frozen.id;
 
-        let outcome = store.accept_write(accept(1, frozen, k.public_key(), 100));
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 100));
         match outcome {
-            AcceptOutcome::Inserted { intent_id, row } => {
+            AcceptOutcome::Inserted { intent_id, row, .. } => {
                 assert_eq!(row.event.id, frozen_id);
                 assert_eq!(row.event.sig, sentinel_signature());
                 let local = row
@@ -123,7 +142,7 @@ fn pending_row_projects_sig_state_and_is_queryable_like_any_row() {
         let k = keys();
         let (frozen, _signed) = compose(&k, Kind::TextNote, "hi", 200);
         let frozen_id = frozen.id;
-        let outcome = store.accept_write(accept(2, frozen, k.public_key(), 200));
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 200));
         let intent_id = outcome.journaled_intent_id().expect("journaled");
 
         // Ordinary kind/author filtering, not just an id lookup — proves
@@ -150,11 +169,11 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
     let k = keys();
     let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "v1", 100);
     let frozen_a_id = frozen_a.id;
-    store.accept_write(accept(10, frozen_a, k.public_key(), 100));
+    do_accept(&mut store, accept(frozen_a, k.public_key(), 100));
 
     let (frozen_b, signed_b) = compose(&k, Kind::ContactList, "v2", 200);
     let frozen_b_id = frozen_b.id;
-    let outcome = store.accept_write(accept(11, frozen_b, k.public_key(), 200));
+    let outcome = do_accept(&mut store, accept(frozen_b, k.public_key(), 200));
     let intent_b = outcome.journaled_intent_id().expect("journaled");
     match outcome {
         AcceptOutcome::Superseded { row, replaced, .. } => {
@@ -173,7 +192,9 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
     assert!(intent_before.displaced.is_some());
 
     let real_sig = signed_b.sig;
-    let promoted = store.promote_signed(frozen_b_id, real_sig);
+    let promoted = store
+        .promote_signed(intent_b, real_sig)
+        .expect("promote_signed persistence");
     match promoted {
         PromoteOutcome::Promoted { row } => {
             assert_eq!(
@@ -211,14 +232,17 @@ fn compensate_removes_pending_and_restores_displaced() {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "v1", 100);
         let frozen_a_id = frozen_a.id;
-        store.accept_write(accept(20, frozen_a, k.public_key(), 100));
+        do_accept(store, accept(frozen_a, k.public_key(), 100));
 
         let (frozen_b, _signed_b) = compose(&k, Kind::ContactList, "v2", 200);
         let frozen_b_id = frozen_b.id;
-        let outcome = store.accept_write(accept(21, frozen_b.clone(), k.public_key(), 200));
+        let outcome = do_accept(store, accept(frozen_b.clone(), k.public_key(), 200));
+        let intent_b = outcome.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome, AcceptOutcome::Superseded { .. }));
 
-        let compensated = store.compensate_write(frozen_b_id);
+        let compensated = store
+            .compensate_write(intent_b)
+            .expect("compensate_write persistence");
         match compensated {
             CompensateOutcome::Compensated { restored } => {
                 let restored = restored.expect("the displaced predecessor is restored");
@@ -238,12 +262,11 @@ fn compensate_removes_pending_and_restores_displaced() {
         // re-wins the address (its `created_at` is still the newest), which
         // simultaneously proves ordinary ADDR_INDEX bookkeeping was left
         // consistent by the compensation.
-        use nmp_store::{RelayObserved, RetractReason};
         let _ = RetractReason::Rejected; // documents which reason `compensate_write` used
-        let relay = nostr::RelayUrl::parse("wss://relay.example").expect("relay url");
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
         let reinsert = store.insert(frozen_b, RelayObserved::new(relay, Timestamp::from(300)));
         match reinsert {
-            nmp_store::InsertOutcome::Superseded { replaced } => {
+            InsertOutcome::Superseded { replaced } => {
                 assert_eq!(replaced.event.id, frozen_a_id);
             }
             other => panic!("expected the compensated id to be freely re-insertable (no tombstone), got {other:?}"),
@@ -262,9 +285,8 @@ fn refused_accept_leaves_no_journal_residue() {
             50,
             vec![Tag::expiration(Timestamp::from(10u64))],
         );
-        let frozen_id = frozen.id;
 
-        let outcome = store.accept_write(accept(50, frozen, k.public_key(), 50));
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 50));
         assert!(matches!(
             outcome,
             AcceptOutcome::Refused(RefuseReason::AlreadyExpired)
@@ -273,14 +295,7 @@ fn refused_accept_leaves_no_journal_residue() {
             outcome.journaled_intent_id().is_none(),
             "a refused call must never allocate an IntentId either"
         );
-
-        // No row.
-        assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
-        // No journal residue either: there is nothing to compensate.
-        assert!(matches!(
-            store.compensate_write(frozen_id),
-            CompensateOutcome::NotFound
-        ));
+        assert!(outcome.journaled_receipt_id().is_none());
     });
 
     // RedbStore only: the durable journal itself (not just the row) is
@@ -296,7 +311,7 @@ fn refused_accept_leaves_no_journal_residue() {
         50,
         vec![Tag::expiration(Timestamp::from(10u64))],
     );
-    store.accept_write(accept(51, frozen, k.public_key(), 50));
+    do_accept(&mut store, accept(frozen, k.public_key(), 50));
     assert!(store.recover_outbox().is_empty());
 }
 
@@ -306,7 +321,8 @@ fn pending_row_is_not_gc_evicted_while_intent_open() {
         let k = keys();
         let (frozen, signed) = compose(&k, Kind::TextNote, "unsigned draft", 100);
         let frozen_id = frozen.id;
-        store.accept_write(accept(60, frozen, k.public_key(), 100));
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 100));
+        let intent_id = outcome.journaled_intent_id().expect("journaled");
 
         // An EMPTY claim set: nothing claims this row by demand at all —
         // and yet it must survive GC while still `Pending` (Fable
@@ -323,7 +339,9 @@ fn pending_row_is_not_gc_evicted_while_intent_open() {
 
         // Once promoted, it is an ordinary event again — GC-able under the
         // SAME empty claim set.
-        store.promote_signed(frozen_id, signed.sig);
+        store
+            .promote_signed(intent_id, signed.sig)
+            .expect("promote_signed persistence");
         let report2 = store.gc(&claims);
         assert_eq!(
             report2.events_evicted, 1,
@@ -362,11 +380,11 @@ fn accept_crash_is_all_or_nothing() {
 
     let ok_intent_id = {
         let mut store = RedbStore::open(&path).expect("open redb store");
-        let ok = store.accept_write(accept(40, frozen_ok, k.public_key(), 100));
+        let ok = do_accept(&mut store, accept(frozen_ok, k.public_key(), 100));
         let ok_intent_id = ok.journaled_intent_id().expect("journaled");
         assert!(matches!(ok, AcceptOutcome::Inserted { .. }));
 
-        let refused = store.accept_write(accept(41, frozen_exp, k.public_key(), 50));
+        let refused = do_accept(&mut store, accept(frozen_exp, k.public_key(), 50));
         assert!(matches!(
             refused,
             AcceptOutcome::Refused(RefuseReason::AlreadyExpired)
@@ -408,14 +426,15 @@ fn recover_outbox_reconstructs_inflight_after_reopen() {
     let (frozen, _signed) = compose(&k, Kind::TextNote, "offline draft", 100);
     let frozen_id = frozen.id;
 
-    let accepted_intent_id = {
+    let (accepted_intent_id, accepted_receipt_id) = {
         let mut store = RedbStore::open(&path).expect("open redb store");
-        let outcome = store.accept_write(accept(30, frozen, k.public_key(), 100));
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 100));
         let intent_id = outcome.journaled_intent_id().expect("journaled");
+        let receipt_id = outcome.journaled_receipt_id().expect("journaled");
         assert!(matches!(outcome, AcceptOutcome::Inserted { .. }));
         // Dropped here WITHOUT ever calling `promote_signed` — simulates a
         // crash between acceptance and the signer's response.
-        intent_id
+        (intent_id, receipt_id)
     };
 
     let store = RedbStore::open(&path).expect("reopen redb store");
@@ -423,7 +442,7 @@ fn recover_outbox_reconstructs_inflight_after_reopen() {
     assert_eq!(recovered.len(), 1);
     let intent = &recovered[0];
     assert_eq!(intent.intent_id, accepted_intent_id);
-    assert_eq!(intent.receipt_id, 30);
+    assert_eq!(intent.receipt_id, accepted_receipt_id);
     assert_eq!(intent.frozen.id, frozen_id);
     assert_eq!(intent.sig_state, IntentSigState::Pending);
     assert!(intent.displaced.is_none());
@@ -467,16 +486,14 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
         // path that deletes their `OUTBOX_INTENTS` open-work row, the
         // reuse hazard the correction closes.
         let (frozen1, _signed1) = compose(&k, Kind::TextNote, "one", 100);
-        let frozen1_id = frozen1.id;
-        let outcome1 = store.accept_write(accept(1, frozen1, k.public_key(), 100));
+        let outcome1 = do_accept(&mut store, accept(frozen1, k.public_key(), 100));
         let id1 = outcome1.journaled_intent_id().expect("journaled");
-        store.compensate_write(frozen1_id);
+        store.compensate_write(id1).expect("compensate persistence");
 
         let (frozen2, _signed2) = compose(&k, Kind::TextNote, "two", 200);
-        let frozen2_id = frozen2.id;
-        let outcome2 = store.accept_write(accept(2, frozen2, k.public_key(), 200));
+        let outcome2 = do_accept(&mut store, accept(frozen2, k.public_key(), 200));
         let id2 = outcome2.journaled_intent_id().expect("journaled");
-        store.compensate_write(frozen2_id);
+        store.compensate_write(id2).expect("compensate persistence");
 
         // At this exact moment, `recover_outbox` sees NOTHING open — the
         // scenario a naive "seed past max open id" allocator would read as
@@ -491,7 +508,7 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
     assert!(store.recover_outbox().is_empty());
 
     let (frozen3, _signed3) = compose(&k, Kind::TextNote, "three", 300);
-    let outcome3 = store.accept_write(accept(3, frozen3, k.public_key(), 300));
+    let outcome3 = do_accept(&mut store, accept(frozen3, k.public_key(), 300));
     let id3 = outcome3.journaled_intent_id().expect("journaled");
 
     assert_ne!(
@@ -531,18 +548,29 @@ fn terminal_receipt_still_reattachable_after_recover() {
     let (frozen_comp, _signed_comp) = compose(&k, Kind::TextNote, "gets compensated", 200);
     let frozen_comp_id = frozen_comp.id;
 
-    let (intent_signed, intent_comp) = {
+    let (intent_signed, receipt_signed_id, intent_comp, receipt_comp_id) = {
         let mut store = RedbStore::open(&path).expect("open redb store");
 
-        let outcome_a = store.accept_write(accept(500, frozen_signed, k.public_key(), 100));
+        let outcome_a = do_accept(&mut store, accept(frozen_signed, k.public_key(), 100));
         let intent_signed = outcome_a.journaled_intent_id().expect("journaled");
-        store.promote_signed(frozen_signed_id, signed.sig);
+        let receipt_signed_id = outcome_a.journaled_receipt_id().expect("journaled");
+        store
+            .promote_signed(intent_signed, signed.sig)
+            .expect("promote persistence");
 
-        let outcome_b = store.accept_write(accept(600, frozen_comp, k.public_key(), 200));
+        let outcome_b = do_accept(&mut store, accept(frozen_comp, k.public_key(), 200));
         let intent_comp = outcome_b.journaled_intent_id().expect("journaled");
-        store.compensate_write(frozen_comp_id);
+        let receipt_comp_id = outcome_b.journaled_receipt_id().expect("journaled");
+        store
+            .compensate_write(intent_comp)
+            .expect("compensate persistence");
 
-        (intent_signed, intent_comp)
+        (
+            intent_signed,
+            receipt_signed_id,
+            intent_comp,
+            receipt_comp_id,
+        )
     };
 
     // Reopen. The COMPENSATED intent's open-work row is gone (the
@@ -561,14 +589,14 @@ fn terminal_receipt_still_reattachable_after_recover() {
     );
 
     let receipt_signed = store
-        .reattach_receipt(500)
+        .reattach_receipt(receipt_signed_id)
         .expect("signed receipt must still be reattachable");
     assert_eq!(receipt_signed.intent_id, Some(intent_signed));
     assert_eq!(receipt_signed.frozen_id, frozen_signed_id);
     assert_eq!(receipt_signed.state, ReceiptState::Signed);
 
     let receipt_comp = store
-        .reattach_receipt(600)
+        .reattach_receipt(receipt_comp_id)
         .expect("compensated receipt must still be reattachable");
     assert_eq!(receipt_comp.intent_id, Some(intent_comp));
     assert_eq!(receipt_comp.frozen_id, frozen_comp_id);
@@ -584,10 +612,11 @@ fn terminal_receipt_still_reattachable_after_recover() {
     // within the life of the process.
     let mut mem = MemoryStore::new();
     let (frozen_fresh, _signed_fresh) = compose(&k, Kind::TextNote, "still open", 300);
-    let outcome_fresh = mem.accept_write(accept(700, frozen_fresh, k.public_key(), 300));
+    let outcome_fresh = do_accept(&mut mem, accept(frozen_fresh, k.public_key(), 300));
     let intent_fresh = outcome_fresh.journaled_intent_id().expect("journaled");
+    let receipt_fresh_id = outcome_fresh.journaled_receipt_id().expect("journaled");
     let receipt_fresh = mem
-        .reattach_receipt(700)
+        .reattach_receipt(receipt_fresh_id)
         .expect("fresh receipt reattachable on MemoryStore too");
     assert_eq!(receipt_fresh.intent_id, Some(intent_fresh));
     assert_eq!(receipt_fresh.state, ReceiptState::Accepted);
@@ -613,9 +642,11 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
     let (frozen, _signed) = compose(&k, Kind::TextNote, "fire and forget", 100);
     let frozen_id = frozen.id;
 
-    {
+    let receipt_id = {
         let mut store = RedbStore::open(&path).expect("open redb store");
-        store.accept_ephemeral(800, frozen_id, k.public_key());
+        let receipt_id = store
+            .accept_ephemeral(frozen_id, k.public_key())
+            .expect("accept_ephemeral persistence");
 
         // No pending row: `accept_ephemeral` never touches `EVENTS`.
         assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
@@ -625,7 +656,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
 
         // The receipt itself IS there, `Accepted`, receipt-only.
         let receipt = store
-            .reattach_receipt(800)
+            .reattach_receipt(receipt_id)
             .expect("ephemeral receipt persists immediately");
         assert_eq!(receipt.intent_id, None, "receipt-only: nothing backs it");
         assert_eq!(receipt.frozen_id, frozen_id);
@@ -633,7 +664,8 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
         // Dropped here with no further transition — simulates the process
         // dying before any dispatch/ack tracking (out of this unit's
         // scope) ever advanced this receipt past `Accepted`.
-    }
+        receipt_id
+    };
 
     let store = RedbStore::open(&path).expect("reopen redb store");
 
@@ -644,7 +676,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
     // But the receipt is reattachable, now correctly `Abandoned` — the
     // boot-time reconciliation `RedbStore::open()` runs.
     let receipt = store
-        .reattach_receipt(800)
+        .reattach_receipt(receipt_id)
         .expect("ephemeral receipt still reattachable after reopen");
     assert_eq!(receipt.intent_id, None);
     assert_eq!(receipt.frozen_id, frozen_id);
@@ -657,12 +689,337 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
     let mut mem = MemoryStore::new();
     let (frozen2, _signed2) = compose(&k, Kind::TextNote, "fire and forget 2", 200);
     let frozen2_id = frozen2.id;
-    mem.accept_ephemeral(900, frozen2_id, k.public_key());
+    let receipt2_id = mem
+        .accept_ephemeral(frozen2_id, k.public_key())
+        .expect("accept_ephemeral persistence");
     assert!(mem.query(&Filter::new().id(frozen2_id)).is_empty());
     assert!(mem.recover_outbox().is_empty());
     let mem_receipt = mem
-        .reattach_receipt(900)
+        .reattach_receipt(receipt2_id)
         .expect("ephemeral receipt reattachable on MemoryStore too");
     assert_eq!(mem_receipt.intent_id, None);
     assert_eq!(mem_receipt.state, ReceiptState::Accepted);
+}
+
+/// Architecture-review blocker: `promote_signed`/`compensate_write` used to
+/// locate an intent by reading the CURRENT row at its frozen event id —
+/// which a `Duplicate` (the row belongs to a DIFFERENT provenance) or
+/// `Stale` (no row was ever stored) intent never has. Both must still be
+/// promotable/compensable via their own `IntentId`, keyed off the intent's
+/// own `OUTBOX_INTENTS.frozen_json`, not off `EVENTS`.
+#[test]
+fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
+    for_each_backend(|store| {
+        let k = keys();
+
+        // Duplicate: the exact same frozen body accepted twice.
+        let (frozen_dup, signed_dup) = compose(&k, Kind::TextNote, "same content", 100);
+        let outcome1 = do_accept(store, accept(frozen_dup.clone(), k.public_key(), 100));
+        assert!(matches!(outcome1, AcceptOutcome::Inserted { .. }));
+        let outcome2 = do_accept(store, accept(frozen_dup, k.public_key(), 100));
+        let intent_dup = outcome2.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome2, AcceptOutcome::Duplicate { .. }));
+
+        let promoted_dup = store
+            .promote_signed(intent_dup, signed_dup.sig)
+            .expect("promote persistence");
+        assert!(
+            matches!(promoted_dup, PromoteOutcome::Promoted { .. }),
+            "a Duplicate intent's row belongs to someone else, but it must still promote via its own IntentId"
+        );
+
+        // Stale: an older candidate accepted after a newer one already won.
+        let (frozen_new, _signed_new) = compose(&k, Kind::ContactList, "newer", 200);
+        do_accept(store, accept(frozen_new, k.public_key(), 200));
+
+        let (frozen_old, signed_old) = compose(&k, Kind::ContactList, "older", 100);
+        let outcome_stale = do_accept(store, accept(frozen_old, k.public_key(), 100));
+        let intent_stale = outcome_stale.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_stale, AcceptOutcome::Stale { .. }));
+
+        let promoted_stale = store
+            .promote_signed(intent_stale, signed_old.sig)
+            .expect("promote persistence");
+        match promoted_stale {
+            PromoteOutcome::Promoted { row } => {
+                assert_eq!(row.event.sig, signed_old.sig);
+            }
+            other => panic!("expected Promoted for a Stale intent, got {other:?}"),
+        }
+
+        // A second Stale intent, compensated instead of promoted.
+        let (frozen_old2, _signed_old2) = compose(&k, Kind::ContactList, "older2", 100);
+        let outcome_stale2 = do_accept(store, accept(frozen_old2, k.public_key(), 100));
+        let intent_stale2 = outcome_stale2.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_stale2, AcceptOutcome::Stale { .. }));
+        let compensated_stale2 = store
+            .compensate_write(intent_stale2)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_stale2,
+            CompensateOutcome::Compensated { restored: None }
+        ));
+    });
+}
+
+/// Architecture-review blocker: a stashed pending predecessor "can later
+/// sign or cancel" — its copy in the displacing intent's `OUTBOX_DISPLACED`
+/// must never resurrect STALE state. Signing a displaced intent must sync
+/// the real signature into its stash copy, so that cancelling the intent
+/// that displaced it restores the SIGNED bytes, not the original sentinel.
+#[test]
+fn chained_local_supersession_promote_displaced_then_cancel_newer_restores_signed_predecessor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let mut store = RedbStore::open(&path).expect("open redb store");
+    let k = keys();
+
+    let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
+    let frozen_a_id = frozen_a.id;
+    let outcome_a = do_accept(&mut store, accept(frozen_a, k.public_key(), 100));
+    let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+    let (frozen_b, _signed_b) = compose(&k, Kind::ContactList, "b", 200);
+    let outcome_b = do_accept(&mut store, accept(frozen_b, k.public_key(), 200));
+    let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+    assert!(matches!(outcome_b, AcceptOutcome::Superseded { .. }));
+
+    // A is now displaced (stashed under B, since B superseded it). Sign it
+    // while displaced.
+    let promoted_a = store
+        .promote_signed(intent_a, signed_a.sig)
+        .expect("promote persistence");
+    match promoted_a {
+        PromoteOutcome::Promoted { row } => {
+            assert_eq!(row.event.id, frozen_a_id);
+            assert_eq!(row.event.sig, signed_a.sig);
+        }
+        other => panic!("expected Promoted, got {other:?}"),
+    }
+
+    // Cancel B — restores its displaced predecessor (A), which must carry
+    // the REAL signature synced in above, not the original sentinel.
+    let compensated_b = store
+        .compensate_write(intent_b)
+        .expect("compensate persistence");
+    match compensated_b {
+        CompensateOutcome::Compensated { restored } => {
+            let restored = restored.expect("A restored");
+            assert_eq!(restored.event.id, frozen_a_id);
+            assert_eq!(
+                restored.event.sig, signed_a.sig,
+                "the restored predecessor must carry the REAL signature synced in while it was displaced, not a stale sentinel"
+            );
+            assert_eq!(
+                restored
+                    .provenance
+                    .local
+                    .expect("still carries local provenance")
+                    .sig_state,
+                SigState::Signed
+            );
+        }
+        other => panic!("expected Compensated, got {other:?}"),
+    }
+}
+
+/// Architecture-review blocker (the other half): cancelling a stashed
+/// pending predecessor must invalidate its copy in the displacing intent's
+/// stash for good — a LATER, unrelated cancellation of the displacing
+/// intent must never resurrect an intent that was already permanently
+/// rejected.
+#[test]
+fn chained_local_supersession_cancel_displaced_then_cancel_newer_never_resurrects() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "a", 100);
+        let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let (frozen_b, _signed_b) = compose(&k, Kind::ContactList, "b", 200);
+        let frozen_b_id = frozen_b.id;
+        let outcome_b = do_accept(store, accept(frozen_b, k.public_key(), 200));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Superseded { .. }));
+
+        // Cancel A WHILE it is displaced (stashed under B) — must
+        // invalidate B's stash copy so a later cancel of B can never
+        // resurrect A.
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_a,
+            CompensateOutcome::Compensated { restored: None }
+        ));
+
+        // Cancel B — must find NOTHING to restore (A was permanently
+        // rejected, not merely superseded).
+        let compensated_b = store
+            .compensate_write(intent_b)
+            .expect("compensate persistence");
+        match compensated_b {
+            CompensateOutcome::Compensated { restored } => {
+                assert!(
+                    restored.is_none(),
+                    "a cancelled intent must never be resurrected by a later, unrelated compensation"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(frozen_b_id)).is_empty());
+    });
+}
+
+/// Architecture-review blocker (generalization): an accepted intent's row
+/// can disappear for reasons OTHER than local chained supersession — a
+/// RELAY-observed event superseding it via the ordinary `insert` door is
+/// one. The intent must remain compensable via its own `IntentId`
+/// regardless.
+#[test]
+fn relay_supersession_orphans_pending_intent_still_compensable() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "local", 100);
+        let frozen_a_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let relay_event = EventBuilder::new(Kind::ContactList, "from relay")
+            .custom_created_at(Timestamp::from(200))
+            .sign_with_keys(&k)
+            .expect("sign relay event");
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        let insert_outcome =
+            store.insert(relay_event, RelayObserved::new(relay, Timestamp::from(200)));
+        assert!(matches!(insert_outcome, InsertOutcome::Superseded { .. }));
+        assert!(
+            store.query(&Filter::new().id(frozen_a_id)).is_empty(),
+            "A's row is gone, superseded by the relay-observed event"
+        );
+
+        // Before the fix, `compensate_write(event_id)` would return
+        // `NotFound` here since no live row carries A's id anymore.
+        let compensated = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(
+            matches!(compensated, CompensateOutcome::Compensated { .. }),
+            "an orphaned intent must still be compensable via IntentId, got {compensated:?}"
+        );
+    });
+}
+
+/// Architecture-review blocker (generalization, continued): a kind:5
+/// (NIP-09) deletion from the SAME author can also remove an accepted
+/// intent's pending row via the ordinary `insert` door. The intent must
+/// remain compensable via its own `IntentId`.
+#[test]
+fn kind5_deletion_orphans_pending_intent_still_compensable() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose(&k, Kind::TextNote, "will be deleted", 100);
+        let frozen_a_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let deletion = deletion_event(&k, vec![Tag::event(frozen_a_id)], 200);
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        let insert_outcome =
+            store.insert(deletion, RelayObserved::new(relay, Timestamp::from(200)));
+        assert!(matches!(
+            insert_outcome,
+            InsertOutcome::Kind5Processed { .. }
+        ));
+        assert!(store.query(&Filter::new().id(frozen_a_id)).is_empty());
+
+        let compensated = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
+    });
+}
+
+/// Architecture-review blocker (generalization, continued): a NIP-40
+/// expiration sweep can also remove an accepted intent's pending row. The
+/// intent must remain compensable via its own `IntentId`.
+#[test]
+fn expiry_orphans_pending_intent_still_compensable() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose_with_tags(
+            &k,
+            Kind::TextNote,
+            "expires",
+            100,
+            vec![Tag::expiration(Timestamp::from(150u64))],
+        );
+        let frozen_a_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let due = store.expire_due(Timestamp::from(200u64));
+        assert_eq!(due.len(), 1);
+        assert!(store.query(&Filter::new().id(frozen_a_id)).is_empty());
+
+        let compensated = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
+    });
+}
+
+/// Architecture-review blocker: a locally-composed kind:5 draft did not run
+/// any tombstone-write processing at accept time, so its targets stayed
+/// visible until the relay echoed the deletion back — conflicting with
+/// issue #2's "no app optimistic mirror" promise. `accept_write` must run
+/// the SAME author-verified tombstone-write processing `insert` runs, in
+/// the SAME transaction, so the delete is immediate and local.
+#[test]
+fn kind5_immediate_delete_removes_target_before_relay_echo() {
+    for_each_backend(|store| {
+        let k = keys();
+        // The target is already held (e.g. relay-observed earlier).
+        let target = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+
+        // Locally compose + accept a kind:5 deleting it — BEFORE any relay
+        // echo of the deletion itself.
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
+        match &outcome {
+            AcceptOutcome::Kind5Processed { deleted, .. } => {
+                assert_eq!(deleted.len(), 1);
+                assert_eq!(deleted[0].event.id, target_id);
+            }
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        // Immediate, local, optimistic delete — the target is gone right
+        // now, no relay round-trip needed.
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // A later redelivery of the (byte-identical) target is refused as
+        // tombstoned.
+        let redelivered = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign redelivered target");
+        assert_eq!(redelivered.id, target_id);
+        let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
+        let reinsert = store.insert(
+            redelivered,
+            RelayObserved::new(relay2, Timestamp::from(300)),
+        );
+        assert!(matches!(
+            reinsert,
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
+    });
 }

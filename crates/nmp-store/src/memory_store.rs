@@ -15,9 +15,9 @@ use crate::coverage::{
 };
 use crate::{
     AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
-    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PromoteOutcome,
-    Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason, RelayObserved,
-    RetractReason, SigState, StoredEvent, WriteDurability,
+    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError,
+    PromoteOutcome, Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason,
+    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
 };
 
 /// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
@@ -116,6 +116,11 @@ pub struct MemoryStore {
     /// The store owns this counter (never a caller) — see `IntentId`'s doc
     /// for why a caller-inferred value is unsound.
     next_intent_id: u64,
+    /// The next receipt id to allocate — the identical durable-counter
+    /// treatment as `next_intent_id`, for the identical reason (team-lead
+    /// correction: receipts are durably retained across restart, so a
+    /// caller-side receipt-id counter has `IntentId`'s exact reuse hazard).
+    next_receipt_id: u64,
     /// `OUTBOX_RECEIPTS` mirror: retained receipt records, independent of
     /// `outbox_intents`'s open-work rows (architecture review correction —
     /// see `ReceiptState`'s doc). Never pruned by this unit.
@@ -135,6 +140,12 @@ impl MemoryStore {
     fn alloc_intent_id(&mut self) -> IntentId {
         self.next_intent_id += 1;
         IntentId(self.next_intent_id)
+    }
+
+    /// Allocate the next receipt id, same treatment as `alloc_intent_id`.
+    fn alloc_receipt_id(&mut self) -> u64 {
+        self.next_receipt_id += 1;
+        self.next_receipt_id
     }
 
     /// Write (or overwrite) one `OUTBOX_INTENTS` row plus its
@@ -605,9 +616,8 @@ impl EventStore for MemoryStore {
         report
     }
 
-    fn accept_write(&mut self, accept: AcceptWrite) -> AcceptOutcome {
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         let AcceptWrite {
-            receipt_id,
             frozen,
             expected_pubkey,
             signing_identity_ref,
@@ -618,16 +628,18 @@ impl EventStore for MemoryStore {
         } = accept;
 
         // Refused at the door FIRST, same as `insert`: never journaled,
-        // nothing to recover, and (R7 correction) no `IntentId` is ever
-        // allocated for a refused call — a refusal can never burn an id.
+        // nothing to recover, and (R7 correction) neither an `IntentId`
+        // nor a receipt id is ever allocated for a refused call — a
+        // refusal can never burn either.
         if frozen.is_expired_at(&accepted_at) {
-            return AcceptOutcome::Refused(RefuseReason::AlreadyExpired);
+            return Ok(AcceptOutcome::Refused(RefuseReason::AlreadyExpired));
         }
         if self.tombstone_refuses(&frozen) {
-            return AcceptOutcome::Refused(RefuseReason::Tombstoned);
+            return Ok(AcceptOutcome::Refused(RefuseReason::Tombstoned));
         }
 
         let intent_id = self.alloc_intent_id();
+        let receipt_id = self.alloc_receipt_id();
         let local = LocalOrigin {
             intent_id,
             sig_state: SigState::Pending,
@@ -656,25 +668,53 @@ impl EventStore for MemoryStore {
                 None,
             );
             self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
-            return AcceptOutcome::Duplicate { intent_id, row };
+            return Ok(AcceptOutcome::Duplicate {
+                intent_id,
+                receipt_id,
+                row,
+            });
         }
 
         let stored = StoredEvent {
             event: frozen.clone(),
             provenance: Provenance::local_origin(local),
         };
+        let is_deletion = frozen.kind == Kind::EventDeletion;
 
         let (outcome, displaced) = match address_key_for(&stored.event) {
             None => {
                 self.index_expiration(&stored);
                 self.by_id.insert(stored.event.id, stored.clone());
-                (
-                    AcceptOutcome::Inserted {
-                        intent_id,
-                        row: stored,
-                    },
-                    None,
-                )
+                // Architecture review correction: a locally-composed
+                // kind:5 draft runs the SAME author-verified
+                // tombstone-write processing `insert` runs for a
+                // relay-observed kind:5, immediately, in this same call —
+                // issue #2's "no app optimistic mirror" promise extends to
+                // local deletions too (kind:5 has no replaceable/
+                // addressable address, so this branch is the only one it
+                // can ever reach, mirroring `insert`'s own kind:5
+                // invariant).
+                if is_deletion {
+                    let deleted = self.process_kind5_deletions(&frozen);
+                    (
+                        AcceptOutcome::Kind5Processed {
+                            intent_id,
+                            receipt_id,
+                            row: stored,
+                            deleted,
+                        },
+                        None,
+                    )
+                } else {
+                    (
+                        AcceptOutcome::Inserted {
+                            intent_id,
+                            receipt_id,
+                            row: stored,
+                        },
+                        None,
+                    )
+                }
             }
             Some(key) => match self.addr_index.get(&key).copied() {
                 None => {
@@ -685,6 +725,7 @@ impl EventStore for MemoryStore {
                     (
                         AcceptOutcome::Inserted {
                             intent_id,
+                            receipt_id,
                             row: stored,
                         },
                         None,
@@ -710,13 +751,20 @@ impl EventStore for MemoryStore {
                         (
                             AcceptOutcome::Superseded {
                                 intent_id,
+                                receipt_id,
                                 row: stored,
                                 replaced: Box::new(replaced.clone()),
                             },
                             Some(replaced),
                         )
                     } else {
-                        (AcceptOutcome::Stale { intent_id }, None)
+                        (
+                            AcceptOutcome::Stale {
+                                intent_id,
+                                receipt_id,
+                            },
+                            None,
+                        )
                     }
                 }
             },
@@ -737,32 +785,92 @@ impl EventStore for MemoryStore {
         );
         self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
 
-        outcome
+        Ok(outcome)
     }
 
-    fn promote_signed(&mut self, id: EventId, sig: Signature) -> PromoteOutcome {
-        let Some(se) = self.by_id.get_mut(&id) else {
-            return PromoteOutcome::NotFound;
+    fn promote_signed(
+        &mut self,
+        intent_id: IntentId,
+        sig: Signature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        let Some(intent_record) = self.outbox_intents.get(&intent_id) else {
+            return Ok(PromoteOutcome::NotFound);
         };
-        let Some(local) = se.provenance.local.as_mut() else {
-            return PromoteOutcome::NotFound;
-        };
-        let intent_id = local.intent_id;
-        local.sig_state = SigState::Signed;
-        se.event.sig = sig;
-        let row = se.clone();
+        let frozen_id = intent_record.frozen.id;
+        let accepted_at = intent_record.accepted_at;
 
-        // Same transaction (in-memory: same call), per R6 — durably drop
-        // the displaced stash so recovery after a promote never sees it.
+        // Architecture review correction (load-bearing): is this intent
+        // still the LIVE row at its own frozen id? A `Duplicate`/`Stale`
+        // intent never had one; a once-live row can since have been
+        // superseded (locally or by a relay), kind:5-deleted, or expired.
+        let live = self.by_id.get(&frozen_id).is_some_and(|se| {
+            se.provenance
+                .local
+                .as_ref()
+                .is_some_and(|l| l.intent_id == intent_id)
+        });
+
+        let row = if live {
+            let se = self
+                .by_id
+                .get_mut(&frozen_id)
+                .expect("just checked this row is live for this intent");
+            se.event.sig = sig;
+            se.provenance
+                .local
+                .as_mut()
+                .expect("just checked this row carries local provenance")
+                .sig_state = SigState::Signed;
+            se.clone()
+        } else {
+            // Not live. If this intent's exact frozen bytes are sitting in
+            // some OTHER intent's displaced stash (it was superseded by a
+            // later local edit before it could sign), sync the real
+            // signature there too — otherwise a future restore of that
+            // stash entry would resurrect a stale sentinel copy of an
+            // intent that actually did sign.
+            if let Some(other) = self
+                .outbox_displaced
+                .values_mut()
+                .find(|se| se.event.id == frozen_id)
+            {
+                other.event.sig = sig;
+                if let Some(local) = other.provenance.local.as_mut() {
+                    local.sig_state = SigState::Signed;
+                }
+            }
+            // Either way, no live row exists to mutate — synthesize the
+            // resulting signed bytes from the journal's own copy. The
+            // engine can still publish these even though this intent does
+            // not (or no longer) win any local address.
+            let mut event = self
+                .outbox_intents
+                .get(&intent_id)
+                .expect("looked up at the top of this call")
+                .frozen
+                .clone();
+            event.sig = sig;
+            StoredEvent {
+                event,
+                provenance: Provenance {
+                    seen: BTreeMap::new(),
+                    local: Some(LocalOrigin {
+                        intent_id,
+                        sig_state: SigState::Signed,
+                        accepted_at,
+                    }),
+                },
+            }
+        };
+
+        // Always: update the durable intent/receipt journal + drop THIS
+        // intent's own displaced stash (R6) — unrelated to whether IT is
+        // currently displaced elsewhere.
         self.outbox_displaced.remove(&intent_id);
         if let Some(record) = self.outbox_intents.get_mut(&intent_id) {
             record.sig_state = IntentSigState::Signed;
             record.frozen = row.event.clone();
         }
-        // Architecture review correction: the RETAINED receipt record
-        // (separate from `outbox_intents`'s open-work row) tracks the same
-        // transition — `reattach_receipt` must reflect `Signed` from here
-        // on, independent of whether the open-work row survives.
         if let Some(receipt) = self
             .outbox_receipts
             .values_mut()
@@ -771,35 +879,63 @@ impl EventStore for MemoryStore {
             receipt.state = ReceiptState::Signed;
         }
 
-        PromoteOutcome::Promoted { row: Box::new(row) }
+        Ok(PromoteOutcome::Promoted { row: Box::new(row) })
     }
 
-    fn compensate_write(&mut self, id: EventId) -> CompensateOutcome {
-        let Some(intent_id) = self
-            .by_id
-            .get(&id)
-            .and_then(|se| se.provenance.local.as_ref())
-            .filter(|local| local.sig_state == SigState::Pending)
-            .map(|local| local.intent_id)
-        else {
-            return CompensateOutcome::NotFound;
+    fn compensate_write(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        let Some(intent_record) = self.outbox_intents.get(&intent_id) else {
+            return Ok(CompensateOutcome::NotFound);
         };
+        // Pre-signature only (retraction doc §4.2's "Promotion
+        // correction"): once `promote_signed` has run, this door refuses.
+        if intent_record.sig_state == IntentSigState::Signed {
+            return Ok(CompensateOutcome::NotFound);
+        }
+        let frozen_id = intent_record.frozen.id;
 
-        // §4.2: `remove(id, Rejected)` writes no tombstone (`remove` never
-        // writes one — only kind:5 processing does), then re-insert the
-        // stashed predecessor through the SAME one door — ordinary
-        // supersession, never an un-supersede operation.
-        self.remove(id, RetractReason::Rejected);
+        let live = self.by_id.get(&frozen_id).is_some_and(|se| {
+            se.provenance
+                .local
+                .as_ref()
+                .is_some_and(|l| l.intent_id == intent_id)
+        });
+
+        if live {
+            // §4.2: `remove(id, Rejected)` writes no tombstone (`remove`
+            // never writes one — only kind:5 processing does).
+            self.remove(frozen_id, RetractReason::Rejected);
+        } else {
+            // Not live. If sitting in someone else's displaced stash
+            // (chained local supersession before this intent could sign),
+            // that stash entry must be invalidated for good: this intent
+            // is being permanently rejected, so the intent that displaced
+            // it must never later resurrect it via ITS OWN compensation.
+            let other_key = self
+                .outbox_displaced
+                .iter()
+                .find(|(_, se)| se.event.id == frozen_id)
+                .map(|(k, _)| *k);
+            if let Some(other_key) = other_key {
+                self.outbox_displaced.remove(&other_key);
+            }
+        }
+
         self.outbox_intents.remove(&intent_id);
+        // THIS intent's OWN displaced predecessor (if any) is restored
+        // through the same one door regardless of whether its row was
+        // live or already gone for some other reason (kind:5/expiry/relay
+        // supersession) — `reinsert_stashed`'s own tombstone check makes
+        // this safe even if the predecessor was itself since deleted or
+        // expired.
         let restored = self
             .outbox_displaced
             .remove(&intent_id)
             .and_then(|displaced| self.reinsert_stashed(displaced))
             .map(Box::new);
 
-        // Architecture review correction: `OUTBOX_INTENTS`'s open-work row
-        // is gone (line above), but the RETAINED receipt record survives —
-        // `reattach_receipt` must still answer `Compensated`, not `None`.
         if let Some(receipt) = self
             .outbox_receipts
             .values_mut()
@@ -808,7 +944,7 @@ impl EventStore for MemoryStore {
             receipt.state = ReceiptState::Compensated;
         }
 
-        CompensateOutcome::Compensated { restored }
+        Ok(CompensateOutcome::Compensated { restored })
     }
 
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
@@ -827,16 +963,16 @@ impl EventStore for MemoryStore {
 
     fn accept_ephemeral(
         &mut self,
-        receipt_id: u64,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
-    ) {
+    ) -> Result<u64, PersistenceError> {
         // Receipt-ONLY: no EVENTS row, no OUTBOX_INTENTS row — nothing
         // backs `intent_id` at all (`None`). `MemoryStore` never models a
         // real crash (Q4), so there is no boot-time reconciliation to
         // `Abandoned` here — an ephemeral receipt just stays `Accepted`
         // for the life of the process unless the engine transitions it
         // itself (out of this unit's scope).
+        let receipt_id = self.alloc_receipt_id();
         self.outbox_receipts.insert(
             receipt_id,
             RecoveredReceipt {
@@ -847,5 +983,6 @@ impl EventStore for MemoryStore {
                 state: ReceiptState::Accepted,
             },
         );
+        Ok(receipt_id)
     }
 }

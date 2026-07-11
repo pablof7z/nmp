@@ -181,6 +181,29 @@ pub fn sentinel_signature() -> Signature {
         .expect("64 zero bytes is always a structurally valid (length-checked) schnorr signature")
 }
 
+/// A durable-persistence failure at the acceptance boundary
+/// (`docs/design/durable-write-signing-and-retry.md` §1: "If that
+/// transaction fails, the caller receives an acceptance error and no
+/// pending row becomes visible" — architecture review correction).
+/// Realistic runtime failures (disk full, I/O error) at `accept_write`/
+/// `accept_ephemeral`/`promote_signed`/`compensate_write` must never panic
+/// the embedding app — unlike the rest of this crate's `redb` usage, which
+/// stays `.expect()`-on-invariant-violation per this crate's own module
+/// doc (a healthy embedded DB file failing to open a table it created
+/// itself is a bug; a write failing because the disk is full is not).
+/// `MemoryStore` implements the same fallible signature for backend
+/// uniformity but never actually returns `Err` (it does no I/O).
+#[derive(Debug)]
+pub struct PersistenceError(pub String);
+
+impl std::fmt::Display for PersistenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "durable-store persistence failure: {}", self.0)
+    }
+}
+
+impl std::error::Error for PersistenceError {}
+
 /// A stored event plus its provenance. What `query` returns — every caller
 /// gets provenance for free, never a bare `Event` (ledger #5's falsifier:
 /// no `query` path returns an event without its provenance populated).
@@ -314,14 +337,18 @@ pub enum IntentSigState {
 /// gathered into one struct so `accept_write` can commit it and the pending
 /// row in a single `redb::WriteTransaction` — atomicity is structural, not
 /// a calling convention.
+///
+/// NOTE: neither an `IntentId` nor a receipt id is a field here — the store
+/// allocates BOTH, from durable high-water marks bumped inside this same
+/// transaction, and hands both back on every journaled [`AcceptOutcome`]
+/// variant. See [`IntentId`]'s doc for why a caller-supplied id of either
+/// kind is unsound: issue #3's "receipt ids remain stable and unique
+/// across restart" carries the IDENTICAL reuse hazard the moment receipts
+/// are durably retained across restart (architecture review correction) —
+/// an engine-side counter that resets on restart could hand out a receipt
+/// id colliding with a retained `OUTBOX_RECEIPTS` row, making
+/// `reattach_receipt` ambiguous.
 pub struct AcceptWrite {
-    /// The engine's own `ReceiptId`, persisted so it can be reattached
-    /// after restart (issue #3: "receipt ids remain stable and unique
-    /// across restart"). NOTE: `IntentId` is deliberately absent from this
-    /// struct — the store allocates it (see [`IntentId`]'s doc for why a
-    /// caller-supplied one is unsound) and hands it back on every
-    /// journaled [`AcceptOutcome`] variant.
-    pub receipt_id: u64,
     /// The frozen, unsigned NIP-01 body: pubkey/created_at/kind/tags/
     /// content are final and `event.id` is already `EventId::new(..)` over
     /// exactly those fields (the signature is not an id input — Q1).
@@ -361,19 +388,22 @@ pub struct AcceptWrite {
 /// *refusal* check `insert` runs, not `insert`'s deletion-processing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
-    /// Brand-new pending row, no address competition. `intent_id` is the
-    /// store-allocated id (see [`IntentId`]'s doc) — the ONLY place a
-    /// caller learns it.
+    /// Brand-new pending row, no address competition. `intent_id`/
+    /// `receipt_id` are the store-allocated ids (see [`IntentId`]'s doc) —
+    /// the ONLY place a caller learns either.
     Inserted {
         intent_id: IntentId,
+        receipt_id: u64,
         row: StoredEvent,
     },
     /// This exact event id was already held (see `Provenance::local_origin`'s
     /// doc — an edge case, not the relay-echo hand-off, which goes through
     /// ordinary `insert`/dedup instead). Still allocates and journals a
-    /// fresh `intent_id` — this call is still a distinct accepted intent.
+    /// fresh `intent_id`/`receipt_id` — this call is still a distinct
+    /// accepted intent.
     Duplicate {
         intent_id: IntentId,
+        receipt_id: u64,
         row: StoredEvent,
     },
     /// The pending row won a replaceable/addressable address, evicting
@@ -382,18 +412,41 @@ pub enum AcceptOutcome {
     /// (`compensate_write`) can restore it (retraction doc §4.2).
     Superseded {
         intent_id: IntentId,
+        receipt_id: u64,
         row: StoredEvent,
         replaced: Box<StoredEvent>,
     },
     /// This intent lost its address race to an existing, newer winner.
     /// The intent is still journaled (still gets signed and delivered —
     /// only `Refused` below skips the journal) but produces no pending row.
-    Stale { intent_id: IntentId },
+    Stale {
+        intent_id: IntentId,
+        receipt_id: u64,
+    },
+    /// A locally-composed kind:5 (NIP-09) deletion, stored like any other
+    /// pending row through this door AND, in the SAME transaction, running
+    /// the identical author-verified tombstone-write processing `insert`
+    /// runs for a relay-observed kind:5 (architecture review correction:
+    /// issue #2's "no app optimistic mirror" promise extends to
+    /// locally-composed deletions too — the targets disappear from the
+    /// LOCAL replica immediately, before any relay round-trip, not only
+    /// once the relay echoes this deletion back through `insert`'s
+    /// dedup-by-id branch). `deleted` holds every currently-held target
+    /// this deletion actually removed, mirroring `InsertOutcome::
+    /// Kind5Processed`. Returned in place of `Inserted` only for this one
+    /// case — kind:5 has no replaceable/addressable address, so it can
+    /// never reach `Superseded`/`Stale` by construction.
+    Kind5Processed {
+        intent_id: IntentId,
+        receipt_id: u64,
+        row: StoredEvent,
+        deleted: Vec<StoredEvent>,
+    },
     /// Refused at the door — the same tombstone/expiry refusal `insert`
     /// runs. Terminal typed failure to the caller (R3): NOTHING is
     /// journaled — no intent row, no pending row, no receipt residue, and
-    /// (correspondingly) no `IntentId` is ever allocated for a refused
-    /// call, so refusal can never "burn" an id.
+    /// (correspondingly) no `IntentId`/receipt id is ever allocated for a
+    /// refused call, so refusal can never "burn" either.
     Refused(RefuseReason),
 }
 
@@ -406,7 +459,23 @@ impl AcceptOutcome {
             AcceptOutcome::Inserted { intent_id, .. }
             | AcceptOutcome::Duplicate { intent_id, .. }
             | AcceptOutcome::Superseded { intent_id, .. }
-            | AcceptOutcome::Stale { intent_id } => Some(*intent_id),
+            | AcceptOutcome::Stale { intent_id, .. }
+            | AcceptOutcome::Kind5Processed { intent_id, .. } => Some(*intent_id),
+            AcceptOutcome::Refused(_) => None,
+        }
+    }
+
+    /// The store-allocated receipt id this call journaled, if any — `None`
+    /// only for `Refused` (architecture review correction: receipt ids are
+    /// store-allocated the same way `IntentId` is, and a refusal burns
+    /// neither).
+    pub fn journaled_receipt_id(&self) -> Option<u64> {
+        match self {
+            AcceptOutcome::Inserted { receipt_id, .. }
+            | AcceptOutcome::Duplicate { receipt_id, .. }
+            | AcceptOutcome::Superseded { receipt_id, .. }
+            | AcceptOutcome::Stale { receipt_id, .. }
+            | AcceptOutcome::Kind5Processed { receipt_id, .. } => Some(*receipt_id),
             AcceptOutcome::Refused(_) => None,
         }
     }
@@ -609,30 +678,76 @@ pub trait EventStore {
     /// (`OUTBOX_INTENTS` + `OUTBOX_DISPLACED`, if a predecessor was
     /// evicted) in ONE transaction (Fable checkpoint R7) — a crash mid-call
     /// leaves either nothing recoverable or a fully `recover_outbox`-able
-    /// `Accepted`. `Refused` writes nothing at all (R3).
-    fn accept_write(&mut self, accept: AcceptWrite) -> AcceptOutcome;
+    /// `Accepted`. `Refused` writes nothing at all (R3). A locally-composed
+    /// kind:5 draft additionally runs the identical author-verified
+    /// tombstone-write processing `insert` runs for a relay-observed
+    /// kind:5, in the SAME transaction (architecture review correction:
+    /// issue #2's immediate-delete promise extends to local compositions,
+    /// not only the relay echo) — see `AcceptOutcome::Kind5Processed`.
+    ///
+    /// Fallible (architecture review correction,
+    /// `docs/design/durable-write-signing-and-retry.md` §1: "if that
+    /// transaction fails, the caller receives an acceptance error and no
+    /// pending row becomes visible"): a realistic persistence failure
+    /// (disk full, I/O error) returns `Err` rather than panicking the
+    /// embedding app — unlike this crate's other, pre-existing doors,
+    /// which remain `.expect()`-on-invariant-violation by design.
+    /// `MemoryStore` never actually returns `Err` (no I/O).
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError>;
 
-    /// Swap the sentinel signature on the local pending row `id` for the
-    /// real `sig`, in place (same id — a NIP-01 id never depends on `sig`
-    /// — so this is a value update, not a remove/re-add), and flip its
-    /// `SigState` to `Signed`. In the SAME transaction: `OUTBOX_INTENTS`'s
-    /// `sig_state` flips to `Signed`, and the intent's `OUTBOX_DISPLACED`
-    /// stash (if any) is durably deleted (R6) — recovery after a promote
-    /// must never see a stale displaced stash. The caller must have already
-    /// validated `sig` against the frozen body/pubkey/id
-    /// (`nostr::Event::verify`) — this door does not re-verify (signature
-    /// verification is explicitly out of scope for this crate).
-    fn promote_signed(&mut self, id: EventId, sig: Signature) -> PromoteOutcome;
+    /// Swap the sentinel signature on `intent_id`'s frozen body for the
+    /// real `sig` and flip its `SigState`/`IntentSigState` to `Signed`, in
+    /// the SAME transaction that durably drops the intent's own
+    /// `OUTBOX_DISPLACED` stash (R6) and updates its retained receipt.
+    /// Keyed by `IntentId`, NOT the frozen event's id (architecture review
+    /// correction — load-bearing): the intent's `OUTBOX_INTENTS.frozen_json`
+    /// is the durable source of truth for its body regardless of whether a
+    /// live `EVENTS` row currently exists for it. Three cases, uniformly:
+    /// (a) a live row still carries `local.intent_id == intent_id` — mutate
+    /// it in place (same id — a NIP-01 id never depends on `sig` — so this
+    /// is a value update, not a remove/re-add); (b) no live row, but this
+    /// intent's exact frozen bytes are sitting in some OTHER intent's
+    /// `OUTBOX_DISPLACED` stash (it was superseded by a later local edit
+    /// before it could sign) — sync the real signature into that stash
+    /// entry too, so a future restore of it never resurrects a stale
+    /// sentinel copy; (c) neither (the intent was `Stale`/`Duplicate` at
+    /// acceptance, or its row was since superseded by a RELAY-observed
+    /// event, kind:5-deleted, or NIP-40-expired) — mutate only the durable
+    /// `OUTBOX_INTENTS`/`OUTBOX_RECEIPTS` journal copies; the resulting
+    /// signed bytes are still returned so the engine can publish them even
+    /// though this intent does not (or no longer) wins any local address.
+    /// The caller must have already validated `sig` against the frozen
+    /// body/pubkey/id (`nostr::Event::verify`) — this door does not
+    /// re-verify (signature verification is explicitly out of scope for
+    /// this crate). Fallible for the same reason `accept_write` is.
+    fn promote_signed(
+        &mut self,
+        intent_id: IntentId,
+        sig: Signature,
+    ) -> Result<PromoteOutcome, PersistenceError>;
 
     /// Pre-signature compensation only (retraction doc §4.2's "Promotion
     /// correction": once `promote_signed` has run, relay ACK/reject/timeout
-    /// is receipt-only and NEVER reaches this door). In ONE transaction:
-    /// `remove(id, Rejected)` (no tombstone), re-`insert` the intent's
+    /// is receipt-only and NEVER reaches this door — a `Signed` intent
+    /// answers `NotFound` here). Keyed by `IntentId` (same architecture
+    /// review correction as `promote_signed`, same three cases): (a) a live
+    /// row still carries `local.intent_id == intent_id` — `remove(id,
+    /// Rejected)` (no tombstone), then re-`insert` the intent's
     /// durably-stashed `displaced` predecessor (if any) through the same
     /// one door — it wins its address back by ordinary supersession, never
-    /// an un-supersede operation — and delete the intent's
-    /// `OUTBOX_INTENTS`/`OUTBOX_DISPLACED` rows.
-    fn compensate_write(&mut self, id: EventId) -> CompensateOutcome;
+    /// an un-supersede operation; (b) no live row, but this intent's exact
+    /// frozen bytes are sitting in some OTHER intent's `OUTBOX_DISPLACED`
+    /// stash — that stash entry is invalidated (removed) for good: this
+    /// intent is being permanently rejected, so the intent that displaced
+    /// it must never later resurrect it via ITS OWN compensation; (c)
+    /// neither — nothing to remove or restore in `EVENTS`. In every case,
+    /// this intent's own `OUTBOX_INTENTS`/`OUTBOX_DISPLACED` rows are
+    /// deleted and its retained receipt updated to `Compensated`. Fallible
+    /// for the same reason `accept_write` is.
+    fn compensate_write(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError>;
 
     /// Read every still-open intent back out of the durable journal on
     /// boot (issue #3 §2.3). Read-only: the pending rows themselves are
@@ -668,5 +783,16 @@ pub trait EventStore {
     /// (nothing backs it — no intent, no journal, no pending event row),
     /// state starts `Accepted`. See [`ReceiptState::Abandoned`] for what
     /// happens to it if the process dies before any further transition.
-    fn accept_ephemeral(&mut self, receipt_id: u64, frozen_id: EventId, expected_pubkey: PublicKey);
+    ///
+    /// Returns the store-allocated receipt id — the same durable
+    /// high-water-mark `accept_write` allocates from (architecture review
+    /// correction: a caller-side receipt-id counter that resets on
+    /// restart has the identical reuse hazard `IntentId` had, now that
+    /// receipts are durably retained across restart). Fallible for the
+    /// same reason `accept_write` is.
+    fn accept_ephemeral(
+        &mut self,
+        frozen_id: EventId,
+        expected_pubkey: PublicKey,
+    ) -> Result<u64, PersistenceError>;
 }
