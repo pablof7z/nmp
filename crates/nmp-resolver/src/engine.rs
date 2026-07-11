@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::{Rc, Weak};
 
 use nmp_grammar::{Binding, ConcreteFilter, DemandDelta, DemandOp, DescriptorHash, Filter};
-use nmp_store::{EventStore, InsertOutcome, RelayObserved};
+use nmp_store::{
+    AcceptOutcome, AcceptWrite, EventStore, InsertOutcome, PersistenceError, RelayObserved,
+};
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
 
@@ -437,6 +439,63 @@ impl<S: EventStore> Engine<S> {
             }
         }
         self.react(inserted, removed)
+    }
+
+    /// The local-authorship mirror of [`Self::ingest_observed`]
+    /// (`crashsafe-accepted-2-3-plan.md` §1.2, #2/#3 under epic #23): a
+    /// locally-composed write enters the ONE store through the
+    /// [`EventStore::accept_write`] door (local provenance +
+    /// `SigState::Pending` instead of a `RelayObserved`) and its
+    /// [`AcceptOutcome`] is sorted into `react`'s `inserted`/`removed`
+    /// EXACTLY as a relay insert's [`InsertOutcome`] is — so the pending row
+    /// is query-visible immediately, participates in `Derived` re-resolution
+    /// (an optimistic kind:3 edit re-resolves follows), replaceable/
+    /// addressable supersession, and the §1 negative-delta lane, with **no
+    /// app optimistic mirror** and no new visibility mechanism.
+    ///
+    /// This method OWNS the single `accept_write` call (the store allocates
+    /// the `intent_id`/`receipt_id` inside its own transaction — the one
+    /// place a caller learns either), so it returns the outcome UNCHANGED
+    /// alongside the `DemandDelta`: `EngineCore` (U3) reads the ids off it
+    /// via [`AcceptOutcome::journaled_intent_id`]/
+    /// [`AcceptOutcome::journaled_receipt_id`] to journal its `PendingWrite`
+    /// and emit `Accepted`, without a second (unsound, two-transaction) door
+    /// call. The outcome is matched by reference to derive the react inputs,
+    /// never consumed/reconstructed. Sorting mirrors `ingest_observed`:
+    /// `Inserted`/`Superseded`/`Kind5Processed` push the new row to
+    /// `inserted` (and `Superseded`'s evicted predecessor / `Kind5Processed`'s
+    /// hidden rows to `removed`); `Duplicate` (row already reflected) and
+    /// `Stale` (no pending row produced) yield an empty delta; `Refused`
+    /// yields an empty delta and carries no journal ids. A door-level
+    /// persistence failure is surfaced as `Err` — the resolver graph is
+    /// untouched (`accept_write` is atomic: on `Err` nothing committed).
+    pub fn accept_local(
+        &mut self,
+        accept: AcceptWrite,
+    ) -> Result<(AcceptOutcome, DemandDelta), PersistenceError> {
+        let outcome = self.store.accept_write(accept)?;
+        let mut inserted: Vec<nostr::Event> = Vec::new();
+        let mut removed: Vec<nostr::Event> = Vec::new();
+        match &outcome {
+            AcceptOutcome::Inserted { row, .. } => inserted.push(row.event.clone()),
+            AcceptOutcome::Superseded { row, replaced, .. } => {
+                inserted.push(row.event.clone());
+                removed.push(replaced.event.clone());
+            }
+            AcceptOutcome::Kind5Processed { row, hidden, .. } => {
+                inserted.push(row.event.clone());
+                removed.extend(hidden.iter().map(|se| se.event.clone()));
+            }
+            // Never a new query fact -- empty delta: a `Duplicate` row was
+            // already reflected in the store (relay echo / co-owner join),
+            // a `Stale` intent produced no pending row (lost its address
+            // race), and a `Refused` intent never entered the store at all.
+            AcceptOutcome::Duplicate { .. }
+            | AcceptOutcome::Stale { .. }
+            | AcceptOutcome::Refused(_) => {}
+        }
+        let delta = self.react(inserted, removed);
+        Ok((outcome, delta))
     }
 
     /// Seed dirty-marks from removals that arrive with NO inbound event at
