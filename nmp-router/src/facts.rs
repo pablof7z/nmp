@@ -101,16 +101,26 @@ impl Default for RelayLimits {
     }
 }
 
-/// The discovery-kind set (default `{0, 3, 10002, 10050}`). An atom whose
-/// `kinds` is a (non-empty) subset of this set MAY use the
-/// `IndexerDiscovery` lane; a content atom never may (ledger: "indexers are
-/// never a content fallback").
+/// The discovery-kind set (default `{0, 3} ∪ 10000..=19999` -- every
+/// NIP-01 REPLACEABLE-range kind, plus kind:0/3 -- owner-affirmed semantics:
+/// "discovery = 0/3/1xxxx". An atom whose `kinds` is a (non-empty) subset of
+/// this set MAY use the `IndexerDiscovery` lane; a content atom never may
+/// (ledger: "indexers are never a content fallback"). Additive with every
+/// other role a relay may carry: nothing here excludes a relay that is ALSO
+/// one of an author's own kind:10002 write relays from carrying that
+/// author's content atoms too (`route::build_candidates` looks up
+/// `write_relays`/`indexers` independently and unions the results into one
+/// candidate list per author -- see `nmp-router/src/router.rs`'s
+/// `additive_relay_role_*` tests).
 #[derive(Clone, Debug)]
 pub struct DiscoveryKinds(pub BTreeSet<u16>);
 
 impl Default for DiscoveryKinds {
     fn default() -> Self {
-        Self(BTreeSet::from([0, 3, 10002, 10050]))
+        let mut kinds: BTreeSet<u16> = (10_000..=19_999).collect();
+        kinds.insert(0);
+        kinds.insert(3);
+        Self(kinds)
     }
 }
 
@@ -295,11 +305,19 @@ impl RelayDirectory for LiveDirectory {
     }
 
     fn ingest_write_relays(&mut self, author: PubkeyHex, relays: Vec<LanedRelay>) {
-        if relays.is_empty() {
-            self.write.remove(&author);
-        } else {
-            self.write.insert(author, relays);
-        }
+        // Always RECORD the fact, even when `relays` is empty -- per the
+        // trait doc's own contract ("still recorded as known, zero relays,
+        // not the same as never having ingested one"). The previous
+        // `remove`-on-empty implementation violated that contract (an
+        // author whose current kind:10002 declares zero write relays looked
+        // IDENTICAL to an author never ingested at all): both produced the
+        // same `write_relays()` answer (an empty `Vec`), which is the only
+        // signal this trait exposes today, so this had no observable effect
+        // on routing -- but it is still a real doc/impl mismatch, and a
+        // future caller that DOES need to distinguish "known, declares
+        // nothing" from "never resolved" (e.g. a `contains_key`-style check)
+        // would have silently gotten the wrong answer.
+        self.write.insert(author, relays);
     }
 }
 
@@ -399,5 +417,21 @@ mod tests {
         assert!(!dk.is_discovery(&Some(BTreeSet::from([1u16]))));
         assert!(!dk.is_discovery(&Some(BTreeSet::from([1u16, 3u16]))));
         assert!(!dk.is_discovery(&None));
+    }
+
+    /// Owner-affirmed semantics: discovery = kind:0, kind:3, and the WHOLE
+    /// NIP-01 replaceable-event range (10000..=19999), not just the four
+    /// kinds NMP happens to read today -- any future replaceable list kind
+    /// (kind:10050 DM inbox already included, plus whatever else lands in
+    /// that range later) is a discovery kind with zero further code changes.
+    #[test]
+    fn discovery_kinds_default_covers_the_whole_replaceable_range() {
+        let dk = DiscoveryKinds::default();
+        assert!(dk.is_discovery(&Some(BTreeSet::from([10_000u16]))));
+        assert!(dk.is_discovery(&Some(BTreeSet::from([10_050u16]))));
+        assert!(dk.is_discovery(&Some(BTreeSet::from([19_999u16]))));
+        assert!(!dk.is_discovery(&Some(BTreeSet::from([9_999u16]))));
+        assert!(!dk.is_discovery(&Some(BTreeSet::from([20_000u16]))));
+        assert!(!dk.is_discovery(&Some(BTreeSet::from([1u16, 10_002u16]))));
     }
 }

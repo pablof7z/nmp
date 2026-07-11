@@ -235,4 +235,98 @@ mod tests {
             }
         }
     }
+
+    /// Owner clarification (relay roles are ADDITIVE, not mutually
+    /// exclusive): a relay that is BOTH an author's own kind:10002 write
+    /// relay AND one of the operator's configured indexers must receive
+    /// BOTH that author's content kinds (kind:1) AND discovery-kind reads
+    /// (kind:3/kind:0/kind:1xxxx) -- `route::build_candidates` looks up
+    /// `write_relays`/`indexers` independently and unions the results into
+    /// one candidate list per author (never a one-role-per-relay
+    /// dedup/exclusion), so the SAME relay legitimately shows up as a
+    /// covering candidate for both an author's outbox group AND their
+    /// discovery group.
+    #[test]
+    fn additive_relay_roles_union_not_exclusive() {
+        let shared = test_relay(0);
+        let dir = FixtureDirectory::new()
+            .with_write(pk('a'), [shared.clone()])
+            .with_indexer(shared.clone());
+        let mut router = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        // kind:1 (content, never discovery-eligible) + kind:3 (discovery)
+        // for the SAME author -- both must route to `shared`.
+        let demand = BTreeSet::from([cf(1, &[pk('a').as_str()]), cf(3, &[pk('a').as_str()])]);
+        let _ = router.compile(&demand, &dir, 10);
+        let plan = router.plan();
+
+        assert!(
+            plan.reqs.contains_key(&shared),
+            "the relay serving both roles must appear in the plan at all"
+        );
+        let covered_kinds: BTreeSet<u16> = plan.reqs[&shared]
+            .iter()
+            .flat_map(|req| req.filter.kinds.clone().unwrap_or_default())
+            .collect();
+        assert!(
+            covered_kinds.contains(&1u16),
+            "the write-relay role must still route the author's content kind: {covered_kinds:?}"
+        );
+        assert!(
+            covered_kinds.contains(&3u16),
+            "the indexer role must still route the author's discovery kind: {covered_kinds:?}"
+        );
+
+        // `shared` qualifies via BOTH lanes (`route::build_candidates` looks
+        // up `write_relays`/`indexers` independently and appends both into
+        // one candidate list, never excluding one because of the other) --
+        // `route::lane_of`'s own doc records this is a deliberate,
+        // documented tie-break (write_relays listed first => Nip65Write
+        // wins the label when a relay qualifies both ways), not a dedup
+        // that drops the indexer role's eligibility. What matters -- and
+        // what the kind-coverage assertions above already prove -- is that
+        // BOTH roles' kinds still route to `shared` regardless of which
+        // single lane the tie-break happens to label it with.
+        let lanes: BTreeSet<Lane> = plan.reqs[&shared]
+            .iter()
+            .flat_map(|req| req.provenance.iter().map(|p| p.lane))
+            .collect();
+        assert!(
+            lanes.contains(&Lane::Nip65Write),
+            "must carry Nip65Write provenance: {lanes:?}"
+        );
+
+        // Sanity check that `IndexerDiscovery` attribution itself still
+        // works in general (i.e. the tie-break above is a labeling nuance
+        // for the double-qualifying relay, not a broken lane): an
+        // indexer-ONLY relay (not in `a`'s write-relay list) covering the
+        // SAME discovery atom must be labeled `IndexerDiscovery`.
+        let indexer_only = test_relay(1);
+        let dir2 = FixtureDirectory::new()
+            .with_write(pk('a'), [shared.clone()])
+            .with_indexer(shared.clone())
+            .with_indexer(indexer_only.clone());
+        let mut router2 = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        let _ = router2.compile(&demand, &dir2, 10);
+        let plan2 = router2.plan();
+        let indexer_only_lanes: BTreeSet<Lane> = plan2
+            .reqs
+            .get(&indexer_only)
+            .into_iter()
+            .flatten()
+            .flat_map(|req| req.provenance.iter().map(|p| p.lane))
+            .collect();
+        assert!(
+            indexer_only_lanes.contains(&Lane::IndexerDiscovery),
+            "an indexer-only relay covering the discovery atom must still be \
+             labeled IndexerDiscovery: {indexer_only_lanes:?}"
+        );
+    }
 }

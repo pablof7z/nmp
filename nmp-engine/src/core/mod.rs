@@ -1041,24 +1041,46 @@ impl<S: EventStore> EngineCore<S> {
 
     /// The self-bootstrapping outbox (M5, `docs/known-gaps.md`'s
     /// "RelayDirectory" gap): keep an internal kind:10002 discovery
-    /// subscription open for EXACTLY the authors current demand references
-    /// whose write relays `self.directory` doesn't know yet -- never more,
-    /// never a permanent/whole-graph scan. Called at the top of every
-    /// `recompile` (i.e. on every subscribe/unsubscribe/re-root/ingest), so
-    /// it reacts to both directions of change: a newly-demanded author with
-    /// unknown relays gets discovered; an author who is no longer demanded
-    /// (or whose relays just became known) drops out of the discovery set.
+    /// subscription open covering EVERY author current demand has EVER
+    /// referenced whose write relays `self.directory` didn't know yet at the
+    /// time -- never a permanent/whole-graph scan (still bounded by "every
+    /// author this session has actually demanded content for"). Called at
+    /// the top of every `recompile` (i.e. on every subscribe/unsubscribe/
+    /// re-root/ingest).
+    ///
+    /// WIDEN-ONLY (`docs/known-gaps.md`'s kind:10002 over-fetch finding: 7112
+    /// events received against a 39-author resolved set, root-caused to THIS
+    /// function -- see the finding's investigation notes): a newly-demanded
+    /// author with unknown relays widens the subscription; an author whose
+    /// relays just became known is deliberately left IN the filter rather
+    /// than dropped. Reopening on every shrink was the actual bug -- an
+    /// author leaving `needed` the moment their kind:10002 resolves used to
+    /// tear down and reopen the ENTIRE subscription (dropping that one
+    /// author from a fresh, differently-shaped filter), and to a NIP-01
+    /// relay an overwriting Req on an already-open sub-id is
+    /// indistinguishable from a brand-new subscription: it replies with a
+    /// full EOSE replay of every event still matching the new filter. Over N
+    /// authors resolving one at a time that is a triangular-number amount of
+    /// redelivered events (N+(N-1)+...+1), not O(N) -- exactly the
+    /// mechanism behind the 7112-for-39 finding. Leaving a resolved author
+    /// in the filter a while longer is widen-safe (matches(wider) ⊇
+    /// matches(narrower), the same proof obligation `nmp_router::coalesce`'s
+    /// `AuthorUnion` rule already carries) -- it can only mean a few extra,
+    /// already-known kind:10002 deliveries for that author, never a
+    /// structural over-fetch. The subscription is only ever torn down when
+    /// `needed` goes fully empty (every demanded author has resolved, or
+    /// none are demanded at all) -- at that point there is nothing left this
+    /// discovery sub is for, so it closes rather than idling forever.
     ///
     /// Deliberately reuses the ordinary resolver subscribe/unsubscribe
     /// machinery rather than hand-rolling a parallel subscription system:
-    /// the discovery atom this produces (`kinds:[10002], authors:{needed}`)
+    /// the discovery atom this produces (`kinds:[10002], authors:{covered}`)
     /// is just another entry in `resolver.active_demand()`, so the router's
-    /// EXISTING discovery-kind eligibility (`DiscoveryKinds` already
-    /// contains 10002) is what routes it to the configured indexers -- no
-    /// router-side change was needed for that half at all. A content atom
-    /// for an author with no known write relays simply routes nowhere in
-    /// the meantime (never an indexer fallback -- "indexers are never a
-    /// content fallback").
+    /// EXISTING discovery-kind eligibility is what routes it to the
+    /// configured indexers -- no router-side change was needed for that half
+    /// at all. A content atom for an author with no known write relays
+    /// simply routes nowhere in the meantime (never an indexer fallback --
+    /// "indexers are never a content fallback").
     fn sync_discovery(&mut self) {
         let needed: BTreeSet<PubkeyHex> = self
             .resolver
@@ -1069,26 +1091,36 @@ impl<S: EventStore> EngineCore<S> {
             .filter(|author| self.directory.write_relays(author).is_empty())
             .collect();
 
-        if needed == self.discovery_authors {
-            return; // no change -- leave whatever subscription exists untouched.
-        }
-
-        // Drop whatever discovery subscription is currently open (its
-        // `Drop` impl only ENQUEUES the withdrawal -- draining happens
-        // below, either by `resolver.subscribe`'s own drain-on-entry or,
-        // when there is nothing to replace it with, by the explicit
-        // `poll_pending_drops` flush).
-        self.discovery_handle = None;
-        self.discovery_authors = needed.clone();
-
         if needed.is_empty() {
+            if self.discovery_handle.is_none() && self.discovery_authors.is_empty() {
+                return; // already closed -- nothing to do.
+            }
+            // Every previously-needed author has resolved (or nothing was
+            // ever demanded): nothing left for this sub to cover, so close
+            // it. Its `Drop` impl only ENQUEUES the withdrawal; there is
+            // nothing to replace it with, so flush explicitly.
+            self.discovery_handle = None;
+            self.discovery_authors = BTreeSet::new();
             let _ = self.resolver.poll_pending_drops();
             return;
         }
 
+        if needed.is_subset(&self.discovery_authors) {
+            // Nothing NEW to cover -- leave the existing subscription
+            // exactly as-is, even though it may now be wider than strictly
+            // required (see this fn's doc: that's the whole point).
+            return;
+        }
+
+        // Widen: union in whatever's newly needed and reopen with the
+        // WIDENED set. Its `Drop` impl only ENQUEUES the old withdrawal;
+        // `resolver.subscribe`'s own drain-on-entry flushes it before
+        // building the new atom.
+        self.discovery_authors = self.discovery_authors.union(&needed).cloned().collect();
+        self.discovery_handle = None;
         let query = LiveQuery(Filter {
             kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
-            authors: Some(Binding::Literal(needed)),
+            authors: Some(Binding::Literal(self.discovery_authors.clone())),
             ..Filter::default()
         });
         let (handle, _delta) = self.resolver.subscribe(query);

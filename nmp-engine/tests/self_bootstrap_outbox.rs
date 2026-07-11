@@ -260,18 +260,30 @@ fn content_atom_reroutes_from_indexer_discovery_to_authors_write_relay_after_100
         event_frame("s", relay_list),
     )));
 
+    // `f.kinds` CONTAINS 1 rather than equals exactly `{1}`: the discovery
+    // sub is widen-only (`sync_discovery`'s fix for the kind:10002
+    // over-fetch churn, `docs/known-gaps.md`) so A is deliberately left in
+    // its author set even after resolving -- and write_r is now ALSO a
+    // legitimate discovery-lane candidate for A (additive relay roles, Bug
+    // 3: an author's own write relay is a fine place to also ask for their
+    // kind:10002). `nmp_router::coalesce`'s `KindUnion` rule correctly folds
+    // both onto ONE Req rather than opening two redundant subs to the same
+    // relay -- this is the widen-safe merge working exactly as designed,
+    // not a partial route.
     assert!(
+        plan.reqs_for(&write_r).iter().any(|f| f
+            .kinds
+            .as_ref()
+            .is_some_and(|ks| ks.contains(&1u16))
+            && f.authors == Some(BTreeSet::from([a.public_key().to_hex()]))),
+        "A's kind:1 content atom must now be routed to A's OWN write relay R; got: {:?}",
         plan.reqs_for(&write_r)
-            .iter()
-            .any(|f| f.kinds == Some(BTreeSet::from([1u16]))
-                && f.authors == Some(BTreeSet::from([a.public_key().to_hex()]))),
-        "A's kind:1 content atom must now be routed to A's OWN write relay R"
     );
     assert!(
         !plan
             .reqs_for(&indexer)
             .iter()
-            .any(|f| f.kinds == Some(BTreeSet::from([1u16]))),
+            .any(|f| f.kinds.as_ref().is_some_and(|ks| ks.contains(&1u16))),
         "the indexer must never carry a content-kind REQ, even after discovery completes"
     );
 }
@@ -315,17 +327,23 @@ fn relay_list_parse_excludes_explicit_read_only_relays() {
         event_frame("s", relay_list),
     )));
 
+    // `contains(&1)` rather than `== Some({1})`: the widen-only discovery
+    // sub (see the churn fix's doc on `sync_discovery`) leaves A in its
+    // author set after resolving, and write_r is now ALSO a legitimate
+    // discovery-lane candidate for A (additive relay roles) -- `KindUnion`
+    // may correctly fold that onto the same Req as A's kind:1 content atom.
     assert!(
         plan.reqs_for(&write_r)
             .iter()
-            .any(|f| f.kinds == Some(BTreeSet::from([1u16]))),
-        "the write relay must carry A's content atom"
+            .any(|f| f.kinds.as_ref().is_some_and(|ks| ks.contains(&1u16))),
+        "the write relay must carry A's content atom; got: {:?}",
+        plan.reqs_for(&write_r)
     );
     assert!(
         !plan
             .reqs_for(&read_only_r)
             .iter()
-            .any(|f| f.kinds == Some(BTreeSet::from([1u16]))),
+            .any(|f| f.kinds.as_ref().is_some_and(|ks| ks.contains(&1u16))),
         "an explicit read-only relay must never receive A's content atom"
     );
 }
