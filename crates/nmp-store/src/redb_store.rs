@@ -17,8 +17,10 @@
 //! is corrupt, not a reachable, recoverable condition this crate's callers
 //! could usefully branch on today.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
@@ -60,6 +62,18 @@ const ADDR_TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("addr_
 /// byte-lexicographic order matches numeric deadline order); value: the
 /// event id hex (redundant with the key suffix, kept for a cheap decode).
 const EXPIRATION_INDEX: TableDefinition<&str, &str> = TableDefinition::new("expiration_index");
+/// Secondary index for `query` (issue #17): `"{author_hex}:{id_hex}" -> id_hex`,
+/// one row per currently-held event keyed by its author. Mirrors the index
+/// discipline `EXPIRATION_INDEX` established (issue #31) — a persistent
+/// index kept in lockstep on every insert/removal, not derived on read.
+/// Lets an author-filtered `query` narrow to a bounded candidate set (that
+/// author's rows) via `range`, instead of decoding every row in `EVENTS`.
+const BY_AUTHOR: TableDefinition<&str, &str> = TableDefinition::new("by_author");
+/// Secondary index for `query` (issue #17): `"{kind:05}:{id_hex}" -> id_hex`
+/// (zero-padded so byte-lexicographic order groups one kind's rows
+/// contiguously), one row per currently-held event keyed by its kind. Same
+/// narrowing purpose as [`BY_AUTHOR`], for kind-filtered queries.
+const BY_KIND: TableDefinition<&str, &str> = TableDefinition::new("by_kind");
 
 /// The `events` table's JSON value: the event's canonical NIP-01 JSON plus
 /// its merged provenance.
@@ -96,6 +110,33 @@ fn expiration_key_upper_bound(ts: Timestamp) -> String {
 /// see [`TOMBSTONES`]'s doc for why this is composite, not just the id.
 fn id_tombstone_key(id: &EventId, author: &PublicKey) -> String {
     format!("{}:{}", id.to_hex(), author.to_hex())
+}
+
+/// [`BY_AUTHOR`]'s key for one stored row.
+fn by_author_key(author: &PublicKey, id: &EventId) -> String {
+    format!("{}:{}", author.to_hex(), id.to_hex())
+}
+
+/// The inclusive bounds of every [`by_author_key`] for `author`: the bare
+/// `"{author_hex}:"` prefix sorts before any id suffixed onto it (a shorter
+/// string is always `<` a longer string it prefixes), and 64 `'f'`s is the
+/// greatest possible id hex — mirrors [`expiration_key_upper_bound`]'s
+/// pattern.
+fn by_author_range(author: &PublicKey) -> (String, String) {
+    let hex = author.to_hex();
+    (format!("{hex}:"), format!("{hex}:{}", "f".repeat(64)))
+}
+
+/// [`BY_KIND`]'s key for one stored row.
+fn by_kind_key(kind: Kind, id: &EventId) -> String {
+    format!("{:05}:{}", kind.as_u16(), id.to_hex())
+}
+
+/// The inclusive bounds of every [`by_kind_key`] for `kind` — same shape as
+/// [`by_author_range`].
+fn by_kind_range(kind: Kind) -> (String, String) {
+    let prefix = format!("{:05}", kind.as_u16());
+    (format!("{prefix}:"), format!("{prefix}:{}", "f".repeat(64)))
 }
 
 /// Read-side tombstone check shared by `insert`
@@ -136,14 +177,18 @@ fn tombstone_refuses(
 
 /// Remove `id`'s row within an already-open write transaction, iff
 /// `predicate` accepts the decoded row — clearing the address index (if it
-/// still points at `id`) and the expiration index (if the row carried a
-/// NIP-40 `expiration`) in the same pass. Shared by the trait's own
-/// `remove` (`predicate` always `true`) and kind:5 processing (`predicate`
-/// is the NIP-09 author-only check).
+/// still points at `id`), the expiration index (if the row carried a
+/// NIP-40 `expiration`), and the [`BY_AUTHOR`]/[`BY_KIND`] query indexes in
+/// the same pass. Shared by the trait's own `remove` (`predicate` always
+/// `true`) and kind:5 processing (`predicate` is the NIP-09 author-only
+/// check).
+#[allow(clippy::too_many_arguments)]
 fn remove_row_in_txn(
     events: &mut redb::Table<'_, &str, &str>,
     addr_index: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
+    by_author: &mut redb::Table<'_, &str, &str>,
+    by_kind: &mut redb::Table<'_, &str, &str>,
     id: EventId,
     predicate: impl FnOnce(&StoredEvent) -> bool,
 ) -> Option<StoredEvent> {
@@ -166,6 +211,12 @@ fn remove_row_in_txn(
     }
 
     events.remove(id_hex.as_str()).expect("redb: remove event");
+    by_author
+        .remove(by_author_key(&se.event.pubkey, &id).as_str())
+        .expect("redb: remove by_author");
+    by_kind
+        .remove(by_kind_key(se.event.kind, &id).as_str())
+        .expect("redb: remove by_kind");
 
     if let Some(addr_key) = address_key_for(&se.event) {
         let addr_key_str = addr_key.to_redb_key();
@@ -205,6 +256,8 @@ fn process_kind5_deletions(
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
+    by_author: &mut redb::Table<'_, &str, &str>,
+    by_kind: &mut redb::Table<'_, &str, &str>,
     deleting: &Event,
 ) -> Vec<StoredEvent> {
     let mut deleted = Vec::new();
@@ -213,11 +266,15 @@ fn process_kind5_deletions(
 
     let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
     for target_id in target_ids {
-        if let Some(removed) =
-            remove_row_in_txn(events, addr_index, expiration_index, target_id, |se| {
-                se.event.pubkey == deleting.pubkey
-            })
-        {
+        if let Some(removed) = remove_row_in_txn(
+            events,
+            addr_index,
+            expiration_index,
+            by_author,
+            by_kind,
+            target_id,
+            |se| se.event.pubkey == deleting.pubkey,
+        ) {
             deleted.push(removed);
         }
         // Claim recorded regardless of hold state right now -- a target
@@ -272,11 +329,15 @@ fn process_kind5_deletions(
         if let Some(current_id_hex) = current_id_hex {
             let current_id =
                 EventId::from_hex(&current_id_hex).expect("redb: decode addr_index id");
-            if let Some(removed) =
-                remove_row_in_txn(events, addr_index, expiration_index, current_id, |se| {
-                    se.event.created_at <= deleting.created_at
-                })
-            {
+            if let Some(removed) = remove_row_in_txn(
+                events,
+                addr_index,
+                expiration_index,
+                by_author,
+                by_kind,
+                current_id,
+                |se| se.event.created_at <= deleting.created_at,
+            ) {
                 deleted.push(removed);
             }
         }
@@ -301,11 +362,19 @@ struct CoverageRowRecord {
 /// oracle it is diffed against in `nmp-store/tests/store_contract.rs`.
 pub struct RedbStore {
     db: Database,
+    /// Test-only instrumentation for the `query`-indexing falsifier
+    /// (`query_by_author_does_not_scan_all_rows`, issue #17): counts every
+    /// row `query` actually JSON-decodes across a run, so a test can assert
+    /// an author/kind-narrowed query decodes only its match set, never
+    /// every row in `EVENTS`. Absent from the struct entirely outside
+    /// `cfg(test)` — zero cost in a normal build.
+    #[cfg(test)]
+    examined_rows: AtomicU64,
 }
 
 impl RedbStore {
     /// Open (creating if absent) a `redb` database file at `path`, ensuring
-    /// all six tables exist.
+    /// all tables exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
         let write_txn = db.begin_write()?;
@@ -316,9 +385,22 @@ impl RedbStore {
             write_txn.open_table(TOMBSTONES)?;
             write_txn.open_table(ADDR_TOMBSTONES)?;
             write_txn.open_table(EXPIRATION_INDEX)?;
+            write_txn.open_table(BY_AUTHOR)?;
+            write_txn.open_table(BY_KIND)?;
         }
         write_txn.commit()?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            #[cfg(test)]
+            examined_rows: AtomicU64::new(0),
+        })
+    }
+
+    /// Current value of [`Self::examined_rows`] — the `query`-indexing
+    /// falsifier's read side.
+    #[cfg(test)]
+    fn examined_rows(&self) -> u64 {
+        self.examined_rows.load(Ordering::Relaxed)
     }
 
     fn coverage_row_key(key: CoverageKey, relay: &RelayUrl) -> String {
@@ -333,6 +415,81 @@ impl RedbStore {
             let _ = write!(hex, "{byte:02x}");
         }
         format!("{hex}:{}", relay.as_str())
+    }
+
+    /// Decode one `EVENTS` row's JSON value into a [`StoredEvent`] —
+    /// `query`'s one decode point, so [`Self::examined_rows`] (test-only)
+    /// counts every row `query` actually pays the JSON-decode cost for,
+    /// regardless of which of `query`'s three paths (id/indexed/full-scan)
+    /// reached it.
+    fn decode_row(&self, json: &str) -> StoredEvent {
+        #[cfg(test)]
+        self.examined_rows.fetch_add(1, Ordering::Relaxed);
+        let record: StoredEventRecord =
+            serde_json::from_str(json).expect("redb: decode stored event");
+        let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+        StoredEvent {
+            event,
+            provenance: Provenance {
+                seen: record.provenance,
+            },
+        }
+    }
+
+    /// `query`'s index-narrowing step (issue #17): `Some(ids)` -- the
+    /// bounded candidate set gathered from `BY_AUTHOR`/`BY_KIND` for
+    /// whichever of `filter.authors`/`filter.kinds` is present (intersected
+    /// if both are) -- or `None` iff the filter carries neither, in which
+    /// case nothing narrows it and `query` must fall back to a full scan.
+    /// Does not touch `filter.ids`; that is `query`'s own, even cheaper,
+    /// fast path.
+    fn candidate_ids(
+        &self,
+        read_txn: &redb::ReadTransaction,
+        filter: &Filter,
+    ) -> Option<HashSet<EventId>> {
+        let by_authors = filter.authors.as_ref().map(|authors| {
+            let by_author = read_txn
+                .open_table(BY_AUTHOR)
+                .expect("redb: open by_author");
+            let mut ids = HashSet::new();
+            for author in authors {
+                let (lower, upper) = by_author_range(author);
+                for entry in by_author
+                    .range::<&str>(lower.as_str()..=upper.as_str())
+                    .expect("redb: range by_author")
+                {
+                    let (_key, value) = entry.expect("redb: read by_author entry");
+                    ids.insert(
+                        EventId::from_hex(value.value()).expect("redb: decode by_author id"),
+                    );
+                }
+            }
+            ids
+        });
+
+        let by_kinds = filter.kinds.as_ref().map(|kinds| {
+            let by_kind = read_txn.open_table(BY_KIND).expect("redb: open by_kind");
+            let mut ids = HashSet::new();
+            for kind in kinds {
+                let (lower, upper) = by_kind_range(*kind);
+                for entry in by_kind
+                    .range::<&str>(lower.as_str()..=upper.as_str())
+                    .expect("redb: range by_kind")
+                {
+                    let (_key, value) = entry.expect("redb: read by_kind entry");
+                    ids.insert(EventId::from_hex(value.value()).expect("redb: decode by_kind id"));
+                }
+            }
+            ids
+        });
+
+        match (by_authors, by_kinds) {
+            (Some(a), Some(k)) => Some(a.intersection(&k).copied().collect()),
+            (Some(a), None) => Some(a),
+            (None, Some(k)) => Some(k),
+            (None, None) => None,
+        }
     }
 }
 
@@ -359,6 +516,10 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .expect("redb: open expiration_index");
+            let mut by_author = write_txn
+                .open_table(BY_AUTHOR)
+                .expect("redb: open by_author");
+            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
             let id_hex = event.id.to_hex();
 
             let existing_json = events
@@ -406,6 +567,15 @@ impl EventStore for RedbStore {
                         events
                             .insert(id_hex.as_str(), encoded.as_str())
                             .expect("redb: insert event");
+                        by_author
+                            .insert(
+                                by_author_key(&event.pubkey, &event.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .expect("redb: insert by_author");
+                        by_kind
+                            .insert(by_kind_key(event.kind, &event.id).as_str(), id_hex.as_str())
+                            .expect("redb: insert by_kind");
                         if let Some(ts) = event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &event.id);
                             expiration_index
@@ -429,6 +599,18 @@ impl EventStore for RedbStore {
                                 addr_index
                                     .insert(addr_key_str.as_str(), id_hex.as_str())
                                     .expect("redb: insert addr_index");
+                                by_author
+                                    .insert(
+                                        by_author_key(&event.pubkey, &event.id).as_str(),
+                                        id_hex.as_str(),
+                                    )
+                                    .expect("redb: insert by_author");
+                                by_kind
+                                    .insert(
+                                        by_kind_key(event.kind, &event.id).as_str(),
+                                        id_hex.as_str(),
+                                    )
+                                    .expect("redb: insert by_kind");
                                 if let Some(ts) = event.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &event.id);
                                     expiration_index
@@ -460,6 +642,21 @@ impl EventStore for RedbStore {
                                     events
                                         .remove(current_id_hex.as_str())
                                         .expect("redb: remove superseded event");
+                                    by_author
+                                        .remove(
+                                            by_author_key(
+                                                &replaced.event.pubkey,
+                                                &replaced.event.id,
+                                            )
+                                            .as_str(),
+                                        )
+                                        .expect("redb: remove by_author");
+                                    by_kind
+                                        .remove(
+                                            by_kind_key(replaced.event.kind, &replaced.event.id)
+                                                .as_str(),
+                                        )
+                                        .expect("redb: remove by_kind");
                                     if let Some(ts) = replaced.event.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &replaced.event.id);
                                         expiration_index
@@ -472,6 +669,18 @@ impl EventStore for RedbStore {
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
                                         .expect("redb: update addr_index");
+                                    by_author
+                                        .insert(
+                                            by_author_key(&event.pubkey, &event.id).as_str(),
+                                            id_hex.as_str(),
+                                        )
+                                        .expect("redb: insert by_author");
+                                    by_kind
+                                        .insert(
+                                            by_kind_key(event.kind, &event.id).as_str(),
+                                            id_hex.as_str(),
+                                        )
+                                        .expect("redb: insert by_kind");
                                     if let Some(ts) = event.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &event.id);
                                         expiration_index
@@ -501,6 +710,8 @@ impl EventStore for RedbStore {
                             &mut tombstones,
                             &mut addr_tombstones,
                             &mut expiration_index,
+                            &mut by_author,
+                            &mut by_kind,
                             &event,
                         );
                         InsertOutcome::Kind5Processed { deleted }
@@ -520,22 +731,60 @@ impl EventStore for RedbStore {
         let read_txn = self.db.begin_read().expect("redb: begin_read");
         let events = read_txn.open_table(EVENTS).expect("redb: open events");
 
-        let mut out = Vec::new();
-        for entry in events.iter().expect("redb: iter events") {
-            let (_key, value) = entry.expect("redb: read event entry");
-            let record: StoredEventRecord =
-                serde_json::from_str(value.value()).expect("redb: decode stored event");
-            let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-            if filter.match_event(&event, MatchEventOptions::new()) {
-                out.push(StoredEvent {
-                    event,
-                    provenance: Provenance {
-                        seen: record.provenance,
-                    },
-                });
+        // Fast path: `filter.ids` narrows directly through `EVENTS`'s own
+        // id-keyed rows -- no secondary index needed, bounded by `|ids|`
+        // regardless of table size (issue #17).
+        if let Some(ids) = &filter.ids {
+            let mut out = Vec::new();
+            for id in ids {
+                let id_hex = id.to_hex();
+                let Some(value) = events.get(id_hex.as_str()).expect("redb: get event") else {
+                    continue;
+                };
+                let se = self.decode_row(value.value());
+                if filter.match_event(&se.event, MatchEventOptions::new()) {
+                    out.push(se);
+                }
+            }
+            return out;
+        }
+
+        // Otherwise, narrow via `BY_AUTHOR`/`BY_KIND` when the filter
+        // carries either -- bounded by the matching authors'/kinds' own row
+        // counts, never the whole table. `candidate_ids` returns `None` iff
+        // neither is present (e.g. a bare generic-tag or search-only
+        // filter), in which case no index narrows it and the pre-existing
+        // full scan is the only correct fallback.
+        match self.candidate_ids(&read_txn, filter) {
+            Some(candidates) => {
+                let mut out = Vec::with_capacity(candidates.len());
+                for id in candidates {
+                    let id_hex = id.to_hex();
+                    let Some(value) = events.get(id_hex.as_str()).expect("redb: get event") else {
+                        // A stale index entry outliving its row (e.g. a GC'd
+                        // event whose BY_AUTHOR/BY_KIND rows haven't been
+                        // touched by that path) — harmless, just skip.
+                        continue;
+                    };
+                    let se = self.decode_row(value.value());
+                    if filter.match_event(&se.event, MatchEventOptions::new()) {
+                        out.push(se);
+                    }
+                }
+                out
+            }
+            None => {
+                let mut out = Vec::new();
+                for entry in events.iter().expect("redb: iter events") {
+                    let (_key, value) = entry.expect("redb: read event entry");
+                    let se = self.decode_row(value.value());
+                    if filter.match_event(&se.event, MatchEventOptions::new()) {
+                        out.push(se);
+                    }
+                }
+                out
             }
         }
-        out
     }
 
     fn remove(&mut self, id: EventId, _reason: RetractReason) -> Option<StoredEvent> {
@@ -548,10 +797,16 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .expect("redb: open expiration_index");
+            let mut by_author = write_txn
+                .open_table(BY_AUTHOR)
+                .expect("redb: open by_author");
+            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
             remove_row_in_txn(
                 &mut events,
                 &mut addr_index,
                 &mut expiration_index,
+                &mut by_author,
+                &mut by_kind,
                 id,
                 |_| true,
             )
@@ -570,6 +825,10 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .expect("redb: open expiration_index");
+            let mut by_author = write_txn
+                .open_table(BY_AUTHOR)
+                .expect("redb: open by_author");
+            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
 
             let upper = expiration_key_upper_bound(now);
             let due_ids: Vec<EventId> = expiration_index
@@ -588,6 +847,8 @@ impl EventStore for RedbStore {
                         &mut events,
                         &mut addr_index,
                         &mut expiration_index,
+                        &mut by_author,
+                        &mut by_kind,
                         id,
                         |_| true,
                     )
@@ -667,6 +928,10 @@ impl EventStore for RedbStore {
         {
             let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
             let mut coverage = write_txn.open_table(COVERAGE).expect("redb: open coverage");
+            let mut by_author = write_txn
+                .open_table(BY_AUTHOR)
+                .expect("redb: open by_author");
+            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
 
             // Pass 1: find victims (regular events matched by no claim).
             // Collected up front into owned values so the removal pass below
@@ -682,10 +947,21 @@ impl EventStore for RedbStore {
                 }
             }
 
-            for (id_hex, _) in &victims {
+            for (id_hex, event) in &victims {
                 events
                     .remove(id_hex.as_str())
                     .expect("redb: remove gc victim");
+                // Keep BY_AUTHOR/BY_KIND in lockstep with EVENTS -- a stale
+                // index row surviving a gc'd event would keep costing
+                // `query` a wasted `events.get` miss on every future hit
+                // (harmless, see `query`'s `None` skip, but unbounded
+                // growth otherwise).
+                by_author
+                    .remove(by_author_key(&event.pubkey, &event.id).as_str())
+                    .expect("redb: remove by_author");
+                by_kind
+                    .remove(by_kind_key(event.kind, &event.id).as_str())
+                    .expect("redb: remove by_kind");
                 report.events_evicted += 1;
             }
 
@@ -798,6 +1074,57 @@ mod tests {
             64,
             "expected 64 hex chars (32 bytes) in the durable key, got {} in {row_key:?}",
             hex_part.len()
+        );
+    }
+
+    /// The row-count falsifier for issue #17: an author-filtered `query`
+    /// must decode (JSON-parse) only that author's own rows via
+    /// `BY_AUTHOR`, never the whole `EVENTS` table -- the documented M5
+    /// replay jank was `RedbStore::query` doing exactly that unbounded
+    /// scan+decode on every refresh.
+    #[test]
+    fn query_by_author_does_not_scan_all_rows() {
+        use nostr::EventBuilder;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let r1 = RelayUrl::parse("wss://r1").expect("relay url");
+
+        let target = nostr::Keys::generate();
+        let target_event = EventBuilder::new(Kind::TextNote, "hi")
+            .sign_with_keys(&target)
+            .expect("sign target event");
+        let target_id = target_event.id;
+        store.insert(
+            target_event,
+            RelayObserved::new(r1.clone(), Timestamp::from(1u64)),
+        );
+
+        // A pile of OTHER authors' rows -- large enough that a full-table
+        // scan would dwarf the one-row match set below.
+        for i in 0..200u64 {
+            let noise_author = nostr::Keys::generate();
+            let noise = EventBuilder::new(Kind::TextNote, "noise")
+                .custom_created_at(Timestamp::from(100 + i))
+                .sign_with_keys(&noise_author)
+                .expect("sign noise event");
+            store.insert(
+                noise,
+                RelayObserved::new(r1.clone(), Timestamp::from(100 + i)),
+            );
+        }
+
+        let before = store.examined_rows();
+        let results = store.query(&Filter::new().author(target.public_key()));
+        let examined = store.examined_rows() - before;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, target_id);
+        assert_eq!(
+            examined, 1,
+            "author-filtered query decoded {examined} row(s) on a 201-row table; \
+             expected exactly 1 (the match), not a full-table scan"
         );
     }
 }

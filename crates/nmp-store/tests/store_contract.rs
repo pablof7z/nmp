@@ -1071,3 +1071,95 @@ fn coverage_bit_identical_across_delete_and_expiry() {
         assert_eq!(before, after_expiry, "expiry must not touch coverage");
     });
 }
+
+// ---------------------------------------------------------------------
+// Query indexing (issue #17): `RedbStore::query` narrows via BY_AUTHOR/
+// BY_KIND instead of decoding every row in EVENTS. This is a correctness
+// regression guard for that narrowing -- the row-count bound itself is
+// `RedbStore`-internal instrumentation and lives in
+// `redb_store.rs`'s own `#[cfg(test)] mod tests`
+// (`query_by_author_does_not_scan_all_rows`).
+// ---------------------------------------------------------------------
+
+#[test]
+fn query_returns_same_rows_after_indexing() {
+    for_each_backend(|store| {
+        let alice = keys();
+        let bob = keys();
+
+        let alice_note = regular_event_at(&alice, "hi", 100);
+        let alice_note_id = alice_note.id;
+        let bob_note = regular_event_at(&bob, "yo", 101);
+        let bob_note_id = bob_note.id;
+        let alice_profile = EventBuilder::new(Kind::Metadata, "{}")
+            .custom_created_at(Timestamp::from(102u64))
+            .sign_with_keys(&alice)
+            .unwrap();
+        let alice_profile_id = alice_profile.id;
+        let alice_addressable = addressable_event(&alice, 30078, "app-data", 103);
+        let alice_addressable_id = alice_addressable.id;
+
+        store.insert(alice_note.clone(), observed("wss://r1", 1));
+        store.insert(bob_note.clone(), observed("wss://r1", 1));
+        store.insert(alice_profile, observed("wss://r1", 1));
+        store.insert(alice_addressable, observed("wss://r1", 1));
+
+        // Noise: other authors' kind:3 rows -- present in the table, but
+        // must never surface in any assertion below (a stray leak would
+        // mean the narrowing widened the candidate set, not just avoided
+        // decoding it).
+        for i in 0..20u64 {
+            let noise = keys();
+            store.insert(kind3_event(&noise, 200 + i), observed("wss://r1", 200 + i));
+        }
+
+        // by-id
+        let by_id = store.query(&Filter::new().id(alice_note_id));
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].event.id, alice_note_id);
+
+        // by-author: every one of alice's rows, none of bob's or the noise.
+        let mut by_author: Vec<_> = store
+            .query(&Filter::new().author(alice.public_key()))
+            .into_iter()
+            .map(|se| se.event.id)
+            .collect();
+        by_author.sort();
+        let mut expected_by_author = vec![alice_note_id, alice_profile_id, alice_addressable_id];
+        expected_by_author.sort();
+        assert_eq!(by_author, expected_by_author);
+
+        // by-kind: both TextNotes, regardless of author; none of the
+        // kind:3 noise or alice's own non-TextNote rows.
+        let mut by_kind: Vec<_> = store
+            .query(&Filter::new().kind(Kind::TextNote))
+            .into_iter()
+            .map(|se| se.event.id)
+            .collect();
+        by_kind.sort();
+        let mut expected_by_kind = vec![alice_note_id, bob_note_id];
+        expected_by_kind.sort();
+        assert_eq!(by_kind, expected_by_kind);
+
+        // author + kind intersection: only alice's TextNote.
+        let combo = store.query(
+            &Filter::new()
+                .author(alice.public_key())
+                .kind(Kind::TextNote),
+        );
+        assert_eq!(combo.len(), 1);
+        assert_eq!(combo[0].event.id, alice_note_id);
+
+        // by-address shape (kind + author + #d): the one addressable row,
+        // matched via the same author/kind narrowing plus `match_event`'s
+        // own tag check -- not a separate address-index path.
+        let addr = store.query(
+            &Filter::new()
+                .author(alice.public_key())
+                .kind(Kind::from(30078))
+                .identifier("app-data"),
+        );
+        assert_eq!(addr.len(), 1);
+        assert_eq!(addr[0].event.id, alice_addressable_id);
+    });
+}
