@@ -264,14 +264,15 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     relay_b.shutdown();
 }
 
-/// Structural grep-guard (M3 plan §5 test 14, widened by M4 §5):
+/// Structural grep-guard (M3 plan §5 test 14, widened by M4 §5 and M5):
 /// `Handle`'s public surface is exactly the five verbs (`subscribe`/
 /// `unsubscribe`/`add_signer`/`set_active_account`/`publish`) plus
 /// `shutdown` -- no `relays:` parameter, no open-REQ method anywhere on it
-/// (ledger #2/#3 preserved at the top edge; `add_signer` is the one
-/// deliberate widening, closing the multi-account gap). Asserted by reading
-/// this crate's own source rather than by reflection (Rust has none) -- the
-/// same "grep-guard" idiom the plan itself names.
+/// (ledger #2/#3 preserved at the top edge; `add_signer` is M4's deliberate
+/// widening, closing the multi-account gap; `observe_diagnostics` is M5's --
+/// read-only, off the data path, never influences routing/delivery). Asserted
+/// by reading this crate's own source rather than by reflection (Rust has
+/// none) -- the same "grep-guard" idiom the plan itself names.
 #[test]
 fn handle_surface_is_exactly_five_verbs_plus_shutdown() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runtime/mod.rs"))
@@ -297,6 +298,7 @@ fn handle_surface_is_exactly_five_verbs_plus_shutdown() {
     methods.sort_unstable();
     let mut expected = vec![
         "add_signer",
+        "observe_diagnostics",
         "publish",
         "set_active_account",
         "shutdown",

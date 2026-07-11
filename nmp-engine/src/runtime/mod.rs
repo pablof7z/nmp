@@ -49,6 +49,8 @@
 //! the full preamble string list on every touch — see `apply_wire_delta`/
 //! `apply_replay`.
 
+mod diagnostics_channel;
+
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -62,8 +64,13 @@ use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId};
 
 use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
-use crate::core::{self, Effect, EngineCore, EngineMsg, QueryCoverage, RowDelta, RowSink};
+use crate::core::{
+    self, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, QueryCoverage, RowDelta, RowSink,
+};
 use crate::outbox::{ReceiptSink, WriteIntent, WriteStatus};
+
+pub use diagnostics_channel::LatestReceiver;
+use diagnostics_channel::{latest_channel, LatestSender};
 
 /// One delivered batch for a live subscription: raw rows + the query's
 /// aggregate coverage (see the module doc's "two delivery channels" note).
@@ -124,6 +131,20 @@ enum Cmd {
         signer: Box<dyn SigningCapability + Send>,
         reply: Sender<Option<PublicKey>>,
     },
+    /// Register a new diagnostics observer (M5 plan §1.2 step 4). The reply
+    /// carries the id (used only by `Cmd::UnobserveDiagnostics` to withdraw
+    /// later) and a mailbox already primed with the CURRENT snapshot — an
+    /// observer that registers between recompiles should not have to wait
+    /// for the next one to see anything (mirrors `Cmd::Subscribe`'s own
+    /// immediate first `EmitRows`).
+    ObserveDiagnostics {
+        reply: Sender<(u64, LatestReceiver<DiagnosticsSnapshot>)>,
+    },
+    /// Withdraw a diagnostics observer registered via `ObserveDiagnostics`.
+    /// Fire-and-forget, same discipline as `Cmd::Engine(EngineMsg::
+    /// Unsubscribe(..))`: dropping the registry's `LatestSender` is what
+    /// lets the observer's `LatestReceiver::recv` return `None`.
+    UnobserveDiagnostics(u64),
     Shutdown,
 }
 
@@ -300,6 +321,8 @@ fn engine_loop<S, D>(
 {
     let mut core = EngineCore::new(store, Box::new(directory), cap);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
+    let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
+    let mut next_diag_id: u64 = 0;
     let mut preambles: Preambles = Preambles::new();
     let mut registry = SignerRegistry::default();
 
@@ -309,6 +332,20 @@ fn engine_loop<S, D>(
             Cmd::AddSigner { signer, reply } => {
                 let pk = registry.add(signer);
                 let _ = reply.send(pk);
+            }
+            Cmd::ObserveDiagnostics { reply } => {
+                let id = next_diag_id;
+                next_diag_id += 1;
+                let (tx, rx) = latest_channel();
+                tx.send(core.diagnostics_snapshot());
+                if reply.send((id, rx)).is_err() {
+                    // Caller already gave up -- nothing to register.
+                    continue;
+                }
+                diag_channels.insert(id, tx);
+            }
+            Cmd::UnobserveDiagnostics(id) => {
+                diag_channels.remove(&id);
             }
             Cmd::Subscribe { query, reply } => {
                 let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
@@ -337,6 +374,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut diag_channels,
                     &mut preambles,
                     &registry,
                     self_inbox,
@@ -350,6 +388,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut diag_channels,
                     &mut preambles,
                     &registry,
                     self_inbox,
@@ -366,6 +405,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut diag_channels,
                     &mut preambles,
                     &registry,
                     self_inbox,
@@ -377,6 +417,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut diag_channels,
                     &mut preambles,
                     &registry,
                     self_inbox,
@@ -398,12 +439,21 @@ fn dispatch_effects(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
     self_inbox: &Sender<Cmd>,
 ) {
     for effect in effects {
-        dispatch_effect(effect, pool, row_channels, preambles, registry, self_inbox);
+        dispatch_effect(
+            effect,
+            pool,
+            row_channels,
+            diag_channels,
+            preambles,
+            registry,
+            self_inbox,
+        );
     }
 }
 
@@ -411,6 +461,7 @@ fn dispatch_effect(
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
     self_inbox: &Sender<Cmd>,
@@ -474,6 +525,16 @@ fn dispatch_effect(
         Effect::EmitRows(id, rows, coverage) => {
             if let Some(tx) = row_channels.get(&id) {
                 let _ = tx.send((rows, coverage));
+            }
+        }
+        Effect::EmitDiagnostics(snapshot) => {
+            // Fan out to every currently-registered observer (M5 plan §1.2
+            // step 4) -- each observer's own `LatestSender` overwrites its
+            // own slot, so a slow consumer only ever sees the newest
+            // snapshot next (see `diagnostics_channel`'s doc), never a
+            // growing backlog.
+            for tx in diag_channels.values() {
+                tx.send(snapshot.clone());
             }
         }
         Effect::EmitReceipt(..) => {
@@ -615,16 +676,42 @@ fn close_frame_text(sub_id: &SubId) -> String {
     ClientMessage::close(wire_id).as_json()
 }
 
+/// The app-facing handle to a live diagnostics stream (returned by
+/// [`Handle::observe_diagnostics`]). Withdraw it via [`Self::cancel`] when
+/// the caller is done; unlike [`QueryHandle`] there is no `Drop` teardown
+/// HERE (this value carries no resource of its own beyond the registry
+/// entry it names) — `nmp-ffi`'s `NmpDiagnosticsHandle` is what ties
+/// teardown to `Drop`, mirroring `NmpQueryHandle`'s own wrapper.
+#[derive(Clone)]
+pub struct DiagnosticsHandle {
+    inbox: Sender<Cmd>,
+    id: u64,
+}
+
+impl DiagnosticsHandle {
+    /// Withdraw this diagnostics observer. Safe to call more than once
+    /// (`Cmd::UnobserveDiagnostics` on an already-removed id is a harmless
+    /// no-op); safe to never call at all (the registry entry simply
+    /// outlives the caller's interest — a stream nobody drains yet, mirrors
+    /// an app that never calls a `QueryHandle`'s `cancel`).
+    pub fn cancel(&self) {
+        let _ = self.inbox.send(Cmd::UnobserveDiagnostics(self.id));
+    }
+}
+
 /// The cheap, `Clone + Send` app-facing handle. Exactly five verbs plus
 /// `shutdown` (ledger #2/#3 preserved at the top edge — plan §5 test 14
 /// grep-guards this structural property; M4 §5 adds `add_signer` to close
-/// the multi-account gap, the one deliberate widening of this surface):
+/// the multi-account gap; M5 adds `observe_diagnostics`, the one other
+/// deliberate widening — read-only, off the data path, never influences
+/// routing/delivery):
 ///
 /// - `subscribe(LiveQuery) -> (QueryHandle, Receiver<RowsMsg>)`
 /// - `unsubscribe(QueryHandle)`
 /// - `add_signer(impl SigningCapability) -> Option<PublicKey>`
 /// - `set_active_account(Option<PublicKey>)`
 /// - `publish(WriteIntent) -> Receiver<WriteStatus>`
+/// - `observe_diagnostics() -> (DiagnosticsHandle, LatestReceiver<DiagnosticsSnapshot>)`
 /// - `shutdown()`
 ///
 /// No `relays:` parameter, no open-REQ method — internally every verb just
@@ -718,6 +805,39 @@ impl Handle {
             .inbox
             .send(Cmd::Engine(EngineMsg::Publish(intent, sink)));
         rx
+    }
+
+    /// Open a live diagnostics stream (M5 plan §1.2 step 4) — see
+    /// `EngineCore::diagnostics_snapshot`'s doc for what it contains: this is
+    /// the read-only projection combining per-relay wire-sub count, exact
+    /// filters, lane counts, reverse coverage, events-received-per-kind, and
+    /// per-filter coverage, engine-global (one stream, not per-query).
+    /// Delivers the CURRENT snapshot immediately, then a fresh one on every
+    /// recompile and every EOSE-driven coverage change — pushed reactively,
+    /// never polled (D8); latest-wins if the consumer is slow (see
+    /// `diagnostics_channel`'s doc — no unbounded backlog, no dropped
+    /// row-equivalent data since this is a recomputed projection, not a
+    /// delta stream). Blocks briefly (one engine-thread round trip, same
+    /// discipline as [`Self::subscribe`]/[`Self::add_signer`]).
+    ///
+    /// # Panics
+    /// If the engine thread has already shut down.
+    #[must_use]
+    pub fn observe_diagnostics(&self) -> (DiagnosticsHandle, LatestReceiver<DiagnosticsSnapshot>) {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ObserveDiagnostics { reply: reply_tx })
+            .expect("nmp-engine: observe_diagnostics() called after the engine thread shut down");
+        let (id, rx) = reply_rx
+            .recv()
+            .expect("nmp-engine: engine thread dropped the observe_diagnostics reply");
+        (
+            DiagnosticsHandle {
+                inbox: self.inbox.clone(),
+                id,
+            },
+            rx,
+        )
     }
 
     /// Stop the engine thread (and, transitively, the pool-bridge thread —

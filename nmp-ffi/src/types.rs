@@ -210,6 +210,63 @@ pub struct FfiWriteIntent {
     pub routing: FfiWriteRouting,
 }
 
+/// One (relay, kind) event count -- `nmp_engine::core::DiagnosticsSnapshot`'s
+/// events-received-per-kind mirror (M5 plan §1.1): the one datum
+/// `nmp-router`'s own `Diagnostics` cannot see, since it only ever reflects
+/// what was compiled/sent, never what was actually received.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiKindCount {
+    pub kind: u16,
+    pub count: u64,
+}
+
+/// One lane's wire-req count within a relay's diagnostics (M5 plan §1.1;
+/// `nmp_router::Lane` mirror, rendered as a string -- see
+/// `convert::lane_to_ffi_string`).
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiLaneCount {
+    pub lane: String,
+    pub count: u32,
+}
+
+/// One filter's proven coverage state at one relay (M5 plan §1.1). `filter`
+/// is the EXACT wire JSON -- the same rendering as the parallel entry in
+/// `FfiRelayDiagnostics.filters`.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiFilterCoverage {
+    pub filter: String,
+    pub coverage: FfiCoverage,
+}
+
+/// One relay's full diagnostics (M5 plan §1.1) -- per-relay wire-sub count,
+/// exact filters, lane breakdown, reverse coverage (authors served), events
+/// actually received per kind, and per-filter coverage state. Every field
+/// here is a REAL number read off the running engine -- never fabricated or
+/// estimated (the plan's truth-anchor rule).
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiRelayDiagnostics {
+    pub relay: String,
+    pub wire_sub_count: u32,
+    pub authors_served: u32,
+    pub by_lane: Vec<FfiLaneCount>,
+    /// The EXACT wire JSON of every filter currently sent to this relay
+    /// (`ConcreteFilter::to_nostr().as_json()`, rendered engine-side).
+    pub filters: Vec<String>,
+    pub events_by_kind: Vec<FfiKindCount>,
+    pub coverage: Vec<FfiFilterCoverage>,
+}
+
+/// The engine-global diagnostics snapshot (M5 plan §1.1) -- "the acceptance
+/// test rendered on screen, permanently." Pushed reactively via
+/// `NmpEngine::observe_diagnostics`, never polled; read-only and off the
+/// data path (never influences routing/delivery).
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiDiagnosticsSnapshot {
+    pub relays: Vec<FfiRelayDiagnostics>,
+    pub uncovered_author_count: u32,
+    pub dropped_merge_rules: Vec<String>,
+}
+
 /// The receipt STREAM (`nmp_engine::outbox::WriteStatus` mirror; ledger #9 —
 /// enqueue is not converged, the app's `ReceiptObserver` may see many of
 /// these per publish).

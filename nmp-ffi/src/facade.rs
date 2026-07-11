@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use nmp_engine::runtime::{EngineThread, Handle, QueryHandle};
+use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle};
 use nmp_resolver::LiveQuery;
 use nmp_router::LiveDirectory;
 use nmp_signer::LocalKeySigner;
@@ -27,10 +27,10 @@ use nmp_transport::PoolConfig;
 use nostr::Keys;
 
 use crate::convert::{
-    coverage_to_ffi, filter_from_ffi, parse_pubkey, parse_relay_url, row_delta_to_ffi,
-    write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
+    coverage_to_ffi, diagnostics_snapshot_to_ffi, filter_from_ffi, parse_pubkey, parse_relay_url,
+    row_delta_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
 };
-use crate::observer::{ReceiptObserver, RowObserver};
+use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
 use crate::types::{FfiFilter, FfiWriteIntent};
 
 /// Matches `nmp-demo`'s own constant (`nmp-demo/src/main.rs`) -- the router
@@ -171,6 +171,30 @@ impl NmpEngine {
         Ok(())
     }
 
+    /// Open a live diagnostics stream (M5 plan §1.2 step 5) -- "the
+    /// acceptance test rendered on screen, permanently." `observer` is
+    /// driven from a dedicated drain thread, mirroring [`Self::observe`];
+    /// the returned [`NmpDiagnosticsHandle`]'s `Drop` withdraws the
+    /// observer (deinit-tied teardown, same discipline as
+    /// [`NmpQueryHandle`]). Delivers the CURRENT snapshot immediately, then
+    /// a fresh one on every recompile/EOSE-driven coverage change --
+    /// pushed reactively, never polled.
+    pub fn observe_diagnostics(
+        &self,
+        observer: Box<dyn DiagnosticsObserver>,
+    ) -> Arc<NmpDiagnosticsHandle> {
+        let (diag_handle, rx) = self.handle.observe_diagnostics();
+
+        thread::spawn(move || {
+            while let Some(snapshot) = rx.recv() {
+                observer.on_snapshot(diagnostics_snapshot_to_ffi(snapshot));
+            }
+            observer.on_closed();
+        });
+
+        Arc::new(NmpDiagnosticsHandle { diag_handle })
+    }
+
     /// Stop the engine. Idempotent: a second call finds the thread already
     /// taken and no-ops.
     pub fn shutdown(&self) {
@@ -205,5 +229,28 @@ impl NmpQueryHandle {
 impl Drop for NmpQueryHandle {
     fn drop(&mut self) {
         self.handle.unsubscribe(self.query_handle);
+    }
+}
+
+/// The app-facing handle to a live diagnostics stream (returned by
+/// [`NmpEngine::observe_diagnostics`]). `Drop` withdraws the observer --
+/// same discipline as [`NmpQueryHandle`].
+#[derive(uniffi::Object)]
+pub struct NmpDiagnosticsHandle {
+    diag_handle: DiagnosticsHandle,
+}
+
+#[uniffi::export]
+impl NmpDiagnosticsHandle {
+    /// Withdraw this diagnostics observer now, rather than waiting for
+    /// `Drop`. Safe to call more than once; safe to never call at all.
+    pub fn cancel(&self) {
+        self.diag_handle.cancel();
+    }
+}
+
+impl Drop for NmpDiagnosticsHandle {
+    fn drop(&mut self) {
+        self.diag_handle.cancel();
     }
 }

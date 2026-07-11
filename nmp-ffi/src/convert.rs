@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use nmp_engine::core::{QueryCoverage, RowDelta};
+use nmp_engine::core::{
+    DiagnosticsSnapshot, FilterCoverageEntry, QueryCoverage, RelayDiagnosticsSnapshot, RowDelta,
+};
 use nmp_engine::outbox::{
     Durability as GDurability, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
     WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
@@ -15,10 +17,12 @@ use nmp_grammar::{
     Binding as GBinding, Derived as GDerived, Filter as GFilter, IdentityField as GIdentityField,
     Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp, TagName,
 };
+use nmp_router::Lane;
 use nostr::{PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 use crate::types::{
-    FfiBinding, FfiCoverage, FfiDerived, FfiDurability, FfiFilter, FfiIdentityField, FfiRow,
+    FfiBinding, FfiCoverage, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
+    FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
     FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiWriteIntent, FfiWriteRouting,
     FfiWriteStatus,
 };
@@ -259,6 +263,69 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::Failed(reason) => FfiWriteStatus::Failed {
             reason: reason.clone(),
         },
+    }
+}
+
+/// `nmp_router::Lane` -> a stable string label (M5 plan §1.1). Rendered as a
+/// string rather than an `Enum` mirror because the diagnostics screen only
+/// ever displays it -- there is no round-trip/construction need the way
+/// `FfiSelector`/`FfiBinding` have for the filter grammar.
+fn lane_to_ffi_string(lane: Lane) -> String {
+    match lane {
+        Lane::Nip65Write => "nip65_write",
+        Lane::Hint => "hint",
+        Lane::Provenance => "provenance",
+        Lane::UserConfigured => "user_configured",
+        Lane::IndexerDiscovery => "indexer_discovery",
+        Lane::GroupHost => "group_host",
+        Lane::DmInbox => "dm_inbox",
+    }
+    .to_string()
+}
+
+fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics {
+    FfiRelayDiagnostics {
+        relay: r.relay.to_string(),
+        wire_sub_count: r.wire_sub_count as u32,
+        authors_served: r.authors_served as u32,
+        by_lane: r
+            .by_lane
+            .into_iter()
+            .map(|(lane, count)| FfiLaneCount {
+                lane: lane_to_ffi_string(lane),
+                count: count as u32,
+            })
+            .collect(),
+        filters: r.filters,
+        events_by_kind: r
+            .events_by_kind
+            .into_iter()
+            .map(|(kind, count)| FfiKindCount { kind, count })
+            .collect(),
+        coverage: r
+            .coverage
+            .into_iter()
+            .map(|entry: FilterCoverageEntry| FfiFilterCoverage {
+                filter: entry.filter,
+                coverage: coverage_to_ffi(entry.coverage),
+            })
+            .collect(),
+    }
+}
+
+/// `nmp_engine::core::DiagnosticsSnapshot -> FfiDiagnosticsSnapshot` (M5 plan
+/// §1.2 step 5) -- the engine-global diagnostics projection, rendered whole
+/// for the FFI boundary. Every number/string here is copied straight off the
+/// engine-owned snapshot, never recomputed/estimated at this layer.
+pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnapshot {
+    FfiDiagnosticsSnapshot {
+        relays: s.relays.into_iter().map(relay_diagnostics_to_ffi).collect(),
+        uncovered_author_count: s.uncovered_author_count as u32,
+        dropped_merge_rules: s
+            .dropped_merge_rules
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
     }
 }
 

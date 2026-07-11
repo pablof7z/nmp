@@ -24,6 +24,7 @@
 
 mod attribution;
 mod coverage_query;
+mod diagnostics;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -65,6 +66,7 @@ const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 use attribution::AttributionState;
 pub use coverage_query::QueryCoverage;
+pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
@@ -178,6 +180,14 @@ pub enum Effect {
         nmp_store::CoverageInterval,
     ),
     EmitRows(HandleId, Vec<RowDelta>, QueryCoverage),
+    /// The engine-global diagnostics projection (M5 plan §1.2 step 3),
+    /// pushed at the end of every `recompile()` and after every EOSE
+    /// (coverage watermarks can advance with no recompile at all). Read-only
+    /// and off the data path -- never influences routing/delivery.
+    /// `runtime::Handle::observe_diagnostics` forwards this to every
+    /// registered observer, latest-wins if a consumer is slow (never
+    /// buffered/replayed).
+    EmitDiagnostics(DiagnosticsSnapshot),
     EmitReceipt(ReceiptId, WriteStatus),
     RequestSign(ReceiptId, UnsignedEvent),
     RequestDecrypt(EventId, PublicKey, String),
@@ -288,6 +298,13 @@ pub struct EngineCore<S: EventStore> {
     /// `sync_discovery` call so the subscription is only replaced when the
     /// set actually changes, not on every recompile.
     discovery_authors: BTreeSet<PubkeyHex>,
+    /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
+    /// actually RECEIVED, per relay per kind. Bumped in the
+    /// `RelayMessage::Event` arm of `on_relay_frame`; read (never mutated)
+    /// by `diagnostics_snapshot`. This is the one datum `nmp-router`'s
+    /// `Diagnostics` cannot see on its own — it never observes inbound
+    /// frames, only what was compiled/sent.
+    events_by_relay_kind: HashMap<RelayUrl, BTreeMap<u16, u64>>,
 }
 
 impl<S: EventStore> EngineCore<S> {
@@ -314,6 +331,7 @@ impl<S: EventStore> EngineCore<S> {
             pending_neg_credit: HashMap::new(),
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
+            events_by_relay_kind: HashMap::new(),
         }
     }
 
@@ -335,6 +353,23 @@ impl<S: EventStore> EngineCore<S> {
         self.resolver
             .store()
             .get_coverage(nmp_store::coverage_key(atom), relay)
+    }
+
+    /// The engine-global diagnostics projection (M5 plan §1.2 step 2) — "the
+    /// acceptance test made visible": combines `nmp_router::Router::
+    /// diagnostics()` (per-relay wire-sub count, exact filters, lane
+    /// counts, reverse coverage) with this reducer's own `events_by_relay_
+    /// kind` counter and per-(relay, filter) coverage read via
+    /// `Self::get_coverage`. Pure and read-only — never influences
+    /// routing/delivery; every number here is real state this reducer
+    /// already tracks for other reasons, never fabricated/estimated.
+    pub fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+        diagnostics::build(
+            self.router.diagnostics(),
+            self.router.plan(),
+            &self.events_by_relay_kind,
+            |relay, filter| self.get_coverage(filter, relay),
+        )
     }
 
     /// A pure clock update PLUS the negentropy liveness-deadline sweep (plan
@@ -804,6 +839,16 @@ impl<S: EventStore> EngineCore<S> {
         match msg {
             RelayMessage::Event { event, .. } => {
                 let event = event.into_owned();
+                // The diagnostic surface's own counter (M5 plan §1.2 step
+                // 1) — genuinely not tracked anywhere else: bump BEFORE
+                // `recompile()` below so the `EmitDiagnostics` it pushes
+                // already reflects this event.
+                *self
+                    .events_by_relay_kind
+                    .entry(relay.clone())
+                    .or_default()
+                    .entry(event.kind.as_u16())
+                    .or_insert(0) += 1;
                 // M5 self-bootstrapping outbox: a kind:10002 needs its
                 // author's write relays fed into the live directory BEFORE
                 // `recompile()` runs, so the very same recompile that
@@ -836,6 +881,12 @@ impl<S: EventStore> EngineCore<S> {
                 // (ruling §6) even with no new rows at all — refresh so
                 // that becomes observable via EmitRows, same as an ingest.
                 self.refresh_all_handles(&mut effects);
+                // Same watermark advance can also flip the diagnostic
+                // surface's own per-(filter, relay) coverage even though
+                // this arm never calls `recompile()` (M5 plan §1.2 step 3:
+                // "after the Event/EOSE ingest arms ... coverage change
+                // points").
+                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
 
                 // A one-shot negentropy backfill REQ (`finish_neg_session`)
                 // has nothing further to prove once it EOSEs -- close it so
@@ -922,6 +973,13 @@ impl<S: EventStore> EngineCore<S> {
         let wire_delta: WireDelta = self
             .router
             .compile(&demand, self.directory.as_ref(), self.cap);
+        // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
+        // for the full current demand, regardless of whether anything
+        // actually changed on the wire (see `Router::compile`'s own body) —
+        // so diagnostics is pushed unconditionally here (M5 plan §1.2 step
+        // 3: "push it at the end of recompile()"), even on the early return
+        // below for a no-op wire delta.
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
         if wire_delta.ops.is_empty() {
             return;
         }
