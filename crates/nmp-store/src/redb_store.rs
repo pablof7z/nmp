@@ -17,13 +17,14 @@
 //! is corrupt, not a reachable, recoverable condition this crate's callers
 //! could usefully branch on today.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
+use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, JsonUtil, Kind, PublicKey, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -34,9 +35,23 @@ use crate::coverage::{
     window_erase, ShapeRecord,
 };
 use crate::{
-    ClaimSet, CoverageInterval, CoverageKey, EventStore, GcReport, InsertOutcome, Provenance,
-    RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
+    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError,
+    PromoteOutcome, Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason,
+    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
 };
+
+/// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
+/// review correction — see its doc). `accept_write`/`accept_ephemeral`/
+/// `promote_signed`/`compensate_write`, and every table-touching helper
+/// they call, propagate through this via `?`; the crate's OTHER,
+/// pre-existing doors (`insert`/`remove`/`expire_due`/`gc`) still
+/// `.expect()` these same `Result`s at their own call sites into the
+/// shared helpers below — unchanged behavior for them, just funneled
+/// through one typed error type instead of a bespoke panic message each.
+fn persist_err(e: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError(e.to_string())
+}
 
 const EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
 const ADDR_INDEX: TableDefinition<&str, &str> = TableDefinition::new("addr_index");
@@ -74,13 +89,487 @@ const BY_AUTHOR: TableDefinition<&str, &str> = TableDefinition::new("by_author")
 /// contiguously), one row per currently-held event keyed by its kind. Same
 /// narrowing purpose as [`BY_AUTHOR`], for kind-filtered queries.
 const BY_KIND: TableDefinition<&str, &str> = TableDefinition::new("by_kind");
+/// The durable write-outbox journal (crashsafe-accepted-2-3-plan.md §2.2,
+/// Fable checkpoint Q2 — APPROVED as co-resident in this same `Database`:
+/// redb atomicity is a per-`Database` property, so the one crash-atomic
+/// commit #3 requires forces the journal into the store's own transaction
+/// boundary). Key: [`intent_key`] (zero-padded decimal `IntentId`, shared
+/// verbatim with [`OUTBOX_DISPLACED`]). Value: JSON-encoded
+/// `OutboxIntentRecord`. A row exists for exactly as long as its intent is
+/// open — `compensate_write` deletes it on pre-signature termination; R8's
+/// terminal-deletion-on-full-delivery is a later unit's job (this frame
+/// never marks an intent all-lanes-terminal, since dispatch/ack tracking is
+/// U3/U4).
+const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_intents");
+/// The predecessor each open intent displaced, if any (retraction doc
+/// §4.2's durable stash). Key: the SAME [`intent_key`] as its
+/// `OUTBOX_INTENTS` row. Value: a `StoredEventRecord`-encoded JSON blob
+/// (reuses the exact `EVENTS` table encoding — see [`encode_stored_event`]/
+/// [`decode_stored_event`]), so the stash round-trips through the same
+/// decode path as any other row. Deleted durably by `promote_signed` (R6)
+/// or `compensate_write`; never by `recover_outbox` (read-only).
+const OUTBOX_DISPLACED: TableDefinition<&str, &str> = TableDefinition::new("outbox_displaced");
+/// Per-`(intent, relay, ordinal)` durable attempt evidence
+/// (crashsafe-accepted-2-3-plan.md §5) — schema created here so the table
+/// exists for the dispatch-time attempt writer to come (U3/U4: "Persist
+/// `AttemptStarted` before dispatch"). This unit does not write rows into
+/// it (Fable checkpoint R2: folding attempt eligibility into
+/// `next_deadline` here is a busy-loop spin hazard — that fold ships with
+/// the retry-owner follow-up, not this frame) and `recover_outbox` does not
+/// read it — it is created purely for forward schema compatibility.
+#[allow(dead_code)]
+const OUTBOX_ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
+/// Store-owned outbox metadata — two rows, `"next_intent_id"` and
+/// `"next_receipt_id"`, each the next id of its kind to allocate (decimal
+/// `u64`, defaulting to 1 if the row has never been written). Both are
+/// bumped inside the SAME transaction as the `OUTBOX_INTENTS`/`EVENTS`
+/// writes they accompany, so allocation and the intent/receipt it names
+/// commit or roll back together (architecture review correction:
+/// allocation of EITHER id is a durable fact the store itself owns — see
+/// [`IntentId`]'s doc for the reuse hazard this closes; the identical
+/// hazard applies to receipt ids once receipts are durably retained).
+const OUTBOX_META: TableDefinition<&str, &str> = TableDefinition::new("outbox_meta");
+const NEXT_INTENT_ID_KEY: &str = "next_intent_id";
+const NEXT_RECEIPT_ID_KEY: &str = "next_receipt_id";
+/// Durably-RETAINED receipt records, keyed by `receipt_id` (zero-padded
+/// decimal, mirroring [`intent_key`]'s convention) — independent of
+/// `OUTBOX_INTENTS`'s open-work rows (architecture review correction: see
+/// [`crate::ReceiptState`]'s doc for why this separation exists). Never
+/// pruned by this unit.
+const OUTBOX_RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_receipts");
+/// Every still-open kind:5 intent's OWN suppression claims (architecture
+/// review requirement — codex-nova's suppression-claim model; see
+/// [`SuppressClaimRecord`]'s doc), keyed by the SAME [`intent_key`] as its
+/// `OUTBOX_INTENTS` row. `promote_signed` drops this row (after committing
+/// the deletion for real — see [`process_kind5_deletions`]); `compensate_write`
+/// just drops it (nothing else to reverse: a claim never moved or removed
+/// the row it names).
+const OUTBOX_KIND5_CLAIMS: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_kind5_claims");
+/// Reverse index: `id_tombstone_key(target id, claiming author) ->
+/// JSON-encoded `Vec<u64>` of claiming `IntentId`s — consulted by
+/// `is_suppressed_in_txn` to decide `query` visibility. More than one
+/// intent can claim the SAME target (two independent pending deletes of
+/// the same event before either signs or cancels): hidden while ANY claim
+/// applies, visible again only once every claim on it is dropped.
+const OUTBOX_SUPPRESS_BY_ID: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_suppress_by_id");
+/// Reverse index for address claims: `AddressKey::to_redb_key() ->
+/// JSON-encoded `Vec<u64>``, same treatment as [`OUTBOX_SUPPRESS_BY_ID`].
+const OUTBOX_SUPPRESS_BY_ADDR: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_suppress_by_addr");
 
 /// The `events` table's JSON value: the event's canonical NIP-01 JSON plus
-/// its merged provenance.
+/// its merged provenance and, iff the row is locally authored, its
+/// [`LocalOrigin`] (issue #2's `Provenance::local` widening — `LocalOrigin`
+/// already derives `Serialize`/`Deserialize`, so no separate mirror type is
+/// needed here).
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredEventRecord {
     event_json: String,
     provenance: BTreeMap<RelayUrl, Timestamp>,
+    /// `#[serde(default)]`: only a relay-observed row (never locally
+    /// authored) omits `local` entirely; defaulting it to `None` on decode
+    /// keeps that the ordinary case instead of a required field every
+    /// caller has to thread through.
+    #[serde(default)]
+    local: Option<LocalOrigin>,
+}
+
+/// One `OUTBOX_INTENTS` row's JSON value — the full acceptance journal
+/// payload (Fable checkpoint R7), everything issue #3's "one crash-atomic
+/// commit" enumerates besides the pending row itself (which lives in
+/// `EVENTS`, not duplicated here).
+#[derive(Debug, Serialize, Deserialize)]
+struct OutboxIntentRecord {
+    receipt_id: u64,
+    frozen_json: String,
+    expected_pubkey: PublicKey,
+    signing_identity_ref: String,
+    durability: WriteDurability,
+    routing: String,
+    sig_state: IntentSigState,
+    accepted_at: Timestamp,
+}
+
+/// [`OUTBOX_INTENTS`]/[`OUTBOX_DISPLACED`]'s shared key for `id` — a
+/// zero-padded decimal so the two tables can never disagree on how to find
+/// each other's row for the same intent, and so a future ordered scan sorts
+/// by acceptance order (lexicographic == numeric, matching
+/// [`expiration_key`]'s convention).
+fn intent_key(id: IntentId) -> String {
+    format!("{:020}", id.0)
+}
+
+/// Allocate the next [`IntentId`] from [`OUTBOX_META`]'s durable high-water
+/// mark, bumping it in the SAME already-open write transaction the caller
+/// is about to journal the intent in (architecture review correction — see
+/// [`IntentId`]'s doc). Starts at 1 if the row has never been written.
+fn alloc_intent_id_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+) -> Result<IntentId, PersistenceError> {
+    Ok(IntentId(alloc_counter_in_txn(
+        outbox_meta,
+        NEXT_INTENT_ID_KEY,
+    )?))
+}
+
+/// Allocate the next receipt id from `OUTBOX_META`'s durable high-water
+/// mark, same treatment as [`alloc_intent_id_in_txn`] (architecture review
+/// correction: receipt ids have the identical reuse hazard now that
+/// receipts are durably retained across restart).
+fn alloc_receipt_id_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+) -> Result<u64, PersistenceError> {
+    alloc_counter_in_txn(outbox_meta, NEXT_RECEIPT_ID_KEY)
+}
+
+/// Shared bump-and-return for one `OUTBOX_META` counter row, keyed by
+/// `meta_key` (either [`NEXT_INTENT_ID_KEY`] or [`NEXT_RECEIPT_ID_KEY`]).
+/// Starts at 1 if the row has never been written.
+fn alloc_counter_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+    meta_key: &str,
+) -> Result<u64, PersistenceError> {
+    let current = outbox_meta
+        .get(meta_key)
+        .map_err(persist_err)?
+        .map(|guard| {
+            guard
+                .value()
+                .parse::<u64>()
+                .expect("redb: parse outbox_meta counter")
+        })
+        .unwrap_or(1);
+    let next = current + 1;
+    let encoded = next.to_string();
+    outbox_meta
+        .insert(meta_key, encoded.as_str())
+        .map_err(persist_err)?;
+    Ok(current)
+}
+
+/// [`OUTBOX_RECEIPTS`]'s key for `id` — same zero-padding convention as
+/// [`intent_key`].
+fn receipt_key(id: u64) -> String {
+    format!("{:020}", id)
+}
+
+/// One `OUTBOX_RECEIPTS` row's JSON value (architecture review correction —
+/// see [`crate::ReceiptState`]'s doc). `EventId`/`PublicKey`/`IntentId`/
+/// `ReceiptState` all already derive `Serialize`/`Deserialize`, so this
+/// mirrors `crate::RecoveredReceipt` field-for-field with no re-encoding.
+#[derive(Debug, Serialize, Deserialize)]
+struct OutboxReceiptRecord {
+    /// `None` for an `Ephemeral` receipt-only record — see
+    /// `crate::RecoveredReceipt::intent_id`'s doc.
+    intent_id: Option<IntentId>,
+    frozen_id: EventId,
+    expected_pubkey: PublicKey,
+    state: ReceiptState,
+}
+
+/// Update `OUTBOX_RECEIPTS[receipt_id]`'s `state` in place, if a row exists
+/// (it always should, by construction — every journaled `accept_write`
+/// writes one in the same transaction). Shared by `promote_signed` and
+/// `compensate_write` (architecture review correction).
+fn update_outbox_receipt(
+    outbox_receipts: &mut redb::Table<'_, &str, &str>,
+    receipt_id: u64,
+    state: ReceiptState,
+) -> Result<(), PersistenceError> {
+    let key = receipt_key(receipt_id);
+    // Two statements, not one chained expression — see `remove_row_in_txn`'s
+    // comment on the same `?`-temporary-lifetime-extension quirk.
+    let existing = outbox_receipts.get(key.as_str()).map_err(persist_err)?;
+    if let Some(json) = existing.map(|guard| guard.value().to_string()) {
+        let mut record: OutboxReceiptRecord =
+            serde_json::from_str(&json).expect("redb: decode outbox receipt");
+        record.state = state;
+        let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
+        outbox_receipts
+            .insert(key.as_str(), encoded.as_str())
+            .map_err(persist_err)?;
+    }
+    Ok(())
+}
+
+/// Boot-time reconciliation: every `Ephemeral` receipt-only record
+/// (`intent_id: None`) still `ReceiptState::Accepted` is flipped to
+/// `Abandoned` — see `ReceiptState::Abandoned`'s doc for why this is sound
+/// without any engine cooperation. Called from `RedbStore::open()`, inside
+/// the SAME write transaction that ensures every table exists (a fresh
+/// store's `OUTBOX_RECEIPTS` is empty, so this is a no-op there). Two
+/// passes (collect then mutate), mirroring `gc`'s victim-collection
+/// pattern: `redb` does not allow mutating a table while iterating it.
+fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &str, &str>) {
+    let mut to_abandon: Vec<(String, OutboxReceiptRecord)> = Vec::new();
+    for entry in outbox_receipts.iter().expect("redb: iter outbox_receipts") {
+        let (key, value) = entry.expect("redb: read outbox_receipts entry");
+        let record: OutboxReceiptRecord =
+            serde_json::from_str(value.value()).expect("redb: decode outbox receipt");
+        if record.intent_id.is_none() && record.state == ReceiptState::Accepted {
+            to_abandon.push((key.value().to_string(), record));
+        }
+    }
+    for (key, mut record) in to_abandon {
+        record.state = ReceiptState::Abandoned;
+        let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
+        outbox_receipts
+            .insert(key.as_str(), encoded.as_str())
+            .expect("redb: update outbox_receipts (ephemeral abandon)");
+    }
+}
+
+/// One provisional kind:5 suppression claim, as persisted in
+/// `OUTBOX_KIND5_CLAIMS` (architecture review requirement — codex-nova's
+/// suppression-claim model, replacing a withdrawn design that physically
+/// moved a target row into a per-intent stash — see
+/// `crate::AcceptOutcome::Kind5Processed`'s doc for why that was unsound).
+/// `Id` mirrors [`id_tombstone_key`]'s own composite (target id, claiming
+/// author) — a future arrival at that id is only ever suppressed if its
+/// real author (fixed by the id's hash) matches. `Addr` names an address
+/// (an [`AddressKey::to_redb_key`] string) PLUS the same NIP-09
+/// `created_at` ceiling the permanent `ADDR_TOMBSTONES` mechanism uses
+/// (issue #61 P0 correction: a claim with no ceiling would hide every
+/// future winner at that address forever, including one created AFTER the
+/// deletion, which even a PERMANENT tombstone does not do). Authorization
+/// is checked immediately at claim-creation time (`coord.public_key ==
+/// deleting.pubkey`), so `deleting_author` here is diagnostic parity with
+/// `AddrTombstoneRecord`, not load-bearing for the visibility check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum SuppressClaimRecord {
+    Id(String),
+    Addr {
+        key: String,
+        ceiling: u64,
+        deleting_author: String,
+    },
+}
+
+/// Append `intent_id` to the JSON-encoded `Vec<u64>` claimant set at
+/// `table[key]` (creating it if absent) — shared by `OUTBOX_SUPPRESS_BY_ID`
+/// only now (see [`add_addr_claimant_in_txn`] for the ceiling-carrying
+/// address counterpart).
+fn add_claimant_in_txn(
+    table: &mut redb::Table<'_, &str, &str>,
+    key: &str,
+    intent_id: IntentId,
+) -> Result<(), PersistenceError> {
+    let mut claimants: Vec<u64> = table
+        .get(key)
+        .map_err(persist_err)?
+        .map(|guard| serde_json::from_str(guard.value()).expect("redb: decode claimant set"))
+        .unwrap_or_default();
+    if !claimants.contains(&intent_id.0) {
+        claimants.push(intent_id.0);
+    }
+    let encoded = serde_json::to_string(&claimants).expect("redb: encode claimant set");
+    table.insert(key, encoded.as_str()).map_err(persist_err)?;
+    Ok(())
+}
+
+/// Remove `intent_id` from the claimant set at `table[key]`, deleting the
+/// row outright once it becomes empty (the row's mere existence implies
+/// non-empty by construction — [`add_claimant_in_txn`] never inserts an
+/// empty set) — the reversal counterpart of [`add_claimant_in_txn`], and
+/// [`has_claimants_in_txn`]'s existence check relies on this invariant.
+fn remove_claimant_in_txn(
+    table: &mut redb::Table<'_, &str, &str>,
+    key: &str,
+    intent_id: IntentId,
+) -> Result<(), PersistenceError> {
+    let Some(json) = table
+        .get(key)
+        .map_err(persist_err)?
+        .map(|guard| guard.value().to_string())
+    else {
+        return Ok(());
+    };
+    let mut claimants: Vec<u64> = serde_json::from_str(&json).expect("redb: decode claimant set");
+    claimants.retain(|id| *id != intent_id.0);
+    if claimants.is_empty() {
+        table.remove(key).map_err(persist_err)?;
+    } else {
+        let encoded = serde_json::to_string(&claimants).expect("redb: encode claimant set");
+        table.insert(key, encoded.as_str()).map_err(persist_err)?;
+    }
+    Ok(())
+}
+
+/// `true` iff `table[key]` currently names at least one claimant —
+/// consulted by [`is_suppressed_in_txn`] for ID claims. Relies on
+/// [`remove_claimant_in_txn`]'s "never leave an empty set behind"
+/// invariant: mere row existence implies non-empty.
+fn has_claimants_in_txn(
+    table: &impl ReadableTable<&'static str, &'static str>,
+    key: &str,
+) -> Result<bool, PersistenceError> {
+    Ok(table.get(key).map_err(persist_err)?.is_some())
+}
+
+/// One `(claiming_intent_id, created_at_ceiling)` pair — `OUTBOX_SUPPRESS_BY_ADDR`'s
+/// value shape (issue #61 P0 correction, mirrors `SuppressClaimRecord::Addr`'s
+/// doc for why a bare claimant list is not enough).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AddrClaimant {
+    intent_id: u64,
+    ceiling: u64,
+}
+
+/// Add (or update) `intent_id`'s ceiling in the JSON-encoded
+/// `Vec<AddrClaimant>` claimant list at `table[key]` — the address
+/// counterpart of [`add_claimant_in_txn`], carrying a ceiling per
+/// claimant instead of a bare id.
+fn add_addr_claimant_in_txn(
+    table: &mut redb::Table<'_, &str, &str>,
+    key: &str,
+    intent_id: IntentId,
+    ceiling: Timestamp,
+) -> Result<(), PersistenceError> {
+    let mut claimants: Vec<AddrClaimant> = table
+        .get(key)
+        .map_err(persist_err)?
+        .map(|guard| serde_json::from_str(guard.value()).expect("redb: decode addr claimant set"))
+        .unwrap_or_default();
+    claimants.retain(|c| c.intent_id != intent_id.0);
+    claimants.push(AddrClaimant {
+        intent_id: intent_id.0,
+        ceiling: ceiling.as_secs(),
+    });
+    let encoded = serde_json::to_string(&claimants).expect("redb: encode addr claimant set");
+    table.insert(key, encoded.as_str()).map_err(persist_err)?;
+    Ok(())
+}
+
+/// Remove `intent_id`'s ceiling entry from `table[key]`, deleting the row
+/// outright once empty — the address counterpart of
+/// [`remove_claimant_in_txn`].
+fn remove_addr_claimant_in_txn(
+    table: &mut redb::Table<'_, &str, &str>,
+    key: &str,
+    intent_id: IntentId,
+) -> Result<(), PersistenceError> {
+    let Some(json) = table
+        .get(key)
+        .map_err(persist_err)?
+        .map(|guard| guard.value().to_string())
+    else {
+        return Ok(());
+    };
+    let mut claimants: Vec<AddrClaimant> =
+        serde_json::from_str(&json).expect("redb: decode addr claimant set");
+    claimants.retain(|c| c.intent_id != intent_id.0);
+    if claimants.is_empty() {
+        table.remove(key).map_err(persist_err)?;
+    } else {
+        let encoded = serde_json::to_string(&claimants).expect("redb: encode addr claimant set");
+        table.insert(key, encoded.as_str()).map_err(persist_err)?;
+    }
+    Ok(())
+}
+
+/// `true` iff ANY claimant at `table[key]` currently covers
+/// `candidate_created_at` (its ceiling is at-or-after it) — the
+/// provisional counterpart of the permanent `ADDR_TOMBSTONES` ceiling
+/// check, consulted by [`is_suppressed_in_txn`].
+fn addr_has_covering_claimant_in_txn(
+    table: &impl ReadableTable<&'static str, &'static str>,
+    key: &str,
+    candidate_created_at: Timestamp,
+) -> Result<bool, PersistenceError> {
+    let Some(json) = table
+        .get(key)
+        .map_err(persist_err)?
+        .map(|guard| guard.value().to_string())
+    else {
+        return Ok(false);
+    };
+    let claimants: Vec<AddrClaimant> =
+        serde_json::from_str(&json).expect("redb: decode addr claimant set");
+    Ok(claimants
+        .iter()
+        .any(|c| candidate_created_at.as_secs() <= c.ceiling))
+}
+
+/// `true` iff `event` is currently hidden by ANY still-open kind:5
+/// suppression claim — consulted by `query` and `gc`. Never affects
+/// `EVENTS`/`ADDR_INDEX` themselves: a suppressed row is fully present,
+/// just filtered out of read results (see [`SuppressClaimRecord`]'s doc).
+/// Mirrors `MemoryStore::is_suppressed` exactly, including the
+/// per-claimant ceiling check for address claims (issue #61 P0
+/// correction). Generic over `ReadableTable` (not the concrete
+/// `Table`/`ReadOnlyTable` types) so it works from BOTH `gc`'s write
+/// transaction and `query`'s read-only one — every other helper in this
+/// file only ever runs inside a write transaction; this is the first
+/// read-only caller.
+fn is_suppressed_in_txn(
+    outbox_suppress_by_id: &impl ReadableTable<&'static str, &'static str>,
+    outbox_suppress_by_addr: &impl ReadableTable<&'static str, &'static str>,
+    event: &Event,
+) -> Result<bool, PersistenceError> {
+    let id_key = id_tombstone_key(&event.id, &event.pubkey);
+    if has_claimants_in_txn(outbox_suppress_by_id, &id_key)? {
+        return Ok(true);
+    }
+    if let Some(key) = address_key_for(event) {
+        let key_str = key.to_redb_key();
+        if addr_has_covering_claimant_in_txn(outbox_suppress_by_addr, &key_str, event.created_at)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Convert `se` into the `StoredEventRecord` any `EVENTS`/`OUTBOX_DISPLACED`
+/// row encodes — shared by [`encode_stored_event`] so the two never drift
+/// on field mapping.
+fn stored_event_to_record(se: &StoredEvent) -> StoredEventRecord {
+    StoredEventRecord {
+        event_json: se.event.as_json(),
+        provenance: se.provenance.seen.clone(),
+        local: se.provenance.local.clone(),
+    }
+}
+
+/// The read-side counterpart of [`stored_event_to_record`].
+fn record_to_stored_event(record: &StoredEventRecord) -> StoredEvent {
+    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+    StoredEvent {
+        event,
+        provenance: Provenance {
+            seen: record.provenance.clone(),
+            local: record.local.clone(),
+        },
+    }
+}
+
+/// Encode `se` exactly as the `EVENTS` table stores a row — shared by every
+/// door that writes a full [`StoredEvent`] back out (the durable
+/// `OUTBOX_DISPLACED` stash, `compensate_write`'s restore path).
+fn encode_stored_event(se: &StoredEvent) -> String {
+    serde_json::to_string(&stored_event_to_record(se)).expect("redb: encode stored event")
+}
+
+/// Decode one `EVENTS`/`OUTBOX_DISPLACED` JSON value into a [`StoredEvent`]
+/// — the read-side counterpart of [`encode_stored_event`].
+fn decode_stored_event(json: &str) -> StoredEvent {
+    let record: StoredEventRecord = serde_json::from_str(json).expect("redb: decode stored event");
+    record_to_stored_event(&record)
+}
+
+/// True iff `record` is a locally-authored row still awaiting a signature
+/// — the GC-exclusion predicate (Fable checkpoint R5), mirrors
+/// `MemoryStore`'s `is_open_local_intent` exactly so the two backends can
+/// never diverge on which rows GC may evict.
+fn is_open_local_intent(record: &StoredEventRecord) -> bool {
+    matches!(
+        record.local,
+        Some(LocalOrigin {
+            sig_state: SigState::Pending,
+            ..
+        })
+    )
 }
 
 /// The `addr_tombstones` table's JSON value.
@@ -150,29 +639,22 @@ fn tombstone_refuses(
     tombstones: &redb::Table<'_, &str, &str>,
     addr_tombstones: &redb::Table<'_, &str, &str>,
     event: &Event,
-) -> bool {
+) -> Result<bool, PersistenceError> {
     let key = id_tombstone_key(&event.id, &event.pubkey);
-    if tombstones
-        .get(key.as_str())
-        .expect("redb: get tombstone")
-        .is_some()
-    {
-        return true;
+    if tombstones.get(key.as_str()).map_err(persist_err)?.is_some() {
+        return Ok(true);
     }
     if let Some(key) = address_key_for(event) {
         let key_str = key.to_redb_key();
-        if let Some(guard) = addr_tombstones
-            .get(key_str.as_str())
-            .expect("redb: get addr tombstone")
-        {
+        if let Some(guard) = addr_tombstones.get(key_str.as_str()).map_err(persist_err)? {
             let rec: AddrTombstoneRecord =
                 serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
             if event.created_at.as_secs() <= rec.ceiling {
-                return true;
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
 }
 
 /// Remove `id`'s row within an already-open write transaction, iff
@@ -191,44 +673,44 @@ fn remove_row_in_txn(
     by_kind: &mut redb::Table<'_, &str, &str>,
     id: EventId,
     predicate: impl FnOnce(&StoredEvent) -> bool,
-) -> Option<StoredEvent> {
+) -> Result<Option<StoredEvent>, PersistenceError> {
     let id_hex = id.to_hex();
-    let json = events
-        .get(id_hex.as_str())
-        .expect("redb: get event")?
-        .value()
-        .to_string();
-    let record: StoredEventRecord = serde_json::from_str(&json).expect("redb: decode stored event");
-    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-    let se = StoredEvent {
-        event,
-        provenance: Provenance {
-            seen: record.provenance,
-        },
+    // A nested block, not a bare chained expression: the `AccessGuard`'s
+    // borrow of `events` must end at the closing `}`, strictly before the
+    // `events.remove(..)` mutation below — `?`'s hidden `ControlFlow`
+    // temporary otherwise extends it (a known rustc temporary-lifetime-
+    // extension quirk that a plain sequence of `let` statements does not
+    // reliably avoid here).
+    let json = {
+        let Some(guard) = events.get(id_hex.as_str()).map_err(persist_err)? else {
+            return Ok(None);
+        };
+        guard.value().to_string()
     };
+    let se = decode_stored_event(&json);
     if !predicate(&se) {
-        return None;
+        return Ok(None);
     }
 
-    events.remove(id_hex.as_str()).expect("redb: remove event");
+    events.remove(id_hex.as_str()).map_err(persist_err)?;
     by_author
         .remove(by_author_key(&se.event.pubkey, &id).as_str())
-        .expect("redb: remove by_author");
+        .map_err(persist_err)?;
     by_kind
         .remove(by_kind_key(se.event.kind, &id).as_str())
-        .expect("redb: remove by_kind");
+        .map_err(persist_err)?;
 
     if let Some(addr_key) = address_key_for(&se.event) {
         let addr_key_str = addr_key.to_redb_key();
         let still_points_here = addr_index
             .get(addr_key_str.as_str())
-            .expect("redb: get addr_index")
+            .map_err(persist_err)?
             .map(|guard| guard.value().to_string())
             == Some(id_hex.clone());
         if still_points_here {
             addr_index
                 .remove(addr_key_str.as_str())
-                .expect("redb: remove addr_index");
+                .map_err(persist_err)?;
         }
     }
 
@@ -236,10 +718,10 @@ fn remove_row_in_txn(
         let exp_key = expiration_key(ts, &id);
         expiration_index
             .remove(exp_key.as_str())
-            .expect("redb: remove expiration_index");
+            .map_err(persist_err)?;
     }
 
-    Some(se)
+    Ok(Some(se))
 }
 
 /// kind:5 processing (retraction-and-negative-deltas.md §2), run within the
@@ -259,7 +741,7 @@ fn process_kind5_deletions(
     by_author: &mut redb::Table<'_, &str, &str>,
     by_kind: &mut redb::Table<'_, &str, &str>,
     deleting: &Event,
-) -> Vec<StoredEvent> {
+) -> Result<Vec<StoredEvent>, PersistenceError> {
     let mut deleted = Vec::new();
     let deleting_id_hex = deleting.id.to_hex();
     let deleting_author_hex = deleting.pubkey.to_hex();
@@ -274,7 +756,7 @@ fn process_kind5_deletions(
             by_kind,
             target_id,
             |se| se.event.pubkey == deleting.pubkey,
-        ) {
+        )? {
             deleted.push(removed);
         }
         // Claim recorded regardless of hold state right now -- a target
@@ -285,7 +767,7 @@ fn process_kind5_deletions(
         let key = id_tombstone_key(&target_id, &deleting.pubkey);
         tombstones
             .insert(key.as_str(), deleting_id_hex.as_str())
-            .expect("redb: insert tombstone");
+            .map_err(persist_err)?;
     }
 
     let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
@@ -303,7 +785,7 @@ fn process_kind5_deletions(
 
         let existing_ceiling = addr_tombstones
             .get(key_str.as_str())
-            .expect("redb: get addr tombstone")
+            .map_err(persist_err)?
             .map(|guard| {
                 let rec: AddrTombstoneRecord =
                     serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
@@ -319,12 +801,12 @@ fn process_kind5_deletions(
             let encoded = serde_json::to_string(&record).expect("redb: encode addr tombstone");
             addr_tombstones
                 .insert(key_str.as_str(), encoded.as_str())
-                .expect("redb: insert addr tombstone");
+                .map_err(persist_err)?;
         }
 
         let current_id_hex = addr_index
             .get(key_str.as_str())
-            .expect("redb: get addr_index")
+            .map_err(persist_err)?
             .map(|guard| guard.value().to_string());
         if let Some(current_id_hex) = current_id_hex {
             let current_id =
@@ -337,13 +819,567 @@ fn process_kind5_deletions(
                 by_kind,
                 current_id,
                 |se| se.event.created_at <= deleting.created_at,
-            ) {
+            )? {
                 deleted.push(removed);
             }
         }
     }
 
-    deleted
+    Ok(deleted)
+}
+
+/// Atomically transition every intent in `owners` whose OWN journal is
+/// still `Pending` to `Signed`, using `canonical_event` as the frozen
+/// bytes each owner's journal now reflects, dropping each owner's own
+/// displaced stash too (R6) and closing each owner's own kind:5
+/// suppression claims if `canonical_event` is a deletion (running the
+/// FULL, permanent [`process_kind5_deletions`] once, not per-owner).
+/// Architecture review requirement (issue #2 P0 correction, codex-nova
+/// ruling): `promote_signed`, [`reinsert_stashed_in_txn`]'s dedup
+/// collision, and `insert`'s relay-dedup onto a pending sentinel must all
+/// fan out IDENTICALLY — an offline co-owner signer must never strand a
+/// receipt behind an event that's already validly signed, regardless of
+/// HOW that signature became canonical. Mirrors
+/// `MemoryStore::fan_out_signed` exactly. Returns every intent THIS call
+/// actually transitioned (an already-`Signed` owner is left untouched and
+/// excluded).
+#[allow(clippy::too_many_arguments)]
+fn fan_out_signed_in_txn(
+    events: &mut redb::Table<'_, &str, &str>,
+    addr_index: &mut redb::Table<'_, &str, &str>,
+    tombstones: &mut redb::Table<'_, &str, &str>,
+    addr_tombstones: &mut redb::Table<'_, &str, &str>,
+    expiration_index: &mut redb::Table<'_, &str, &str>,
+    by_author: &mut redb::Table<'_, &str, &str>,
+    by_kind: &mut redb::Table<'_, &str, &str>,
+    outbox_intents: &mut redb::Table<'_, &str, &str>,
+    outbox_receipts: &mut redb::Table<'_, &str, &str>,
+    outbox_displaced: &mut redb::Table<'_, &str, &str>,
+    outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
+    owners: &BTreeSet<IntentId>,
+    canonical_event: &Event,
+) -> Result<Vec<IntentId>, PersistenceError> {
+    let mut transitioned = Vec::new();
+    let is_deletion = canonical_event.kind == Kind::EventDeletion;
+    let canonical_json = canonical_event.as_json();
+    for owner_id in owners {
+        let owner_key = intent_key(*owner_id);
+        outbox_displaced
+            .remove(owner_key.as_str())
+            .map_err(persist_err)?;
+        let owner_intent_json = outbox_intents
+            .get(owner_key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string());
+        if let Some(owner_intent_json) = owner_intent_json {
+            let mut owner_record: OutboxIntentRecord =
+                serde_json::from_str(&owner_intent_json).expect("redb: decode outbox intent");
+            if owner_record.sig_state != IntentSigState::Signed {
+                owner_record.sig_state = IntentSigState::Signed;
+                owner_record.frozen_json = canonical_json.clone();
+                let encoded_owner =
+                    serde_json::to_string(&owner_record).expect("redb: encode outbox intent");
+                outbox_intents
+                    .insert(owner_key.as_str(), encoded_owner.as_str())
+                    .map_err(persist_err)?;
+                update_outbox_receipt(
+                    outbox_receipts,
+                    owner_record.receipt_id,
+                    ReceiptState::Signed,
+                )?;
+                transitioned.push(*owner_id);
+            }
+        }
+        if is_deletion {
+            let claims_json = outbox_kind5_claims
+                .remove(owner_key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string());
+            if let Some(claims_json) = claims_json {
+                let claims: Vec<SuppressClaimRecord> =
+                    serde_json::from_str(&claims_json).expect("redb: decode claims");
+                for claim in claims {
+                    match claim {
+                        SuppressClaimRecord::Id(id_key) => {
+                            remove_claimant_in_txn(outbox_suppress_by_id, &id_key, *owner_id)?;
+                        }
+                        SuppressClaimRecord::Addr { key: addr_key, .. } => {
+                            remove_addr_claimant_in_txn(
+                                outbox_suppress_by_addr,
+                                &addr_key,
+                                *owner_id,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if is_deletion {
+        process_kind5_deletions(
+            events,
+            addr_index,
+            tombstones,
+            addr_tombstones,
+            expiration_index,
+            by_author,
+            by_kind,
+            canonical_event,
+        )?;
+    }
+    Ok(transitioned)
+}
+
+/// The PENDING half of kind:5 processing (architecture review requirement
+/// — see [`SuppressClaimRecord`]'s doc): stages a REVERSIBLE suppression
+/// claim over every e-tag id target and a-tag address target `deleting`
+/// names, hiding whatever row currently lives there from `query` — via
+/// [`is_suppressed_in_txn`], consulted at read time — WITHOUT moving or
+/// removing it from `EVENTS`/`ADDR_INDEX`. Called for EVERY accepted
+/// pending kind:5 intent, including an exact `Duplicate` (issue #61 P0
+/// correction — see this fn's caller in `accept_write`). `promote_signed`
+/// later drops these claims and runs the FULL, permanent
+/// [`process_kind5_deletions`]; `compensate_write` just drops them
+/// (nothing to re-insert — a claim never moved or removed the row it
+/// names). Returns the rows that ACTUALLY became newly hidden as a result
+/// of THIS call — a true visibility delta (issue #61 P1 correction),
+/// computed from before/after suppression state and deduped by event id
+/// — and the exact claims staged (for `OUTBOX_KIND5_CLAIMS`). Mirrors
+/// `MemoryStore::process_kind5_deletions_provisional` exactly.
+fn process_kind5_deletions_provisional_in_txn(
+    events: &redb::Table<'_, &str, &str>,
+    addr_index: &redb::Table<'_, &str, &str>,
+    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
+    intent_id: IntentId,
+    deleting: &Event,
+) -> Result<(Vec<StoredEvent>, Vec<SuppressClaimRecord>), PersistenceError> {
+    let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
+    let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
+
+    let mut candidate_ids: Vec<EventId> = Vec::new();
+    let mut seen_candidates: HashSet<EventId> = HashSet::new();
+    for target_id in &target_ids {
+        if seen_candidates.insert(*target_id) {
+            candidate_ids.push(*target_id);
+        }
+    }
+    for coord in &coords {
+        if coord.public_key != deleting.pubkey {
+            continue;
+        }
+        if let Some(key) = address_key_for_coordinate(coord) {
+            let key_str = key.to_redb_key();
+            let current_id_hex = addr_index
+                .get(key_str.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string());
+            if let Some(current_id_hex) = current_id_hex {
+                let current_id =
+                    EventId::from_hex(&current_id_hex).expect("redb: decode addr_index id");
+                if seen_candidates.insert(current_id) {
+                    candidate_ids.push(current_id);
+                }
+            }
+        }
+    }
+
+    let mut visible_before: HashMap<EventId, bool> = HashMap::new();
+    for id in &candidate_ids {
+        let id_hex = id.to_hex();
+        let visible = match events.get(id_hex.as_str()).map_err(persist_err)? {
+            None => false,
+            Some(guard) => {
+                let se = decode_stored_event(guard.value());
+                !is_suppressed_in_txn(outbox_suppress_by_id, outbox_suppress_by_addr, &se.event)?
+            }
+        };
+        visible_before.insert(*id, visible);
+    }
+
+    let mut claims = Vec::new();
+    for target_id in target_ids {
+        let key = id_tombstone_key(&target_id, &deleting.pubkey);
+        add_claimant_in_txn(outbox_suppress_by_id, &key, intent_id)?;
+        claims.push(SuppressClaimRecord::Id(key));
+    }
+    for coord in coords {
+        if coord.public_key != deleting.pubkey {
+            // NIP-09 author-only: a coordinate naming a pubkey other than
+            // this deletion's own author carries no authority at all here
+            // -- skip entirely, no claim staged.
+            continue;
+        }
+        let Some(key) = address_key_for_coordinate(&coord) else {
+            continue;
+        };
+        let key_str = key.to_redb_key();
+        add_addr_claimant_in_txn(
+            outbox_suppress_by_addr,
+            &key_str,
+            intent_id,
+            deleting.created_at,
+        )?;
+        claims.push(SuppressClaimRecord::Addr {
+            key: key_str,
+            ceiling: deleting.created_at.as_secs(),
+            deleting_author: deleting.pubkey.to_hex(),
+        });
+    }
+
+    let mut hidden = Vec::new();
+    for id in candidate_ids {
+        if !visible_before.get(&id).copied().unwrap_or(false) {
+            continue;
+        }
+        let id_hex = id.to_hex();
+        if let Some(guard) = events.get(id_hex.as_str()).map_err(persist_err)? {
+            let se = decode_stored_event(guard.value());
+            if is_suppressed_in_txn(outbox_suppress_by_id, outbox_suppress_by_addr, &se.event)? {
+                hidden.push(se);
+            }
+        }
+    }
+
+    Ok((hidden, claims))
+}
+
+/// Scan `OUTBOX_DISPLACED` for the row (if any) whose stashed event's id is
+/// `frozen_id` AND whose OWN local provenance's owner SET contains
+/// `intent_id` — used by `promote_signed`/`compensate_write` for an intent
+/// that is not currently the live row at its own id: it may instead be
+/// sitting in some OTHER intent's displaced stash, having been superseded
+/// by a LATER local edit before it could sign or be cancelled (architecture
+/// review correction: a stashed predecessor "can later sign or cancel", so
+/// its copy must be kept in sync or invalidated, never left to resurrect
+/// stale or cancelled state). The `intent_id` membership check is
+/// load-bearing, not redundant with the event-id match (codex-nova
+/// finding): two DIFFERENT intents can share the same frozen event id (a
+/// real intent and a byte-identical `Duplicate` of it), so matching by
+/// event id alone could let one intent's promote/compensate call mutate or
+/// delete an UNRELATED intent's stash entry. `owners` is a SET, not a
+/// single id (issue #2, team-lead decision): a `Duplicate` accepted
+/// BEFORE its predecessor was superseded is a CO-OWNER of the SAME stash
+/// slot, not a slot of its own — see `LocalOrigin`'s doc. Returns the
+/// OWNING stash's `OUTBOX_DISPLACED` key, if found — at most one, by
+/// construction (a `StoredEvent` is only ever the CURRENT displaced stash
+/// of the one intent that most recently superseded it).
+fn find_displaced_key_by_event_id_in_txn(
+    outbox_displaced: &redb::Table<'_, &str, &str>,
+    frozen_id: EventId,
+    intent_id: IntentId,
+) -> Result<Option<String>, PersistenceError> {
+    for entry in outbox_displaced.iter().map_err(persist_err)? {
+        let (key, value) = entry.map_err(persist_err)?;
+        let record: StoredEventRecord =
+            serde_json::from_str(value.value()).expect("redb: decode stored event");
+        let owned_by_this_intent = record
+            .local
+            .as_ref()
+            .is_some_and(|l| l.owners.contains(&intent_id));
+        if !owned_by_this_intent {
+            continue;
+        }
+        if let Ok(event) = Event::from_json(&record.event_json) {
+            if event.id == frozen_id {
+                return Ok(Some(key.value().to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Find ANY displaced-stash entry (regardless of which intent owns it)
+/// whose frozen event id matches `frozen_id`. Architecture review
+/// requirement (issue #2 P0 correction, codex-nova ruling): `accept_write`'s
+/// duplicate detection must search the DISPLACED stash too, not only the
+/// live `EVENTS` row — a duplicate accepted while its canonical predecessor
+/// is currently sitting displaced (superseded by a later local edit, not
+/// yet restored) must ALSO join that stash entry's owner set, or it would
+/// be silently treated as a fresh insert and strand its own obligation
+/// outside the shared ownership entirely. Unlike
+/// [`find_displaced_key_by_event_id_in_txn`] (which only matches an entry a
+/// SPECIFIC intent already owns), this is used for a BRAND NEW intent that
+/// owns nothing yet, so it must match on event id alone.
+fn find_any_displaced_key_by_event_id_in_txn(
+    outbox_displaced: &redb::Table<'_, &str, &str>,
+    frozen_id: EventId,
+) -> Result<Option<String>, PersistenceError> {
+    for entry in outbox_displaced.iter().map_err(persist_err)? {
+        let (key, value) = entry.map_err(persist_err)?;
+        let record: StoredEventRecord =
+            serde_json::from_str(value.value()).expect("redb: decode stored event");
+        if let Ok(event) = Event::from_json(&record.event_json) {
+            if event.id == frozen_id {
+                return Ok(Some(key.value().to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Re-admit a durably-stashed predecessor `se` through the ordinary
+/// dedup/tombstone/supersession rules `insert` runs, preserving its FULL
+/// original provenance (both relay `seen` history and any `local` origin)
+/// rather than reconstructing it from a single fresh observation —
+/// `compensate_write`'s compensating re-insert (retraction-and-negative-
+/// deltas.md §4.2: "through the same one door... wins its address back by
+/// ordinary supersession rules", never an un-supersede operation). Mirrors
+/// `MemoryStore::reinsert_stashed` exactly. Returns the row as it now
+/// stands if `se` actually (re)claims a slot; `None` if it is refused,
+/// deduped away, or loses the address race (`Stale` — the correct, silent
+/// §3.4 outcome for a re-offered grand-predecessor: nothing churns).
+#[allow(clippy::too_many_arguments)]
+fn reinsert_stashed_in_txn(
+    events: &mut redb::Table<'_, &str, &str>,
+    addr_index: &mut redb::Table<'_, &str, &str>,
+    tombstones: &mut redb::Table<'_, &str, &str>,
+    addr_tombstones: &mut redb::Table<'_, &str, &str>,
+    expiration_index: &mut redb::Table<'_, &str, &str>,
+    by_author: &mut redb::Table<'_, &str, &str>,
+    by_kind: &mut redb::Table<'_, &str, &str>,
+    outbox_intents: &mut redb::Table<'_, &str, &str>,
+    outbox_receipts: &mut redb::Table<'_, &str, &str>,
+    outbox_displaced: &mut redb::Table<'_, &str, &str>,
+    outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
+    se: StoredEvent,
+) -> Result<Option<StoredEvent>, PersistenceError> {
+    let id_hex = se.event.id.to_hex();
+
+    let existing_json = events
+        .get(id_hex.as_str())
+        .map_err(persist_err)?
+        .map(|guard| guard.value().to_string());
+    if let Some(existing_json) = existing_json {
+        // Architecture review requirement (issue #2 P0 correction,
+        // codex-nova ruling): union the owner sets and apply Signed
+        // dominance — never silently drop the stashed entry's OWN
+        // ownership/signature-state fact just because this exact id
+        // happens to already be held. If the union newly becomes Signed
+        // for previously-Pending owners, fan out to all of them — the
+        // SAME invariant `promote_signed` enforces explicitly, since a
+        // dedup collision here is functionally no different from a relay
+        // independently confirming the signature.
+        let mut record: StoredEventRecord =
+            serde_json::from_str(&existing_json).expect("redb: decode stored event");
+        let mut provenance = Provenance {
+            seen: record.provenance,
+            local: record.local,
+        };
+        for (relay, at) in &se.provenance.seen {
+            provenance.merge_observation(&RelayObserved::new(relay.clone(), *at));
+        }
+        let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
+        if let Some(stashed_local) = &se.provenance.local {
+            // codex-nova ruling (cross-door reachability finding): a row
+            // with NO local provenance at all is purely relay-observed --
+            // its `event_json`'s signature is by construction already
+            // real, never a sentinel -- so it counts as "already signed"
+            // exactly like a locally-owned row whose own `sig_state` is
+            // `Signed` (the SAME rule `accept_write`'s `already_signed`
+            // and `insert`'s dedup branch already apply). `unwrap_or(true)`,
+            // NOT `is_some_and` defaulting to `false` -- getting this
+            // backwards here specifically meant a relay-confirmed row
+            // restored from a stash collision never told the stash's own
+            // owner it was safe to stop waiting.
+            let existing_signed = provenance
+                .local
+                .as_ref()
+                .map(|l| l.sig_state == SigState::Signed)
+                .unwrap_or(true);
+            let stashed_signed = stashed_local.sig_state == SigState::Signed;
+            if !existing_signed && stashed_signed {
+                // Adopt the stash's real signature onto the record's OWN
+                // event bytes (NIP-01 id never depends on `sig`, so this
+                // is a pure value update, no id churn).
+                let mut adopted =
+                    Event::from_json(&record.event_json).expect("redb: decode event json");
+                adopted.sig = se.event.sig;
+                record.event_json = adopted.as_json();
+            }
+            let mut owners = provenance
+                .local
+                .as_ref()
+                .map(|l| l.owners.clone())
+                .unwrap_or_default();
+            owners.extend(stashed_local.owners.iter().copied());
+            let result_signed = existing_signed || stashed_signed;
+            provenance.local = Some(LocalOrigin {
+                owners: owners.clone(),
+                sig_state: if result_signed {
+                    SigState::Signed
+                } else {
+                    SigState::Pending
+                },
+            });
+            // Fan out whenever the RESULT is Signed, regardless of which
+            // side already held the real signature -- `fan_out_signed_in_
+            // txn` itself is idempotent per owner (it only transitions an
+            // owner whose OWN journal is still `Pending`), so this is
+            // always safe, and it is the ONLY way the STASH's own
+            // owner(s) ever learn that a row which was ALREADY signed on
+            // the live/relay side is done waiting on them.
+            if result_signed {
+                fan_out_owners = Some(owners);
+            }
+        }
+        record.provenance = provenance.seen.clone();
+        record.local = provenance.local.clone();
+        let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
+        events
+            .insert(id_hex.as_str(), encoded.as_str())
+            .map_err(persist_err)?;
+        if let Some(owners) = &fan_out_owners {
+            let canonical_event =
+                Event::from_json(&record.event_json).expect("redb: decode event json");
+            fan_out_signed_in_txn(
+                events,
+                addr_index,
+                tombstones,
+                addr_tombstones,
+                expiration_index,
+                by_author,
+                by_kind,
+                outbox_intents,
+                outbox_receipts,
+                outbox_displaced,
+                outbox_kind5_claims,
+                outbox_suppress_by_id,
+                outbox_suppress_by_addr,
+                owners,
+                &canonical_event,
+            )?;
+        }
+        let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+        return Ok(Some(StoredEvent { event, provenance }));
+    }
+    if tombstone_refuses(tombstones, addr_tombstones, &se.event)? {
+        return Ok(None);
+    }
+
+    let encoded = encode_stored_event(&se);
+
+    let result = match address_key_for(&se.event) {
+        None => {
+            events
+                .insert(id_hex.as_str(), encoded.as_str())
+                .map_err(persist_err)?;
+            by_author
+                .insert(
+                    by_author_key(&se.event.pubkey, &se.event.id).as_str(),
+                    id_hex.as_str(),
+                )
+                .map_err(persist_err)?;
+            by_kind
+                .insert(
+                    by_kind_key(se.event.kind, &se.event.id).as_str(),
+                    id_hex.as_str(),
+                )
+                .map_err(persist_err)?;
+            if let Some(ts) = se.event.tags.expiration().copied() {
+                let exp_key = expiration_key(ts, &se.event.id);
+                expiration_index
+                    .insert(exp_key.as_str(), id_hex.as_str())
+                    .map_err(persist_err)?;
+            }
+            Some(se)
+        }
+        Some(addr_key) => {
+            let addr_key_str = addr_key.to_redb_key();
+            let current_id_hex = addr_index
+                .get(addr_key_str.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string());
+
+            match current_id_hex {
+                None => {
+                    events
+                        .insert(id_hex.as_str(), encoded.as_str())
+                        .map_err(persist_err)?;
+                    addr_index
+                        .insert(addr_key_str.as_str(), id_hex.as_str())
+                        .map_err(persist_err)?;
+                    by_author
+                        .insert(
+                            by_author_key(&se.event.pubkey, &se.event.id).as_str(),
+                            id_hex.as_str(),
+                        )
+                        .map_err(persist_err)?;
+                    by_kind
+                        .insert(
+                            by_kind_key(se.event.kind, &se.event.id).as_str(),
+                            id_hex.as_str(),
+                        )
+                        .map_err(persist_err)?;
+                    if let Some(ts) = se.event.tags.expiration().copied() {
+                        let exp_key = expiration_key(ts, &se.event.id);
+                        expiration_index
+                            .insert(exp_key.as_str(), id_hex.as_str())
+                            .map_err(persist_err)?;
+                    }
+                    Some(se)
+                }
+                Some(current_id_hex) => {
+                    let current_json = events
+                        .get(current_id_hex.as_str())
+                        .map_err(persist_err)?
+                        .expect("addr_index must always point at a stored event")
+                        .value()
+                        .to_string();
+                    let current_event = decode_stored_event(&current_json).event;
+
+                    if candidate_wins(&se.event, &current_event) {
+                        let current_id =
+                            EventId::from_hex(&current_id_hex).expect("redb: decode addr_index id");
+                        remove_row_in_txn(
+                            events,
+                            addr_index,
+                            expiration_index,
+                            by_author,
+                            by_kind,
+                            current_id,
+                            |_| true,
+                        )?
+                        .expect("addr_index must always point at a stored event");
+
+                        events
+                            .insert(id_hex.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
+                        addr_index
+                            .insert(addr_key_str.as_str(), id_hex.as_str())
+                            .map_err(persist_err)?;
+                        by_author
+                            .insert(
+                                by_author_key(&se.event.pubkey, &se.event.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .map_err(persist_err)?;
+                        by_kind
+                            .insert(
+                                by_kind_key(se.event.kind, &se.event.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .map_err(persist_err)?;
+                        if let Some(ts) = se.event.tags.expiration().copied() {
+                            let exp_key = expiration_key(ts, &se.event.id);
+                            expiration_index
+                                .insert(exp_key.as_str(), id_hex.as_str())
+                                .map_err(persist_err)?;
+                        }
+                        Some(se)
+                    } else {
+                        // Stale — §3.4: nothing churns.
+                        None
+                    }
+                }
+            }
+        }
+    };
+    Ok(result)
 }
 
 /// The `coverage` table's JSON value: the window-erased shape the row was
@@ -387,6 +1423,21 @@ impl RedbStore {
             write_txn.open_table(EXPIRATION_INDEX)?;
             write_txn.open_table(BY_AUTHOR)?;
             write_txn.open_table(BY_KIND)?;
+            write_txn.open_table(OUTBOX_INTENTS)?;
+            write_txn.open_table(OUTBOX_DISPLACED)?;
+            write_txn.open_table(OUTBOX_ATTEMPTS)?;
+            write_txn.open_table(OUTBOX_META)?;
+            write_txn.open_table(OUTBOX_KIND5_CLAIMS)?;
+            write_txn.open_table(OUTBOX_SUPPRESS_BY_ID)?;
+            write_txn.open_table(OUTBOX_SUPPRESS_BY_ADDR)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
+            // Boot-time reconciliation (VISION-ratified receipt contract,
+            // team-lead correction): any `Ephemeral` receipt-only record
+            // still `Accepted` at this point can only mean the process
+            // died before any further transition was ever recorded — see
+            // `ReceiptState::Abandoned`'s doc. A no-op on a fresh store
+            // (the table is empty) or a store with no ephemeral receipts.
+            reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts);
         }
         write_txn.commit()?;
         Ok(Self {
@@ -425,15 +1476,7 @@ impl RedbStore {
     fn decode_row(&self, json: &str) -> StoredEvent {
         #[cfg(test)]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
-        let record: StoredEventRecord =
-            serde_json::from_str(json).expect("redb: decode stored event");
-        let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-        StoredEvent {
-            event,
-            provenance: Provenance {
-                seen: record.provenance,
-            },
-        }
+        decode_stored_event(json)
     }
 
     /// `query`'s index-narrowing step (issue #17): `Some(ids)` -- the
@@ -520,6 +1563,24 @@ impl EventStore for RedbStore {
                 .open_table(BY_AUTHOR)
                 .expect("redb: open by_author");
             let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+            let mut outbox_intents = write_txn
+                .open_table(OUTBOX_INTENTS)
+                .expect("redb: open outbox_intents");
+            let mut outbox_receipts = write_txn
+                .open_table(OUTBOX_RECEIPTS)
+                .expect("redb: open outbox_receipts");
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .expect("redb: open outbox_displaced");
+            let mut outbox_kind5_claims = write_txn
+                .open_table(OUTBOX_KIND5_CLAIMS)
+                .expect("redb: open outbox_kind5_claims");
+            let mut outbox_suppress_by_id = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ID)
+                .expect("redb: open outbox_suppress_by_id");
+            let mut outbox_suppress_by_addr = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+                .expect("redb: open outbox_suppress_by_addr");
             let id_hex = event.id.to_hex();
 
             let existing_json = events
@@ -536,17 +1597,71 @@ impl EventStore for RedbStore {
                     serde_json::from_str(&existing_json).expect("redb: decode stored event");
                 let mut provenance = Provenance {
                     seen: record.provenance,
+                    local: record.local,
                 };
                 let grew = provenance.merge_observation(&from);
+                // Architecture review requirement (issue #2 P0 correction,
+                // codex-nova ruling): a relay delivering the real signed
+                // event for a still-Pending local draft is functionally the
+                // SAME signature-adoption/fan-out invariant `promote_signed`
+                // performs explicitly — adopt it, mark every co-owner
+                // `Signed`, and fan out, rather than silently keeping our
+                // own sentinel forever (`event` here is, by this door's own
+                // contract, always a genuine relay delivery, never our OWN
+                // sentinel, so its signature is always safe to adopt).
+                let needs_adoption = provenance
+                    .local
+                    .as_ref()
+                    .is_some_and(|l| l.sig_state == SigState::Pending);
+                let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
+                if needs_adoption {
+                    let mut local = provenance
+                        .local
+                        .clone()
+                        .expect("just checked this row carries local provenance");
+                    local.sig_state = SigState::Signed;
+                    fan_out_owners = Some(local.owners.clone());
+                    provenance.local = Some(local);
+                }
+                // `merge_observation` never touches `local` (a relay echo
+                // of an already-local row keeps its local provenance,
+                // retraction doc §4.1) — `provenance.local` is otherwise
+                // unchanged, written straight back.
                 record.provenance = provenance.seen;
+                record.local = provenance.local;
+                if fan_out_owners.is_some() {
+                    record.event_json = event.as_json();
+                }
                 let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
                 events
                     .insert(id_hex.as_str(), encoded.as_str())
                     .expect("redb: update event provenance");
+                if let Some(owners) = &fan_out_owners {
+                    fan_out_signed_in_txn(
+                        &mut events,
+                        &mut addr_index,
+                        &mut tombstones,
+                        &mut addr_tombstones,
+                        &mut expiration_index,
+                        &mut by_author,
+                        &mut by_kind,
+                        &mut outbox_intents,
+                        &mut outbox_receipts,
+                        &mut outbox_displaced,
+                        &mut outbox_kind5_claims,
+                        &mut outbox_suppress_by_id,
+                        &mut outbox_suppress_by_addr,
+                        owners,
+                        &event,
+                    )
+                    .expect("redb: fan out adopted signature");
+                }
                 InsertOutcome::Duplicate {
                     provenance_grew: grew,
                 }
-            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event) {
+            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event)
+                .expect("redb: tombstone check")
+            {
                 // Tombstone check, AFTER dedup-by-id, BEFORE storage
                 // (retraction-and-negative-deltas.md §2).
                 InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -559,6 +1674,7 @@ impl EventStore for RedbStore {
                         m.insert(from.relay.clone(), from.at);
                         m
                     },
+                    local: None,
                 };
                 let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
 
@@ -637,6 +1753,7 @@ impl EventStore for RedbStore {
                                         event: current_event,
                                         provenance: Provenance {
                                             seen: current_record.provenance,
+                                            local: current_record.local,
                                         },
                                     };
                                     events
@@ -713,7 +1830,8 @@ impl EventStore for RedbStore {
                             &mut by_author,
                             &mut by_kind,
                             &event,
-                        );
+                        )
+                        .expect("redb: kind5 processing");
                         InsertOutcome::Kind5Processed { deleted }
                     } else {
                         outcome
@@ -730,6 +1848,21 @@ impl EventStore for RedbStore {
     fn query(&self, filter: &Filter) -> Vec<StoredEvent> {
         let read_txn = self.db.begin_read().expect("redb: begin_read");
         let events = read_txn.open_table(EVENTS).expect("redb: open events");
+        let outbox_suppress_by_id = read_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ID)
+            .expect("redb: open outbox_suppress_by_id");
+        let outbox_suppress_by_addr = read_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+            .expect("redb: open outbox_suppress_by_addr");
+        // A still-open kind:5 intent's provisional suppression claim
+        // (architecture review requirement — see `SuppressClaimRecord`'s
+        // doc) hides a row from every one of `query`'s three paths WITHOUT
+        // ever removing it from `EVENTS` — the row is fully present, only
+        // filtered out here.
+        let visible = |event: &Event| -> bool {
+            !is_suppressed_in_txn(&outbox_suppress_by_id, &outbox_suppress_by_addr, event)
+                .expect("redb: check suppression")
+        };
 
         // Fast path: `filter.ids` narrows directly through `EVENTS`'s own
         // id-keyed rows -- no secondary index needed, bounded by `|ids|`
@@ -742,7 +1875,7 @@ impl EventStore for RedbStore {
                     continue;
                 };
                 let se = self.decode_row(value.value());
-                if filter.match_event(&se.event, MatchEventOptions::new()) {
+                if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event) {
                     out.push(se);
                 }
             }
@@ -767,7 +1900,8 @@ impl EventStore for RedbStore {
                         continue;
                     };
                     let se = self.decode_row(value.value());
-                    if filter.match_event(&se.event, MatchEventOptions::new()) {
+                    if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event)
+                    {
                         out.push(se);
                     }
                 }
@@ -778,7 +1912,8 @@ impl EventStore for RedbStore {
                 for entry in events.iter().expect("redb: iter events") {
                     let (_key, value) = entry.expect("redb: read event entry");
                     let se = self.decode_row(value.value());
-                    if filter.match_event(&se.event, MatchEventOptions::new()) {
+                    if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event)
+                    {
                         out.push(se);
                     }
                 }
@@ -810,6 +1945,7 @@ impl EventStore for RedbStore {
                 id,
                 |_| true,
             )
+            .expect("redb: remove row")
         };
         write_txn.commit().expect("redb: commit remove");
         removed
@@ -852,6 +1988,7 @@ impl EventStore for RedbStore {
                         id,
                         |_| true,
                     )
+                    .expect("redb: remove due row")
                 })
                 .collect()
         };
@@ -932,17 +2069,38 @@ impl EventStore for RedbStore {
                 .open_table(BY_AUTHOR)
                 .expect("redb: open by_author");
             let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+            let outbox_suppress_by_id = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ID)
+                .expect("redb: open outbox_suppress_by_id");
+            let outbox_suppress_by_addr = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+                .expect("redb: open outbox_suppress_by_addr");
 
-            // Pass 1: find victims (regular events matched by no claim).
-            // Collected up front into owned values so the removal pass below
-            // never holds a borrow across a mutation.
+            // Pass 1: find victims (regular events matched by no claim, and
+            // not an open — unsigned — local intent: Fable checkpoint R5,
+            // mirrors `MemoryStore::gc`'s exclusion exactly). A row
+            // currently hidden by a still-open kind:5 suppression claim is
+            // pinned the same way (architecture review requirement — GC
+            // must never evict a target a pending cancel/promote can still
+            // act on; NIP-40 expiry may still remove it separately).
+            // Collected up front into owned values so the removal pass
+            // below never holds a borrow across a mutation.
             let mut victims: Vec<(String, Event)> = Vec::new();
             for entry in events.iter().expect("redb: iter events") {
                 let (key, value) = entry.expect("redb: read event entry");
                 let record: StoredEventRecord =
                     serde_json::from_str(value.value()).expect("redb: decode stored event");
                 let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-                if address_key_for(&event).is_none() && !claims.is_claimed(&event) {
+                if address_key_for(&event).is_none()
+                    && !is_open_local_intent(&record)
+                    && !is_suppressed_in_txn(
+                        &outbox_suppress_by_id,
+                        &outbox_suppress_by_addr,
+                        &event,
+                    )
+                    .expect("redb: check suppression")
+                    && !claims.is_claimed(&event)
+                {
                     victims.push((key.value().to_string(), event));
                 }
             }
@@ -1033,6 +2191,1148 @@ impl EventStore for RedbStore {
         write_txn.commit().expect("redb: commit gc");
 
         report
+    }
+
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
+        let AcceptWrite {
+            mut frozen,
+            expected_pubkey,
+            signing_identity_ref,
+            durability,
+            routing,
+            mut sig_state,
+            accepted_at,
+        } = accept;
+        // Overridden inside the `Duplicate` branch when the existing row
+        // is ALREADY signed (codex-nova ruling) — the shared R7 journal
+        // write below uses these instead of the hardcoded `Accepted`/
+        // caller-supplied values in that one case.
+        let mut receipt_state = ReceiptState::Accepted;
+
+        // Refused at the door FIRST, same as `insert`: never journaled,
+        // nothing to recover, and neither an `IntentId` nor a receipt id
+        // is ever allocated (R3 + architecture review correction: a
+        // refusal can never burn either).
+        if frozen.is_expired_at(&accepted_at) {
+            return Ok(AcceptOutcome::Refused(RefuseReason::AlreadyExpired));
+        }
+
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let outcome = {
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+            let tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .map_err(persist_err)?;
+            let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let mut outbox_kind5_claims = write_txn
+                .open_table(OUTBOX_KIND5_CLAIMS)
+                .map_err(persist_err)?;
+            let mut outbox_suppress_by_id = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ID)
+                .map_err(persist_err)?;
+            let mut outbox_suppress_by_addr = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+                .map_err(persist_err)?;
+
+            let id_hex = frozen.id.to_hex();
+            let existing = events.get(id_hex.as_str()).map_err(persist_err)?;
+            let existing_json = existing.map(|guard| guard.value().to_string());
+            let is_deletion = frozen.kind == Kind::EventDeletion;
+
+            // Dedup detection: checked against BOTH the live `EVENTS` row
+            // AND every OTHER intent's `OUTBOX_DISPLACED` stash (issue #2
+            // P0 correction, codex-nova ruling) — a duplicate accepted
+            // while its canonical predecessor is currently sitting
+            // displaced (superseded by a later local edit, not yet
+            // restored) must ALSO join that stash entry's owner set,
+            // otherwise it would be silently treated as a fresh insert and
+            // strand its own obligation outside the shared ownership
+            // entirely. See `find_any_displaced_key_by_event_id_in_txn`'s
+            // doc.
+            enum DupLoc {
+                Live,
+                Stash(String),
+            }
+            let dup_loc = if existing_json.is_some() {
+                Some(DupLoc::Live)
+            } else {
+                find_any_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen.id)?
+                    .map(DupLoc::Stash)
+            };
+
+            // Same tombstone-refusal + dedup-by-id + replaceable/addressable
+            // supersession rules `insert` runs — see this fn's own doc and
+            // `AcceptOutcome`'s. `Refused` is the ONLY branch that skips
+            // both the journal write below AND `IntentId`/receipt-id
+            // allocation.
+            let (result, displaced): (AcceptOutcome, Option<StoredEvent>) = if let Some(dup_loc) =
+                dup_loc
+            {
+                let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
+                let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
+                let existing_json_for_dup = match &dup_loc {
+                    DupLoc::Live => existing_json.clone().expect("checked DupLoc::Live above"),
+                    DupLoc::Stash(key) => outbox_displaced
+                        .get(key.as_str())
+                        .map_err(persist_err)?
+                        .expect("just found this key")
+                        .value()
+                        .to_string(),
+                };
+                let mut existing_record: StoredEventRecord =
+                    serde_json::from_str(&existing_json_for_dup)
+                        .expect("redb: decode stored event");
+                // codex-nova ruling: a row with NO local provenance at
+                // all is purely relay-observed — its `event_json`'s
+                // signature is by construction already real (never a
+                // sentinel, since `insert` only ever stores what a
+                // relay actually delivered), so it counts as "already
+                // signed" exactly like a locally-owned row whose own
+                // `sig_state` is `Signed`.
+                let already_signed = existing_record
+                    .local
+                    .as_ref()
+                    .map(|l| l.sig_state == SigState::Signed)
+                    .unwrap_or(true);
+
+                // Architecture review correction (issue #2, team-lead
+                // decision): this new intent joins the existing row's
+                // owner set — an exact `Duplicate` must retain
+                // INDEPENDENT ownership rather than being silently
+                // coalesced into whichever intent already backs the
+                // row (see `LocalOrigin`'s doc for why coalescing was
+                // rejected). This now applies even to a PURELY
+                // relay-observed row (codex-nova ruling): its `local`
+                // becomes `Some` for the first time, tracking this
+                // intent's own obligation.
+                let mut owners = existing_record
+                    .local
+                    .as_ref()
+                    .map(|l| l.owners.clone())
+                    .unwrap_or_default();
+                owners.insert(intent_id);
+                let row_sig_state = existing_record
+                    .local
+                    .as_ref()
+                    .map(|l| l.sig_state)
+                    .unwrap_or(SigState::Signed);
+                existing_record.local = Some(LocalOrigin {
+                    owners,
+                    sig_state: row_sig_state,
+                });
+                let encoded =
+                    serde_json::to_string(&existing_record).expect("redb: encode stored event");
+                match &dup_loc {
+                    DupLoc::Live => {
+                        events
+                            .insert(id_hex.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
+                    }
+                    DupLoc::Stash(key) => {
+                        outbox_displaced
+                            .insert(key.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
+                    }
+                }
+
+                // Issue #61 P0 correction: an exact-duplicate kind:5
+                // intent must own an INDEPENDENT suppression claim
+                // too — otherwise cancelling the canonical original
+                // while this duplicate remains pending would
+                // incorrectly reveal a target it is still obligated
+                // to delete. Only meaningful while still PENDING — an
+                // already-signed kind:5's tombstones are already
+                // permanent, nothing provisional left to claim.
+                if frozen.kind == Kind::EventDeletion && !already_signed {
+                    let (_hidden, claims) = process_kind5_deletions_provisional_in_txn(
+                        &events,
+                        &addr_index,
+                        &mut outbox_suppress_by_id,
+                        &mut outbox_suppress_by_addr,
+                        intent_id,
+                        &frozen,
+                    )?;
+                    let encoded_claims =
+                        serde_json::to_string(&claims).expect("redb: encode claims");
+                    outbox_kind5_claims
+                        .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
+                        .map_err(persist_err)?;
+                }
+
+                let row = record_to_stored_event(&existing_record);
+
+                // codex-nova ruling: a duplicate of an ALREADY-signed
+                // row (local or relay) must itself start `Signed`,
+                // journaling the CANONICAL bytes (`row.event`, not
+                // this call's own sentinel-signed `frozen`) — an
+                // offline co-owner signer must never strand a receipt
+                // behind an event that's already validly signed, and
+                // there is nothing left for THIS intent to sign. The
+                // shared R7 journal-write section below picks these
+                // overridden values up.
+                if already_signed {
+                    frozen = row.event.clone();
+                    sig_state = IntentSigState::Signed;
+                    receipt_state = ReceiptState::Signed;
+                }
+
+                (
+                    AcceptOutcome::Duplicate {
+                        intent_id,
+                        receipt_id,
+                        row,
+                    },
+                    None,
+                )
+            } else if tombstone_refuses(&tombstones, &addr_tombstones, &frozen)? {
+                (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
+            } else {
+                let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
+                let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
+                let local = LocalOrigin {
+                    owners: BTreeSet::from([intent_id]),
+                    sig_state: SigState::Pending,
+                };
+                let stored = StoredEvent {
+                    event: frozen.clone(),
+                    provenance: Provenance {
+                        seen: BTreeMap::new(),
+                        local: Some(local),
+                    },
+                };
+                let encoded = encode_stored_event(&stored);
+
+                match address_key_for(&frozen) {
+                    None => {
+                        events
+                            .insert(id_hex.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
+                        by_author
+                            .insert(
+                                by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .map_err(persist_err)?;
+                        by_kind
+                            .insert(
+                                by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .map_err(persist_err)?;
+                        if let Some(ts) = frozen.tags.expiration().copied() {
+                            let exp_key = expiration_key(ts, &frozen.id);
+                            expiration_index
+                                .insert(exp_key.as_str(), id_hex.as_str())
+                                .map_err(persist_err)?;
+                        }
+                        // Architecture review correction: a
+                        // locally-composed kind:5 draft stages a
+                        // REVERSIBLE suppression claim over every
+                        // target it names, immediately, in this same
+                        // transaction — issue #2's "no app optimistic
+                        // mirror" promise extends to local deletions
+                        // too. Kind:5 has no replaceable/addressable
+                        // address, so this branch is the only one it
+                        // can ever reach (mirrors `insert`'s own
+                        // kind:5 invariant). See
+                        // `SuppressClaimRecord`'s doc for why this
+                        // hides rather than removes: `compensate_write`
+                        // can then simply drop the claim (nothing to
+                        // re-insert, the row never left), and the
+                        // target's OWN `promote_signed`/
+                        // `compensate_write` keep working on exactly
+                        // the row they always did.
+                        if is_deletion {
+                            let (hidden, claims) = process_kind5_deletions_provisional_in_txn(
+                                &events,
+                                &addr_index,
+                                &mut outbox_suppress_by_id,
+                                &mut outbox_suppress_by_addr,
+                                intent_id,
+                                &frozen,
+                            )?;
+                            let encoded_claims =
+                                serde_json::to_string(&claims).expect("redb: encode claims");
+                            outbox_kind5_claims
+                                .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
+                                .map_err(persist_err)?;
+                            (
+                                AcceptOutcome::Kind5Processed {
+                                    intent_id,
+                                    receipt_id,
+                                    row: stored,
+                                    hidden,
+                                },
+                                None,
+                            )
+                        } else {
+                            (
+                                AcceptOutcome::Inserted {
+                                    intent_id,
+                                    receipt_id,
+                                    row: stored,
+                                },
+                                None,
+                            )
+                        }
+                    }
+                    Some(addr_key) => {
+                        let addr_key_str = addr_key.to_redb_key();
+                        let current = addr_index.get(addr_key_str.as_str()).map_err(persist_err)?;
+                        let current_id_hex = current.map(|guard| guard.value().to_string());
+
+                        match current_id_hex {
+                            None => {
+                                events
+                                    .insert(id_hex.as_str(), encoded.as_str())
+                                    .map_err(persist_err)?;
+                                addr_index
+                                    .insert(addr_key_str.as_str(), id_hex.as_str())
+                                    .map_err(persist_err)?;
+                                by_author
+                                    .insert(
+                                        by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                        id_hex.as_str(),
+                                    )
+                                    .map_err(persist_err)?;
+                                by_kind
+                                    .insert(
+                                        by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                        id_hex.as_str(),
+                                    )
+                                    .map_err(persist_err)?;
+                                if let Some(ts) = frozen.tags.expiration().copied() {
+                                    let exp_key = expiration_key(ts, &frozen.id);
+                                    expiration_index
+                                        .insert(exp_key.as_str(), id_hex.as_str())
+                                        .map_err(persist_err)?;
+                                }
+                                (
+                                    AcceptOutcome::Inserted {
+                                        intent_id,
+                                        receipt_id,
+                                        row: stored,
+                                    },
+                                    None,
+                                )
+                            }
+                            Some(current_id_hex) => {
+                                let current_guard = events
+                                    .get(current_id_hex.as_str())
+                                    .map_err(persist_err)?
+                                    .expect("addr_index must always point at a stored event");
+                                let current_json = current_guard.value().to_string();
+                                drop(current_guard);
+                                let current_event = decode_stored_event(&current_json).event;
+
+                                if candidate_wins(&frozen, &current_event) {
+                                    let current_id = EventId::from_hex(&current_id_hex)
+                                        .expect("redb: decode addr_index id");
+                                    let replaced = remove_row_in_txn(
+                                        &mut events,
+                                        &mut addr_index,
+                                        &mut expiration_index,
+                                        &mut by_author,
+                                        &mut by_kind,
+                                        current_id,
+                                        |_| true,
+                                    )?
+                                    .expect("addr_index must always point at a stored event");
+
+                                    events
+                                        .insert(id_hex.as_str(), encoded.as_str())
+                                        .map_err(persist_err)?;
+                                    addr_index
+                                        .insert(addr_key_str.as_str(), id_hex.as_str())
+                                        .map_err(persist_err)?;
+                                    by_author
+                                        .insert(
+                                            by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                            id_hex.as_str(),
+                                        )
+                                        .map_err(persist_err)?;
+                                    by_kind
+                                        .insert(
+                                            by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                            id_hex.as_str(),
+                                        )
+                                        .map_err(persist_err)?;
+                                    if let Some(ts) = frozen.tags.expiration().copied() {
+                                        let exp_key = expiration_key(ts, &frozen.id);
+                                        expiration_index
+                                            .insert(exp_key.as_str(), id_hex.as_str())
+                                            .map_err(persist_err)?;
+                                    }
+                                    (
+                                        AcceptOutcome::Superseded {
+                                            intent_id,
+                                            receipt_id,
+                                            row: stored,
+                                            replaced: Box::new(replaced.clone()),
+                                        },
+                                        Some(replaced),
+                                    )
+                                } else {
+                                    (
+                                        AcceptOutcome::Stale {
+                                            intent_id,
+                                            receipt_id,
+                                        },
+                                        None,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            // R7: the intent's full journal payload AND the retained
+            // receipt record commit in this SAME transaction as the
+            // event-table mutation (and the `IntentId`/receipt-id
+            // allocation) above — a crash here leaves either nothing or a
+            // fully `recover_outbox`-able `Accepted`. R3: `Refused` is the
+            // one outcome that journals nothing at all.
+            if let (Some(intent_id), Some(receipt_id)) =
+                (result.journaled_intent_id(), result.journaled_receipt_id())
+            {
+                let key = intent_key(intent_id);
+                let intent_record = OutboxIntentRecord {
+                    receipt_id,
+                    frozen_json: frozen.as_json(),
+                    expected_pubkey,
+                    signing_identity_ref,
+                    durability,
+                    routing,
+                    sig_state,
+                    accepted_at,
+                };
+                let encoded_intent =
+                    serde_json::to_string(&intent_record).expect("redb: encode outbox intent");
+                outbox_intents
+                    .insert(key.as_str(), encoded_intent.as_str())
+                    .map_err(persist_err)?;
+
+                if let Some(displaced) = &displaced {
+                    let encoded_displaced = encode_stored_event(displaced);
+                    outbox_displaced
+                        .insert(key.as_str(), encoded_displaced.as_str())
+                        .map_err(persist_err)?;
+                }
+
+                // Architecture review correction: the RETAINED receipt
+                // record, independent of `OUTBOX_INTENTS`'s open-work row.
+                // `receipt_state` is `Accepted` except for the `Duplicate`-
+                // of-an-already-signed-row case above, which overrides it
+                // to `Signed` (codex-nova ruling).
+                let receipt_record = OutboxReceiptRecord {
+                    intent_id: Some(intent_id),
+                    frozen_id: frozen.id,
+                    expected_pubkey,
+                    state: receipt_state,
+                };
+                let encoded_receipt =
+                    serde_json::to_string(&receipt_record).expect("redb: encode outbox receipt");
+                outbox_receipts
+                    .insert(receipt_key(receipt_id).as_str(), encoded_receipt.as_str())
+                    .map_err(persist_err)?;
+            }
+
+            result
+        };
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcome)
+    }
+
+    fn promote_signed(
+        &mut self,
+        intent_id: IntentId,
+        sig: Signature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let outcome = {
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let mut outbox_kind5_claims = write_txn
+                .open_table(OUTBOX_KIND5_CLAIMS)
+                .map_err(persist_err)?;
+            let mut outbox_suppress_by_id = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ID)
+                .map_err(persist_err)?;
+            let mut outbox_suppress_by_addr = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+                .map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+
+            let key = intent_key(intent_id);
+            let intent_json = outbox_intents
+                .get(key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string());
+
+            let outcome = match intent_json {
+                None => PromoteOutcome::NotFound,
+                Some(intent_json) => {
+                    let intent_record: OutboxIntentRecord =
+                        serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
+                    // No-second-transition guard (codex-nova finding): a
+                    // repeat promotion (e.g. a duplicate signer completion)
+                    // must not overwrite an already-Signed row and re-emit
+                    // `Promoted` — the trait doc already promised
+                    // "already-promoted returns NotFound"; this enforces
+                    // it. Load-bearing for `AtMostOnce`: a second silent
+                    // transition here could let the caller re-publish.
+                    if intent_record.sig_state == IntentSigState::Signed {
+                        return Ok(PromoteOutcome::NotFound);
+                    }
+                    let frozen_event = Event::from_json(&intent_record.frozen_json)
+                        .expect("redb: decode frozen event json");
+                    let frozen_id = frozen_event.id;
+                    let frozen_id_hex = frozen_id.to_hex();
+
+                    // Architecture review correction (load-bearing): is
+                    // this intent AMONG the owners of the LIVE row at its
+                    // own frozen id? A `Duplicate`/`Stale` intent never
+                    // had one of its own; a once-live row can since have
+                    // been superseded (locally or by a relay),
+                    // kind:5-deleted, or expired. Ownership is a SET
+                    // (issue #2, team-lead decision): an exact `Duplicate`
+                    // is a CO-OWNER of the SAME canonical row, not a
+                    // second row of its own — see `LocalOrigin`'s doc.
+                    let live_json = events
+                        .get(frozen_id_hex.as_str())
+                        .map_err(persist_err)?
+                        .map(|guard| guard.value().to_string());
+                    let live_record: Option<StoredEventRecord> = live_json
+                        .as_ref()
+                        .map(|j| serde_json::from_str(j).expect("redb: decode stored event"));
+                    let is_live = live_record.as_ref().is_some_and(|r| {
+                        r.local
+                            .as_ref()
+                            .is_some_and(|l| l.owners.contains(&intent_id))
+                    });
+
+                    // Row-level already-signed check: is the shared row/
+                    // stash entry ALREADY signed by some OTHER co-owner?
+                    // Structurally this should never actually be reached
+                    // in a healthy run any more (see below) — the eager
+                    // cross-owner propagation this call itself performs
+                    // means the per-intent guard above already catches a
+                    // co-owner's OWN later call — but it is kept as a
+                    // defensive fallback: never overwrite a canonical
+                    // signature that's already there.
+                    let already_signed = if is_live {
+                        live_record
+                            .as_ref()
+                            .and_then(|r| r.local.as_ref())
+                            .is_some_and(|l| l.sig_state == SigState::Signed)
+                    } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                        &outbox_displaced,
+                        frozen_id,
+                        intent_id,
+                    )? {
+                        let other_json = outbox_displaced
+                            .get(other_key.as_str())
+                            .map_err(persist_err)?
+                            .expect("just found this key")
+                            .value()
+                            .to_string();
+                        let other_record: StoredEventRecord =
+                            serde_json::from_str(&other_json).expect("redb: decode stored event");
+                        other_record
+                            .local
+                            .as_ref()
+                            .is_some_and(|l| l.sig_state == SigState::Signed)
+                    } else {
+                        false
+                    };
+
+                    let mut signed_frozen_event = frozen_event.clone();
+                    signed_frozen_event.sig = sig;
+                    let new_frozen_json = signed_frozen_event.as_json();
+
+                    let (row, owners) = if is_live {
+                        // Swap the sentinel for the real signature — same
+                        // id (a NIP-01 id never depends on `sig`), so this
+                        // is purely a value update: no EVENTS/ADDR_INDEX/
+                        // BY_AUTHOR/BY_KIND key ever changes. Skipped
+                        // entirely if `already_signed`: the canonical
+                        // signature some OTHER owner already committed
+                        // must never be overwritten.
+                        let mut record = live_record.expect("checked is_live above");
+                        if !already_signed {
+                            let mut local = record.local.expect("checked is_live above");
+                            local.sig_state = SigState::Signed;
+                            record.local = Some(local);
+                            record.event_json = new_frozen_json.clone();
+                            let encoded =
+                                serde_json::to_string(&record).expect("redb: encode stored event");
+                            events
+                                .insert(frozen_id_hex.as_str(), encoded.as_str())
+                                .map_err(persist_err)?;
+                        }
+                        let owners = record
+                            .local
+                            .as_ref()
+                            .expect("checked is_live above")
+                            .owners
+                            .clone();
+                        let event =
+                            Event::from_json(&record.event_json).expect("redb: decode event json");
+                        (
+                            StoredEvent {
+                                event,
+                                provenance: Provenance {
+                                    seen: record.provenance,
+                                    local: record.local,
+                                },
+                            },
+                            owners,
+                        )
+                    } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                        &outbox_displaced,
+                        frozen_id,
+                        intent_id,
+                    )? {
+                        // Not live. If this intent's exact frozen bytes
+                        // are sitting in some OTHER intent's displaced
+                        // stash (it was superseded by a later local edit
+                        // before it could sign), sync the real signature
+                        // into that stash entry too — otherwise a future
+                        // restore of it would resurrect a stale sentinel
+                        // copy of an intent that actually did sign. Same
+                        // `already_signed` skip as the live case above.
+                        let other_json = outbox_displaced
+                            .get(other_key.as_str())
+                            .map_err(persist_err)?
+                            .expect("just found this key")
+                            .value()
+                            .to_string();
+                        let mut other_record: StoredEventRecord =
+                            serde_json::from_str(&other_json).expect("redb: decode stored event");
+                        if !already_signed {
+                            other_record.event_json = new_frozen_json.clone();
+                            if let Some(local) = other_record.local.as_mut() {
+                                local.sig_state = SigState::Signed;
+                            }
+                            let encoded_other = serde_json::to_string(&other_record)
+                                .expect("redb: encode stored event");
+                            outbox_displaced
+                                .insert(other_key.as_str(), encoded_other.as_str())
+                                .map_err(persist_err)?;
+                        }
+                        let owners = other_record
+                            .local
+                            .as_ref()
+                            .expect("just matched an owned stash entry")
+                            .owners
+                            .clone();
+                        let event = Event::from_json(&other_record.event_json)
+                            .expect("redb: decode event json");
+                        (
+                            StoredEvent {
+                                event,
+                                provenance: Provenance {
+                                    seen: other_record.provenance,
+                                    local: other_record.local,
+                                },
+                            },
+                            owners,
+                        )
+                    } else {
+                        // Neither live nor in anyone's stash — synthesize
+                        // the resulting signed bytes from the journal's
+                        // own copy. The engine can still publish these
+                        // even though this intent does not (or no longer)
+                        // win any local address. Only reachable when
+                        // `!already_signed`: `already_signed` requires a
+                        // matching live row or stash entry to have been
+                        // found above.
+                        (
+                            StoredEvent {
+                                event: signed_frozen_event.clone(),
+                                provenance: Provenance {
+                                    seen: BTreeMap::new(),
+                                    local: Some(LocalOrigin {
+                                        owners: BTreeSet::from([intent_id]),
+                                        sig_state: SigState::Signed,
+                                    }),
+                                },
+                            },
+                            BTreeSet::from([intent_id]),
+                        )
+                    };
+                    // codex-nova ruling (tightened after review): the
+                    // FIRST owner to sign atomically transitions EVERY
+                    // co-owner's OWN journal/receipt to `Signed` against
+                    // the SAME canonical bytes, in THIS SAME transaction
+                    // — never lazily deferred until (or unless) each
+                    // co-owner separately calls `promote_signed` itself.
+                    // An offline co-owner signer that never calls back
+                    // must never strand its receipt behind an event
+                    // that's already validly signed. Shared with
+                    // `reinsert_stashed_in_txn`'s dedup collision and
+                    // `insert`'s relay-dedup-onto-pending path.
+                    let co_signed: Vec<IntentId> = fan_out_signed_in_txn(
+                        &mut events,
+                        &mut addr_index,
+                        &mut tombstones,
+                        &mut addr_tombstones,
+                        &mut expiration_index,
+                        &mut by_author,
+                        &mut by_kind,
+                        &mut outbox_intents,
+                        &mut outbox_receipts,
+                        &mut outbox_displaced,
+                        &mut outbox_kind5_claims,
+                        &mut outbox_suppress_by_id,
+                        &mut outbox_suppress_by_addr,
+                        &owners,
+                        &row.event,
+                    )?
+                    .into_iter()
+                    .filter(|owner_id| *owner_id != intent_id)
+                    .collect();
+
+                    PromoteOutcome::Promoted {
+                        row: Box::new(row),
+                        co_signed,
+                    }
+                }
+            };
+            outcome
+        };
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcome)
+    }
+
+    fn compensate_write(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let outcome = {
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let mut outbox_kind5_claims = write_txn
+                .open_table(OUTBOX_KIND5_CLAIMS)
+                .map_err(persist_err)?;
+            let mut outbox_suppress_by_id = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ID)
+                .map_err(persist_err)?;
+            let mut outbox_suppress_by_addr = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+                .map_err(persist_err)?;
+
+            let key = intent_key(intent_id);
+            let intent_json = outbox_intents
+                .get(key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string());
+
+            let outcome = match intent_json {
+                None => CompensateOutcome::NotFound,
+                Some(intent_json) => {
+                    let intent_record: OutboxIntentRecord =
+                        serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
+                    if intent_record.sig_state == IntentSigState::Signed {
+                        // Pre-signature only (retraction doc §4.2's
+                        // "Promotion correction").
+                        CompensateOutcome::NotFound
+                    } else {
+                        let frozen_event = Event::from_json(&intent_record.frozen_json)
+                            .expect("redb: decode frozen event json");
+                        let frozen_id = frozen_event.id;
+                        let frozen_id_hex = frozen_id.to_hex();
+
+                        let live_json = events
+                            .get(frozen_id_hex.as_str())
+                            .map_err(persist_err)?
+                            .map(|guard| guard.value().to_string());
+                        let is_live = live_json.as_ref().is_some_and(|j| {
+                            let r: StoredEventRecord =
+                                serde_json::from_str(j).expect("redb: decode stored event");
+                            r.local
+                                .as_ref()
+                                .is_some_and(|l| l.owners.contains(&intent_id))
+                        });
+
+                        if is_live {
+                            // Architecture review correction (issue #2,
+                            // team-lead decision): removing THIS intent
+                            // from the row's owner set only actually
+                            // retracts the canonical row once the set is
+                            // EMPTY, `sig_state` is still `Pending`, AND
+                            // no relay has independently confirmed it — an
+                            // exact-`Duplicate`'s still-open obligation,
+                            // an already-`Signed` state some OTHER owner
+                            // committed, or independent relay provenance,
+                            // must all survive this one intent's
+                            // cancellation (see `LocalOrigin`'s doc).
+                            // §4.2: `remove(id, Rejected)` writes no
+                            // tombstone (only kind:5 processing ever
+                            // does).
+                            let mut record: StoredEventRecord = serde_json::from_str(
+                                live_json.as_deref().expect("checked is_live above"),
+                            )
+                            .expect("redb: decode stored event");
+                            let mut local = record.local.clone().expect("checked is_live above");
+                            local.owners.remove(&intent_id);
+                            let should_retract = local.owners.is_empty()
+                                && local.sig_state == SigState::Pending
+                                && record.provenance.is_empty();
+                            if should_retract {
+                                remove_row_in_txn(
+                                    &mut events,
+                                    &mut addr_index,
+                                    &mut expiration_index,
+                                    &mut by_author,
+                                    &mut by_kind,
+                                    frozen_id,
+                                    |_| true,
+                                )?;
+                            } else {
+                                record.local = Some(local);
+                                let encoded = serde_json::to_string(&record)
+                                    .expect("redb: encode stored event");
+                                events
+                                    .insert(frozen_id_hex.as_str(), encoded.as_str())
+                                    .map_err(persist_err)?;
+                            }
+                        } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                            &outbox_displaced,
+                            frozen_id,
+                            intent_id,
+                        )? {
+                            // Not live, but sitting in someone else's
+                            // displaced stash (chained local supersession
+                            // before this intent could sign) — remove
+                            // THIS intent from THAT stash entry's owner
+                            // set, same conditional-retraction rule as the
+                            // live case above: an exact-`Duplicate`
+                            // co-owner (or a signed/relay-confirmed state)
+                            // sitting in the SAME stash slot must survive
+                            // this intent's cancellation too.
+                            let other_json = outbox_displaced
+                                .get(other_key.as_str())
+                                .map_err(persist_err)?
+                                .expect("just found this key")
+                                .value()
+                                .to_string();
+                            let mut other_record: StoredEventRecord =
+                                serde_json::from_str(&other_json)
+                                    .expect("redb: decode stored event");
+                            let mut local = other_record.local.clone().expect(
+                                "find_displaced_key_by_event_id_in_txn only matches owned entries",
+                            );
+                            local.owners.remove(&intent_id);
+                            let should_drop = local.owners.is_empty()
+                                && local.sig_state == SigState::Pending
+                                && other_record.provenance.is_empty();
+                            if should_drop {
+                                outbox_displaced
+                                    .remove(other_key.as_str())
+                                    .map_err(persist_err)?;
+                            } else {
+                                other_record.local = Some(local);
+                                let encoded_other = serde_json::to_string(&other_record)
+                                    .expect("redb: encode stored event");
+                                outbox_displaced
+                                    .insert(other_key.as_str(), encoded_other.as_str())
+                                    .map_err(persist_err)?;
+                            }
+                        }
+
+                        outbox_intents.remove(key.as_str()).map_err(persist_err)?;
+                        // THIS intent's OWN displaced predecessor (if any)
+                        // is restored through the same one door regardless
+                        // of whether its row was live or already gone for
+                        // some other reason (kind:5/expiry/relay
+                        // supersession) — `reinsert_stashed_in_txn`'s own
+                        // tombstone check makes this safe even if the
+                        // predecessor was itself since deleted or expired.
+                        let displaced_json = outbox_displaced
+                            .remove(key.as_str())
+                            .map_err(persist_err)?
+                            .map(|guard| guard.value().to_string());
+                        let restored = match displaced_json {
+                            Some(json) => reinsert_stashed_in_txn(
+                                &mut events,
+                                &mut addr_index,
+                                &mut tombstones,
+                                &mut addr_tombstones,
+                                &mut expiration_index,
+                                &mut by_author,
+                                &mut by_kind,
+                                &mut outbox_intents,
+                                &mut outbox_receipts,
+                                &mut outbox_displaced,
+                                &mut outbox_kind5_claims,
+                                &mut outbox_suppress_by_id,
+                                &mut outbox_suppress_by_addr,
+                                decode_stored_event(&json),
+                            )?
+                            .map(Box::new),
+                            None => None,
+                        };
+
+                        // Architecture review requirement (kind:5
+                        // suppression-claim reversal, codex-nova's model):
+                        // if this was a still-pending kind:5 draft, drop
+                        // its OWN claims outright — nothing was ever moved
+                        // or removed, so there is nothing to re-insert.
+                        // `revealed` is a true visibility DELTA (issue #61
+                        // P1 correction), computed from before/after
+                        // suppression state and deduped by event id — so
+                        // a target still hidden by some OTHER intent's
+                        // overlapping claim, one already gone for good
+                        // because a different intent already promoted its
+                        // own deletion of the same target, or one this
+                        // claim's own (author/ceiling) component never
+                        // actually covered in the first place (e.g. a
+                        // wrong-author e-tag claim on a row some OTHER
+                        // author holds), is correctly excluded.
+                        let mut revealed = Vec::new();
+                        let claims_json = outbox_kind5_claims
+                            .remove(key.as_str())
+                            .map_err(persist_err)?
+                            .map(|guard| guard.value().to_string());
+                        if let Some(claims_json) = claims_json {
+                            let claims: Vec<SuppressClaimRecord> =
+                                serde_json::from_str(&claims_json).expect("redb: decode claims");
+
+                            let mut candidate_ids: Vec<EventId> = Vec::new();
+                            let mut seen_candidates: HashSet<EventId> = HashSet::new();
+                            for claim in &claims {
+                                let target_id = match claim {
+                                    SuppressClaimRecord::Id(id_key) => {
+                                        // `id_tombstone_key` is
+                                        // `"{id_hex}:{author_hex}"` — the
+                                        // target's own id is everything
+                                        // before the first `:`.
+                                        let hex = id_key
+                                            .split(':')
+                                            .next()
+                                            .expect("id_tombstone_key always has a ':'");
+                                        Some(
+                                            EventId::from_hex(hex)
+                                                .expect("redb: decode id claim target"),
+                                        )
+                                    }
+                                    SuppressClaimRecord::Addr { key: addr_key, .. } => addr_index
+                                        .get(addr_key.as_str())
+                                        .map_err(persist_err)?
+                                        .map(|guard| {
+                                            EventId::from_hex(guard.value())
+                                                .expect("redb: decode addr_index id")
+                                        }),
+                                };
+                                if let Some(target_id) = target_id {
+                                    if seen_candidates.insert(target_id) {
+                                        candidate_ids.push(target_id);
+                                    }
+                                }
+                            }
+
+                            let mut visible_before: HashMap<EventId, bool> = HashMap::new();
+                            for id in &candidate_ids {
+                                let id_hex = id.to_hex();
+                                let visible =
+                                    match events.get(id_hex.as_str()).map_err(persist_err)? {
+                                        None => false,
+                                        Some(guard) => {
+                                            let se = decode_stored_event(guard.value());
+                                            !is_suppressed_in_txn(
+                                                &outbox_suppress_by_id,
+                                                &outbox_suppress_by_addr,
+                                                &se.event,
+                                            )?
+                                        }
+                                    };
+                                visible_before.insert(*id, visible);
+                            }
+
+                            for claim in claims {
+                                match claim {
+                                    SuppressClaimRecord::Id(id_key) => {
+                                        remove_claimant_in_txn(
+                                            &mut outbox_suppress_by_id,
+                                            &id_key,
+                                            intent_id,
+                                        )?;
+                                    }
+                                    SuppressClaimRecord::Addr { key: addr_key, .. } => {
+                                        remove_addr_claimant_in_txn(
+                                            &mut outbox_suppress_by_addr,
+                                            &addr_key,
+                                            intent_id,
+                                        )?;
+                                    }
+                                }
+                            }
+
+                            for id in candidate_ids {
+                                if visible_before.get(&id).copied().unwrap_or(false) {
+                                    continue;
+                                }
+                                let id_hex = id.to_hex();
+                                if let Some(guard) =
+                                    events.get(id_hex.as_str()).map_err(persist_err)?
+                                {
+                                    let se = decode_stored_event(guard.value());
+                                    if !is_suppressed_in_txn(
+                                        &outbox_suppress_by_id,
+                                        &outbox_suppress_by_addr,
+                                        &se.event,
+                                    )? {
+                                        revealed.push(se);
+                                    }
+                                }
+                            }
+                        }
+
+                        update_outbox_receipt(
+                            &mut outbox_receipts,
+                            intent_record.receipt_id,
+                            ReceiptState::Compensated,
+                        )?;
+
+                        CompensateOutcome::Compensated { restored, revealed }
+                    }
+                }
+            };
+            outcome
+        };
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcome)
+    }
+
+    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+        let read_txn = self.db.begin_read().expect("redb: begin_read");
+        let outbox_intents = read_txn
+            .open_table(OUTBOX_INTENTS)
+            .expect("redb: open outbox_intents");
+        let outbox_displaced = read_txn
+            .open_table(OUTBOX_DISPLACED)
+            .expect("redb: open outbox_displaced");
+
+        let mut out = Vec::new();
+        for entry in outbox_intents.iter().expect("redb: iter outbox_intents") {
+            let (key, value) = entry.expect("redb: read outbox_intents entry");
+            let intent_id = IntentId(
+                key.value()
+                    .parse::<u64>()
+                    .expect("redb: parse outbox_intents key"),
+            );
+            let record: OutboxIntentRecord =
+                serde_json::from_str(value.value()).expect("redb: decode outbox intent");
+            let frozen =
+                Event::from_json(&record.frozen_json).expect("redb: decode frozen event json");
+
+            let displaced = outbox_displaced
+                .get(key.value())
+                .expect("redb: get outbox_displaced")
+                .map(|guard| decode_stored_event(guard.value()));
+
+            out.push(RecoveredIntent {
+                intent_id,
+                receipt_id: record.receipt_id,
+                frozen,
+                expected_pubkey: record.expected_pubkey,
+                signing_identity_ref: record.signing_identity_ref,
+                durability: record.durability,
+                routing: record.routing,
+                sig_state: record.sig_state,
+                displaced,
+                accepted_at: record.accepted_at,
+            });
+        }
+        out
+    }
+
+    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+        // NOT a Q4 "always empty" door: retention (not crash-survival) is
+        // the contract — `OUTBOX_RECEIPTS` rows are never deleted by this
+        // unit, so this is an ordinary durable read.
+        let read_txn = self.db.begin_read().expect("redb: begin_read");
+        let outbox_receipts = read_txn
+            .open_table(OUTBOX_RECEIPTS)
+            .expect("redb: open outbox_receipts");
+        let json = outbox_receipts
+            .get(receipt_key(receipt_id).as_str())
+            .expect("redb: get outbox_receipts")
+            .map(|guard| guard.value().to_string())?;
+        let record: OutboxReceiptRecord =
+            serde_json::from_str(&json).expect("redb: decode outbox receipt");
+        Some(RecoveredReceipt {
+            receipt_id,
+            intent_id: record.intent_id,
+            frozen_id: record.frozen_id,
+            expected_pubkey: record.expected_pubkey,
+            state: record.state,
+        })
+    }
+
+    fn accept_ephemeral(
+        &mut self,
+        frozen_id: EventId,
+        expected_pubkey: PublicKey,
+    ) -> Result<u64, PersistenceError> {
+        // Receipt-ONLY: touches `OUTBOX_RECEIPTS` (+ `OUTBOX_META` for the
+        // id allocation) alone — no `EVENTS` row, no `OUTBOX_INTENTS` row,
+        // `intent_id: None` (nothing backs it).
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let receipt_id = {
+            let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
+            let record = OutboxReceiptRecord {
+                intent_id: None,
+                frozen_id,
+                expected_pubkey,
+                state: ReceiptState::Accepted,
+            };
+            let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
+            outbox_receipts
+                .insert(receipt_key(receipt_id).as_str(), encoded.as_str())
+                .map_err(persist_err)?;
+            receipt_id
+        };
+        write_txn.commit().map_err(persist_err)?;
+        Ok(receipt_id)
     }
 }
 
