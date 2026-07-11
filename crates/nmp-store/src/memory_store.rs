@@ -46,6 +46,35 @@ struct OutboxIntentRecord {
     accepted_at: Timestamp,
 }
 
+/// What a PENDING (unsigned) kind:5 draft provisionally did at
+/// `accept_write` time, staged alongside its intent so `promote_signed`
+/// can finish/commit it and `compensate_write` can atomically reverse it
+/// (architecture review requirement, codex-nova verdict: "all provisional
+/// semantic side effects must compensate atomically before signature
+/// promotion... especially delete/tombstone effects" — cancelling a
+/// pending delete must restore the content, not just close the intent's
+/// journal). Only e-tag (id) targets are processed provisionally here —
+/// a-tag (addressable) targets are DEFERRED to `promote_signed` (see its
+/// doc for why the ceiling-based addr-tombstone mechanism is not safely
+/// provisional in the presence of concurrent writers). This is NOT a
+/// second category of PERMANENT tombstone: retraction doc §7's "PERMANENT,
+/// never GC-claimed" ruling governs tombstones from a SIGNED/published
+/// kind:5 only. A provisional entry here still refuses redelivery of its
+/// target while pending (`deleted_ids`/`TOMBSTONES` don't distinguish
+/// provisional from authoritative — existence is existence), but it is
+/// reversible: deleted outright on cancel, simply left in place (already
+/// correct) on promote.
+#[derive(Debug, Clone, Default)]
+struct Kind5Stash {
+    /// Every currently-held e-tag target this draft provisionally
+    /// removed — restored (full original provenance) on cancel.
+    deleted: Vec<StoredEvent>,
+    /// The exact `deleted_ids` composite keys this draft wrote fresh —
+    /// removed outright on cancel (nothing else could have depended on
+    /// them yet, since they didn't exist before this draft).
+    id_tombstone_keys: Vec<(EventId, PublicKey)>,
+}
+
 /// An address-tombstone's durable fact: which kind:5 event set the
 /// deletion ceiling, and (diagnostics only — the ceiling comparison alone
 /// decides refusal) that kind:5's own author. Retention is PERMANENT
@@ -125,6 +154,12 @@ pub struct MemoryStore {
     /// `outbox_intents`'s open-work rows (architecture review correction —
     /// see `ReceiptState`'s doc). Never pruned by this unit.
     outbox_receipts: HashMap<u64, RecoveredReceipt>,
+    /// `OUTBOX_KIND5_STASH` mirror: what a still-open, pending kind:5
+    /// intent provisionally deleted, kept reversible until
+    /// `promote_signed` (commits it — drops the stash, the deletion
+    /// already stands) or `compensate_write` (reverses it) — see
+    /// `Kind5Stash`'s doc.
+    outbox_kind5_stash: HashMap<IntentId, Kind5Stash>,
 }
 
 impl MemoryStore {
@@ -389,6 +424,41 @@ impl MemoryStore {
         }
 
         deleted
+    }
+
+    /// The PENDING half of kind:5 processing (architecture review
+    /// requirement — see `Kind5Stash`'s doc): applies ONLY the e-tag (id)
+    /// target deletions, immediately and REVERSIBLY. Unlike
+    /// `process_kind5_deletions`, a-tag (addressable) targets are left
+    /// entirely untouched here — deferred to `promote_signed`, which runs
+    /// the FULL `process_kind5_deletions` (idempotent for the e-tags this
+    /// already handled; fresh for any a-tags). Returns the removed rows
+    /// (to restore on cancel) and the exact `deleted_ids` keys written (to
+    /// remove on cancel) — see `Kind5Stash`.
+    fn process_kind5_deletions_provisional(
+        &mut self,
+        deleting: &Event,
+    ) -> (Vec<StoredEvent>, Vec<(EventId, PublicKey)>) {
+        let mut deleted = Vec::new();
+        let mut tombstone_keys = Vec::new();
+
+        let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
+        for target_id in target_ids {
+            let authorized_and_held = self
+                .by_id
+                .get(&target_id)
+                .is_some_and(|se| se.event.pubkey == deleting.pubkey);
+            if authorized_and_held {
+                if let Some(removed) = self.remove(target_id, RetractReason::Deleted) {
+                    deleted.push(removed);
+                }
+            }
+            self.deleted_ids
+                .insert((target_id, deleting.pubkey), deleting.id);
+            tombstone_keys.push((target_id, deleting.pubkey));
+        }
+
+        (deleted, tombstone_keys)
     }
 }
 
@@ -693,9 +763,20 @@ impl EventStore for MemoryStore {
                 // local deletions too (kind:5 has no replaceable/
                 // addressable address, so this branch is the only one it
                 // can ever reach, mirroring `insert`'s own kind:5
-                // invariant).
+                // invariant). Only the e-tag half runs provisionally/
+                // reversibly here — see `Kind5Stash`'s doc — so the whole
+                // effect can be atomically reversed by `compensate_write`
+                // if this draft is cancelled before it ever signs.
                 if is_deletion {
-                    let deleted = self.process_kind5_deletions(&frozen);
+                    let (deleted, id_tombstone_keys) =
+                        self.process_kind5_deletions_provisional(&frozen);
+                    self.outbox_kind5_stash.insert(
+                        intent_id,
+                        Kind5Stash {
+                            deleted: deleted.clone(),
+                            id_tombstone_keys,
+                        },
+                    );
                     (
                         AcceptOutcome::Kind5Processed {
                             intent_id,
@@ -796,8 +877,18 @@ impl EventStore for MemoryStore {
         let Some(intent_record) = self.outbox_intents.get(&intent_id) else {
             return Ok(PromoteOutcome::NotFound);
         };
+        // No-second-transition guard (codex-nova finding): a repeat
+        // promotion (e.g. a duplicate signer completion) must not
+        // overwrite an already-Signed row and re-emit `Promoted` — the
+        // trait doc already promised "already-promoted returns NotFound";
+        // this enforces it. Load-bearing for `AtMostOnce`: a second
+        // silent transition here could let the caller re-publish.
+        if intent_record.sig_state == IntentSigState::Signed {
+            return Ok(PromoteOutcome::NotFound);
+        }
         let frozen_id = intent_record.frozen.id;
         let accepted_at = intent_record.accepted_at;
+        let is_deletion = intent_record.frozen.kind == Kind::EventDeletion;
 
         // Architecture review correction (load-bearing): is this intent
         // still the LIVE row at its own frozen id? A `Duplicate`/`Stale`
@@ -828,12 +919,20 @@ impl EventStore for MemoryStore {
             // later local edit before it could sign), sync the real
             // signature there too — otherwise a future restore of that
             // stash entry would resurrect a stale sentinel copy of an
-            // intent that actually did sign.
-            if let Some(other) = self
-                .outbox_displaced
-                .values_mut()
-                .find(|se| se.event.id == frozen_id)
-            {
+            // intent that actually did sign. Matched by OWNING intent_id,
+            // NOT bare event id (codex-nova finding): two different
+            // intents (e.g. a real one and its byte-identical `Duplicate`)
+            // can share the same frozen event id, and only the entry whose
+            // OWN `LocalOrigin::intent_id` equals `intent_id` may ever be
+            // touched here.
+            if let Some(other) = self.outbox_displaced.values_mut().find(|se| {
+                se.event.id == frozen_id
+                    && se
+                        .provenance
+                        .local
+                        .as_ref()
+                        .is_some_and(|l| l.intent_id == intent_id)
+            }) {
                 other.event.sig = sig;
                 if let Some(local) = other.provenance.local.as_mut() {
                     local.sig_state = SigState::Signed;
@@ -879,6 +978,19 @@ impl EventStore for MemoryStore {
             receipt.state = ReceiptState::Signed;
         }
 
+        // Architecture review requirement (kind:5 provisional-tombstone
+        // commit): this intent's PENDING delete effects (if any — see
+        // `Kind5Stash`) become AUTHORITATIVE the moment it signs. Nothing
+        // needs undoing for the e-tag half already applied at accept time
+        // (it's already sitting there, correctly, as a permanent fact once
+        // this drops the stash); the a-tag half was deliberately deferred
+        // until now — run the FULL kind:5 processing so any addressable
+        // targets are finally (and only now) removed.
+        if is_deletion {
+            self.outbox_kind5_stash.remove(&intent_id);
+            self.process_kind5_deletions(&row.event);
+        }
+
         Ok(PromoteOutcome::Promoted { row: Box::new(row) })
     }
 
@@ -913,10 +1025,20 @@ impl EventStore for MemoryStore {
             // that stash entry must be invalidated for good: this intent
             // is being permanently rejected, so the intent that displaced
             // it must never later resurrect it via ITS OWN compensation.
+            // Matched by OWNING intent_id, not bare event id — see
+            // `promote_signed`'s identical fix for why (a `Duplicate` can
+            // share an event id with an unrelated, real intent).
             let other_key = self
                 .outbox_displaced
                 .iter()
-                .find(|(_, se)| se.event.id == frozen_id)
+                .find(|(_, se)| {
+                    se.event.id == frozen_id
+                        && se
+                            .provenance
+                            .local
+                            .as_ref()
+                            .is_some_and(|l| l.intent_id == intent_id)
+                })
                 .map(|(k, _)| *k);
             if let Some(other_key) = other_key {
                 self.outbox_displaced.remove(&other_key);
@@ -935,6 +1057,20 @@ impl EventStore for MemoryStore {
             .remove(&intent_id)
             .and_then(|displaced| self.reinsert_stashed(displaced))
             .map(Box::new);
+
+        // Architecture review requirement (kind:5 provisional-tombstone
+        // reversal): if this was a still-pending kind:5 draft, atomically
+        // undo everything it provisionally did — remove its tombstone
+        // claims and restore every target it removed. Cancelling a delete
+        // must bring the content back, not merely close the journal.
+        if let Some(stash) = self.outbox_kind5_stash.remove(&intent_id) {
+            for key in stash.id_tombstone_keys {
+                self.deleted_ids.remove(&key);
+            }
+            for deleted in stash.deleted {
+                self.reinsert_stashed(deleted);
+            }
+        }
 
         if let Some(receipt) = self
             .outbox_receipts

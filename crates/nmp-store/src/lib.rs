@@ -303,8 +303,11 @@ pub enum RetractReason {
 /// crashsafe-accepted-2-3-plan.md §7 Q2's boundary constraint), it only
 /// journals and returns it verbatim. `Ephemeral` is deliberately absent:
 /// per the plan's R4, an `Ephemeral` write never reaches `accept_write` at
-/// all — it keeps today's direct-publish path with no journal row, no
-/// pending store row, no receipt (ledger #9).
+/// all — it keeps today's direct-publish path with no journal row and no
+/// pending store row, but it is NOT receipt-less (VISION-ratified
+/// correction): [`EventStore::accept_ephemeral`] still persists a
+/// reattachable [`RecoveredReceipt`] with `intent_id: None`, exactly like
+/// any durable-write receipt, just with no backing `OUTBOX_INTENTS` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteDurability {
     Durable,
@@ -380,12 +383,15 @@ pub struct AcceptWrite {
 /// The result of an [`EventStore::accept_write`] call — mirrors
 /// [`InsertOutcome`]'s shape (Fable checkpoint: "reuses the widened
 /// `Superseded` shape so the resolver sorts it exactly like a relay
-/// insert"), minus `Kind5Processed`: a locally-composed kind:5 draft is
-/// stored like any other pending row through this door; its NIP-09
-/// tombstone *write* side effects apply once it is relay-observed (the
-/// ordinary `insert` path), not at local acceptance — out of this frame's
-/// scope (the plan requires only that `accept_write` reuse the tombstone
-/// *refusal* check `insert` runs, not `insert`'s deletion-processing).
+/// insert"), including `Kind5Processed`: a locally-composed kind:5 draft
+/// runs the SAME author-verified tombstone-write processing `insert` runs
+/// for a relay-observed kind:5, immediately, in this same transaction
+/// (architecture review correction — issue #2's "no app optimistic
+/// mirror" promise extends to local deletions too). Its tombstone claims
+/// are PROVISIONAL while the intent is still pending — reversible by
+/// `compensate_write`, committed to permanent by `promote_signed` — see
+/// `Kind5StashRecord`'s doc (redb backend) / `Kind5Stash`'s doc (memory
+/// backend).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
     /// Brand-new pending row, no address competition. `intent_id`/
@@ -481,38 +487,66 @@ impl AcceptOutcome {
     }
 }
 
-/// The result of an [`EventStore::promote_signed`] call.
+/// The result of an [`EventStore::promote_signed`] call — keyed by
+/// `IntentId`, not the frozen event's id (architecture review correction: a
+/// `Duplicate`/`Stale` intent never won a live row at its own id at all,
+/// and a once-live row can since have been superseded, kind:5-deleted, or
+/// expired). Three cases, all reachable: the intent's row is still live at
+/// its own id (sentinel swapped for `sig` in place — same id, same
+/// EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND entries, zero churn); the intent's
+/// frozen bytes are sitting in some OTHER intent's `OUTBOX_DISPLACED` stash
+/// (chained local supersession before this intent could sign — the real
+/// signature is synced into that stash entry too, so a future restore of
+/// it never resurrects a stale sentinel copy of an intent that actually
+/// signed); or neither (the row is gone for some unrelated reason — relay
+/// supersession, kind:5 deletion, NIP-40 expiry — and the signed bytes are
+/// synthesized from the journal's own copy so the engine can still publish
+/// them even though this intent wins no local address). Either way,
+/// `SigState`/`IntentSigState` flip to `Signed`, the durable
+/// `OUTBOX_DISPLACED` stash for THIS intent (if any) is deleted in the same
+/// transaction (R6), and — if this was a pending kind:5 draft — its
+/// provisional tombstone claims become authoritative (see
+/// `Kind5StashRecord`'s doc). Boxed for the same reason
+/// `InsertOutcome::Superseded` is: keeps the common `NotFound` variant
+/// small.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromoteOutcome {
-    /// The sentinel signature was swapped for `sig` in place (same id, same
-    /// EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND entries — zero churn) and
-    /// `SigState` flipped to `Signed`. The durable `OUTBOX_DISPLACED` stash
-    /// for this intent (if any) was deleted in the same transaction (R6).
-    /// Boxed for the same reason `InsertOutcome::Superseded` is: keeps the
-    /// common `NotFound` variant small.
-    Promoted { row: Box<StoredEvent> },
-    /// No local pending row with this id — already promoted, already
-    /// compensated, or never accepted through `accept_write`.
+    Promoted {
+        row: Box<StoredEvent>,
+    },
+    /// This `IntentId` names no still-open intent: already promoted (a
+    /// repeat promotion is a no-op, not a re-signature — codex-nova
+    /// finding), already compensated, or never accepted through
+    /// `accept_write`.
     NotFound,
 }
 
-/// The result of an [`EventStore::compensate_write`] call.
+/// The result of an [`EventStore::compensate_write`] call — keyed by
+/// `IntentId`, same three-case dispatch [`PromoteOutcome`] documents (live
+/// row / displaced-in-another-intent's-stash / neither). If live, the row
+/// is removed (`remove(id, Rejected)` — no tombstone, the row was never
+/// validly signed); if sitting in another intent's stash, that stash entry
+/// is invalidated so the intent that displaced it can never later
+/// resurrect a cancelled predecessor via ITS OWN compensation. Either way,
+/// THIS intent's own displaced predecessor (if any) is restored through
+/// the same one door and returned here (`None` if it displaced nothing, or
+/// the re-offered predecessor came back `Stale` — retraction doc §3.4).
+/// If this was a pending kind:5 draft, its provisional tombstone claims and
+/// every target it removed are atomically reversed (see
+/// `Kind5StashRecord`'s doc) — cancelling a delete brings the content back,
+/// not merely closes the journal. The intent's `OUTBOX_INTENTS`/
+/// `OUTBOX_DISPLACED`/kind:5-stash rows were all deleted in the same
+/// transaction. Boxed for the same reason `InsertOutcome::Superseded` is:
+/// keeps the common `NotFound` variant small.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompensateOutcome {
-    /// The pending row was removed (`remove(id, Rejected)` — no tombstone,
-    /// the row was never validly signed) and, if it had displaced a
-    /// predecessor, that predecessor was re-inserted through the same one
-    /// door and is returned here (`None` if it displaced nothing, or the
-    /// re-offered predecessor came back `Stale` — retraction doc §3.4). The
-    /// intent's `OUTBOX_INTENTS`/`OUTBOX_DISPLACED` rows were deleted in
-    /// the same transaction. Boxed for the same reason
-    /// `InsertOutcome::Superseded` is: keeps the common `NotFound` variant
-    /// small.
-    Compensated { restored: Option<Box<StoredEvent>> },
-    /// No local pending row with this id — already promoted (compensation
-    /// is pre-signature only, retraction doc §4.2's "Promotion
-    /// correction"), already compensated, or never accepted through
-    /// `accept_write`.
+    Compensated {
+        restored: Option<Box<StoredEvent>>,
+    },
+    /// This `IntentId` names no still-open intent: already promoted
+    /// (compensation is pre-signature only, retraction doc §4.2's
+    /// "Promotion correction"), already compensated, or never accepted
+    /// through `accept_write`.
     NotFound,
 }
 
