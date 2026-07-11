@@ -1,0 +1,11 @@
+[package]
+name = "nmp-component-interface-snapshot"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Keep this governance tool outside NMP's product/workspace dependency graph.
+[workspace]
+
+[dependencies]
+uniffi_bindgen = "=0.29.5"
