@@ -7,8 +7,19 @@ publish.workspace = true
 
 [dependencies]
 nostr.workspace = true
+nmp-grammar.workspace = true
 # M3 §3.1: the persistent backend (`RedbStore`) lives here, behind the same
 # `EventStore` trait `MemoryStore` already implements. Pure-Rust embedded
 # ACID key-value store — no C toolchain/`build.rs`, no wasm landmine. A1
-# lands `RedbStore`; Step 0 only wires the dependency.
+# lands `RedbStore`.
 redb = "4.1"
+# Row/value encoding for `RedbStore`: `nostr::Event` already has a canonical
+# NIP-01 JSON form (`JsonUtil::as_json`/`from_json`) — reused as-is rather
+# than inventing a second wire format. `Provenance`/`CoverageRow`/`ShapeRecord`
+# are plain-old-data, JSON-encoded the same way for one consistent on-disk
+# encoding across every table.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -4,6 +4,8 @@
 //! `(pubkey,kind,d-tag)`. Everything else has no address (a "regular"
 //! event: no supersession, only id-dedup applies).
 
+use std::cmp::Ordering;
+
 use nostr::{Event, Kind, PublicKey};
 
 /// The replaceable/addressable competition key for an event, or `None` if
@@ -44,6 +46,46 @@ pub(crate) fn address_key_for(event: &Event) -> Option<AddressKey> {
         Some(AddressKey::Addressable(event.pubkey, event.kind, d))
     } else {
         None
+    }
+}
+
+impl AddressKey {
+    /// A canonical, unambiguous string encoding used ONLY as `RedbStore`'s
+    /// `addr_index` table key. `MemoryStore` keys directly off the enum via
+    /// `Hash`/`Eq` and never calls this — it exists purely because `redb`
+    /// table keys need a byte-encodable type, and `&str`/`String` (already
+    /// `Key`/`Value` in `redb`) is the simplest fit for one.
+    ///
+    /// `\0` (NUL) separates fields: valid pubkey-hex/kind-decimal segments
+    /// never contain NUL, so those two segments can never collide across
+    /// keys. A `d`-tag value containing a stray NUL could in principle
+    /// produce a segment-boundary collision with another address — but that
+    /// only risks an extra, conservative supersession comparison (`redb`'s
+    /// `insert` still re-checks `candidate_wins` against whatever the
+    /// collided key currently holds), never silent data loss, since
+    /// dedup-by-id always runs first regardless.
+    pub(crate) fn to_redb_key(&self) -> String {
+        match self {
+            AddressKey::Replaceable(pk, kind) => {
+                format!("R\0{}\0{}", pk.to_hex(), kind.as_u16())
+            }
+            AddressKey::Addressable(pk, kind, d) => {
+                format!("A\0{}\0{}\0{}", pk.to_hex(), kind.as_u16(), d)
+            }
+        }
+    }
+}
+
+/// True iff `candidate` wins over `current` for the same
+/// replaceable/addressable address: newest `created_at` wins; on a
+/// `created_at` tie, the lexicographically-smallest id wins. Shared by both
+/// `MemoryStore` and `RedbStore` so supersession semantics can never diverge
+/// between the oracle and the persistent backend.
+pub(crate) fn candidate_wins(candidate: &Event, current: &Event) -> bool {
+    match candidate.created_at.cmp(&current.created_at) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => candidate.id < current.id,
     }
 }
 

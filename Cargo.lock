@@ -647,8 +647,12 @@ dependencies = [
 name = "nmp-store"
 version = "0.1.0"
 dependencies = [
+ "nmp-grammar",
  "nostr",
  "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
