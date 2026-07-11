@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, RowsMsg};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, TagName};
+use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
@@ -201,7 +201,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            project: Selector::Tag(TagName::new('p').unwrap()),
+            project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
     });

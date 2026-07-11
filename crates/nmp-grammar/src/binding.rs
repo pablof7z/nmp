@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::indexed_tag_name::IndexedTagName;
 use crate::selector::{IdentityField, Selector};
-use crate::tag_name::TagName;
 
 /// Every bindable filter-field value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -69,7 +69,7 @@ pub struct Filter {
     pub ids: Option<Binding>,
     /// Per-tag bindings — any `Binding` may appear here, including
     /// `Reactive(ActivePubkey)` in e.g. `#p` (amendment #2).
-    pub tags: BTreeMap<TagName, Binding>,
+    pub tags: BTreeMap<IndexedTagName, Binding>,
     /// Inclusive lower bound on `created_at`.
     pub since: Option<u64>,
     /// Inclusive upper bound on `created_at`.
@@ -142,9 +142,12 @@ mod tests {
         let mut f = Filter::new();
         f.authors = Some(Binding::Reactive(IdentityField::ActivePubkey));
         f.tags.insert(
-            TagName::new('p').unwrap(),
+            IndexedTagName::new('p').unwrap(),
             Binding::Reactive(IdentityField::ActivePubkey),
         );
-        assert_eq!(f.authors, f.tags.get(&TagName::new('p').unwrap()).cloned());
+        assert_eq!(
+            f.authors,
+            f.tags.get(&IndexedTagName::new('p').unwrap()).cloned()
+        );
     }
 }

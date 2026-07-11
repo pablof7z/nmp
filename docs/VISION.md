@@ -60,10 +60,14 @@ Binding  := Literal(set)
           | Reactive(CurrentPubkey)
           | Derived(inner: Filter, project: Selector)
           | SetOp(Union | Intersect | Diff, [Binding])
-Selector := Authors | Ids | Tag(char) | AddressCoord
+Selector := Authors | Ids | Tag(name: String) | AddressCoord
 ```
 
-Selectors remain closed, typed, hashable, and introspectable. App closures
+`Tag`'s `name` is an arbitrary event-tag key, not restricted to a single
+letter — it projects already-acquired events locally, so it carries no wire
+syntax restriction (distinct from a wire/local `Filter`'s indexed tag keys,
+which stay exactly NIP-01's single-ASCII-letter alphabet). Selectors remain
+closed, typed, hashable, and introspectable. App closures
 never enter demand, admission, routing, ordering, or cursor decisions.
 
 `$currentPubkey` is a useful reactive root, not a global engine identity. When

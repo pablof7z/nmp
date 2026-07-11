@@ -29,9 +29,12 @@ pub enum FfiIdentityField {
 pub enum FfiSelector {
     Authors,
     Ids,
-    /// `name` is exactly one character from the closed tag-name set
-    /// (`p, e, a, d, E, t, q, h`) -- validated on the way IN by
-    /// `convert::tag_name_from_ffi`, never trusted verbatim.
+    /// `name` is an arbitrary event-tag key (#64) -- a purely local
+    /// projection over already-acquired events, NOT restricted to
+    /// `FfiFilter.tags`' single-letter wire-filter alphabet. Passed through
+    /// unchanged by `convert::selector_from_ffi`: `"-"`, `"poop"`, `"alt"`,
+    /// or any other multi-character/punctuation tag name an event actually
+    /// carries is a legal key here.
     Tag {
         name: String,
     },
@@ -118,8 +121,12 @@ impl FfiSetOp {
 /// A live-query filter whose field values may be [`FfiBinding`]s
 /// (`nmp_grammar::Filter` mirror). `tags` is keyed by the tag's single
 /// character as a one-character `String` (UniFFI has no native `char`
-/// mirror as clean as this one) -- `convert::tag_name_from_ffi` validates
-/// every key against the closed set on the way in.
+/// mirror as clean as this one) -- `convert::indexed_tag_name_from_ffi`
+/// validates every key is exactly one ASCII letter (`a`-`z`/`A`-`Z`, all 52
+/// valid) on the way in. This is the wire/local INDEXED filter alphabet
+/// only (NIP-01 `#<letter>` queries) -- it is a distinct concept from
+/// [`FfiSelector::Tag`]'s arbitrary event-tag key, which is never restricted
+/// to a single letter.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Record)]
 pub struct FfiFilter {
     pub kinds: Option<Vec<u16>>,
