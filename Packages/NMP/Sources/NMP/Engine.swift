@@ -4,26 +4,47 @@
 
 import NMPFFI
 
-/// Construction config for `NMPEngine`. `indexerRelays` is the ONLY relay
-/// fact this app ever supplies: the engine self-navigates outbox routing
-/// from there on its own (M5's self-bootstrapping outbox -- it discovers
-/// each author's NIP-65 write relays live via its own internal kind:10002
-/// reads against `indexerRelays`, and re-routes content atoms to them as
-/// they resolve). No pre-resolved write-relay map is needed or accepted --
-/// see `nmp-ffi`'s own `NmpEngineConfig` doc.
+/// Construction config for `NMPEngine`. The only relay facts this app ever
+/// supplies are the three operator-configured lanes -- `indexerRelays`,
+/// `appRelays`, `fallbackRelays` (`routing-and-ownership.md` §2.1): the
+/// engine self-navigates outbox routing from there on its own (M5's
+/// self-bootstrapping outbox -- it discovers each author's NIP-65 write
+/// relays live via its own internal kind:10002 reads against
+/// `indexerRelays`, and re-routes content atoms to them as they resolve).
+/// No pre-resolved write-relay map is needed or accepted -- see `nmp-ffi`'s
+/// own `NmpEngineConfig` doc.
 public struct NMPConfig: Sendable {
     /// `nil` -> in-memory store (nothing survives a restart). A path ->
     /// a persistent store reopened at that path across launches.
     public var storePath: String?
     public var indexerRelays: [String]
+    /// Operator app relay set (`Lane::AppRelay`) -- every kind, every
+    /// author, always, additive. Default empty.
+    public var appRelays: [String]
+    /// Operator fallback relay set (`Lane::Fallback`) -- tops up authors
+    /// under the 2-relay-min, suppressed when `appRelays` is non-empty.
+    /// Default empty.
+    public var fallbackRelays: [String]
 
-    public init(storePath: String? = nil, indexerRelays: [String] = []) {
+    public init(
+        storePath: String? = nil,
+        indexerRelays: [String] = [],
+        appRelays: [String] = [],
+        fallbackRelays: [String] = []
+    ) {
         self.storePath = storePath
         self.indexerRelays = indexerRelays
+        self.appRelays = appRelays
+        self.fallbackRelays = fallbackRelays
     }
 
     func toFfi() -> NmpEngineConfig {
-        NmpEngineConfig(storePath: storePath, indexerRelays: indexerRelays)
+        NmpEngineConfig(
+            storePath: storePath,
+            indexerRelays: indexerRelays,
+            appRelays: appRelays,
+            fallbackRelays: fallbackRelays
+        )
     }
 }
 

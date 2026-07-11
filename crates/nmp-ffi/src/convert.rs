@@ -340,6 +340,9 @@ fn lane_to_ffi_string(lane: Lane) -> String {
         Lane::IndexerDiscovery => "indexer_discovery",
         Lane::GroupHost => "group_host",
         Lane::DmInbox => "dm_inbox",
+        Lane::Nip65Read => "nip65_read",
+        Lane::AppRelay => "app_relay",
+        Lane::Fallback => "fallback",
     }
     .to_string()
 }
