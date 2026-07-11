@@ -1334,6 +1334,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0efe882e02d206d8d279c20eb40e03baf7cb5136a1476dc084a324fbc3ec42d"
 
 [[package]]
+name = "nmp"
+version = "0.1.0"
+dependencies = [
+ "nmp-engine",
+ "nmp-grammar",
+ "nmp-resolver",
+ "nmp-router",
+ "nmp-signer",
+ "nmp-store",
+ "nmp-transport",
+ "nostr 0.44.4",
+ "tempfile",
+]
+
+[[package]]
 name = "nmp-bdd"
 version = "0.1.0"
 dependencies = [
@@ -1348,6 +1363,13 @@ dependencies = [
  "nostr 0.44.4",
  "nostr-relay-builder",
  "tokio",
+]
+
+[[package]]
+name = "nmp-consumer-check"
+version = "0.1.0"
+dependencies = [
+ "nmp",
 ]
 
 [[package]]

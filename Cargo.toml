@@ -9,6 +9,8 @@ members = [
     "crates/nmp-transport",
     "crates/nmp-signer",
     "crates/nmp-engine",
+    "crates/nmp",
+    "crates/nmp-consumer-check",
     "crates/nmp-demo",
     "crates/nmp-ffi",
     "crates/nmp-bdd",
@@ -36,5 +38,6 @@ nmp-router = { path = "crates/nmp-router" }
 nmp-transport = { path = "crates/nmp-transport" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-engine = { path = "crates/nmp-engine" }
+nmp = { path = "crates/nmp" }
 proptest = "1"
 uniffi = "0.29"
