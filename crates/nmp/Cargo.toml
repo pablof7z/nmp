@@ -1,0 +1,28 @@
+[package]
+name = "nmp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# #52 Q3 (Fable checkpoint): the ONLY sanctioned way to inject a pre-built
+# store/directory pair, needed by `nmp-bdd` (spawns the real `EngineThread`
+# against scripted in-process relays -- world.rs). Off by default; enabling
+# it in a consumer's `Cargo.toml` is a greppable, reviewable line -- a
+# stability exception, not a security one (the acceptance-boundary verify in
+# `nmp-engine::core` covers every path regardless, Unit A0/#56).
+unstable-mechanism = []
+
+[dependencies]
+nostr.workspace = true
+nmp-grammar.workspace = true
+nmp-engine.workspace = true
+nmp-signer.workspace = true
+nmp-store.workspace = true
+nmp-router.workspace = true
+nmp-resolver.workspace = true
+nmp-transport.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
