@@ -1,0 +1,14 @@
+[package]
+name = "nmp-ownership"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Zero dependencies, on purpose -- not even `nostr`. Every future
+# `nmp-mod-*` protocol crate depends on `nmp-ownership` to declare a
+# `KindClaim` (+ optional `RoutePolicy`) WITHOUT linking the whole router
+# (docs/design/routing-build-plan.md §7.1, owner-resolved Q7). Kinds are
+# plain `u16` here, same as the wire -- pulling in `nostr::Kind` would be
+# the first crack in that boundary.
+[dependencies]
