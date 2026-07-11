@@ -868,34 +868,64 @@ impl EventStore for MemoryStore {
         // delivered even though it does not WIN a fresh row here.
         if self.by_id.contains_key(&frozen.id) {
             let frozen_id = frozen.id;
-            // Architecture review correction (issue #2, team-lead
-            // decision): if the existing row is ITSELF locally owned, this
-            // new intent joins its owner set — an exact `Duplicate` must
-            // retain INDEPENDENT ownership rather than being silently
-            // coalesced into whichever intent already backs the row (see
-            // `LocalOrigin`'s doc for why coalescing was rejected).
-            let existing_local = self
+            let existing = self
                 .by_id
                 .get(&frozen_id)
                 .expect("just checked this id exists")
+                .clone();
+            // codex-nova ruling: a row with NO local provenance at all is
+            // purely relay-observed — its `event.sig` is by construction
+            // already real (never a sentinel, since `insert` only ever
+            // stores what a relay actually delivered), so it counts as
+            // "already signed" exactly like a locally-owned row whose own
+            // `sig_state` is `Signed`.
+            let already_signed = existing
                 .provenance
                 .local
-                .clone();
-            if let Some(mut local) = existing_local {
-                local.owners.insert(intent_id);
-                self.by_id
-                    .get_mut(&frozen_id)
-                    .expect("just checked this id exists")
-                    .provenance
-                    .local = Some(local);
-            }
+                .as_ref()
+                .map(|l| l.sig_state == SigState::Signed)
+                .unwrap_or(true);
+
+            // Architecture review correction (issue #2, team-lead
+            // decision): this new intent joins the existing row's owner
+            // set — an exact `Duplicate` must retain INDEPENDENT ownership
+            // rather than being silently coalesced into whichever intent
+            // already backs the row (see `LocalOrigin`'s doc for why
+            // coalescing was rejected). This now applies even to a
+            // PURELY relay-observed row (codex-nova ruling): its
+            // `local` becomes `Some` for the first time, tracking this
+            // intent's own obligation.
+            let mut owners = existing
+                .provenance
+                .local
+                .as_ref()
+                .map(|l| l.owners.clone())
+                .unwrap_or_default();
+            owners.insert(intent_id);
+            let row_sig_state = existing
+                .provenance
+                .local
+                .as_ref()
+                .map(|l| l.sig_state)
+                .unwrap_or(SigState::Signed);
+            self.by_id
+                .get_mut(&frozen_id)
+                .expect("just checked this id exists")
+                .provenance
+                .local = Some(LocalOrigin {
+                owners,
+                sig_state: row_sig_state,
+            });
+
             // Issue #61 P0 correction: an exact-duplicate kind:5 intent
             // must own an INDEPENDENT suppression claim too — otherwise
             // cancelling the canonical original while this duplicate
             // remains pending would incorrectly reveal a target it is
             // still obligated to delete (see `process_kind5_deletions_
-            // provisional`'s doc).
-            if frozen.kind == Kind::EventDeletion {
+            // provisional`'s doc). Only meaningful while still PENDING —
+            // an already-signed kind:5's tombstones are already permanent,
+            // nothing provisional left to claim.
+            if frozen.kind == Kind::EventDeletion && !already_signed {
                 self.process_kind5_deletions_provisional(intent_id, &frozen);
             }
             let row = self
@@ -903,19 +933,37 @@ impl EventStore for MemoryStore {
                 .get(&frozen_id)
                 .expect("just checked this id exists")
                 .clone();
+
+            // codex-nova ruling: a duplicate of an ALREADY-signed row
+            // (local or relay) must itself start `Signed`, journaling the
+            // CANONICAL bytes (`row.event`, not this call's own
+            // sentinel-signed `frozen`) — an offline co-owner signer must
+            // never strand a receipt behind an event that's already
+            // validly signed, and there is nothing left for THIS intent
+            // to sign.
+            let (journaled_frozen, journaled_sig_state) = if already_signed {
+                (row.event.clone(), IntentSigState::Signed)
+            } else {
+                (frozen, sig_state)
+            };
             self.journal_intent(
                 intent_id,
                 receipt_id,
-                frozen,
+                journaled_frozen,
                 expected_pubkey,
                 signing_identity_ref,
                 durability,
                 routing,
-                sig_state,
+                journaled_sig_state,
                 accepted_at,
                 None,
             );
             self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
+            if already_signed {
+                if let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) {
+                    receipt.state = ReceiptState::Signed;
+                }
+            }
             return Ok(AcceptOutcome::Duplicate {
                 intent_id,
                 receipt_id,
@@ -1075,15 +1123,13 @@ impl EventStore for MemoryStore {
                 .is_some_and(|l| l.owners.contains(&intent_id))
         });
 
-        // Row-level no-second-transition guard (architecture review
-        // correction, issue #2's ownership-set model): the per-intent
-        // guard above only catches THIS intent re-promoting itself. Under
-        // co-ownership, a DIFFERENT owner (e.g. a `Duplicate`) can reach
-        // this call for the FIRST time on ITS OWN journal even though the
-        // shared canonical row (live or still sitting in someone else's
-        // displaced stash) was already signed by some OTHER owner — that
-        // must be refused too, never silently overwrite the row's one
-        // real signature with a second, different one.
+        // Row-level already-signed check: is the shared row/stash entry
+        // ALREADY signed by some OTHER co-owner? Structurally this should
+        // never actually be reached in a healthy run any more (see below)
+        // — the eager cross-owner propagation this call itself performs
+        // means the per-intent guard above already catches a co-owner's
+        // OWN later call — but it is kept as a defensive fallback: never
+        // overwrite a canonical signature that's already there.
         let already_signed = if live {
             self.by_id
                 .get(&frozen_id)
@@ -1097,23 +1143,29 @@ impl EventStore for MemoryStore {
                     })
             })
         };
-        if already_signed {
-            return Ok(PromoteOutcome::NotFound);
-        }
 
-        let row = if live {
+        let (row, owners) = if live {
             let se = self
                 .by_id
                 .get_mut(&frozen_id)
                 .expect("just checked this row is live for this intent");
-            se.event.sig = sig;
-            se.provenance
+            if !already_signed {
+                se.event.sig = sig;
+                se.provenance
+                    .local
+                    .as_mut()
+                    .expect("just checked this row carries local provenance")
+                    .sig_state = SigState::Signed;
+            }
+            let owners = se
+                .provenance
                 .local
-                .as_mut()
+                .as_ref()
                 .expect("just checked this row carries local provenance")
-                .sig_state = SigState::Signed;
-            se.clone()
-        } else {
+                .owners
+                .clone();
+            (se.clone(), owners)
+        } else if let Some(other) = self.outbox_displaced.values_mut().find(|se| {
             // Not live. If this intent's exact frozen bytes are sitting in
             // some OTHER intent's displaced stash (it was superseded by a
             // later local edit before it could sign), sync the real
@@ -1125,23 +1177,34 @@ impl EventStore for MemoryStore {
             // `Duplicate`) can share the same frozen event id, and only a
             // stash entry whose OWN `LocalOrigin::owners` set CONTAINS
             // `intent_id` may ever be touched here.
-            if let Some(other) = self.outbox_displaced.values_mut().find(|se| {
-                se.event.id == frozen_id
-                    && se
-                        .provenance
-                        .local
-                        .as_ref()
-                        .is_some_and(|l| l.owners.contains(&intent_id))
-            }) {
+            se.event.id == frozen_id
+                && se
+                    .provenance
+                    .local
+                    .as_ref()
+                    .is_some_and(|l| l.owners.contains(&intent_id))
+        }) {
+            if !already_signed {
                 other.event.sig = sig;
                 if let Some(local) = other.provenance.local.as_mut() {
                     local.sig_state = SigState::Signed;
                 }
             }
-            // Either way, no live row exists to mutate — synthesize the
+            let owners = other
+                .provenance
+                .local
+                .as_ref()
+                .expect("just matched an owned stash entry")
+                .owners
+                .clone();
+            (other.clone(), owners)
+        } else {
+            // Neither live nor in anyone's stash — synthesize the
             // resulting signed bytes from the journal's own copy. The
             // engine can still publish these even though this intent does
-            // not (or no longer) win any local address.
+            // not (or no longer) win any local address. Only reachable
+            // when `!already_signed`: `already_signed` requires a matching
+            // live row or stash entry to have been found above.
             let mut event = self
                 .outbox_intents
                 .get(&intent_id)
@@ -1149,52 +1212,67 @@ impl EventStore for MemoryStore {
                 .frozen
                 .clone();
             event.sig = sig;
-            StoredEvent {
-                event,
-                provenance: Provenance {
-                    seen: BTreeMap::new(),
-                    local: Some(LocalOrigin {
-                        owners: BTreeSet::from([intent_id]),
-                        sig_state: SigState::Signed,
-                    }),
+            (
+                StoredEvent {
+                    event,
+                    provenance: Provenance {
+                        seen: BTreeMap::new(),
+                        local: Some(LocalOrigin {
+                            owners: BTreeSet::from([intent_id]),
+                            sig_state: SigState::Signed,
+                        }),
+                    },
                 },
-            }
+                BTreeSet::from([intent_id]),
+            )
         };
 
-        // Always: update the durable intent/receipt journal + drop THIS
-        // intent's own displaced stash (R6) — unrelated to whether IT is
-        // currently displaced elsewhere.
-        self.outbox_displaced.remove(&intent_id);
-        if let Some(record) = self.outbox_intents.get_mut(&intent_id) {
-            record.sig_state = IntentSigState::Signed;
-            record.frozen = row.event.clone();
-        }
-        if let Some(receipt) = self
-            .outbox_receipts
-            .values_mut()
-            .find(|r| r.intent_id == Some(intent_id))
-        {
-            receipt.state = ReceiptState::Signed;
-        }
-
-        // Architecture review requirement (kind:5 suppression-claim
-        // commit): this intent's PENDING delete becomes AUTHORITATIVE the
-        // moment it signs. Drop this intent's OWN claims (their job is
-        // done — the deletion no longer needs to be provisional) and run
-        // the FULL, permanent `process_kind5_deletions`, which does not
-        // care whether a claim existed at all: it operates directly on
-        // `by_id`/`addr_index` (this is also what makes promoting an
-        // exact-`Duplicate` kind:5 intent sound even though a `Duplicate`
-        // never staged its own claim — see `AcceptOutcome::Kind5Processed`'s
-        // doc).
-        if is_deletion {
-            if let Some(claims) = self.outbox_kind5_claims.remove(&intent_id) {
-                self.drop_kind5_claims(intent_id, &claims);
+        // codex-nova ruling (tightened after review): the FIRST owner to
+        // sign atomically transitions EVERY co-owner's OWN journal/
+        // receipt to `Signed` against the SAME canonical bytes, in THIS
+        // SAME call — never lazily deferred until (or unless) each
+        // co-owner separately calls `promote_signed` itself. An offline
+        // co-owner signer that never calls back must never strand its
+        // receipt behind an event that's already validly signed. Each
+        // owner's own displaced stash (if any) is dropped too (R6) and,
+        // for a kind:5 draft, each owner's own suppression claims commit
+        // to authoritative permanent tombstones alongside `intent_id`'s.
+        let mut co_signed = Vec::new();
+        for owner_id in &owners {
+            self.outbox_displaced.remove(owner_id);
+            if let Some(record) = self.outbox_intents.get_mut(owner_id) {
+                if record.sig_state != IntentSigState::Signed {
+                    record.sig_state = IntentSigState::Signed;
+                    record.frozen = row.event.clone();
+                    if *owner_id != intent_id {
+                        co_signed.push(*owner_id);
+                    }
+                }
             }
+            if let Some(receipt) = self
+                .outbox_receipts
+                .values_mut()
+                .find(|r| r.intent_id == Some(*owner_id))
+            {
+                receipt.state = ReceiptState::Signed;
+            }
+            if is_deletion {
+                if let Some(claims) = self.outbox_kind5_claims.remove(owner_id) {
+                    self.drop_kind5_claims(*owner_id, &claims);
+                }
+            }
+        }
+        if is_deletion {
+            // Run once, not per-owner: this is a single physical
+            // operation on the shared underlying targets, not a
+            // per-intent one — see `process_kind5_deletions`'s own doc.
             self.process_kind5_deletions(&row.event);
         }
 
-        Ok(PromoteOutcome::Promoted { row: Box::new(row) })
+        Ok(PromoteOutcome::Promoted {
+            row: Box::new(row),
+            co_signed,
+        })
     }
 
     fn compensate_write(

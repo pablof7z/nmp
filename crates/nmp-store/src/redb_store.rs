@@ -1911,14 +1911,19 @@ impl EventStore for RedbStore {
 
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         let AcceptWrite {
-            frozen,
+            mut frozen,
             expected_pubkey,
             signing_identity_ref,
             durability,
             routing,
-            sig_state,
+            mut sig_state,
             accepted_at,
         } = accept;
+        // Overridden inside the `Duplicate` branch when the existing row
+        // is ALREADY signed (codex-nova ruling) — the shared R7 journal
+        // write below uses these instead of the hardcoded `Accepted`/
+        // caller-supplied values in that one case.
+        let mut receipt_state = ReceiptState::Accepted;
 
         // Refused at the door FIRST, same as `insert`: never journaled,
         // nothing to recover, and neither an `IntentId` nor a receipt id
@@ -1971,28 +1976,59 @@ impl EventStore for RedbStore {
                     let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
                     let mut existing_record: StoredEventRecord =
                         serde_json::from_str(&existing_json).expect("redb: decode stored event");
+                    // codex-nova ruling: a row with NO local provenance at
+                    // all is purely relay-observed — its `event_json`'s
+                    // signature is by construction already real (never a
+                    // sentinel, since `insert` only ever stores what a
+                    // relay actually delivered), so it counts as "already
+                    // signed" exactly like a locally-owned row whose own
+                    // `sig_state` is `Signed`.
+                    let already_signed = existing_record
+                        .local
+                        .as_ref()
+                        .map(|l| l.sig_state == SigState::Signed)
+                        .unwrap_or(true);
+
                     // Architecture review correction (issue #2, team-lead
-                    // decision): if the existing row is ITSELF locally
-                    // owned, this new intent joins its owner set — an
-                    // exact `Duplicate` must retain INDEPENDENT ownership
-                    // rather than being silently coalesced into whichever
-                    // intent already backs the row (see `LocalOrigin`'s
-                    // doc for why coalescing was rejected).
-                    if let Some(local) = existing_record.local.as_mut() {
-                        local.owners.insert(intent_id);
-                        let encoded = serde_json::to_string(&existing_record)
-                            .expect("redb: encode stored event");
-                        events
-                            .insert(id_hex.as_str(), encoded.as_str())
-                            .map_err(persist_err)?;
-                    }
+                    // decision): this new intent joins the existing row's
+                    // owner set — an exact `Duplicate` must retain
+                    // INDEPENDENT ownership rather than being silently
+                    // coalesced into whichever intent already backs the
+                    // row (see `LocalOrigin`'s doc for why coalescing was
+                    // rejected). This now applies even to a PURELY
+                    // relay-observed row (codex-nova ruling): its `local`
+                    // becomes `Some` for the first time, tracking this
+                    // intent's own obligation.
+                    let mut owners = existing_record
+                        .local
+                        .as_ref()
+                        .map(|l| l.owners.clone())
+                        .unwrap_or_default();
+                    owners.insert(intent_id);
+                    let row_sig_state = existing_record
+                        .local
+                        .as_ref()
+                        .map(|l| l.sig_state)
+                        .unwrap_or(SigState::Signed);
+                    existing_record.local = Some(LocalOrigin {
+                        owners,
+                        sig_state: row_sig_state,
+                    });
+                    let encoded =
+                        serde_json::to_string(&existing_record).expect("redb: encode stored event");
+                    events
+                        .insert(id_hex.as_str(), encoded.as_str())
+                        .map_err(persist_err)?;
+
                     // Issue #61 P0 correction: an exact-duplicate kind:5
                     // intent must own an INDEPENDENT suppression claim
                     // too — otherwise cancelling the canonical original
                     // while this duplicate remains pending would
                     // incorrectly reveal a target it is still obligated
-                    // to delete.
-                    if frozen.kind == Kind::EventDeletion {
+                    // to delete. Only meaningful while still PENDING — an
+                    // already-signed kind:5's tombstones are already
+                    // permanent, nothing provisional left to claim.
+                    if frozen.kind == Kind::EventDeletion && !already_signed {
                         let (_hidden, claims) = process_kind5_deletions_provisional_in_txn(
                             &events,
                             &addr_index,
@@ -2007,11 +2043,29 @@ impl EventStore for RedbStore {
                             .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
                             .map_err(persist_err)?;
                     }
+
+                    let row = record_to_stored_event(&existing_record);
+
+                    // codex-nova ruling: a duplicate of an ALREADY-signed
+                    // row (local or relay) must itself start `Signed`,
+                    // journaling the CANONICAL bytes (`row.event`, not
+                    // this call's own sentinel-signed `frozen`) — an
+                    // offline co-owner signer must never strand a receipt
+                    // behind an event that's already validly signed, and
+                    // there is nothing left for THIS intent to sign. The
+                    // shared R7 journal-write section below picks these
+                    // overridden values up.
+                    if already_signed {
+                        frozen = row.event.clone();
+                        sig_state = IntentSigState::Signed;
+                        receipt_state = ReceiptState::Signed;
+                    }
+
                     (
                         AcceptOutcome::Duplicate {
                             intent_id,
                             receipt_id,
-                            row: record_to_stored_event(&existing_record),
+                            row,
                         },
                         None,
                     )
@@ -2254,11 +2308,14 @@ impl EventStore for RedbStore {
 
                 // Architecture review correction: the RETAINED receipt
                 // record, independent of `OUTBOX_INTENTS`'s open-work row.
+                // `receipt_state` is `Accepted` except for the `Duplicate`-
+                // of-an-already-signed-row case above, which overrides it
+                // to `Signed` (codex-nova ruling).
                 let receipt_record = OutboxReceiptRecord {
                     intent_id: Some(intent_id),
                     frozen_id: frozen.id,
                     expected_pubkey,
-                    state: ReceiptState::Accepted,
+                    state: receipt_state,
                 };
                 let encoded_receipt =
                     serde_json::to_string(&receipt_record).expect("redb: encode outbox receipt");
@@ -2313,7 +2370,7 @@ impl EventStore for RedbStore {
             let outcome = match intent_json {
                 None => PromoteOutcome::NotFound,
                 Some(intent_json) => {
-                    let mut intent_record: OutboxIntentRecord =
+                    let intent_record: OutboxIntentRecord =
                         serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
                     // No-second-transition guard (codex-nova finding): a
                     // repeat promotion (e.g. a duplicate signer completion)
@@ -2325,7 +2382,7 @@ impl EventStore for RedbStore {
                     if intent_record.sig_state == IntentSigState::Signed {
                         return Ok(PromoteOutcome::NotFound);
                     }
-                    let mut frozen_event = Event::from_json(&intent_record.frozen_json)
+                    let frozen_event = Event::from_json(&intent_record.frozen_json)
                         .expect("redb: decode frozen event json");
                     let frozen_id = frozen_event.id;
                     let frozen_id_hex = frozen_id.to_hex();
@@ -2353,17 +2410,15 @@ impl EventStore for RedbStore {
                             .is_some_and(|l| l.owners.contains(&intent_id))
                     });
 
-                    // Row-level no-second-transition guard (architecture
-                    // review correction, issue #2's ownership-set model):
-                    // the per-intent guard above only catches THIS intent
-                    // re-promoting itself. Under co-ownership, a
-                    // DIFFERENT owner (e.g. a `Duplicate`) can reach this
-                    // call for the FIRST time on ITS OWN journal even
-                    // though the shared canonical row (live or still
-                    // sitting in someone else's displaced stash) was
-                    // already signed by some OTHER owner — that must be
-                    // refused too, never silently overwrite the row's one
-                    // real signature with a second, different one.
+                    // Row-level already-signed check: is the shared row/
+                    // stash entry ALREADY signed by some OTHER co-owner?
+                    // Structurally this should never actually be reached
+                    // in a healthy run any more (see below) — the eager
+                    // cross-owner propagation this call itself performs
+                    // means the per-intent guard above already catches a
+                    // co-owner's OWN later call — but it is kept as a
+                    // defensive fallback: never overwrite a canonical
+                    // signature that's already there.
                     let already_signed = if is_live {
                         live_record
                             .as_ref()
@@ -2389,57 +2444,71 @@ impl EventStore for RedbStore {
                     } else {
                         false
                     };
-                    if already_signed {
-                        return Ok(PromoteOutcome::NotFound);
-                    }
 
-                    frozen_event.sig = sig;
-                    let new_frozen_json = frozen_event.as_json();
+                    let mut signed_frozen_event = frozen_event.clone();
+                    signed_frozen_event.sig = sig;
+                    let new_frozen_json = signed_frozen_event.as_json();
 
-                    let row = if is_live {
+                    let (row, owners) = if is_live {
                         // Swap the sentinel for the real signature — same
                         // id (a NIP-01 id never depends on `sig`), so this
                         // is purely a value update: no EVENTS/ADDR_INDEX/
-                        // BY_AUTHOR/BY_KIND key ever changes.
+                        // BY_AUTHOR/BY_KIND key ever changes. Skipped
+                        // entirely if `already_signed`: the canonical
+                        // signature some OTHER owner already committed
+                        // must never be overwritten.
                         let mut record = live_record.expect("checked is_live above");
-                        let mut local = record.local.expect("checked is_live above");
-                        local.sig_state = SigState::Signed;
-                        record.local = Some(local);
-                        record.event_json = new_frozen_json.clone();
-                        let encoded =
-                            serde_json::to_string(&record).expect("redb: encode stored event");
-                        events
-                            .insert(frozen_id_hex.as_str(), encoded.as_str())
-                            .map_err(persist_err)?;
-                        StoredEvent {
-                            event: frozen_event.clone(),
-                            provenance: Provenance {
-                                seen: record.provenance,
-                                local: record.local,
-                            },
+                        if !already_signed {
+                            let mut local = record.local.expect("checked is_live above");
+                            local.sig_state = SigState::Signed;
+                            record.local = Some(local);
+                            record.event_json = new_frozen_json.clone();
+                            let encoded =
+                                serde_json::to_string(&record).expect("redb: encode stored event");
+                            events
+                                .insert(frozen_id_hex.as_str(), encoded.as_str())
+                                .map_err(persist_err)?;
                         }
-                    } else {
+                        let owners = record
+                            .local
+                            .as_ref()
+                            .expect("checked is_live above")
+                            .owners
+                            .clone();
+                        let event =
+                            Event::from_json(&record.event_json).expect("redb: decode event json");
+                        (
+                            StoredEvent {
+                                event,
+                                provenance: Provenance {
+                                    seen: record.provenance,
+                                    local: record.local,
+                                },
+                            },
+                            owners,
+                        )
+                    } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                        &outbox_displaced,
+                        frozen_id,
+                        intent_id,
+                    )? {
                         // Not live. If this intent's exact frozen bytes
                         // are sitting in some OTHER intent's displaced
                         // stash (it was superseded by a later local edit
                         // before it could sign), sync the real signature
                         // into that stash entry too — otherwise a future
                         // restore of it would resurrect a stale sentinel
-                        // copy of an intent that actually did sign.
-                        if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                            &outbox_displaced,
-                            frozen_id,
-                            intent_id,
-                        )? {
-                            let other_json = outbox_displaced
-                                .get(other_key.as_str())
-                                .map_err(persist_err)?
-                                .expect("just found this key")
-                                .value()
-                                .to_string();
-                            let mut other_record: StoredEventRecord =
-                                serde_json::from_str(&other_json)
-                                    .expect("redb: decode stored event");
+                        // copy of an intent that actually did sign. Same
+                        // `already_signed` skip as the live case above.
+                        let other_json = outbox_displaced
+                            .get(other_key.as_str())
+                            .map_err(persist_err)?
+                            .expect("just found this key")
+                            .value()
+                            .to_string();
+                        let mut other_record: StoredEventRecord =
+                            serde_json::from_str(&other_json).expect("redb: decode stored event");
+                        if !already_signed {
                             other_record.event_json = new_frozen_json.clone();
                             if let Some(local) = other_record.local.as_mut() {
                                 local.sig_state = SigState::Signed;
@@ -2450,81 +2519,126 @@ impl EventStore for RedbStore {
                                 .insert(other_key.as_str(), encoded_other.as_str())
                                 .map_err(persist_err)?;
                         }
-                        // Either way, no live row exists to mutate —
-                        // synthesize the resulting signed bytes from the
-                        // journal's own copy. The engine can still
-                        // publish these even though this intent does not
-                        // (or no longer) win any local address.
-                        StoredEvent {
-                            event: frozen_event.clone(),
-                            provenance: Provenance {
-                                seen: BTreeMap::new(),
-                                local: Some(LocalOrigin {
-                                    owners: BTreeSet::from([intent_id]),
-                                    sig_state: SigState::Signed,
-                                }),
+                        let owners = other_record
+                            .local
+                            .as_ref()
+                            .expect("just matched an owned stash entry")
+                            .owners
+                            .clone();
+                        let event = Event::from_json(&other_record.event_json)
+                            .expect("redb: decode event json");
+                        (
+                            StoredEvent {
+                                event,
+                                provenance: Provenance {
+                                    seen: other_record.provenance,
+                                    local: other_record.local,
+                                },
                             },
-                        }
+                            owners,
+                        )
+                    } else {
+                        // Neither live nor in anyone's stash — synthesize
+                        // the resulting signed bytes from the journal's
+                        // own copy. The engine can still publish these
+                        // even though this intent does not (or no longer)
+                        // win any local address. Only reachable when
+                        // `!already_signed`: `already_signed` requires a
+                        // matching live row or stash entry to have been
+                        // found above.
+                        (
+                            StoredEvent {
+                                event: signed_frozen_event.clone(),
+                                provenance: Provenance {
+                                    seen: BTreeMap::new(),
+                                    local: Some(LocalOrigin {
+                                        owners: BTreeSet::from([intent_id]),
+                                        sig_state: SigState::Signed,
+                                    }),
+                                },
+                            },
+                            BTreeSet::from([intent_id]),
+                        )
                     };
-
-                    // Always: update the durable intent/receipt journal +
-                    // drop THIS intent's own displaced stash (R6) —
-                    // unrelated to whether IT is currently displaced
-                    // elsewhere.
-                    outbox_displaced.remove(key.as_str()).map_err(persist_err)?;
-                    intent_record.sig_state = IntentSigState::Signed;
-                    intent_record.frozen_json = new_frozen_json;
-                    let encoded_intent =
-                        serde_json::to_string(&intent_record).expect("redb: encode outbox intent");
-                    outbox_intents
-                        .insert(key.as_str(), encoded_intent.as_str())
-                        .map_err(persist_err)?;
-
-                    update_outbox_receipt(
-                        &mut outbox_receipts,
-                        intent_record.receipt_id,
-                        ReceiptState::Signed,
-                    )?;
-
-                    // Architecture review requirement (codex-nova's
-                    // suppression-claim model — see `SuppressClaimRecord`'s
-                    // doc): this intent's PENDING delete becomes
-                    // AUTHORITATIVE the moment it signs. Drop this
-                    // intent's OWN claims (their job is done) and run the
-                    // FULL, permanent `process_kind5_deletions`, which
-                    // does not care whether a claim existed at all: it
-                    // operates directly on `EVENTS`/`ADDR_INDEX` (this is
-                    // also what makes promoting an exact-`Duplicate`
-                    // kind:5 intent sound even though a `Duplicate` never
-                    // staged its own claim — see
-                    // `AcceptOutcome::Kind5Processed`'s doc).
-                    if is_deletion {
-                        let claims_json = outbox_kind5_claims
-                            .remove(key.as_str())
+                    // codex-nova ruling (tightened after review): the
+                    // FIRST owner to sign atomically transitions EVERY
+                    // co-owner's OWN journal/receipt to `Signed` against
+                    // the SAME canonical bytes, in THIS SAME transaction
+                    // — never lazily deferred until (or unless) each
+                    // co-owner separately calls `promote_signed` itself.
+                    // An offline co-owner signer that never calls back
+                    // must never strand its receipt behind an event
+                    // that's already validly signed. Each owner's own
+                    // displaced stash (if any) is dropped too (R6) and,
+                    // for a kind:5 draft, each owner's own suppression
+                    // claims commit to authoritative permanent tombstones
+                    // alongside `intent_id`'s.
+                    let mut co_signed = Vec::new();
+                    for owner_id in &owners {
+                        let owner_key = intent_key(*owner_id);
+                        outbox_displaced
+                            .remove(owner_key.as_str())
+                            .map_err(persist_err)?;
+                        let owner_intent_json = outbox_intents
+                            .get(owner_key.as_str())
                             .map_err(persist_err)?
                             .map(|guard| guard.value().to_string());
-                        if let Some(claims_json) = claims_json {
-                            let claims: Vec<SuppressClaimRecord> =
-                                serde_json::from_str(&claims_json).expect("redb: decode claims");
-                            for claim in claims {
-                                match claim {
-                                    SuppressClaimRecord::Id(id_key) => {
-                                        remove_claimant_in_txn(
-                                            &mut outbox_suppress_by_id,
-                                            &id_key,
-                                            intent_id,
-                                        )?;
-                                    }
-                                    SuppressClaimRecord::Addr { key, .. } => {
-                                        remove_addr_claimant_in_txn(
-                                            &mut outbox_suppress_by_addr,
-                                            &key,
-                                            intent_id,
-                                        )?;
+                        if let Some(owner_intent_json) = owner_intent_json {
+                            let mut owner_record: OutboxIntentRecord =
+                                serde_json::from_str(&owner_intent_json)
+                                    .expect("redb: decode outbox intent");
+                            if owner_record.sig_state != IntentSigState::Signed {
+                                owner_record.sig_state = IntentSigState::Signed;
+                                owner_record.frozen_json = row.event.as_json();
+                                let encoded_owner = serde_json::to_string(&owner_record)
+                                    .expect("redb: encode outbox intent");
+                                outbox_intents
+                                    .insert(owner_key.as_str(), encoded_owner.as_str())
+                                    .map_err(persist_err)?;
+                                update_outbox_receipt(
+                                    &mut outbox_receipts,
+                                    owner_record.receipt_id,
+                                    ReceiptState::Signed,
+                                )?;
+                                if *owner_id != intent_id {
+                                    co_signed.push(*owner_id);
+                                }
+                            }
+                        }
+                        if is_deletion {
+                            let claims_json = outbox_kind5_claims
+                                .remove(owner_key.as_str())
+                                .map_err(persist_err)?
+                                .map(|guard| guard.value().to_string());
+                            if let Some(claims_json) = claims_json {
+                                let claims: Vec<SuppressClaimRecord> =
+                                    serde_json::from_str(&claims_json)
+                                        .expect("redb: decode claims");
+                                for claim in claims {
+                                    match claim {
+                                        SuppressClaimRecord::Id(id_key) => {
+                                            remove_claimant_in_txn(
+                                                &mut outbox_suppress_by_id,
+                                                &id_key,
+                                                *owner_id,
+                                            )?;
+                                        }
+                                        SuppressClaimRecord::Addr { key: addr_key, .. } => {
+                                            remove_addr_claimant_in_txn(
+                                                &mut outbox_suppress_by_addr,
+                                                &addr_key,
+                                                *owner_id,
+                                            )?;
+                                        }
                                     }
                                 }
                             }
                         }
+                    }
+                    if is_deletion {
+                        // Run once, not per-owner: this is a single
+                        // physical operation on the shared underlying
+                        // targets, not a per-intent one.
                         process_kind5_deletions(
                             &mut events,
                             &mut addr_index,
@@ -2533,11 +2647,14 @@ impl EventStore for RedbStore {
                             &mut expiration_index,
                             &mut by_author,
                             &mut by_kind,
-                            &frozen_event,
+                            &row.event,
                         )?;
                     }
 
-                    PromoteOutcome::Promoted { row: Box::new(row) }
+                    PromoteOutcome::Promoted {
+                        row: Box::new(row),
+                        co_signed,
+                    }
                 }
             };
             outcome
