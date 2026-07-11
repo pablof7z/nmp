@@ -49,9 +49,13 @@ use serde::{Deserialize, Serialize};
 pub struct CoverageKey(DescriptorHash);
 
 impl CoverageKey {
-    /// The raw hash value, for use as (part of) a durable storage key.
-    pub fn as_u64(&self) -> u64 {
-        self.0.as_u64()
+    /// The raw 32-byte BLAKE3 digest, for use as (part of) a durable
+    /// storage key. Widened from a 64-bit FNV hash (see
+    /// `nmp_grammar::DescriptorHash`'s doc): this is the durable redb
+    /// coverage-watermark key, so a collision here would forge a
+    /// `CompleteUpTo` for a filter never actually fetched.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
     }
 }
 
@@ -299,6 +303,26 @@ mod tests {
         let a = cf(&[1], &["aa"], None, None);
         let b = cf(&[1], &["bb"], None, None);
         assert_ne!(coverage_key(&a), coverage_key(&b));
+    }
+
+    /// `CoverageKey` is the DURABLE redb watermark key (ledger #7): a forged
+    /// collision here forges a `CompleteUpTo`. Pin its width at 32 bytes
+    /// (256-bit BLAKE3, via `DescriptorHash`) -- NOT the 8-byte FNV-64 value
+    /// it replaced -- so a future change can't silently narrow it back down.
+    #[test]
+    fn coverage_key_is_a_256_bit_digest_not_64() {
+        let a = cf(&[1], &["aa"], None, None);
+        assert_eq!(coverage_key(&a).as_bytes().len(), 32);
+    }
+
+    /// Same filter hashed twice (simulating a re-derive across two separate
+    /// calls, e.g. two different code paths computing the same atom's
+    /// coverage key) is byte-for-byte stable -- required for `get_coverage`/
+    /// `record_coverage` to ever find the SAME durable row twice.
+    #[test]
+    fn coverage_key_is_stable_across_repeated_calls() {
+        let a = cf(&[1], &["aa", "bb"], Some(10), Some(5));
+        assert_eq!(coverage_key(&a).as_bytes(), coverage_key(&a).as_bytes());
     }
 
     #[test]

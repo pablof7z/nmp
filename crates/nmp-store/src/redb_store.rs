@@ -82,7 +82,17 @@ impl RedbStore {
     }
 
     fn coverage_row_key(key: CoverageKey, relay: &RelayUrl) -> String {
-        format!("{:016x}:{}", key.as_u64(), relay.as_str())
+        use std::fmt::Write as _;
+
+        // Full 32-byte BLAKE3 digest, hex-encoded -- NOT truncated to 64
+        // bits (see `CoverageKey::as_bytes`'s doc): this is the durable
+        // redb watermark key, so the full collision-resistant width must
+        // survive into the key, not just exist in memory.
+        let mut hex = String::with_capacity(64);
+        for byte in key.as_bytes() {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        format!("{hex}:{}", relay.as_str())
     }
 }
 
@@ -363,4 +373,38 @@ fn decode_interval(json: &str) -> CoverageInterval {
         Timestamp::from(record.from),
         Timestamp::from(record.through),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The durable-key falsifier for this fix: `coverage_row_key` must
+    /// carry the FULL 32-byte BLAKE3 digest (64 hex chars), not a
+    /// truncated 8-byte (16 hex char) prefix -- truncating back down to
+    /// 64 bits in the on-disk key would silently undo the whole point of
+    /// widening `DescriptorHash`/`CoverageKey` (a forged collision only
+    /// needs to defeat whatever width actually reaches the durable key).
+    #[test]
+    fn coverage_row_key_carries_the_full_256_bit_digest() {
+        let filter = ConcreteFilter {
+            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            authors: Some(std::collections::BTreeSet::from(["aa".to_string()])),
+            ..ConcreteFilter::default()
+        };
+        let key = compute_coverage_key(&filter);
+        let relay = RelayUrl::parse("wss://relay.example").unwrap();
+        let row_key = RedbStore::coverage_row_key(key, &relay);
+
+        let hex_part = row_key
+            .split(':')
+            .next()
+            .expect("row key always has a hex-prefix:relay-url shape");
+        assert_eq!(
+            hex_part.len(),
+            64,
+            "expected 64 hex chars (32 bytes) in the durable key, got {} in {row_key:?}",
+            hex_part.len()
+        );
+    }
 }

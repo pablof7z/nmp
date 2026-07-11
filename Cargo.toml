@@ -21,6 +21,12 @@ publish = false
 
 [workspace.dependencies]
 nostr = "0.44.4"
+# Collision-resistant 256-bit digest for `nmp-grammar::DescriptorHash`
+# (network-controlled filter contents feed this via `Binding::Derived`; a
+# 64-bit FNV hash is trivially, constructibly collidable and this value is
+# both the demand/refcount key AND (via `CoverageKey`) the durable redb
+# watermark key -- a forged collision there would forge a `CompleteUpTo`).
+blake3 = "1"
 nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
