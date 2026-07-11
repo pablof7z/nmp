@@ -74,7 +74,7 @@ Full detail: [`docs/VISION.md`](docs/VISION.md). Design record & non-negotiables
 | M0 — Founding gate | **PASSED** (conditional; amendments applied) |
 | M1 — Grammar engine spike | **PROVED** — 12/12 contract tests green; independently verified honest |
 | M2 — Compiler/router + coalescing | **PROVED** — 91 tests green; kill did not fire; independently verified honest |
-| M3 — Store + transport + write outbox | planning (Opus) |
+| M3 — Store + transport + write outbox | **in progress** — persistent store, signer, core reducer landed (119 tests green); transport building; runtime/outbox/negentropy next |
 | M4–M6 | not started |
 
 **Proved so far (running code, each independently verified by a separate Opus review):**
