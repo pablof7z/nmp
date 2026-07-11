@@ -34,11 +34,12 @@
 //! `EngineCore` hands rows to a subscriber TWO ways: synchronously via the
 //! `core::RowSink` passed to `EngineMsg::Subscribe`, and again via the
 //! returned `Effect::EmitRows`. The two are NOT equivalent: `RowSink::
-//! on_rows` carries only `Vec<RowDelta>` (no coverage), while `Effect::
-//! EmitRows` carries `(HandleId, Vec<RowDelta>, QueryCoverage)` — the
-//! query-level coverage the M3 ruling makes part of the read contract (test
-//! 9's headline). This runtime therefore picks ONE channel per plan's
-//! guidance: rows+coverage are delivered from `Effect::EmitRows` alone (via
+//! on_rows` carries only `Vec<RowDelta>` (no evidence), while `Effect::
+//! EmitRows` carries `(HandleId, Vec<RowDelta>, AcquisitionEvidence)` — the
+//! per-query acquisition evidence the read contract makes part of every
+//! batch (`docs/design/scoped-evidence-49-12-plan.md`). This runtime
+//! therefore picks ONE channel per plan's guidance: rows+evidence are
+//! delivered from `Effect::EmitRows` alone (via
 //! a `HandleId -> Sender` registry owned by the engine thread); the
 //! `RowSink` registered at `Subscribe` time is a deliberate no-op so nothing
 //! is delivered twice. Receipts have no such asymmetry — `ReceiptSink::
@@ -73,7 +74,8 @@ use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timest
 use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
-    self, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, QueryCoverage, RowDelta, RowSink,
+    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, RowDelta,
+    RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteIntent, WriteStatus};
 
@@ -81,8 +83,9 @@ pub use diagnostics_channel::LatestReceiver;
 use diagnostics_channel::{latest_channel, LatestSender};
 
 /// One delivered batch for a live subscription: raw rows + the query's
-/// aggregate coverage (see the module doc's "two delivery channels" note).
-pub type RowsMsg = (Vec<RowDelta>, QueryCoverage);
+/// per-source acquisition evidence (see the module doc's "two delivery
+/// channels" note).
+pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
 
 /// The app-facing handle to a live subscription (returned by
 /// [`Handle::subscribe`]). `Send`, `Copy`-cheap, carries nothing that
@@ -420,7 +423,7 @@ fn engine_loop<S, D>(
             Cmd::Subscribe { query, reply } => {
                 let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
                 // `on_subscribe` always emits exactly one `Effect::EmitRows`
-                // for the handle it just created (its `last_coverage` starts
+                // for the handle it just created (its `last_evidence` starts
                 // `None`, which can never equal `Some(_)` -- see
                 // `core::mod`'s `refresh_handle`), so this is always found.
                 let id = effects
@@ -592,9 +595,9 @@ fn dispatch_effect(
             // an observer, not a command this runtime must additionally act
             // on.
         }
-        Effect::EmitRows(id, rows, coverage) => {
+        Effect::EmitRows(id, rows, evidence) => {
             if let Some(tx) = row_channels.get(&id) {
-                let _ = tx.send((rows, coverage));
+                let _ = tx.send((rows, evidence));
             }
         }
         Effect::EmitDiagnostics(snapshot) => {

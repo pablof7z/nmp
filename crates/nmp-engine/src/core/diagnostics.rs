@@ -21,16 +21,23 @@ use nmp_grammar::ConcreteFilter;
 use nmp_router::{Diagnostics, Lane, RelayPlan};
 use nmp_store::CoverageInterval;
 
-use super::QueryCoverage;
-
 /// One filter's proven coverage state at one relay (parallel to
 /// [`RelayDiagnosticsSnapshot::filters`] — same order, same rendering).
+/// Diagnostics is engine-global and unscoped BY DESIGN (M5 plan §1) — it is
+/// deliberately distinct from the *query* surface's scoped
+/// [`super::AcquisitionEvidence`] (`docs/design/scoped-evidence-49-12-plan.md`
+/// §4), so this no longer reuses that query-facing type: it keeps its own
+/// diagnostics-local fact, the exact per-(relay, filter) proven interval
+/// (or its absence), never a query-level verdict.
 #[derive(Debug, Clone)]
 pub struct FilterCoverageEntry {
     /// The exact wire JSON this coverage state is for — identical rendering
     /// to the corresponding entry in [`RelayDiagnosticsSnapshot::filters`].
     pub filter: String,
-    pub coverage: QueryCoverage,
+    /// `Some(interval)` -- this relay has a proven `[from, through]` row for
+    /// this exact filter's shape; `None` -- unproven ("no row = not
+    /// covered", unchanged from the store's own rule).
+    pub coverage: Option<CoverageInterval>,
 }
 
 /// One relay's full diagnostics: wire-sub count, lane breakdown, reverse
@@ -58,7 +65,7 @@ pub struct RelayDiagnosticsSnapshot {
 /// The engine-global diagnostics snapshot (M5 plan §1.1) — "the acceptance
 /// test rendered on screen, permanently." One snapshot covers every
 /// currently-planned relay; there is no separate per-query diagnostics (that
-/// is [`super::QueryCoverage`], already delivered alongside every
+/// is [`super::AcquisitionEvidence`], already delivered alongside every
 /// `Effect::EmitRows`).
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsSnapshot {
@@ -95,13 +102,9 @@ pub(crate) fn build(
             .flatten()
             .map(|req| {
                 let text = req.filter.to_nostr().as_json();
-                let state = match get_coverage(relay, &req.filter) {
-                    Some(interval) => QueryCoverage::CompleteUpTo(interval.through),
-                    None => QueryCoverage::Unknown,
-                };
                 FilterCoverageEntry {
                     filter: text,
-                    coverage: state,
+                    coverage: get_coverage(relay, &req.filter),
                 }
             })
             .collect();

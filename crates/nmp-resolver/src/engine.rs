@@ -199,15 +199,40 @@ impl<S: EventStore> Engine<S> {
     /// The ROOT FilterNode's own current atoms for `id`'s subscription —
     /// i.e. exactly the (possibly fanned-out) `ConcreteFilter`s the query's
     /// OWN descriptor resolves to, never an inner `Derived`'s bookkeeping
-    /// atoms (contrast with `Graph::atoms_in_structural_order`, which walks
-    /// the WHOLE subtree and exists purely for demand-set refcounting).
-    /// `EngineCore` uses this to know which store rows/coverage a handle's
-    /// `EmitRows` should be computed over. Empty for an unknown handle.
+    /// atoms (contrast with [`Self::subtree_atoms`]/`Graph::
+    /// atoms_in_structural_order`, which walk the WHOLE subtree — the
+    /// former for coverage, the latter purely for demand-set refcounting).
+    /// `EngineCore` uses this to know which store ROWS a handle's
+    /// `EmitRows` should be computed over — delivery shape is root-only and
+    /// unchanged by #12/#49; only coverage/evidence widens to the subtree.
+    /// Empty for an unknown handle.
     pub fn root_atoms(&self, id: HandleId) -> BTreeSet<ConcreteFilter> {
         let Some(&root) = self.handle_to_root.get(&id) else {
             return BTreeSet::new();
         };
         self.graph.cached_atoms_of(root).clone()
+    }
+
+    /// Every atom in `id`'s subscription's FULL subtree — interior
+    /// `Derived` inner-filter atoms INCLUDED, not just the root FilterNode's
+    /// own atoms (contrast with [`Self::root_atoms`], which deliberately
+    /// excludes the subtree and is used for row computation only). Built on
+    /// [`Graph::atoms_in_structural_order`], the exact same walk
+    /// `subscribe`/`unsubscribe` already use for refcounting — this is a
+    /// coverage-facing READ over that walk, never a second source of truth,
+    /// and changes nothing about refcounting or wire Open/Close.
+    ///
+    /// This is the #12 fix's input: a query's coverage/acquisition-evidence
+    /// must be computed over every atom a `Derived` binding depends on, not
+    /// only the query's own root atoms — otherwise a query can report
+    /// itself settled while an inner expansion (e.g. the kind:3 follow-list
+    /// atom under a `$myFollows`-shaped query) is still entirely unproven.
+    /// Empty for an unknown handle.
+    pub fn subtree_atoms(&self, id: HandleId) -> BTreeSet<ConcreteFilter> {
+        let Some(&root) = self.handle_to_root.get(&id) else {
+            return BTreeSet::new();
+        };
+        self.graph.atoms_in_structural_order(root).into_iter().collect()
     }
 
     pub fn graph_snapshot(&self) -> GraphSnapshot {

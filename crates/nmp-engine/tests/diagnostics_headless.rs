@@ -243,12 +243,16 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
 }
 
 /// Per-filter coverage (M5 plan §1.1's "coverage per (filter, relay)"):
-/// `Unknown` before any EOSE, `CompleteUpTo` immediately after -- and an
-/// `EmitDiagnostics` fires from the EOSE arm itself (which never calls
-/// `recompile()`), proving the diagnostic surface observes coverage change
-/// points that are not a recompile.
+/// unproven (`None`) before any EOSE, a proven interval (`Some`) immediately
+/// after -- and an `EmitDiagnostics` fires from the EOSE arm itself (which
+/// never calls `recompile()`), proving the diagnostic surface observes
+/// coverage change points that are not a recompile. Diagnostics is engine-
+/// global and intentionally distinct from the query-facing
+/// `AcquisitionEvidence` surface (`docs/design/scoped-evidence-49-12-plan.md`
+/// §4) -- this asserts its own local fact (`Option<CoverageInterval>`), not
+/// a query-level verdict.
 #[test]
-fn diagnostics_coverage_flips_unknown_to_complete_up_to_on_eose_and_pushes_reactively() {
+fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactively() {
     let me = Keys::generate();
     let me_hex = me.public_key().to_hex();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
@@ -267,11 +271,8 @@ fn diagnostics_coverage_flips_unknown_to_complete_up_to_on_eose_and_pushes_react
     let r0 = snap.relays.iter().find(|r| r.relay == relay0).unwrap();
     assert_eq!(r0.coverage.len(), 1);
     assert!(
-        matches!(
-            r0.coverage[0].coverage,
-            nmp_engine::core::QueryCoverage::Unknown
-        ),
-        "no EOSE has arrived yet -- coverage must be Unknown, never fabricated"
+        r0.coverage[0].coverage.is_none(),
+        "no EOSE has arrived yet -- coverage must be unproven, never fabricated"
     );
 
     let wire0 = wire_sub_string(&sub0);
@@ -292,10 +293,7 @@ fn diagnostics_coverage_flips_unknown_to_complete_up_to_on_eose_and_pushes_react
     let snap = core.diagnostics_snapshot();
     let r0 = snap.relays.iter().find(|r| r.relay == relay0).unwrap();
     assert!(
-        matches!(
-            r0.coverage[0].coverage,
-            nmp_engine::core::QueryCoverage::CompleteUpTo(_)
-        ),
-        "after EOSE the same filter's coverage must flip to CompleteUpTo"
+        r0.coverage[0].coverage.is_some(),
+        "after EOSE the same filter's coverage must flip to a proven interval"
     );
 }

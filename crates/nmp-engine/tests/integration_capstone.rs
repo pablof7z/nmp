@@ -18,7 +18,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use nmp_engine::core::{QueryCoverage, RowDelta};
+use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, RowsMsg};
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp};
@@ -56,15 +56,15 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
 /// Accumulates the channel's `Added`/`Removed` deltas into the row set they
 /// currently describe (exactly as a real app must -- `Handle::subscribe`'s
 /// wire is deltas, not snapshots, per `nmp_engine::core::RowDelta`'s doc) and
-/// blocks until that accumulated set + the latest coverage satisfy `pred`,
-/// or `timeout` lapses. Replaying `Removed` deltas (not just tracking "ever
-/// added") is load-bearing for `follows_minus_mutes_resolves_over_a_real_
-/// relay` below, whose predicate needs the settled CURRENT membership, not
-/// a monotonic history.
+/// blocks until that accumulated set + the latest acquisition evidence
+/// satisfy `pred`, or `timeout` lapses. Replaying `Removed` deltas (not just
+/// tracking "ever added") is load-bearing for `follows_minus_mutes_resolves_
+/// over_a_real_relay` below, whose predicate needs the settled CURRENT
+/// membership, not a monotonic history.
 fn wait_for_rows(
     rx: &Receiver<RowsMsg>,
     timeout: Duration,
-    pred: impl Fn(&[nostr::Event], QueryCoverage) -> bool,
+    pred: impl Fn(&[nostr::Event], &AcquisitionEvidence) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
@@ -74,7 +74,7 @@ fn wait_for_rows(
             return false;
         }
         match rx.recv_timeout(remaining) {
-            Ok((deltas, coverage)) => {
+            Ok((deltas, evidence)) => {
                 for delta in deltas {
                     match delta {
                         RowDelta::Added(event) => {
@@ -86,7 +86,7 @@ fn wait_for_rows(
                     }
                 }
                 let snapshot: Vec<nostr::Event> = current.values().cloned().collect();
-                if pred(&snapshot, coverage) {
+                if pred(&snapshot, &evidence) {
                     return true;
                 }
             }
@@ -116,6 +116,16 @@ fn wait_for_status(
     }
 }
 
+/// Find `relay`'s [`nmp_engine::core::SourceEvidence`] entry, if any, inside
+/// `evidence` -- test-fixture convenience mirroring `core_headless.rs`'s
+/// identically-named helper.
+fn source_for<'a>(
+    evidence: &'a AcquisitionEvidence,
+    relay: &RelayUrl,
+) -> Option<&'a nmp_engine::core::SourceEvidence> {
+    evidence.sources.iter().find(|s| &s.relay == relay)
+}
+
 fn spawn_relay(port: u16) -> LocalRelay {
     LocalRelay::builder()
         .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
@@ -128,27 +138,36 @@ fn spawn_relay(port: u16) -> LocalRelay {
 // ===========================================================================
 
 /// Phase 1 (online): subscribe against a real relay, wait for the plain
-/// REQ/EOSE round trip to land 3 seeded events AND the query's coverage to
-/// read `CompleteUpTo` (an authoritative-complete watermark, persisted to
-/// the `RedbStore` file). Phase 2 (offline): shut the relay down, spawn a
-/// brand-new engine on the SAME redb file, subscribe the SAME query again.
-/// The FIRST batch on the fresh subscription is computed entirely inside
-/// `EngineCore::on_subscribe` (`recompile` + `refresh_handle`) -- both pure,
-/// no I/O -- so it is available with zero network round trips: this test
-/// asserts that batch already shows the 3 persisted rows AND
-/// `CompleteUpTo`, never `Unknown`, proving the watermark survived the
+/// REQ/EOSE round trip to land 3 seeded events AND the query's relay
+/// source to reach a proven `reconciled_through` (an authoritative
+/// watermark, persisted to the `RedbStore` file). Phase 2 (offline): shut
+/// the relay down, spawn a brand-new engine on the SAME redb file,
+/// subscribe the SAME query again. The FIRST batch on the fresh
+/// subscription is computed entirely inside `EngineCore::on_subscribe`
+/// (`recompile` + `refresh_handle`) -- both pure, no I/O -- so it is
+/// available with zero network round trips: this test asserts that batch
+/// already shows the 3 persisted rows AND a `reconciled_through: Some(_)`
+/// on the relay's own source entry, proving the watermark survived the
 /// restart and makes a cold, offline read authoritative rather than a
-/// (wrongly) empty cache-miss.
+/// (wrongly) empty cache-miss. This fresh process never once connects to
+/// the (now-dead) relay, so the SAME source's `status` reads `Connecting`
+/// throughout -- the load-bearing orthogonality proof
+/// (`docs/design/scoped-evidence-49-12-plan.md` Q3): a proven watermark and
+/// a not-currently-reachable link status coexist on the SAME
+/// `SourceEvidence`, neither shadowing the other (the sibling falsifier
+/// `source_watermark_survives_disconnect_alongside_the_disconnected_status`
+/// in `core_headless.rs` proves the same fact via an explicit
+/// connect-then-disconnect sequence instead of a cold restart).
 ///
 /// A second, never-queried-before shape (kind:1 authored by `b`, whose
 /// write relay is registered up front but has no coverage row) is asserted
-/// to read `Unknown` in the SAME offline engine -- the falsifier's other
-/// half: "no row = not covered" must still hold, offline, distinguishing a
-/// genuine unknown from a proven-empty watermark. If either half regresses
-/// (offline reads `Unknown` when it should be `CompleteUpTo`, or a
-/// never-synced shape reads `CompleteUpTo` when it should be `Unknown`),
-/// ledger #7 is not real and this assertion fails loudly rather than being
-/// softened.
+/// to read an UNPROVEN `reconciled_through: None` in the SAME offline
+/// engine -- the falsifier's other half: "no row = not covered" must still
+/// hold, offline, distinguishing a genuine unknown from a proven-empty
+/// watermark. If either half regresses (offline reads unproven when it
+/// should be proven, or a never-synced shape reads proven when it should
+/// be unproven), ledger #7 is not real and this assertion fails loudly
+/// rather than being softened.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watermark_cold_start_offline() {
     let _ = tracing_subscriber::fmt()
@@ -210,11 +229,14 @@ async fn watermark_cold_start_offline() {
         let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
 
         assert!(
-            wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, coverage| {
+            wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, evidence| {
                 let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
-                ids == post_ids && matches!(coverage, QueryCoverage::CompleteUpTo(_))
+                ids == post_ids
+                    && source_for(evidence, &url)
+                        .is_some_and(|s| s.reconciled_through.is_some())
             }),
-            "phase 1 (online) must fetch all 3 seeded posts and reach CompleteUpTo via a real EOSE"
+            "phase 1 (online) must fetch all 3 seeded posts and reach a proven \
+             reconciled_through via a real EOSE"
         );
 
         handle.shutdown();
@@ -243,32 +265,40 @@ async fn watermark_cold_start_offline() {
             },
         );
 
-        // THE assertion: a's shape reads back from cache, offline, as
-        // CompleteUpTo -- never Unknown -- with zero network round trips
+        // THE assertion: a's shape reads back from cache, offline, as a
+        // proven `reconciled_through` -- with zero network round trips
         // (this batch is available the instant `subscribe` returns; the
         // bounded wait below is a safety margin, not evidence of a network
-        // wait having occurred).
+        // wait having occurred). The SAME source's `status` is `Connecting`
+        // (this process never once connects to the dead relay) -- proving
+        // the watermark and the link status are independent facts, neither
+        // shadowing the other.
         let (_qh_a, rows_rx_a) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
         assert!(
-            wait_for_rows(&rows_rx_a, Duration::from_secs(5), |rows, coverage| {
+            wait_for_rows(&rows_rx_a, Duration::from_secs(5), |rows, evidence| {
                 let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
-                ids == post_ids && matches!(coverage, QueryCoverage::CompleteUpTo(_))
+                ids == post_ids
+                    && source_for(evidence, &url).is_some_and(|s| {
+                        s.reconciled_through.is_some() && s.status == SourceStatus::Connecting
+                    })
             }),
-            "offline cold read must be AUTHORITATIVE: CompleteUpTo from the persisted watermark, \
-             serving the 3 cached rows with zero network -- if this reads Unknown, ledger #7 is \
-             not real"
+            "offline cold read must be AUTHORITATIVE: a proven reconciled_through from the \
+             persisted watermark, serving the 3 cached rows with zero network, coexisting with \
+             a Connecting link status -- if reconciled_through is None, ledger #7 is not real"
         );
 
-        // Control: b's shape has no coverage row anywhere and must read
-        // Unknown, not CompleteUpTo -- "no row = not covered" must survive
-        // the restart just as faithfully as the proven case does.
+        // Control: b's shape has no coverage row anywhere and must read an
+        // unproven `reconciled_through: None` -- "no row = not covered"
+        // must survive the restart just as faithfully as the proven case
+        // does.
         let (_qh_b, rows_rx_b) = handle.subscribe(literal_kind1(&b.public_key().to_hex()));
         assert!(
-            wait_for_rows(&rows_rx_b, Duration::from_secs(5), |rows, coverage| {
-                rows.is_empty() && matches!(coverage, QueryCoverage::Unknown)
+            wait_for_rows(&rows_rx_b, Duration::from_secs(5), |rows, evidence| {
+                rows.is_empty()
+                    && source_for(evidence, &url).is_some_and(|s| s.reconciled_through.is_none())
             }),
-            "a never-synced shape must read Unknown, never CompleteUpTo -- a proven-empty \
-             watermark must not be confused with a genuine cache-miss"
+            "a never-synced shape must read an unproven reconciled_through, never a proven one \
+             -- a proven-empty watermark must not be confused with a genuine cache-miss"
         );
 
         handle.shutdown();
@@ -348,21 +378,24 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
 
     let shared_post_id = shared_post.id.to_hex();
 
-    // Wait until both relays have proven complete (CompleteUpTo requires
-    // EVERY covering relay to be proven -- ruling §6's unanimity rule) AND
-    // the falsifier itself: exactly ONE row for this id, never two, despite
-    // two independent relay deliveries of the identical event.
+    // Wait until BOTH relays' own sources independently prove their window
+    // (each relay's `reconciled_through` is its OWN fact -- no joint
+    // unanimity verdict anywhere under the new evidence model) AND the
+    // falsifier itself: exactly ONE row for this id, never two, despite two
+    // independent relay deliveries of the identical event.
     assert!(
-        wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, coverage| {
+        wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, evidence| {
             let matching = rows
                 .iter()
                 .filter(|r| r.id.to_hex() == shared_post_id)
                 .count();
-            matching == 1 && matches!(coverage, QueryCoverage::CompleteUpTo(_))
+            matching == 1
+                && source_for(evidence, &url_1).is_some_and(|s| s.reconciled_through.is_some())
+                && source_for(evidence, &url_2).is_some_and(|s| s.reconciled_through.is_some())
         }),
-        "the shared post must surface as EXACTLY ONE row once both relays have proven complete \
-         -- a duplicate row here would mean the two-relay delivery leaked a second, \
-         un-deduplicated copy into the read result"
+        "the shared post must surface as EXACTLY ONE row once both relays' own sources have \
+         independently proven their window -- a duplicate row here would mean the two-relay \
+         delivery leaked a second, un-deduplicated copy into the read result"
     );
 
     handle.shutdown();
@@ -639,7 +672,7 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
     // The settled state must show b's post and never c's -- SetOp(Diff)
     // resolved end-to-end over the real relay.
     assert!(
-        wait_for_rows(&rows_rx, Duration::from_secs(15), |rows, _coverage| {
+        wait_for_rows(&rows_rx, Duration::from_secs(15), |rows, _evidence| {
             let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
             ids.contains(&b_post.id.to_hex()) && !ids.contains(&c_post.id.to_hex())
         }),

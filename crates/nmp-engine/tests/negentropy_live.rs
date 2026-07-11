@@ -46,14 +46,15 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 /// Accumulates the channel's `Added`/`Removed` deltas into the row set they
 /// currently describe (exactly as a real app must -- the wire is deltas, not
 /// snapshots, per `nmp_engine::core::RowDelta`'s doc) and blocks until that
-/// accumulated set + the latest coverage satisfy `pred`, or `timeout` lapses.
-/// Coverage and rows can change independently (a watermark advancing carries
-/// an empty row delta) -- `pred` is checked against the freshest coverage
-/// seen alongside the freshest accumulated row set on every batch.
+/// accumulated set + the latest acquisition evidence satisfy `pred`, or
+/// `timeout` lapses. Evidence and rows can change independently (a
+/// watermark advancing carries an empty row delta) -- `pred` is checked
+/// against the freshest evidence seen alongside the freshest accumulated
+/// row set on every batch.
 fn wait_for_rows(
     rx: &Receiver<RowsMsg>,
     timeout: Duration,
-    pred: impl Fn(&[nostr::Event], nmp_engine::core::QueryCoverage) -> bool,
+    pred: impl Fn(&[nostr::Event], &nmp_engine::core::AcquisitionEvidence) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
@@ -63,7 +64,7 @@ fn wait_for_rows(
             return false;
         }
         match rx.recv_timeout(remaining) {
-            Ok((deltas, coverage)) => {
+            Ok((deltas, evidence)) => {
                 for delta in deltas {
                     match delta {
                         RowDelta::Added(event) => {
@@ -75,7 +76,7 @@ fn wait_for_rows(
                     }
                 }
                 let snapshot: Vec<nostr::Event> = current.values().cloned().collect();
-                if pred(&snapshot, coverage) {
+                if pred(&snapshot, &evidence) {
                     return true;
                 }
             }
@@ -170,13 +171,16 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
     let (_b_handle, b_rows_rx) = handle.subscribe(literal_kind1(&b.public_key().to_hex()));
 
     assert!(
-        wait_for_rows(&b_rows_rx, Duration::from_secs(15), |rows, coverage| {
+        wait_for_rows(&b_rows_rx, Duration::from_secs(15), |rows, evidence| {
             rows.iter().any(|r| r.id.to_hex() == b_post.id.to_hex())
-                && matches!(coverage, nmp_engine::core::QueryCoverage::CompleteUpTo(_))
+                && evidence
+                    .sources
+                    .iter()
+                    .any(|s| s.reconciled_through.is_some())
         }),
         "negentropy must discover b's pre-seeded, never-REQ'd post, backfill it via the \
-         ordinary REQ/EOSE/ingest pipeline, and the query's coverage must read CompleteUpTo \
-         once (and only once) the backfilled event actually landed"
+         ordinary REQ/EOSE/ingest pipeline, and the query's own relay source must carry a \
+         proven reconciled_through once (and only once) the backfilled event actually landed"
     );
 
     handle.shutdown();

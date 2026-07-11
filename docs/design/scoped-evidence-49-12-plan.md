@@ -128,6 +128,69 @@ Error/AwaitingAuth` as "reserved; populated when the transport-state fold and #8
 wire half land." Adding a variant later is itself a governed surface change; do
 it once.
 
+### 2.2 Ratified vocabulary (codex-nova, this frame) — supersedes §2's names
+
+U1+U2 (Rust core: `nmp-resolver`, `nmp-engine`) landed against this corrected
+shape, ratified by codex-nova during build to resolve exactly the two defects
+the Fable checkpoint below flags in §2's original draft (the watermark/link
+conflation, and the AUTH vocabulary's representable non-states). This
+supersedes §2's `SourceAcquisition`/`SourceState` sketch; `AcquisitionEvidence`
+and `ShortfallFact` keep their §2 shape (with `NoCandidates` renamed
+`NoPlannedSource` and a new `NoResolvedDemand` variant for a vacuously-empty
+subtree):
+
+```rust
+pub struct AcquisitionEvidence { pub sources: Vec<SourceEvidence>, pub shortfall: Vec<ShortfallFact> }
+pub struct SourceEvidence { pub relay: RelayUrl, pub reconciled_through: Option<Timestamp>, pub status: SourceStatus }
+pub enum SourceStatus { Requesting, Connecting, Disconnected, AwaitingAuth { phase: AuthPhase }, AuthDenied, Error }
+pub enum AuthPhase { AwaitingPolicy, AwaitingSignature }
+pub enum ShortfallFact { NoPlannedSource { atom: ConcreteFilter }, NoResolvedDemand, LocalLimit { atom: ConcreteFilter } }
+```
+
+`reconciled_through` is a FIELD on `SourceEvidence`, never a `SourceStatus`
+variant — the load-bearing fix: a source's durable proven watermark and its
+current link status are orthogonal facts, so a relay can read
+`reconciled_through: Some(_)` AND `status: Disconnected` in the very same
+snapshot (the #49 "offline cached rows remain usable" acceptance criterion).
+`AuthDenied` is its own top-level `SourceStatus`, never a phase of
+`AwaitingAuth` (an enum that could express "awaiting-but-already-denied" would
+be a representable non-state); `AuthPhase` keeps only `AwaitingPolicy`/
+`AwaitingSignature` — no `Authenticated`/`Denied` phase, since an authenticated
+source is just `Requesting`/carrying a `reconciled_through`.
+
+Population in this frame (U1+U2 only, Rust core): `Requesting` (connected,
+outstanding REQ), `Connecting` (planned, never yet connected this process),
+and `Disconnected` (was connected, now dropped) are ALL populated — folded
+from `EngineCore`'s own `connected_relays`/`ever_connected_relays` sets
+(additive bookkeeping alongside the pre-existing `slot_to_url`, updated in
+`on_relay_connected`/`on_relay_disconnected`). `AwaitingAuth`/`AuthDenied`
+(#8) and `Error` (#51) remain reserved/unpopulated, as §2.1 already specified.
+
+**#12 falsifiers landed** (`crates/nmp-engine/tests/core_headless.rs`):
+`derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_outer`
+(a `$myFollows`-shaped `Derived` query: the outer atom's relay proves its
+window while the inner kind:3 atom's relay never does — the inner atom's
+relay is PRESENT in `evidence.sources` with `reconciled_through: None`, then
+flips to `Some` once its own EOSE lands) and
+`source_watermark_survives_disconnect_alongside_the_disconnected_status` (the
+orthogonality proof: `reconciled_through: Some(_)` and `status: Disconnected`
+coexist on one `SourceEvidence` after a real connect-then-disconnect
+sequence). `integration_capstone.rs::watermark_cold_start_offline` proves the
+same orthogonality via a cold, offline restart instead (`status: Connecting`
++ `reconciled_through: Some(_)`, since that process never once connects to
+the dead relay) — two independent falsifiers of the same fact via different
+paths.
+
+**Interior-vs-root heuristic (recorded durably, #12's general lesson):** for
+ANY per-query mechanism — coverage/evidence, hint propagation (#11),
+diagnostics attribution, GC claims — ask whether it behaves identically for
+an interior (`Derived`'s own inner filter) node and a root node. Any "no" is
+either a bug or an undocumented exception. `root_atoms` (rows) and
+`subtree_atoms` (evidence) are deliberately DIFFERENT answers to that
+question for DIFFERENT purposes — delivery shape stays root-only by design,
+while every acquisition-evidence-shaped mechanism must consult the full
+subtree, or it repeats #12's exact mistake.
+
 ---
 
 ## 3. The #12 fix (interior atoms) — folded into #49, not landed alone
