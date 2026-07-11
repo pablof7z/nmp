@@ -48,6 +48,14 @@ use crate::outbox::{
 
 use attribution::AttributionState;
 pub use coverage_query::QueryCoverage;
+// `runtime` (C) needs the EXACT same wire subscription-id string
+// `attribution.rs` records at send time (`AttributionState::record_send`) so
+// that a REQ actually placed on the wire under this string round-trips back
+// to the right `SubId` when the relay echoes it in an EOSE — re-derive it or
+// drift silently breaks coverage attribution. `pub(crate)` (not a wider
+// re-export): this is an internal wire-format detail `core` and `runtime`
+// share, never a public contract for callers outside this crate.
+pub(crate) use attribution::wire_sub_id_string;
 
 /// Opaque id correlating a `Publish`/`RequestSign` to its `EmitReceipt`/
 /// `SignerCompleted`.
