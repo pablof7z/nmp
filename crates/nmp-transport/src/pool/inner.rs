@@ -20,11 +20,13 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use nostr::RelayUrl;
+use nostr::secp256k1::schnorr::Signature;
+use nostr::{EventId, RelayUrl};
 
 use crate::handle::RelayHandle;
 use crate::health::{ConnState, RelayHealth};
 
+use super::verify::{self, GateVerdict};
 use super::worker::{
     pack_generation, worker_id_of, WorkerCommand, WorkerEvent, WorkerEventKind, WorkerHandle,
 };
@@ -65,6 +67,13 @@ pub(super) struct PoolInner {
     config: PoolConfig,
     translator: Option<JoinHandle<()>>,
     shutdown: bool,
+    /// Pool-global ingest verification cache (`pool::verify::gate`): every
+    /// distinct event id that has passed `Event::verify()` once, mapped to
+    /// the signature that verified. Shared across every slot -- deliberately
+    /// NOT per-relay -- because a redelivery of the same event by a second
+    /// relay must reuse this cache, not re-run the schnorr check. See
+    /// `verify::gate`'s doc for the accept/reject/pass-through rules.
+    verified_events: HashMap<EventId, Signature>,
 }
 
 impl PoolInner {
@@ -79,6 +88,7 @@ impl PoolInner {
             config,
             translator: None,
             shutdown: false,
+            verified_events: HashMap::new(),
         }));
         let translator = spawn_translator(Arc::clone(&inner), worker_event_rx);
         if let Ok(mut guard) = inner.lock() {
@@ -359,13 +369,29 @@ fn apply_worker_event(inner: &mut PoolInner, event: WorkerEvent) -> Option<PoolE
             if !same_worker || event.generation != state.generation {
                 return None;
             }
-            Some(PoolEvent::Frame {
-                handle: RelayHandle {
-                    slot: event.slot,
-                    generation: event.generation,
-                },
-                frame,
-            })
+            // Ingest verification gate (network-boundary, kind-blind --
+            // see `pool::verify`'s module doc): a frame that fails here is
+            // dropped BEFORE it ever becomes a `PoolEvent::Frame` -- never
+            // forwarded to the engine/store/routing. `verified_events` is
+            // pool-global (not per-slot) so a redelivery of the same event
+            // id by a DIFFERENT relay still hits the cache-compare fast
+            // path instead of re-running schnorr.
+            match verify::gate(&mut inner.verified_events, &frame) {
+                GateVerdict::PassThrough | GateVerdict::Accept => Some(PoolEvent::Frame {
+                    handle: RelayHandle {
+                        slot: event.slot,
+                        generation: event.generation,
+                    },
+                    frame,
+                }),
+                GateVerdict::Reject => {
+                    verify::record_misbehavior(&mut state.health);
+                    Some(PoolEvent::Health {
+                        slot: event.slot,
+                        health: state.health.clone(),
+                    })
+                }
+            }
         }
     }
 }
@@ -467,5 +493,88 @@ mod tests {
             guard.command_tx_for(h2).is_some(),
             "new handle must be valid"
         );
+    }
+
+    /// The ingest verification gate wired into `apply_worker_event`
+    /// (`WorkerEventKind::Frame`'s arm): a bad-signature `EVENT` frame from
+    /// a relay is dropped -- it never becomes a `PoolEvent::Frame` -- and
+    /// instead surfaces as a `PoolEvent::Health` with a nonzero
+    /// `invalid_signature_count`, the relay-misbehavior signal a caller can
+    /// observe. A genuine signed event from the SAME relay/slot afterward
+    /// still passes -- the gate rejects forgery, not the relay itself.
+    #[test]
+    fn tampered_event_frame_is_dropped_and_flags_relay_misbehavior() {
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind};
+
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+        let h = guard.ensure_open(&url);
+        let _ = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h.slot,
+                generation: h.generation,
+                kind: WorkerEventKind::Connected,
+            },
+        );
+
+        let keys = Keys::generate();
+        let mut event = EventBuilder::new(Kind::TextNote, "genuine")
+            .sign_with_keys(&keys)
+            .expect("test fixture must sign cleanly");
+        event.content = "forged in transit".to_string();
+        let forged_text =
+            nostr::RelayMessage::event(nostr::SubscriptionId::new("s"), event).as_json();
+
+        let outcome = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h.slot,
+                generation: h.generation,
+                kind: WorkerEventKind::Frame(crate::pool::RelayFrame::Text(forged_text)),
+            },
+        );
+        match outcome {
+            Some(PoolEvent::Health { health, .. }) => {
+                assert_eq!(
+                    health.invalid_signature_count, 1,
+                    "the forged frame must bump the misbehavior counter"
+                );
+            }
+            other => panic!("expected PoolEvent::Health for a rejected frame, got {other:?}"),
+        }
+        assert_eq!(
+            guard.health_for(h).map(|h| h.invalid_signature_count),
+            Some(1),
+            "the misbehavior count must be visible via Pool::health"
+        );
+
+        // A genuine event from the same relay still passes through as a
+        // normal Frame -- the gate rejects forgery, not the relay slot.
+        let genuine = nmp_resolver_test_event(&keys, "real content");
+        let genuine_text =
+            nostr::RelayMessage::event(nostr::SubscriptionId::new("s"), genuine).as_json();
+        let outcome = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h.slot,
+                generation: h.generation,
+                kind: WorkerEventKind::Frame(crate::pool::RelayFrame::Text(genuine_text)),
+            },
+        );
+        assert!(
+            matches!(outcome, Some(PoolEvent::Frame { .. })),
+            "a genuine event must still be forwarded as a Frame"
+        );
+    }
+
+    /// Test-only helper: a properly signed kind:1 event (mirrors
+    /// `nmp_resolver::testkit::kind1`, duplicated here rather than pulled in
+    /// as a dependency -- `nmp-transport` depends on no other NMP crate).
+    fn nmp_resolver_test_event(keys: &nostr::Keys, content: &str) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::TextNote, content)
+            .sign_with_keys(keys)
+            .expect("test fixture must sign cleanly")
     }
 }
