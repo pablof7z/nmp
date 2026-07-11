@@ -707,16 +707,18 @@ impl<S: EventStore> EngineCore<S> {
     /// relay set is exactly whatever the caller pre-narrowed into the
     /// `NarrowOnly` set, empty or not (ledger #6's fail-closed mechanism).
     ///
-    /// DEVIATION (flagged, not silently papered over): `ToInboxes` wants
-    /// each recipient's kind:10050/NIP-65 READ relays. `RelayDirectory`
-    /// (nmp-router, out of this builder's scope) currently exposes only
-    /// `write_relays`/`extra_relays`/`indexers`/`pinned_relays` — no
-    /// per-pubkey read/inbox accessor exists. This falls back to the union
-    /// of each recipient's `write_relays` + `extra_relays` as the closest
-    /// available fact source; it is NOT the correct NIP-65 read-relay
-    /// routing and should be replaced once `RelayDirectory` grows a
-    /// dedicated accessor (a small additive change to `nmp-router`,
-    /// coordinated separately per the scope boundary on this task).
+    /// `ToInboxes` fans a p-tagged inbox write out to each recipient's
+    /// NIP-65 READ-marked relays (`RelayDirectory::read_relays`, lane
+    /// `Nip65Read`) — the read side of the SAME kind:10002 winner the read
+    /// path consults for authors' write relays (`routing-and-ownership.md`
+    /// §2.4). It NEVER consults a recipient's `write_relays`/`extra_relays`:
+    /// addressing inbox traffic to a recipient's write relays under-delivers
+    /// and leaks metadata (issue #19). A recipient whose read/inbox relays
+    /// are unknown — never seen a kind:10002, or one that declares only
+    /// write-marked relays — fails the whole intent CLOSED with a typed
+    /// `Failed` before any `PublishEvent`, rather than guessing a relay;
+    /// recipient discovery rides the existing kind:10002 `sync_discovery`
+    /// machinery, so a later winner simply makes the retry routable.
     fn resolve_routes(
         &self,
         routing: &WriteRouting,
@@ -741,21 +743,26 @@ impl<S: EventStore> EngineCore<S> {
                 let mut relays = BTreeSet::new();
                 for pk in recipients {
                     let hex = pk.to_hex();
-                    relays.extend(
-                        self.directory
-                            .write_relays(&hex)
-                            .into_iter()
-                            .map(|lr| lr.url),
-                    );
-                    relays.extend(
-                        self.directory
-                            .extra_relays(&hex)
-                            .into_iter()
-                            .map(|lr| lr.url),
-                    );
+                    // Read/inbox relays ONLY (lane `Nip65Read`) — never a
+                    // recipient's write/extra relays. Fail CLOSED per
+                    // recipient: an unknown or write-only recipient has no
+                    // inbox relay, and guessing one would leak/under-deliver.
+                    let inbox: Vec<RelayUrl> = self
+                        .directory
+                        .read_relays(&hex)
+                        .into_iter()
+                        .map(|lr| lr.url)
+                        .collect();
+                    if inbox.is_empty() {
+                        return Err(format!(
+                            "no NIP-65 read/inbox relays known for recipient {hex} -- \
+                             inbox route fails closed, never falls back to write relays"
+                        ));
+                    }
+                    relays.extend(inbox);
                 }
                 if relays.is_empty() {
-                    Err("no recipient inbox relays resolved".to_string())
+                    Err("ToInboxes routing has no recipients".to_string())
                 } else {
                     Ok(relays)
                 }
