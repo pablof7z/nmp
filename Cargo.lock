@@ -802,6 +802,7 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
+ "tempfile",
  "tokio",
  "tracing-subscriber",
 ]

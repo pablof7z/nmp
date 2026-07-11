@@ -36,3 +36,8 @@ hex = "0.4"
 nostr-relay-builder = "0.45.0-alpha.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `watermark_cold_start_offline` (integration_capstone.rs) needs a real
+# on-disk `RedbStore` file it can close and reopen across a simulated
+# restart -- a throwaway temp dir per test run, same crate `nmp-store`
+# already uses for its own `RedbStore` tests.
+tempfile = "3"
