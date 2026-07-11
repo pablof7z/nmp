@@ -1379,9 +1379,11 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing-subscriber",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]

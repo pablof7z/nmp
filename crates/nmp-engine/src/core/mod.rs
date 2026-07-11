@@ -413,12 +413,25 @@ impl<S: EventStore> EngineCore<S> {
             self.refresh_all_handles(&mut effects);
         }
 
+        // `>=` against the EXACT `Timestamp` threshold `next_deadline()`
+        // arms for (`started_at + NEG_LIVENESS_DEADLINE_SECS`) -- not the
+        // `as_secs()`-truncated, strictly-greater subtraction this used to
+        // be. Those two must reference the identical expression: the
+        // runtime driver's `recv_timeout` wakes AT the deadline it was
+        // armed for (`duration_until` floors an already-reached deadline to
+        // zero), so a strict `>` here left the sweep still false at that
+        // exact `now`, `next_deadline()` still returning the same
+        // deadline, and `duration_until` still flooring to zero -- a
+        // `recv_timeout(0)` busy-spin until the wall clock ticked over into
+        // the NEXT whole second (`as_secs()` finally reading `31 > 30`).
+        // `>=` clears the session in the very tick that reaches its
+        // deadline, so `next_deadline()` recomputes without it and the loop
+        // parks -- see #39's fix-up review and the regression test this
+        // predicate exists to satisfy.
         let stale: Vec<SubId> = self
             .neg_sessions
             .iter()
-            .filter(|(_, s)| {
-                now.as_secs().saturating_sub(s.started_at.as_secs()) > NEG_LIVENESS_DEADLINE_SECS
-            })
+            .filter(|(_, s)| now >= s.started_at + NEG_LIVENESS_DEADLINE_SECS)
             .map(|(id, _)| id.clone())
             .collect();
         for sub_id in stale {
