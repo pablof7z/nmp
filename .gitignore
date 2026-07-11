@@ -8,3 +8,14 @@ xcuserdata/
 /android/**/build/
 .gradle/
 *.swp
+
+# M4 packaging outputs (scripts/build-swift-xcframework.sh) -- regenerated
+# from source, never committed: /gen holds the raw uniffi-bindgen dump, and
+# Packages/NMP/NMP.xcframework + Packages/NMP/Sources/NMPFFI/nmp_ffi.swift
+# are its split (headers-only vs Swift-source) outputs. A later builder's
+# hand-written Package.swift + Sources/NMP/ (the ergonomic layer) belong in
+# Packages/NMP too and SHOULD be committed once they exist -- only the
+# generated/compiled pieces are ignored here.
+/gen
+/Packages/NMP/NMP.xcframework
+/Packages/NMP/Sources/NMPFFI
