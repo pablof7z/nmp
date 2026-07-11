@@ -2090,6 +2090,223 @@ fn duplicate_of_already_signed_relay_row_starts_signed() {
     });
 }
 
+/// Issue #2 P0 correction (codex-nova ruling): a relay delivering the REAL
+/// signed event for a still-`Pending` local row through the ordinary
+/// `insert` door is functionally the SAME signature-adoption/fan-out
+/// invariant `promote_signed` performs explicitly. With TWO co-owners on
+/// the row (via a `Duplicate` accept), the relay delivery must adopt the
+/// signature, mark BOTH owners' own journals/receipts `Signed`, and fan
+/// out -- an offline co-owner signer must never strand a receipt behind
+/// an event a relay has already confirmed.
+#[test]
+fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all_owners() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
+        let frozen_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let outcome_b = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+
+        // Neither owner has signed yet -- the row is still Pending.
+        let rows = store.query(&Filter::new().id(frozen_id));
+        assert_eq!(
+            rows[0].provenance.local.as_ref().unwrap().sig_state,
+            SigState::Pending
+        );
+
+        // A relay independently delivers the REAL signed bytes.
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        let insert_outcome = store.insert(
+            signed_a.clone(),
+            RelayObserved::new(relay, Timestamp::from(100)),
+        );
+        assert!(matches!(
+            insert_outcome,
+            InsertOutcome::Duplicate {
+                provenance_grew: true
+            }
+        ));
+
+        // The row must now carry the real signature and be Signed.
+        let rows = store.query(&Filter::new().id(frozen_id));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.sig, signed_a.sig);
+        let local = rows[0]
+            .provenance
+            .local
+            .as_ref()
+            .expect("still locally owned");
+        assert_eq!(local.sig_state, SigState::Signed);
+        assert!(local.owners.contains(&intent_a));
+        assert!(local.owners.contains(&intent_b));
+
+        // BOTH owners' own journals were fanned out to Signed -- neither
+        // can be promoted or compensated again.
+        let promoted_a = store
+            .promote_signed(intent_a, signed_a.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_a, PromoteOutcome::NotFound));
+        let promoted_b = store
+            .promote_signed(intent_b, signed_a.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_b, PromoteOutcome::NotFound));
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(matches!(compensated_a, CompensateOutcome::NotFound));
+        let compensated_b = store
+            .compensate_write(intent_b)
+            .expect("compensate persistence");
+        assert!(matches!(compensated_b, CompensateOutcome::NotFound));
+    });
+}
+
+/// Issue #2 P0 correction (codex-nova ruling): `accept_write`'s duplicate
+/// detection must ALSO search the `OUTBOX_DISPLACED` stash, not only the
+/// live `EVENTS` row — a duplicate accepted while its canonical
+/// predecessor is currently sitting displaced (superseded by a later
+/// local edit, not yet restored) must join that stash entry's owner set
+/// too, and that shared ownership must survive both an unrelated owner's
+/// cancellation AND the later restore of the whole stash entry back to
+/// live.
+#[test]
+fn duplicate_accepted_while_stashed_joins_owner_set_and_survives_restore_and_cancel() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "a", 100);
+        let frozen_a_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
+
+        // C supersedes A -- A is now displaced into C's stash, owned by
+        // {A}, still Pending.
+        let (frozen_c, _signed_c) = compose(&k, Kind::ContactList, "c", 200);
+        let outcome_c = do_accept(store, accept(frozen_c, k.public_key(), 200));
+        let intent_c = outcome_c.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_c, AcceptOutcome::Superseded { .. }));
+
+        // D: a fresh intent with BYTE-IDENTICAL frozen bytes to A, accepted
+        // WHILE A sits displaced (not live). Must be detected as a
+        // `Duplicate` against the STASHED entry, not treated as a fresh
+        // insert.
+        let outcome_d = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        match outcome_d {
+            AcceptOutcome::Duplicate { row, .. } => {
+                assert_eq!(row.event.id, frozen_a_id);
+                let local = row
+                    .provenance
+                    .local
+                    .expect("stash entry already carried local provenance");
+                assert_eq!(local.sig_state, SigState::Pending);
+                assert!(local.owners.contains(&intent_a));
+                assert!(local.owners.contains(&intent_d));
+            }
+            other => panic!("expected Duplicate (joined via the displaced stash), got {other:?}"),
+        }
+
+        // Cancelling A (an unrelated owner of the SAME stash entry) must
+        // only drop A's own ownership -- D's still-open obligation keeps
+        // the stash entry alive, nothing to restore under A's own key
+        // (A never displaced anyone itself).
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_a,
+            CompensateOutcome::Compensated { restored: None, .. }
+        ));
+
+        // Cancelling C restores the shared stash entry to live -- now
+        // owned ONLY by D (A already dropped out above).
+        let compensated_c = store
+            .compensate_write(intent_c)
+            .expect("compensate persistence");
+        match compensated_c {
+            CompensateOutcome::Compensated { restored, .. } => {
+                let restored = restored.expect("A's slot must survive cancelling C");
+                assert_eq!(restored.event.id, frozen_a_id);
+                let local = restored.provenance.local.expect("still locally owned");
+                assert_eq!(local.sig_state, SigState::Pending);
+                assert!(local.owners.contains(&intent_d));
+                assert!(
+                    !local.owners.contains(&intent_a),
+                    "A must stay removed from the owner set"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+
+        // Cancelling D last retracts it for real -- nothing sustains the
+        // row anymore.
+        let compensated_d = store
+            .compensate_write(intent_d)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_d,
+            CompensateOutcome::Compensated { restored: None, .. }
+        ));
+        assert!(store.query(&Filter::new().id(frozen_a_id)).is_empty());
+    });
+}
+
+/// `RedbStore`-only durable-reopen variant of the falsifier above: an
+/// owner set joined via the DISPLACED stash (not the live row) must
+/// survive a real process restart just like the live-row case does
+/// (`duplicate_ownership_survives_restart`).
+#[test]
+fn duplicate_accepted_while_stashed_survives_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+    let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "a", 100);
+    let frozen_a_id = frozen_a.id;
+
+    let (intent_a, intent_c, intent_d) = {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let outcome_a = do_accept(&mut store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let (frozen_c, _signed_c) = compose(&k, Kind::ContactList, "c", 200);
+        let outcome_c = do_accept(&mut store, accept(frozen_c, k.public_key(), 200));
+        let intent_c = outcome_c.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_c, AcceptOutcome::Superseded { .. }));
+
+        let outcome_d = do_accept(&mut store, accept(frozen_a, k.public_key(), 100));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_d, AcceptOutcome::Duplicate { .. }));
+
+        (intent_a, intent_c, intent_d)
+    };
+
+    let mut store = RedbStore::open(&path).expect("reopen redb store");
+    let recovered = store.recover_outbox();
+    assert!(recovered.iter().any(|r| r.intent_id == intent_a));
+    assert!(recovered.iter().any(|r| r.intent_id == intent_c));
+    assert!(recovered.iter().any(|r| r.intent_id == intent_d));
+
+    // Restore C after reopen -- the shared stash entry (owned by A and D)
+    // must come back intact.
+    let compensated_c = store
+        .compensate_write(intent_c)
+        .expect("compensate persistence");
+    match compensated_c {
+        CompensateOutcome::Compensated { restored, .. } => {
+            let restored = restored.expect("A's slot must survive reopen + cancelling C");
+            assert_eq!(restored.event.id, frozen_a_id);
+            let local = restored.provenance.local.expect("still locally owned");
+            assert!(local.owners.contains(&intent_a));
+            assert!(local.owners.contains(&intent_d));
+        }
+        other => panic!("expected Compensated, got {other:?}"),
+    }
+}
+
 /// Issue #2 required falsifier #4 (kind:5 variant): an exact-`Duplicate`
 /// kind:5 intent's OWN independent suppression claim (issue #61 P0
 /// correction) must keep a target hidden after the canonical original is
