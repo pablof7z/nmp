@@ -1414,8 +1414,8 @@ impl<S: EventStore> EngineCore<S> {
     /// REQ once the backlog is settled.
     ///
     /// Evidence crediting (ledger #7) is NOT immediate when a backfill is
-    /// needed: recording "complete" before the backfilled events are
-    /// actually ingested would create a reconciled watermark over a store
+    /// needed: recording a reconciled watermark before the backfilled events
+    /// are actually ingested would attach evidence to a store
     /// that is still, transiently, missing precisely the events negentropy
     /// just proved are missing.
     /// `pending_neg_credit` defers the credit to the backfill sub's OWN
