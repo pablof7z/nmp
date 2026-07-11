@@ -20,6 +20,7 @@ use nmp_store::{
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 fn keys() -> Keys {
     Keys::generate()
@@ -63,6 +64,18 @@ fn deletion_event(keys: &Keys, targets: Vec<Tag>, created_at: u64) -> Event {
         .custom_created_at(Timestamp::from(created_at))
         .sign_with_keys(keys)
         .expect("sign deletion event")
+}
+
+fn frozen_from_signed(signed: &Event) -> Event {
+    Event::new(
+        signed.id,
+        signed.pubkey,
+        signed.created_at,
+        signed.kind,
+        signed.tags.clone(),
+        signed.content.clone(),
+        sentinel_signature(),
+    )
 }
 
 /// An `AcceptWrite` for `frozen`. Neither `IntentId` nor a receipt id is a
@@ -1235,6 +1248,74 @@ fn late_arrival_while_hidden_is_stored_not_refused_and_reveals_on_cancel() {
     });
 }
 
+/// Issue #61's literal first-arrival falsifier: the target is absent when
+/// the provisional claim is staged, then arrives for the first time while
+/// suppressed. It must enter the canonical store, merge a second relay's
+/// provenance in place, remain query-hidden, and reveal as one row with
+/// both observations when the claim is cancelled.
+#[test]
+fn first_arrival_while_suppressed_is_retained_deduped_and_revealed_on_cancel() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "late target")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome = do_accept(
+            store,
+            accept(frozen_from_signed(&deletion), k.public_key(), 100),
+        );
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        assert!(matches!(
+            outcome,
+            AcceptOutcome::Kind5Processed { ref hidden, .. } if hidden.is_empty()
+        ));
+
+        let first = store.insert(
+            target.clone(),
+            RelayObserved::new(
+                RelayUrl::parse("wss://relay1.example").expect("relay url"),
+                Timestamp::from(150),
+            ),
+        );
+        assert!(matches!(first, InsertOutcome::Inserted));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        let second = store.insert(
+            target,
+            RelayObserved::new(
+                RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                Timestamp::from(200),
+            ),
+        );
+        assert!(matches!(
+            second,
+            InsertOutcome::Duplicate {
+                provenance_grew: true
+            }
+        ));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        let cancelled = store
+            .compensate_write(intent)
+            .expect("compensate persistence");
+        match cancelled {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert_eq!(revealed.len(), 1);
+                assert_eq!(revealed[0].event.id, target_id);
+                assert_eq!(revealed[0].provenance.seen.len(), 2);
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        let rows = store.query(&Filter::new().id(target_id));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provenance.seen.len(), 2);
+    });
+}
+
 /// codex-nova P0 falsifier: a target's OWN `promote_signed` must remain
 /// fully functional while it is hidden by an UNRELATED pending kind:5
 /// intent's suppression claim. The withdrawn Kind5Stash design moved the
@@ -1397,6 +1478,327 @@ fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
             other => panic!("expected Compensated, got {other:?}"),
         }
         assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+    });
+}
+
+/// Issue #61 literal order falsifier: cancelling one independent delete
+/// must leave the other's suppression claim intact, and promoting that
+/// remaining intent must convert its own claim into the permanent
+/// tombstone without depending on the cancelled intent's metadata.
+#[test]
+fn independent_kind5_claims_cancel_then_promote_commit_the_remaining_delete() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "target")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            target.clone(),
+            RelayObserved::new(relay, Timestamp::from(50)),
+        );
+
+        let signed_1 = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome_1 = do_accept(
+            store,
+            accept(frozen_from_signed(&signed_1), k.public_key(), 100),
+        );
+        let intent_1 = outcome_1.journaled_intent_id().expect("journaled");
+
+        let signed_2 = deletion_event(&k, vec![Tag::event(target_id)], 101);
+        let outcome_2 = do_accept(
+            store,
+            accept(frozen_from_signed(&signed_2), k.public_key(), 101),
+        );
+        let intent_2 = outcome_2.journaled_intent_id().expect("journaled");
+
+        let cancelled = store
+            .compensate_write(intent_1)
+            .expect("compensate persistence");
+        assert!(matches!(
+            cancelled,
+            CompensateOutcome::Compensated { ref revealed, .. } if revealed.is_empty()
+        ));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        let promoted = store
+            .promote_signed(intent_2, signed_2.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        let replay = store.insert(
+            target,
+            RelayObserved::new(
+                RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                Timestamp::from(300),
+            ),
+        );
+        assert!(matches!(
+            replay,
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
+    });
+}
+
+/// Issue #61's reverse-order falsifier: once either independent delete
+/// promotes, the target is permanently deleted. Cancelling the other
+/// still-pending intent may remove only its own provisional claim and
+/// must neither reveal nor resurrect the target.
+#[test]
+fn independent_kind5_claims_promote_then_cancel_preserve_permanent_delete() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "target")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            target.clone(),
+            RelayObserved::new(relay, Timestamp::from(50)),
+        );
+
+        let signed_1 = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome_1 = do_accept(
+            store,
+            accept(frozen_from_signed(&signed_1), k.public_key(), 100),
+        );
+        let intent_1 = outcome_1.journaled_intent_id().expect("journaled");
+
+        let signed_2 = deletion_event(&k, vec![Tag::event(target_id)], 101);
+        let outcome_2 = do_accept(
+            store,
+            accept(frozen_from_signed(&signed_2), k.public_key(), 101),
+        );
+        let intent_2 = outcome_2.journaled_intent_id().expect("journaled");
+
+        let promoted = store
+            .promote_signed(intent_1, signed_1.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
+
+        let cancelled = store
+            .compensate_write(intent_2)
+            .expect("compensate persistence");
+        assert!(matches!(
+            cancelled,
+            CompensateOutcome::Compensated { ref revealed, .. } if revealed.is_empty()
+        ));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        let replay = store.insert(
+            target,
+            RelayObserved::new(
+                RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                Timestamp::from(300),
+            ),
+        );
+        assert!(matches!(
+            replay,
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
+    });
+}
+
+/// A provisional claim overlapping an already-permanent tombstone is
+/// allowed to own only its reversible metadata. Cancelling it cannot
+/// erase the older permanent deletion or make a redelivery admissible.
+#[test]
+fn pending_kind5_claim_over_permanent_tombstone_cannot_reveal_target() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "target")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            target.clone(),
+            RelayObserved::new(relay.clone(), Timestamp::from(50)),
+        );
+
+        let permanent = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        assert!(matches!(
+            store.insert(permanent, RelayObserved::new(relay, Timestamp::from(100))),
+            InsertOutcome::Kind5Processed { .. }
+        ));
+
+        let pending = deletion_event(&k, vec![Tag::event(target_id)], 101);
+        let outcome = do_accept(
+            store,
+            accept(frozen_from_signed(&pending), k.public_key(), 101),
+        );
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        assert!(matches!(
+            outcome,
+            AcceptOutcome::Kind5Processed { ref hidden, .. } if hidden.is_empty()
+        ));
+
+        let cancelled = store
+            .compensate_write(intent)
+            .expect("compensate persistence");
+        assert!(matches!(
+            cancelled,
+            CompensateOutcome::Compensated { ref revealed, .. } if revealed.is_empty()
+        ));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(matches!(
+            store.insert(
+                target,
+                RelayObserved::new(
+                    RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                    Timestamp::from(300),
+                ),
+            ),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
+    });
+}
+
+/// One kind:5 intent may name ordinary `e` targets and addressable `a`
+/// targets together. Both claims are staged atomically and cancelling the
+/// one intent reveals both rows through the same lifecycle.
+#[test]
+fn mixed_e_and_a_tag_kind5_intent_hides_and_reveals_both_targets() {
+    for_each_backend(|store| {
+        let k = keys();
+        let regular = EventBuilder::new(Kind::TextNote, "regular")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign regular target");
+        let regular_id = regular.id;
+        let addressable = EventBuilder::new(Kind::from(30_003u16), "addressable")
+            .tag(Tag::identifier("g1"))
+            .custom_created_at(Timestamp::from(60))
+            .sign_with_keys(&k)
+            .expect("sign addressable target");
+        let addressable_id = addressable.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            regular,
+            RelayObserved::new(relay.clone(), Timestamp::from(50)),
+        );
+        store.insert(addressable, RelayObserved::new(relay, Timestamp::from(60)));
+
+        let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
+        let signed_delete = deletion_event(
+            &k,
+            vec![Tag::event(regular_id), Tag::coordinate(coord, None)],
+            100,
+        );
+        let outcome = do_accept(
+            store,
+            accept(frozen_from_signed(&signed_delete), k.public_key(), 100),
+        );
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        match outcome {
+            AcceptOutcome::Kind5Processed { hidden, .. } => {
+                let mut hidden_ids: Vec<_> = hidden.into_iter().map(|row| row.event.id).collect();
+                hidden_ids.sort();
+                let mut expected = vec![regular_id, addressable_id];
+                expected.sort();
+                assert_eq!(hidden_ids, expected);
+            }
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(regular_id)).is_empty());
+        assert!(store.query(&Filter::new().id(addressable_id)).is_empty());
+
+        let cancelled = store
+            .compensate_write(intent)
+            .expect("compensate persistence");
+        match cancelled {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                let mut revealed_ids: Vec<_> =
+                    revealed.into_iter().map(|row| row.event.id).collect();
+                revealed_ids.sort();
+                let mut expected = vec![regular_id, addressable_id];
+                expected.sort();
+                assert_eq!(revealed_ids, expected);
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+    });
+}
+
+/// Promotion of one mixed deletion intent must convert both provisional
+/// claim classes into their permanent NIP-09 forms in the same lifecycle:
+/// the exact `e` target is id-tombstoned and an at-or-before-ceiling
+/// candidate for the `a` target is address-tombstoned.
+#[test]
+fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
+    for_each_backend(|store| {
+        let k = keys();
+        let regular = EventBuilder::new(Kind::TextNote, "regular")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign regular target");
+        let regular_id = regular.id;
+        let addressable = EventBuilder::new(Kind::from(30_003u16), "addressable")
+            .tag(Tag::identifier("g1"))
+            .custom_created_at(Timestamp::from(60))
+            .sign_with_keys(&k)
+            .expect("sign addressable target");
+        let addressable_id = addressable.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            regular.clone(),
+            RelayObserved::new(relay.clone(), Timestamp::from(50)),
+        );
+        store.insert(
+            addressable,
+            RelayObserved::new(relay.clone(), Timestamp::from(60)),
+        );
+
+        let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
+        let signed_delete = deletion_event(
+            &k,
+            vec![Tag::event(regular_id), Tag::coordinate(coord, None)],
+            100,
+        );
+        let outcome = do_accept(
+            store,
+            accept(frozen_from_signed(&signed_delete), k.public_key(), 100),
+        );
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        match outcome {
+            AcceptOutcome::Kind5Processed { hidden, .. } => {
+                assert_eq!(hidden.len(), 2);
+            }
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
+
+        let promoted = store
+            .promote_signed(intent, signed_delete.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
+        assert!(store.query(&Filter::new().id(regular_id)).is_empty());
+        assert!(store.query(&Filter::new().id(addressable_id)).is_empty());
+
+        assert!(matches!(
+            store.insert(
+                regular,
+                RelayObserved::new(relay.clone(), Timestamp::from(200)),
+            ),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
+        let address_replay = EventBuilder::new(Kind::from(30_003u16), "older replay")
+            .tag(Tag::identifier("g1"))
+            .custom_created_at(Timestamp::from(70))
+            .sign_with_keys(&k)
+            .expect("sign address replay");
+        assert!(matches!(
+            store.insert(
+                address_replay,
+                RelayObserved::new(relay, Timestamp::from(201)),
+            ),
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
     });
 }
 
@@ -1798,6 +2200,247 @@ fn address_claim_ceiling_survives_reopen() {
         .compensate_write(intent_d)
         .expect("compensate persistence");
     assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
+}
+
+/// Both reversible terminal paths must operate on suppression claims
+/// loaded from disk, not merely on process-local bookkeeping. This uses a
+/// real close/reopen boundary and exercises cancellation and promotion on
+/// different pending deletes after that boundary.
+#[test]
+fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+    let target_cancel = EventBuilder::new(Kind::TextNote, "cancel target")
+        .custom_created_at(Timestamp::from(50))
+        .sign_with_keys(&k)
+        .expect("sign cancel target");
+    let target_cancel_id = target_cancel.id;
+    let target_promote = EventBuilder::new(Kind::TextNote, "promote target")
+        .custom_created_at(Timestamp::from(51))
+        .sign_with_keys(&k)
+        .expect("sign promote target");
+    let target_promote_id = target_promote.id;
+    let signed_cancel_delete = deletion_event(&k, vec![Tag::event(target_cancel_id)], 100);
+    let signed_promote_delete = deletion_event(&k, vec![Tag::event(target_promote_id)], 101);
+
+    let (intent_cancel, intent_promote) = {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            target_cancel.clone(),
+            RelayObserved::new(relay.clone(), Timestamp::from(50)),
+        );
+        store.insert(
+            target_promote.clone(),
+            RelayObserved::new(relay, Timestamp::from(51)),
+        );
+        let cancel_outcome = do_accept(
+            &mut store,
+            accept(
+                frozen_from_signed(&signed_cancel_delete),
+                k.public_key(),
+                100,
+            ),
+        );
+        let promote_outcome = do_accept(
+            &mut store,
+            accept(
+                frozen_from_signed(&signed_promote_delete),
+                k.public_key(),
+                101,
+            ),
+        );
+        (
+            cancel_outcome.journaled_intent_id().expect("journaled"),
+            promote_outcome.journaled_intent_id().expect("journaled"),
+        )
+    };
+
+    let mut store = RedbStore::open(&path).expect("reopen redb store");
+    assert!(store.query(&Filter::new().id(target_cancel_id)).is_empty());
+    assert!(store.query(&Filter::new().id(target_promote_id)).is_empty());
+    let recovered = store.recover_outbox();
+    assert!(recovered.iter().any(|row| row.intent_id == intent_cancel));
+    assert!(recovered.iter().any(|row| row.intent_id == intent_promote));
+
+    let cancelled = store
+        .compensate_write(intent_cancel)
+        .expect("post-restart compensation");
+    assert!(matches!(
+        cancelled,
+        CompensateOutcome::Compensated { ref revealed, .. }
+            if revealed.iter().any(|row| row.event.id == target_cancel_id)
+    ));
+    assert_eq!(store.query(&Filter::new().id(target_cancel_id)).len(), 1);
+
+    let promoted = store
+        .promote_signed(intent_promote, signed_promote_delete.sig)
+        .expect("post-restart promotion");
+    assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
+    assert!(store.query(&Filter::new().id(target_promote_id)).is_empty());
+    assert!(matches!(
+        store.insert(
+            target_promote,
+            RelayObserved::new(
+                RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                Timestamp::from(300),
+            ),
+        ),
+        InsertOutcome::Refused(RefuseReason::Tombstoned)
+    ));
+}
+
+/// A suppressed regular row is pinned against bounded GC because a later
+/// cancellation still needs the canonical row to reveal. NIP-40 remains
+/// an explicit semantic retraction: expiry may remove the hidden row, and
+/// cancelling afterward must report no phantom reveal.
+#[test]
+fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
+    for_each_backend(|store| {
+        let k = keys();
+        let gc_target = EventBuilder::new(Kind::TextNote, "gc target")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign gc target");
+        let gc_target_id = gc_target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            gc_target,
+            RelayObserved::new(relay.clone(), Timestamp::from(50)),
+        );
+        let gc_delete = deletion_event(&k, vec![Tag::event(gc_target_id)], 100);
+        let gc_outcome = do_accept(
+            store,
+            accept(frozen_from_signed(&gc_delete), k.public_key(), 100),
+        );
+        let gc_intent = gc_outcome.journaled_intent_id().expect("journaled");
+
+        let gc_report = store.gc(&ClaimSet::new(vec![]));
+        assert_eq!(gc_report.events_evicted, 0);
+        let cancelled = store
+            .compensate_write(gc_intent)
+            .expect("compensate persistence");
+        assert!(matches!(
+            cancelled,
+            CompensateOutcome::Compensated { ref revealed, .. }
+                if revealed.iter().any(|row| row.event.id == gc_target_id)
+        ));
+        assert_eq!(store.query(&Filter::new().id(gc_target_id)).len(), 1);
+        let post_cancel_gc = store.gc(&ClaimSet::new(vec![]));
+        assert_eq!(post_cancel_gc.events_evicted, 1);
+        assert!(store.query(&Filter::new().id(gc_target_id)).is_empty());
+
+        let expiring_target = EventBuilder::new(Kind::TextNote, "expiry target")
+            .tag(Tag::expiration(Timestamp::from(250u64)))
+            .custom_created_at(Timestamp::from(150))
+            .sign_with_keys(&k)
+            .expect("sign expiring target");
+        let expiring_target_id = expiring_target.id;
+        store.insert(
+            expiring_target,
+            RelayObserved::new(relay, Timestamp::from(150)),
+        );
+        let expiry_delete = deletion_event(&k, vec![Tag::event(expiring_target_id)], 200);
+        let expiry_outcome = do_accept(
+            store,
+            accept(frozen_from_signed(&expiry_delete), k.public_key(), 200),
+        );
+        let expiry_intent = expiry_outcome.journaled_intent_id().expect("journaled");
+        assert!(store
+            .query(&Filter::new().id(expiring_target_id))
+            .is_empty());
+
+        let expired = store.expire_due(Timestamp::from(300u64));
+        assert!(expired.iter().any(|row| row.event.id == expiring_target_id));
+        let cancelled = store
+            .compensate_write(expiry_intent)
+            .expect("compensate persistence");
+        assert!(matches!(
+            cancelled,
+            CompensateOutcome::Compensated { ref revealed, .. } if revealed.is_empty()
+        ));
+        assert!(store
+            .query(&Filter::new().id(expiring_target_id))
+            .is_empty());
+    });
+}
+
+/// Persistence-shape falsifier for issue #61's canonical-owner rule. A
+/// provisional deletion makes the target query-invisible but leaves its
+/// one full row in `events`; no copy is moved into the only other table
+/// that owns full event rows (`outbox_displaced`). Cancelling then exposes
+/// that same one row again.
+#[test]
+fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
+    const EVENTS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("events");
+    const DISPLACED_TABLE: TableDefinition<&str, &str> = TableDefinition::new("outbox_displaced");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+    let target = EventBuilder::new(Kind::TextNote, "one canonical owner")
+        .custom_created_at(Timestamp::from(50))
+        .sign_with_keys(&k)
+        .expect("sign target");
+    let target_id = target.id;
+    let intent = {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        store.insert(
+            target,
+            RelayObserved::new(
+                RelayUrl::parse("wss://relay.example").expect("relay url"),
+                Timestamp::from(50),
+            ),
+        );
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome = do_accept(
+            &mut store,
+            accept(frozen_from_signed(&deletion), k.public_key(), 100),
+        );
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        outcome.journaled_intent_id().expect("journaled")
+    };
+
+    let db = Database::open(&path).expect("inspect redb");
+    let read = db.begin_read().expect("begin inspection read");
+    let events = read.open_table(EVENTS_TABLE).expect("open events");
+    assert!(events
+        .get(target_id.to_hex().as_str())
+        .expect("read target row")
+        .is_some());
+    let persisted_event_rows = events
+        .iter()
+        .expect("iterate events")
+        .map(|entry| entry.expect("read events entry"))
+        .filter(|(key, _)| key.value() == target_id.to_hex())
+        .count();
+    assert_eq!(persisted_event_rows, 1);
+
+    let displaced = read
+        .open_table(DISPLACED_TABLE)
+        .expect("open displaced rows");
+    let target_hex = target_id.to_hex();
+    let displaced_target_copies = displaced
+        .iter()
+        .expect("iterate displaced rows")
+        .map(|entry| entry.expect("read displaced entry"))
+        .filter(|(_, value)| value.value().contains(&target_hex))
+        .count();
+    assert_eq!(displaced_target_copies, 0);
+    drop(displaced);
+    drop(events);
+    drop(read);
+    drop(db);
+
+    let mut store = RedbStore::open(&path).expect("reopen redb store");
+    let cancelled = store
+        .compensate_write(intent)
+        .expect("compensate persistence");
+    assert!(matches!(cancelled, CompensateOutcome::Compensated { .. }));
+    let visible = store.query(&Filter::new().id(target_id));
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].event.id, target_id);
 }
 
 /// Issue #2 required falsifier #1 (team-lead decision, canonical-row
