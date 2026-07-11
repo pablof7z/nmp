@@ -1103,3 +1103,320 @@ fn kind5_immediate_delete_removes_target_before_relay_echo() {
         ));
     });
 }
+
+/// Architecture-review requirement (codex-nova verdict: "all provisional
+/// semantic side effects must compensate atomically before signature
+/// promotion... especially delete/tombstone effects"): cancelling a still-
+/// PENDING kind:5 draft must reverse its accept-time optimistic delete
+/// atomically, restoring every target it removed — not merely close the
+/// journal and leave the content gone.
+#[test]
+fn pending_kind5_delete_reverses_on_cancel_restoring_targets() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Cancel BEFORE signing — the provisional delete must reverse
+        // atomically.
+        let compensated = store
+            .compensate_write(intent)
+            .expect("compensate persistence");
+        assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
+
+        let rows = store.query(&Filter::new().id(target_id));
+        assert_eq!(
+            rows.len(),
+            1,
+            "cancelling a pending kind:5 delete must restore its target"
+        );
+        assert_eq!(rows[0].event.id, target_id);
+    });
+}
+
+/// Architecture-review requirement (the other half of the same fork): once
+/// a pending kind:5 draft actually SIGNS, its provisional tombstone claims
+/// become AUTHORITATIVE — permanent, per retraction-and-negative-deltas.md
+/// §7 — and can no longer be reversed by a (now-invalid) later
+/// `compensate_write`.
+#[test]
+fn pending_kind5_delete_commits_to_permanent_on_promote() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+
+        let signed_deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let frozen_deletion = Event::new(
+            signed_deletion.id,
+            signed_deletion.pubkey,
+            signed_deletion.created_at,
+            signed_deletion.kind,
+            signed_deletion.tags.clone(),
+            signed_deletion.content.clone(),
+            sentinel_signature(),
+        );
+
+        let outcome = do_accept(store, accept(frozen_deletion, k.public_key(), 100));
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        let promoted = store
+            .promote_signed(intent, signed_deletion.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
+
+        // Compensation is pre-signature only (retraction doc §4.2's
+        // "Promotion correction") — a no-op now, NOT a reversal.
+        let compensated = store
+            .compensate_write(intent)
+            .expect("compensate persistence");
+        assert!(matches!(compensated, CompensateOutcome::NotFound));
+        assert!(
+            store.query(&Filter::new().id(target_id)).is_empty(),
+            "promotion must not be reversible — the delete is now permanent"
+        );
+
+        // The same PERMANENT tombstone retraction doc §7 governs now
+        // refuses a redelivery of the byte-identical target.
+        let redelivered = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign redelivered target");
+        assert_eq!(redelivered.id, target_id);
+        let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
+        let reinsert = store.insert(
+            redelivered,
+            RelayObserved::new(relay2, Timestamp::from(300)),
+        );
+        assert!(matches!(
+            reinsert,
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
+    });
+}
+
+/// Architecture-review requirement: a provisional tombstone must refuse
+/// redelivery of its target WHILE the intent is still pending — exactly
+/// like a permanent one would — and that refusal must clear the instant
+/// the intent is cancelled.
+#[test]
+fn provisional_tombstone_refuses_redelivery_while_pending_then_clears_on_cancel() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
+
+        // Still pending — a fresh redelivery of the byte-identical target
+        // must be refused, same as a permanent tombstone would.
+        let redelivered = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign redelivered target");
+        assert_eq!(redelivered.id, target_id);
+        let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
+        let reinsert = store.insert(
+            redelivered.clone(),
+            RelayObserved::new(relay2.clone(), Timestamp::from(300)),
+        );
+        assert!(matches!(
+            reinsert,
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
+
+        // Cancel — the provisional claim clears, and the SAME redelivery
+        // must now be accepted.
+        let compensated = store
+            .compensate_write(intent)
+            .expect("compensate persistence");
+        assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
+
+        let reinsert2 = store.insert(
+            redelivered,
+            RelayObserved::new(relay2, Timestamp::from(300)),
+        );
+        assert!(
+            !matches!(reinsert2, InsertOutcome::Refused(_)),
+            "cancelling a pending kind:5 delete must clear its provisional tombstone claim, got {reinsert2:?}"
+        );
+    });
+}
+
+/// codex-nova finding: the displaced-stash lookup `promote_signed`/
+/// `compensate_write` use for a non-live intent must match on the STASH
+/// ENTRY'S OWN `intent_id`, not merely on frozen event id — two DIFFERENT
+/// intents can share the same frozen event id (a real intent and a
+/// byte-identical `Duplicate` of it). Falsifier: accept A for event E;
+/// accept B as a `Duplicate` of the identical E; accept C (a newer
+/// replaceable) so A's row is stashed under C; compensate B — this must
+/// NOT touch A's stash entry (a later cancel of C must still restore A).
+#[test]
+fn compensating_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "a", 100);
+        let frozen_a_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
+        assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
+
+        // B: a byte-identical Duplicate of A's exact frozen body.
+        let outcome_b = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+
+        // C: a newer replaceable candidate that supersedes A, stashing A's
+        // row under C's OUTBOX_DISPLACED entry.
+        let (frozen_c, _signed_c) = compose(&k, Kind::ContactList, "c", 200);
+        let outcome_c = do_accept(store, accept(frozen_c, k.public_key(), 200));
+        let intent_c = outcome_c.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_c, AcceptOutcome::Superseded { .. }));
+
+        // Compensating B — an unrelated intent that merely shares A's
+        // event id — must be a no-op with respect to A's stash entry.
+        let compensated_b = store
+            .compensate_write(intent_b)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_b,
+            CompensateOutcome::Compensated { restored: None }
+        ));
+
+        // A's stash entry must still be intact — cancelling C must still
+        // restore A.
+        let compensated_c = store
+            .compensate_write(intent_c)
+            .expect("compensate persistence");
+        match compensated_c {
+            CompensateOutcome::Compensated { restored } => {
+                let restored = restored
+                    .expect("A's stash must survive compensating the unrelated Duplicate intent B");
+                assert_eq!(restored.event.id, frozen_a_id);
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+    });
+}
+
+/// codex-nova finding, promote variant: `promote_signed` on B similarly
+/// must not write B's signature into A's unrelated stash entry, nor mark
+/// A's `LocalOrigin` as `Signed`.
+#[test]
+fn promoting_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
+        let frozen_a_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+
+        let outcome_b = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+
+        let (frozen_c, _signed_c) = compose(&k, Kind::ContactList, "c", 200);
+        let outcome_c = do_accept(store, accept(frozen_c, k.public_key(), 200));
+        let intent_c = outcome_c.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_c, AcceptOutcome::Superseded { .. }));
+
+        // Promote B with a signature that is NOT A's own.
+        let (_, signed_unrelated) = compose(&k, Kind::ContactList, "unrelated-sig-source", 999);
+        let promoted_b = store
+            .promote_signed(intent_b, signed_unrelated.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_b, PromoteOutcome::Promoted { .. }));
+
+        // A's stash entry must still carry A's OWN sentinel signature,
+        // never mutated by promoting the unrelated intent B.
+        let compensated_c = store
+            .compensate_write(intent_c)
+            .expect("compensate persistence");
+        match compensated_c {
+            CompensateOutcome::Compensated { restored } => {
+                let restored = restored
+                    .expect("A's stash must survive promoting the unrelated Duplicate intent B");
+                assert_eq!(restored.event.id, frozen_a_id);
+                assert_eq!(
+                    restored.event.sig,
+                    sentinel_signature(),
+                    "A's stash entry must not have been mutated by promoting the unrelated intent B"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+
+        // A itself, now restored live by cancelling C, still promotes
+        // independently with its OWN signature.
+        let promoted_a = store
+            .promote_signed(intent_a, signed_a.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_a, PromoteOutcome::Promoted { .. }));
+    });
+}
+
+/// codex-nova finding: `promote_signed` did not guard `IntentSigState::Signed`
+/// — a duplicate signer completion could re-promote, overwrite the
+/// signature, and return `Promoted` again, risking a double-publish
+/// (especially under `AtMostOnce`). A repeat promotion must be a no-op.
+#[test]
+fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, signed) = compose(&k, Kind::TextNote, "hello", 100);
+        let frozen_id = frozen.id;
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 100));
+        let intent = outcome.journaled_intent_id().expect("journaled");
+
+        let promoted = store
+            .promote_signed(intent, signed.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
+
+        // A second, distinct valid signature over the SAME frozen body
+        // (e.g. a duplicate signer completion racing the first).
+        let (_, other_signed) = compose(&k, Kind::TextNote, "hello", 100);
+        assert_ne!(
+            other_signed.sig, signed.sig,
+            "need a genuinely different signature to prove no overwrite occurred"
+        );
+
+        let repeat = store
+            .promote_signed(intent, other_signed.sig)
+            .expect("promote persistence");
+        assert!(
+            matches!(repeat, PromoteOutcome::NotFound),
+            "a repeat promotion must be a no-op, got {repeat:?}"
+        );
+
+        // The row must still carry the FIRST signature, never overwritten.
+        let rows = store.query(&Filter::new().id(frozen_id));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.sig, signed.sig);
+    });
+}

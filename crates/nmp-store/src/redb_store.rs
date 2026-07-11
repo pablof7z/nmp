@@ -137,6 +137,13 @@ const NEXT_RECEIPT_ID_KEY: &str = "next_receipt_id";
 /// [`crate::ReceiptState`]'s doc for why this separation exists). Never
 /// pruned by this unit.
 const OUTBOX_RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_receipts");
+/// What a still-open, PENDING kind:5 intent provisionally did at
+/// `accept_write` time (architecture review requirement — see
+/// [`Kind5StashRecord`]'s doc), keyed by the SAME [`intent_key`] as its
+/// `OUTBOX_INTENTS` row. `promote_signed` drops this row (the deletion
+/// already stands, now authoritative); `compensate_write` reverses it —
+/// deletes the tombstone claims and restores every removed target.
+const OUTBOX_KIND5_STASH: TableDefinition<&str, &str> = TableDefinition::new("outbox_kind5_stash");
 
 /// The `events` table's JSON value: the event's canonical NIP-01 JSON plus
 /// its merged provenance and, iff the row is locally authored, its
@@ -147,12 +154,10 @@ const OUTBOX_RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbo
 struct StoredEventRecord {
     event_json: String,
     provenance: BTreeMap<RelayUrl, Timestamp>,
-    /// `#[serde(default)]`: a pre-this-PR `EVENTS` row's JSON has no
-    /// `local` key at all — without a default, `serde_json` treats a
-    /// missing `Option<T>` field as a hard decode error, not `None`, and
-    /// every such row would panic on first read after upgrading past this
-    /// PR (architecture review correction — backward-compat falsifier
-    /// covers this).
+    /// `#[serde(default)]`: only a relay-observed row (never locally
+    /// authored) omits `local` entirely; defaulting it to `None` on decode
+    /// keeps that the ordinary case instead of a required field every
+    /// caller has to thread through.
     #[serde(default)]
     local: Option<LocalOrigin>,
 }
@@ -302,30 +307,59 @@ fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &st
     }
 }
 
+/// One `OUTBOX_KIND5_STASH` row's JSON value: what a still-open, PENDING
+/// kind:5 intent's `process_kind5_deletions_provisional_in_txn` call
+/// removed and claimed (architecture review requirement — codex-nova
+/// verdict: "all provisional semantic side effects must compensate
+/// atomically before signature promotion... especially delete/tombstone
+/// effects"). NOT a second category of PERMANENT tombstone — retraction
+/// doc §7's "PERMANENT, never GC-claimed" ruling governs tombstones from a
+/// SIGNED/published kind:5 only; these are reversed wholesale by
+/// `compensate_write` before that ever applies. Keyed by the SAME
+/// [`intent_key`] as its `OUTBOX_INTENTS` row.
+#[derive(Debug, Serialize, Deserialize)]
+struct Kind5StashRecord {
+    deleted: Vec<StoredEventRecord>,
+    /// The exact `TOMBSTONES` keys `process_kind5_deletions_provisional_in_txn`
+    /// wrote — removed verbatim on `compensate_write`.
+    id_tombstone_keys: Vec<String>,
+}
+
+/// Convert `se` into the `StoredEventRecord` any `EVENTS`/`OUTBOX_DISPLACED`/
+/// `OUTBOX_KIND5_STASH` row encodes — shared by [`encode_stored_event`] and
+/// the kind:5 stash, so the two never drift on field mapping.
+fn stored_event_to_record(se: &StoredEvent) -> StoredEventRecord {
+    StoredEventRecord {
+        event_json: se.event.as_json(),
+        provenance: se.provenance.seen.clone(),
+        local: se.provenance.local,
+    }
+}
+
+/// The read-side counterpart of [`stored_event_to_record`].
+fn record_to_stored_event(record: &StoredEventRecord) -> StoredEvent {
+    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+    StoredEvent {
+        event,
+        provenance: Provenance {
+            seen: record.provenance.clone(),
+            local: record.local,
+        },
+    }
+}
+
 /// Encode `se` exactly as the `EVENTS` table stores a row — shared by every
 /// door that writes a full [`StoredEvent`] back out (the durable
 /// `OUTBOX_DISPLACED` stash, `compensate_write`'s restore path).
 fn encode_stored_event(se: &StoredEvent) -> String {
-    let record = StoredEventRecord {
-        event_json: se.event.as_json(),
-        provenance: se.provenance.seen.clone(),
-        local: se.provenance.local,
-    };
-    serde_json::to_string(&record).expect("redb: encode stored event")
+    serde_json::to_string(&stored_event_to_record(se)).expect("redb: encode stored event")
 }
 
 /// Decode one `EVENTS`/`OUTBOX_DISPLACED` JSON value into a [`StoredEvent`]
 /// — the read-side counterpart of [`encode_stored_event`].
 fn decode_stored_event(json: &str) -> StoredEvent {
     let record: StoredEventRecord = serde_json::from_str(json).expect("redb: decode stored event");
-    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-    StoredEvent {
-        event,
-        provenance: Provenance {
-            seen: record.provenance,
-            local: record.local,
-        },
-    }
+    record_to_stored_event(&record)
 }
 
 /// True iff `record` is a locally-authored row still awaiting a signature
@@ -598,25 +632,86 @@ fn process_kind5_deletions(
     Ok(deleted)
 }
 
+/// The PENDING half of kind:5 processing (architecture review requirement —
+/// see [`Kind5StashRecord`]'s doc): applies ONLY the e-tag (id) target
+/// deletions, immediately and REVERSIBLY. Unlike [`process_kind5_deletions`],
+/// a-tag (addressable) targets are left entirely untouched here — deferred
+/// to `promote_signed`, which runs the FULL `process_kind5_deletions`
+/// (idempotent for the e-tags this already handled; fresh for any a-tags).
+/// Returns the removed rows (to restore on cancel) and the exact
+/// `TOMBSTONES` keys written (to remove on cancel) — see
+/// [`Kind5StashRecord`]. Mirrors `MemoryStore::process_kind5_deletions_provisional`
+/// exactly.
+#[allow(clippy::too_many_arguments)]
+fn process_kind5_deletions_provisional_in_txn(
+    events: &mut redb::Table<'_, &str, &str>,
+    addr_index: &mut redb::Table<'_, &str, &str>,
+    tombstones: &mut redb::Table<'_, &str, &str>,
+    expiration_index: &mut redb::Table<'_, &str, &str>,
+    by_author: &mut redb::Table<'_, &str, &str>,
+    by_kind: &mut redb::Table<'_, &str, &str>,
+    deleting: &Event,
+) -> Result<(Vec<StoredEvent>, Vec<String>), PersistenceError> {
+    let mut deleted = Vec::new();
+    let mut tombstone_keys = Vec::new();
+    let deleting_id_hex = deleting.id.to_hex();
+
+    let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
+    for target_id in target_ids {
+        if let Some(removed) = remove_row_in_txn(
+            events,
+            addr_index,
+            expiration_index,
+            by_author,
+            by_kind,
+            target_id,
+            |se| se.event.pubkey == deleting.pubkey,
+        )? {
+            deleted.push(removed);
+        }
+        let key = id_tombstone_key(&target_id, &deleting.pubkey);
+        tombstones
+            .insert(key.as_str(), deleting_id_hex.as_str())
+            .map_err(persist_err)?;
+        tombstone_keys.push(key);
+    }
+
+    Ok((deleted, tombstone_keys))
+}
+
 /// Scan `OUTBOX_DISPLACED` for the row (if any) whose stashed event's id is
-/// `frozen_id` — used by `promote_signed`/`compensate_write` for an intent
-/// that is not currently the live row at its own id: it may instead be
-/// sitting in some OTHER intent's displaced stash, having been superseded
-/// by a LATER local edit before it could sign or be cancelled
-/// (architecture review correction: a stashed predecessor "can later sign
-/// or cancel", so its copy must be kept in sync or invalidated, never left
-/// to resurrect stale or cancelled state). Returns the OWNING intent's
-/// `OUTBOX_DISPLACED` key, if found — at most one, by construction (a
-/// `StoredEvent` is only ever the CURRENT displaced stash of the one
-/// intent that most recently superseded it).
+/// `frozen_id` AND whose OWN local provenance names `intent_id` — used by
+/// `promote_signed`/`compensate_write` for an intent that is not currently
+/// the live row at its own id: it may instead be sitting in some OTHER
+/// intent's displaced stash, having been superseded by a LATER local edit
+/// before it could sign or be cancelled (architecture review correction: a
+/// stashed predecessor "can later sign or cancel", so its copy must be
+/// kept in sync or invalidated, never left to resurrect stale or cancelled
+/// state). The `intent_id` check is load-bearing, not redundant with the
+/// event-id match (codex-nova finding): two DIFFERENT intents can share
+/// the same frozen event id (a real intent and a byte-identical
+/// `Duplicate` of it), so matching by event id alone could let one
+/// intent's promote/compensate call mutate or delete an UNRELATED intent's
+/// stash entry. Returns the OWNING intent's `OUTBOX_DISPLACED` key, if
+/// found — at most one, by construction (a `StoredEvent` is only ever the
+/// CURRENT displaced stash of the one intent that most recently
+/// superseded it).
 fn find_displaced_key_by_event_id_in_txn(
     outbox_displaced: &redb::Table<'_, &str, &str>,
     frozen_id: EventId,
+    intent_id: IntentId,
 ) -> Result<Option<String>, PersistenceError> {
     for entry in outbox_displaced.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
         let record: StoredEventRecord =
             serde_json::from_str(value.value()).expect("redb: decode stored event");
+        let owned_by_this_intent = record
+            .local
+            .as_ref()
+            .is_some_and(|l| l.intent_id == intent_id);
+        if !owned_by_this_intent {
+            continue;
+        }
         if let Ok(event) = Event::from_json(&record.event_json) {
             if event.id == frozen_id {
                 return Ok(Some(key.value().to_string()));
@@ -846,6 +941,7 @@ impl RedbStore {
             write_txn.open_table(OUTBOX_DISPLACED)?;
             write_txn.open_table(OUTBOX_ATTEMPTS)?;
             write_txn.open_table(OUTBOX_META)?;
+            write_txn.open_table(OUTBOX_KIND5_STASH)?;
             let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
             // Boot-time reconciliation (VISION-ratified receipt contract,
             // team-lead correction): any `Ephemeral` receipt-only record
@@ -1536,7 +1632,7 @@ impl EventStore for RedbStore {
             let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
             let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
             let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
-            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
+            let addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
@@ -1548,6 +1644,9 @@ impl EventStore for RedbStore {
                 .map_err(persist_err)?;
             let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
             let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let mut outbox_kind5_stash = write_txn
+                .open_table(OUTBOX_KIND5_STASH)
+                .map_err(persist_err)?;
 
             let id_hex = frozen.id.to_hex();
             let existing = events.get(id_hex.as_str()).map_err(persist_err)?;
@@ -1623,18 +1722,32 @@ impl EventStore for RedbStore {
                             // Kind:5 has no replaceable/addressable
                             // address, so this branch is the only one it
                             // can ever reach (mirrors `insert`'s own
-                            // kind:5 invariant).
+                            // kind:5 invariant). Only the PROVISIONAL
+                            // (e-tag) half runs here, reversibly, staged
+                            // in `OUTBOX_KIND5_STASH` alongside the
+                            // intent — see `Kind5StashRecord`'s doc.
+                            // a-tag targets are deferred to
+                            // `promote_signed`.
                             if is_deletion {
-                                let deleted = process_kind5_deletions(
-                                    &mut events,
-                                    &mut addr_index,
-                                    &mut tombstones,
-                                    &mut addr_tombstones,
-                                    &mut expiration_index,
-                                    &mut by_author,
-                                    &mut by_kind,
-                                    &frozen,
-                                )?;
+                                let (deleted, id_tombstone_keys) =
+                                    process_kind5_deletions_provisional_in_txn(
+                                        &mut events,
+                                        &mut addr_index,
+                                        &mut tombstones,
+                                        &mut expiration_index,
+                                        &mut by_author,
+                                        &mut by_kind,
+                                        &frozen,
+                                    )?;
+                                let stash_record = Kind5StashRecord {
+                                    deleted: deleted.iter().map(stored_event_to_record).collect(),
+                                    id_tombstone_keys,
+                                };
+                                let encoded_stash = serde_json::to_string(&stash_record)
+                                    .expect("redb: encode kind5 stash");
+                                outbox_kind5_stash
+                                    .insert(intent_key(intent_id).as_str(), encoded_stash.as_str())
+                                    .map_err(persist_err)?;
                                 (
                                     AcceptOutcome::Kind5Processed {
                                         intent_id,
@@ -1834,6 +1947,17 @@ impl EventStore for RedbStore {
                 .open_table(OUTBOX_DISPLACED)
                 .map_err(persist_err)?;
             let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let mut outbox_kind5_stash = write_txn
+                .open_table(OUTBOX_KIND5_STASH)
+                .map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
+            let mut expiration_index = write_txn
+                .open_table(EXPIRATION_INDEX)
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
 
             let key = intent_key(intent_id);
             let intent_json = outbox_intents
@@ -1846,10 +1970,21 @@ impl EventStore for RedbStore {
                 Some(intent_json) => {
                     let mut intent_record: OutboxIntentRecord =
                         serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
+                    // No-second-transition guard (codex-nova finding): a
+                    // repeat promotion (e.g. a duplicate signer completion)
+                    // must not overwrite an already-Signed row and re-emit
+                    // `Promoted` — the trait doc already promised
+                    // "already-promoted returns NotFound"; this enforces
+                    // it. Load-bearing for `AtMostOnce`: a second silent
+                    // transition here could let the caller re-publish.
+                    if intent_record.sig_state == IntentSigState::Signed {
+                        return Ok(PromoteOutcome::NotFound);
+                    }
                     let mut frozen_event = Event::from_json(&intent_record.frozen_json)
                         .expect("redb: decode frozen event json");
                     let frozen_id = frozen_event.id;
                     let frozen_id_hex = frozen_id.to_hex();
+                    let is_deletion = frozen_event.kind == Kind::EventDeletion;
 
                     // Architecture review correction (load-bearing): is
                     // this intent still the LIVE row at its own frozen id?
@@ -1900,9 +2035,11 @@ impl EventStore for RedbStore {
                         // into that stash entry too — otherwise a future
                         // restore of it would resurrect a stale sentinel
                         // copy of an intent that actually did sign.
-                        if let Some(other_key) =
-                            find_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen_id)?
-                        {
+                        if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                            &outbox_displaced,
+                            frozen_id,
+                            intent_id,
+                        )? {
                             let other_json = outbox_displaced
                                 .get(other_key.as_str())
                                 .map_err(persist_err)?
@@ -1959,6 +2096,33 @@ impl EventStore for RedbStore {
                         ReceiptState::Signed,
                     )?;
 
+                    // Architecture review requirement (codex-nova verdict):
+                    // this intent's provisional tombstone claims (see
+                    // `Kind5StashRecord`'s doc) become AUTHORITATIVE the
+                    // moment it signs. Nothing here needs reversing, only
+                    // committing — drop the stash row (its bookkeeping is
+                    // no longer needed, the deletion now stands on its
+                    // own) and run the FULL `process_kind5_deletions`
+                    // (idempotent for the e-tags `accept_write` already
+                    // handled provisionally; fresh for any a-tag
+                    // coordinates, which are deferred entirely to this
+                    // point).
+                    if is_deletion {
+                        outbox_kind5_stash
+                            .remove(key.as_str())
+                            .map_err(persist_err)?;
+                        process_kind5_deletions(
+                            &mut events,
+                            &mut addr_index,
+                            &mut tombstones,
+                            &mut addr_tombstones,
+                            &mut expiration_index,
+                            &mut by_author,
+                            &mut by_kind,
+                            &frozen_event,
+                        )?;
+                    }
+
                     PromoteOutcome::Promoted { row: Box::new(row) }
                 }
             };
@@ -1976,7 +2140,7 @@ impl EventStore for RedbStore {
         let outcome = {
             let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
             let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-            let tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
             let addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
@@ -1988,6 +2152,9 @@ impl EventStore for RedbStore {
                 .open_table(OUTBOX_DISPLACED)
                 .map_err(persist_err)?;
             let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let mut outbox_kind5_stash = write_txn
+                .open_table(OUTBOX_KIND5_STASH)
+                .map_err(persist_err)?;
 
             let key = intent_key(intent_id);
             let intent_json = outbox_intents
@@ -2033,9 +2200,11 @@ impl EventStore for RedbStore {
                                 frozen_id,
                                 |_| true,
                             )?;
-                        } else if let Some(other_key) =
-                            find_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen_id)?
-                        {
+                        } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                            &outbox_displaced,
+                            frozen_id,
+                            intent_id,
+                        )? {
                             // Not live, but sitting in someone else's
                             // displaced stash (chained local supersession
                             // before this intent could sign) — invalidate
@@ -2074,6 +2243,40 @@ impl EventStore for RedbStore {
                             .map(Box::new),
                             None => None,
                         };
+
+                        // Architecture review requirement (kind:5
+                        // provisional-tombstone reversal, codex-nova
+                        // verdict): if this was a still-pending kind:5
+                        // draft, atomically undo everything it
+                        // provisionally did — remove its tombstone claims
+                        // and restore every target it removed. Cancelling
+                        // a delete must bring the content back, not merely
+                        // close the journal.
+                        let stash_json = outbox_kind5_stash
+                            .remove(key.as_str())
+                            .map_err(persist_err)?
+                            .map(|guard| guard.value().to_string());
+                        if let Some(stash_json) = stash_json {
+                            let stash: Kind5StashRecord = serde_json::from_str(&stash_json)
+                                .expect("redb: decode kind5 stash");
+                            for tombstone_key in stash.id_tombstone_keys {
+                                tombstones
+                                    .remove(tombstone_key.as_str())
+                                    .map_err(persist_err)?;
+                            }
+                            for deleted_record in stash.deleted {
+                                reinsert_stashed_in_txn(
+                                    &mut events,
+                                    &mut addr_index,
+                                    &tombstones,
+                                    &addr_tombstones,
+                                    &mut expiration_index,
+                                    &mut by_author,
+                                    &mut by_kind,
+                                    record_to_stored_event(&deleted_record),
+                                )?;
+                            }
+                        }
 
                         update_outbox_receipt(
                             &mut outbox_receipts,
