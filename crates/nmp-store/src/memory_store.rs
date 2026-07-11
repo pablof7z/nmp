@@ -16,8 +16,8 @@ use crate::coverage::{
 use crate::{
     AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
     EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PromoteOutcome,
-    Provenance, RecoveredIntent, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
-    WriteDurability,
+    Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason, RelayObserved,
+    RetractReason, SigState, StoredEvent, WriteDurability,
 };
 
 /// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
@@ -112,12 +112,29 @@ pub struct MemoryStore {
     /// evicted, if any, kept durable-in-memory until `promote_signed` or
     /// `compensate_write` drops it.
     outbox_displaced: HashMap<IntentId, StoredEvent>,
+    /// `OUTBOX_META`'s in-memory mirror: the next `IntentId` to allocate.
+    /// The store owns this counter (never a caller) — see `IntentId`'s doc
+    /// for why a caller-inferred value is unsound.
+    next_intent_id: u64,
+    /// `OUTBOX_RECEIPTS` mirror: retained receipt records, independent of
+    /// `outbox_intents`'s open-work rows (architecture review correction —
+    /// see `ReceiptState`'s doc). Never pruned by this unit.
+    outbox_receipts: HashMap<u64, RecoveredReceipt>,
 }
 
 impl MemoryStore {
     /// A new, empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Allocate the next `IntentId` from the store's own durable
+    /// high-water mark (never inferred from the currently-open set — see
+    /// `IntentId`'s doc). Starts at 1 (0 is never issued, kept free as an
+    /// unambiguous "no id" sentinel for callers that want one).
+    fn alloc_intent_id(&mut self) -> IntentId {
+        self.next_intent_id += 1;
+        IntentId(self.next_intent_id)
     }
 
     /// Write (or overwrite) one `OUTBOX_INTENTS` row plus its
@@ -154,6 +171,29 @@ impl MemoryStore {
         if let Some(displaced) = displaced {
             self.outbox_displaced.insert(intent_id, displaced);
         }
+    }
+
+    /// Write one `OUTBOX_RECEIPTS` row at `Accepted` — `accept_write`'s
+    /// receipt-retention half (architecture review correction). Always
+    /// paired with `journal_intent` in the same call; never pruned by this
+    /// unit.
+    fn journal_receipt(
+        &mut self,
+        receipt_id: u64,
+        intent_id: IntentId,
+        frozen_id: EventId,
+        expected_pubkey: PublicKey,
+    ) {
+        self.outbox_receipts.insert(
+            receipt_id,
+            RecoveredReceipt {
+                receipt_id,
+                intent_id,
+                frozen_id,
+                expected_pubkey,
+                state: ReceiptState::Accepted,
+            },
+        );
     }
 
     /// Re-admit a durably-stashed predecessor `se` through the ordinary
@@ -567,7 +607,6 @@ impl EventStore for MemoryStore {
 
     fn accept_write(&mut self, accept: AcceptWrite) -> AcceptOutcome {
         let AcceptWrite {
-            intent_id,
             receipt_id,
             frozen,
             expected_pubkey,
@@ -579,7 +618,8 @@ impl EventStore for MemoryStore {
         } = accept;
 
         // Refused at the door FIRST, same as `insert`: never journaled,
-        // nothing to recover (R3).
+        // nothing to recover, and (R7 correction) no `IntentId` is ever
+        // allocated for a refused call — a refusal can never burn an id.
         if frozen.is_expired_at(&accepted_at) {
             return AcceptOutcome::Refused(RefuseReason::AlreadyExpired);
         }
@@ -587,6 +627,7 @@ impl EventStore for MemoryStore {
             return AcceptOutcome::Refused(RefuseReason::Tombstoned);
         }
 
+        let intent_id = self.alloc_intent_id();
         let local = LocalOrigin {
             intent_id,
             sig_state: SigState::Pending,
@@ -601,6 +642,7 @@ impl EventStore for MemoryStore {
         // delivered even though it does not (re)claim the row here.
         if let Some(existing) = self.by_id.get(&frozen.id) {
             let row = existing.clone();
+            let frozen_id = frozen.id;
             self.journal_intent(
                 intent_id,
                 receipt_id,
@@ -613,7 +655,8 @@ impl EventStore for MemoryStore {
                 accepted_at,
                 None,
             );
-            return AcceptOutcome::Duplicate { row };
+            self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
+            return AcceptOutcome::Duplicate { intent_id, row };
         }
 
         let stored = StoredEvent {
@@ -625,7 +668,13 @@ impl EventStore for MemoryStore {
             None => {
                 self.index_expiration(&stored);
                 self.by_id.insert(stored.event.id, stored.clone());
-                (AcceptOutcome::Inserted { row: stored }, None)
+                (
+                    AcceptOutcome::Inserted {
+                        intent_id,
+                        row: stored,
+                    },
+                    None,
+                )
             }
             Some(key) => match self.addr_index.get(&key).copied() {
                 None => {
@@ -633,7 +682,13 @@ impl EventStore for MemoryStore {
                     self.index_expiration(&stored);
                     self.by_id.insert(id, stored.clone());
                     self.addr_index.insert(key, id);
-                    (AcceptOutcome::Inserted { row: stored }, None)
+                    (
+                        AcceptOutcome::Inserted {
+                            intent_id,
+                            row: stored,
+                        },
+                        None,
+                    )
                 }
                 Some(current_id) => {
                     let current_event = &self
@@ -654,18 +709,20 @@ impl EventStore for MemoryStore {
                         self.addr_index.insert(key, new_id);
                         (
                             AcceptOutcome::Superseded {
+                                intent_id,
                                 row: stored,
                                 replaced: Box::new(replaced.clone()),
                             },
                             Some(replaced),
                         )
                     } else {
-                        (AcceptOutcome::Stale, None)
+                        (AcceptOutcome::Stale { intent_id }, None)
                     }
                 }
             },
         };
 
+        let frozen_id = frozen.id;
         self.journal_intent(
             intent_id,
             receipt_id,
@@ -678,6 +735,7 @@ impl EventStore for MemoryStore {
             accepted_at,
             displaced,
         );
+        self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
 
         outcome
     }
@@ -700,6 +758,17 @@ impl EventStore for MemoryStore {
         if let Some(record) = self.outbox_intents.get_mut(&intent_id) {
             record.sig_state = IntentSigState::Signed;
             record.frozen = row.event.clone();
+        }
+        // Architecture review correction: the RETAINED receipt record
+        // (separate from `outbox_intents`'s open-work row) tracks the same
+        // transition — `reattach_receipt` must reflect `Signed` from here
+        // on, independent of whether the open-work row survives.
+        if let Some(receipt) = self
+            .outbox_receipts
+            .values_mut()
+            .find(|r| r.intent_id == intent_id)
+        {
+            receipt.state = ReceiptState::Signed;
         }
 
         PromoteOutcome::Promoted { row: Box::new(row) }
@@ -728,6 +797,17 @@ impl EventStore for MemoryStore {
             .and_then(|displaced| self.reinsert_stashed(displaced))
             .map(Box::new);
 
+        // Architecture review correction: `OUTBOX_INTENTS`'s open-work row
+        // is gone (line above), but the RETAINED receipt record survives —
+        // `reattach_receipt` must still answer `Compensated`, not `None`.
+        if let Some(receipt) = self
+            .outbox_receipts
+            .values_mut()
+            .find(|r| r.intent_id == intent_id)
+        {
+            receipt.state = ReceiptState::Compensated;
+        }
+
         CompensateOutcome::Compensated { restored }
     }
 
@@ -736,5 +816,12 @@ impl EventStore for MemoryStore {
         // property. Nothing here survives a real process crash, so there
         // is nothing to recover, by construction.
         Vec::new()
+    }
+
+    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+        // NOT a Q4 "always empty" door: retention (not crash-survival) is
+        // the contract here, and `MemoryStore` retains faithfully for the
+        // life of the process — see `EventStore::reattach_receipt`'s doc.
+        self.outbox_receipts.get(&receipt_id).cloned()
     }
 }

@@ -40,6 +40,15 @@
 //! signer orchestration) stays in `nmp-engine`; the store exposes only these
 //! typed doors — never raw table/transaction access.
 //!
+//! Two architecture-review corrections load-bear on the above: (1)
+//! [`IntentId`] is allocated by the STORE from a durable high-water mark
+//! bumped inside `accept_write`'s own transaction — never caller-supplied
+//! (see its doc for the reuse hazard this closes); (2) receipt identity/
+//! state is retained under `OUTBOX_RECEIPTS`, independently of
+//! `OUTBOX_INTENTS`'s open-work row, so [`EventStore::reattach_receipt`]
+//! keeps answering for a terminal receipt after its open-work row is gone
+//! (see [`ReceiptState`]'s doc).
+//!
 //! Explicitly out of scope for M3 step A1 (owned by later steps): signature
 //! verification (the `nostr::Event::verify` call an accepted signer result
 //! must pass happens in `nmp-engine`, before `promote_signed` is ever
@@ -62,21 +71,26 @@ use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, PublicKey, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for a durable write intent, assigned by the caller
-/// (`nmp-engine`) and persisted in `OUTBOX_INTENTS`/carried on the pending
-/// row's [`LocalOrigin`] — unlike an in-memory receipt counter, it survives
-/// restart. The store never allocates one, and never infers a "next free"
-/// value from the currently-open set: a caller (U3/U4) MUST allocate from a
-/// durable, monotonically-advancing high-water mark that is never reset by
-/// recovery, so a value is never reused across the store's ENTIRE lifetime
-/// — not just while an intent using it is still open. Seeding an allocator
-/// only past the max *currently-open* recovered id is UNSOUND: R8 deletes
-/// `OUTBOX_INTENTS` rows once an intent terminates, so an id freed that way
-/// looks "never used" to a naive open-set scan and can collide with a
-/// retained `OUTBOX_ATTEMPTS` row from the terminated intent that reused
-/// it — issue #3's "receipt ids remain stable and unique across restart"
-/// requires uniqueness for the store's whole lifetime, not merely among
-/// what recovery currently sees open.
+/// Stable identifier for a durable write intent, ALLOCATED BY THE STORE
+/// ITSELF from a durable, monotonically-advancing high-water mark
+/// (`OUTBOX_META` for `RedbStore`) bumped inside the SAME `accept_write`
+/// transaction that journals the intent — never inferred from the
+/// currently-open set.
+///
+/// This is a load-bearing correction (architecture review, post-initial-
+/// build): an earlier revision of this door took a CALLER-assigned
+/// `IntentId` and left allocation to `nmp-engine`. That is unsound the
+/// moment R8-style terminal cleanup exists: `OUTBOX_INTENTS` rows are
+/// deleted once an intent's open work concludes (`compensate_write` today;
+/// a future all-lanes-terminal path later), so a caller-side allocator that
+/// infers "next free" from the currently-*open* recovered set will
+/// eventually reissue an id that a terminated intent already used —
+/// colliding with that intent's still-*retained* [`RecoveredReceipt`] (see
+/// [`EventStore::reattach_receipt`]) or any retained per-relay attempt
+/// evidence. Issue #3's "ids remain stable and unique across restart"
+/// means unique for the store's ENTIRE lifetime, not merely among what
+/// recovery currently sees open — so allocation must be a fact the store
+/// itself owns and persists, never a value trusted in from outside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct IntentId(pub u64);
 
@@ -301,10 +315,12 @@ pub enum IntentSigState {
 /// row in a single `redb::WriteTransaction` — atomicity is structural, not
 /// a calling convention.
 pub struct AcceptWrite {
-    pub intent_id: IntentId,
     /// The engine's own `ReceiptId`, persisted so it can be reattached
     /// after restart (issue #3: "receipt ids remain stable and unique
-    /// across restart").
+    /// across restart"). NOTE: `IntentId` is deliberately absent from this
+    /// struct — the store allocates it (see [`IntentId`]'s doc for why a
+    /// caller-supplied one is unsound) and hands it back on every
+    /// journaled [`AcceptOutcome`] variant.
     pub receipt_id: u64,
     /// The frozen, unsigned NIP-01 body: pubkey/created_at/kind/tags/
     /// content are final and `event.id` is already `EventId::new(..)` over
@@ -345,28 +361,55 @@ pub struct AcceptWrite {
 /// *refusal* check `insert` runs, not `insert`'s deletion-processing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
-    /// Brand-new pending row, no address competition.
-    Inserted { row: StoredEvent },
+    /// Brand-new pending row, no address competition. `intent_id` is the
+    /// store-allocated id (see [`IntentId`]'s doc) — the ONLY place a
+    /// caller learns it.
+    Inserted {
+        intent_id: IntentId,
+        row: StoredEvent,
+    },
     /// This exact event id was already held (see `Provenance::local_origin`'s
     /// doc — an edge case, not the relay-echo hand-off, which goes through
-    /// ordinary `insert`/dedup instead).
-    Duplicate { row: StoredEvent },
+    /// ordinary `insert`/dedup instead). Still allocates and journals a
+    /// fresh `intent_id` — this call is still a distinct accepted intent.
+    Duplicate {
+        intent_id: IntentId,
+        row: StoredEvent,
+    },
     /// The pending row won a replaceable/addressable address, evicting
     /// `replaced` — durably stashed by the caller into `OUTBOX_DISPLACED`
     /// in the SAME transaction, so pre-signature compensation
     /// (`compensate_write`) can restore it (retraction doc §4.2).
     Superseded {
+        intent_id: IntentId,
         row: StoredEvent,
         replaced: Box<StoredEvent>,
     },
     /// This intent lost its address race to an existing, newer winner.
     /// The intent is still journaled (still gets signed and delivered —
     /// only `Refused` below skips the journal) but produces no pending row.
-    Stale,
+    Stale { intent_id: IntentId },
     /// Refused at the door — the same tombstone/expiry refusal `insert`
     /// runs. Terminal typed failure to the caller (R3): NOTHING is
-    /// journaled — no intent row, no pending row, no receipt residue.
+    /// journaled — no intent row, no pending row, no receipt residue, and
+    /// (correspondingly) no `IntentId` is ever allocated for a refused
+    /// call, so refusal can never "burn" an id.
     Refused(RefuseReason),
+}
+
+impl AcceptOutcome {
+    /// The `IntentId` this call journaled, if any — `None` only for
+    /// `Refused` (R3: nothing was ever journaled, and no id was ever
+    /// allocated for a refused call).
+    pub fn journaled_intent_id(&self) -> Option<IntentId> {
+        match self {
+            AcceptOutcome::Inserted { intent_id, .. }
+            | AcceptOutcome::Duplicate { intent_id, .. }
+            | AcceptOutcome::Superseded { intent_id, .. }
+            | AcceptOutcome::Stale { intent_id } => Some(*intent_id),
+            AcceptOutcome::Refused(_) => None,
+        }
+    }
 }
 
 /// The result of an [`EventStore::promote_signed`] call.
@@ -426,6 +469,44 @@ pub struct RecoveredIntent {
     /// cancellation can still restore it.
     pub displaced: Option<StoredEvent>,
     pub accepted_at: Timestamp,
+}
+
+/// A durably-retained receipt's coarse status — the STORE-OBSERVABLE
+/// subset of the full receipt stream (`nmp-engine`'s `WriteStatus` owns
+/// the complete enum, including per-relay `Routed`/`Sent`/`Acked`/
+/// `Rejected`/`GaveUp`/`Failed`; this crate only knows what its OWN four
+/// doors did to a receipt). Retained under `OUTBOX_RECEIPTS` — separately
+/// from `OUTBOX_INTENTS`'s open-work row — precisely so a receipt stays
+/// reattachable via [`EventStore::reattach_receipt`] after the open-work
+/// row is gone (architecture review correction: R8-style terminal cleanup
+/// of `OUTBOX_INTENTS` must never also delete receipt identity/state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiptState {
+    /// `accept_write` ran; nothing else has happened to this intent yet.
+    Accepted,
+    /// `promote_signed` ran; the row carries a real signature. (Per-relay
+    /// delivery evidence beyond this point is a later unit's job — the
+    /// durable attempt table this frame only creates the schema for.)
+    Signed,
+    /// `compensate_write` ran; the pending row was retracted pre-signature
+    /// (retraction doc §4.2). Terminal — a compensated intent never
+    /// promotes.
+    Compensated,
+}
+
+/// A durably-retained receipt record, independent of whether the intent's
+/// open-work row (`OUTBOX_INTENTS`/[`RecoveredIntent`]) still exists —
+/// see [`ReceiptState`]'s doc for why this separation exists. This unit
+/// builds no pruning policy for these rows (mirrors how the retry-owner
+/// follow-up, not this frame, owns `OUTBOX_ATTEMPTS` retention policy);
+/// they simply accumulate until a later unit defines a retention/GC rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredReceipt {
+    pub receipt_id: u64,
+    pub intent_id: IntentId,
+    pub frozen_id: EventId,
+    pub expected_pubkey: PublicKey,
+    pub state: ReceiptState,
 }
 
 /// The single mutating door onto the event store.
@@ -543,4 +624,17 @@ pub trait EventStore {
     /// empty (Fable checkpoint Q4: crash-safety is a `RedbStore`-only
     /// backend property, not a contract `EventStore` itself promises).
     fn recover_outbox(&self) -> Vec<RecoveredIntent>;
+
+    /// Look up `receipt_id`'s durably-RETAINED record — independent of
+    /// whether its intent's `OUTBOX_INTENTS` open-work row still exists
+    /// (architecture review correction: separates "recoverable open work"
+    /// from "receipt identity/state", so a terminal receipt stays
+    /// reattachable — issue #3's "receipts remain... reattachable" —
+    /// rather than disappearing the moment its open-work row is cleaned
+    /// up). Unlike `recover_outbox`, this is an ordinary retained-data
+    /// lookup, not a boot-only replay: `MemoryStore` answers it faithfully
+    /// for the life of the process (no Q4 "always empty" carve-out here —
+    /// that carve-out is specifically about surviving a REAL crash, which
+    /// this door never claims to do for a volatile backend).
+    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt>;
 }
