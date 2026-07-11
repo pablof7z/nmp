@@ -1,43 +1,44 @@
 <!-- docsify sidebar -->
 
-- [NMP Builder Manual](README.md)
-- **Orient**
-  - [Why NMP exists](01-why-nmp.md)
+- [NMP Builder Guide](README.md)
+- **Start**
   - [Mental model](02-mental-model.md)
-  - [Current and target status](03-status-map.md)
-- **Get running**
-  - [Current Falsifier timeline](04-ten-minute-timeline.md)
+  - [Ten-minute embedding](04-ten-minute-timeline.md)
   - [Two nouns and ownership](05-two-nouns.md)
-  - [Small app shapes](06-first-app.md)
-  - [Brownfield adoption](07-brownfield.md)
-  - [Packaging](08-packaging.md)
 - **Read**
   - [Binding grammar](09-binding-grammar.md)
-  - [Consuming snapshots](10-consuming-results.md)
-  - [Cache and source evidence](11-coverage.md)
-  - [Collection mode](12-collection-mode.md)
+  - [Snapshots and evidence](10-consuming-results.md)
+  - [No global completeness](11-coverage.md)
   - [Delivery transforms](13-delivery-transforms.md)
 - **Write**
-  - [Durable intent and receipts](14-writing.md)
+  - [Drafts and receipts](14-writing.md)
   - [Replaceable edits](15-editing-replaceable.md)
-- **Hard concerns**
-  - [Identity and signer selection](16-identity.md)
-  - [Compiled routes](17-relays.md)
+  - [Identity and signers](16-identity.md)
+- **Route and operate**
+  - [Source and routing context](17-relays.md)
   - [Tracing demand](18-tracing-demand.md)
   - [Offline and reconnect](19-offline-sync.md)
   - [Capabilities](20-capabilities.md)
   - [Provenance](21-provenance.md)
-- **Operate**
   - [Diagnostics](22-diagnostics.md)
-  - [Threading and bounded delivery](23-threading-lifecycle.md)
+  - [Bounded delivery](23-threading-lifecycle.md)
   - [Cost and limits](24-performance.md)
   - [Testing](25-testing.md)
   - [Troubleshooting](26-troubleshooting.md)
+- **Extend**
+  - [Protocol declarations and operations](27-recipes-and-choosing.md)
+  - [Protocol modules](32-extending.md)
+  - [Kind-diverse examples](31-gallery.md)
+- **Integrate**
+  - [Native platform shapes](06-first-app.md)
+  - [Brownfield adoption](07-brownfield.md)
+  - [Packaging](08-packaging.md)
+  - [Platform projections](30-platform-guides.md)
 - **Reference**
-  - [Declarations and protocol operations](27-recipes-and-choosing.md)
+  - [Glossary](glossary.md)
+  - [Why NMP](01-why-nmp.md)
   - [Guarantees](28-patterns.md)
   - [What NMP does not own](29-not-do.md)
-  - [Platform projections](30-platform-guides.md)
-  - [Falsifier gallery](31-gallery.md)
-  - [Protocol modules](32-extending.md)
-  - [Governed provisional surface](33-versioning.md)
+  - [Governed provisional API](33-versioning.md)
+  - [Open design: windowed observation](12-collection-mode.md)
+  - [Current implementation status](03-status-map.md)

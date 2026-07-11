@@ -1,117 +1,137 @@
-# Protocol modules, reusable declarations, and app policy
+# Using protocol modules
 
-**Status: TARGET.** The closed filter grammar is built. Opt-in protocol-module
-packaging and semantic module operations are not yet shipped. This chapter
-records the ownership boundary; examples are directional, not frozen API.
+Core gives every app the raw two-noun engine. Enable an exact protocol module
+when you want NIP-aware builders, parsing, reconstructed state, query fragments,
+semantic operations, or typed context without hand-writing that protocol in app
+code.
 
-## No content kind is privileged
+## Modules are optional semantic libraries
 
-NMP core is a generic sync-and-routing engine. It does not ship a favored
-`textNote`, `homeFeed`, `myFollowsNotes`, or other content-kind battery. Kind:1
-is one event kind among many, not the center of the extension model.
+Enabling a module adds protocol knowledge around the same engine:
 
-Reusable conveniences are still welcome, but they belong to one of three
-categories with different ownership.
+```swift
+import NMP
+import NMPNip29
+import NMPNip68
+```
 
-## 1. Reusable closed declarations
+It does not add an NMP app container, register scene lifecycle, create another
+store, or open its own relay pool.
 
-A helper may package an existing, closed descriptor without hiding its
-expansion. For example, a NIP-02 module can provide the binding commonly called
-`myFollows`:
+The exact Cargo/SwiftPM/Gradle packaging is provisional. Opt-in code weight and
+one canonical engine path are not.
 
-```text
-Derived(
-  inner: Filter(kinds:[3], authors: Reactive(ActivePubkey)),
-  project: Tag(p)
+## Closed reusable declarations
+
+A helper may package the public binding grammar:
+
+```swift
+let authors = Nip02.myFollows()
+let selection = NMPFilter(
+    kinds: .literal(callerSelectedKinds),
+    authors: authors
 )
 ```
 
-This is not a new reactive primitive and not an app closure. NMP still sees the
-entire value, so it can hash, deduplicate, route, re-root, and explain it.
+`myFollows()` expands to the NIP-02 contact-list projection. NMP can print,
+hash, deduplicate, re-root, and diagnose it exactly as if the app wrote the
+`Derived` graph inline.
 
-Apps and third-party packages may define equivalent helpers. The core does not
-need to bless one feed assembled from that binding.
+NIP-02 owns the declaration. Core does not attach kind:1, a timeline, ranking,
+or any other feed policy to it.
 
-## 2. Protocol-owned semantic functionality
+Apps and third-party packages may publish similar constructors over public
+values. A helper is not a new reactive primitive or hidden subscription.
 
-An opt-in NIP module owns the protocol facts defined by that NIP:
+## Composed typed protocol queries
 
-- its event schemas and owned event kinds;
-- codecs and validation;
-- state reconstruction rules;
-- typed references and semantic operations;
-- reusable query declarations;
-- protocol routing context.
+Some protocols reconstruct more than one raw event. A module may expose a
+typed live result while using ordinary demands underneath:
 
-For example, a NIP-29 module may expose group creation, administration, member
-state, and a typed group reference containing its host relay. It owns NIP-29's
-management/state events. It does **not** own every content kind that can be
-published inside a group.
-
-The module may contextually publish a foreign draft:
-
-```text
-photo = Nip68.buildPhoto(asset)
-receipt = group.publish(photo)
+```swift
+for await snapshot in nip29.observeRememberedGroups(using: engine) {
+    groups = snapshot.values
+    sourceFacts = snapshot.acquisition
+    shortfall = snapshot.shortfall
+}
 ```
 
-`Nip68` owns the photo draft. The bound NIP-29 group adds only the NIP-29
-context it owns, such as the correct `h` tag and host-relay routing. Core then
-selects a signer once, signs once, stores once, and publishes once.
+This surface composes two exact owners:
 
-## 3. App policy
+- NIP-51 owns kind `10009` Simple groups, including its public/private list
+  codec, replacement construction, and typed list entries.
+- NIP-29 consumes those typed entries and adds NIP-29-facing group references
+  and host-scoped operations. It claims neither kind `10009` nor kind `30002`.
 
-The app owns choices that are not protocol facts:
+The underlying kind `10009` demand is rooted at current pubkey and acquired
+through user-list authority, never through the currently selected group host.
+The selected group remains app state. Enabling the NIP-29 package may bring the
+NIP-51 codec transitively; that dependency does not transfer schema ownership.
+Neither module maintains a parallel cache or subscription lifecycle.
 
-- what appears in a feed;
-- ranking, ordering, and nesting;
-- moderation and presentation policy;
-- which queries exist and how long they live;
-- how protocol results fold into app state.
+## Semantic operations
 
-A reusable helper can live in app code without becoming an NMP promise. "Many
-apps need it" is evidence for convenience, not permission to specialize core.
+Protocol operations can own multi-event/state rules that should not leak into
+app code:
 
-## Composition rules
+```swift
+let group = try await nip29.createGroup(
+    name: "Research",
+    host: selectedHost,
+    using: engine
+)
 
-Protocol composition uses immutable unsigned drafts:
+let receipt = try group.makeAdmin(pubkey, using: engine)
+```
 
-1. A schema module constructs a draft containing only the fields it owns.
-2. A contextual module returns a new draft containing only its contribution.
-3. The core freezes the final body at acceptance, selects the default or
-   overridden signer, signs once, and publishes through the declared protocol
-   route.
+NIP-29 owns the exact management events, tags, validation, group-state
+transition, and host authority required by those operations. The result still
+uses core write receipts.
 
-No module may mutate an already-signed event. No module may register opaque
-closures into demand, routing, ordering, or admission. Contextual routing must
-remain typed and introspectable.
+## Compose foreign drafts without stealing ownership
 
-## Relay rule
+```swift
+let asset = try await blossom.upload(file)
+let photo = try Nip68.buildPhoto(asset)
+let receipt = try group.publish(photo, using: engine)
+```
 
-The app does not hand NMP an expanded relay list for ordinary queries or
-author-outbox writes. That would move routing correctness back into app code.
+- Blossom owns upload and asset verification.
+- NIP-68 owns the photo event schema.
+- NIP-29 adds only validated group context, including the `h` tag and host
+  authority.
+- Core freezes the final body, selects one signer, maintains one canonical row,
+  and publishes one intent.
 
-A protocol module may carry a relay because the protocol makes that relay part
-of the semantic object: a NIP-29 group host, an inbox set, or another typed
-source authority. That is protocol context, not a generic relay override.
+NIP-29 does not own the photo kind merely because a group can contain it.
+
+## App policy remains app policy
+
+The app still decides:
+
+- which protocol queries exist;
+- ranking, ordering, grouping, and presentation;
+- product moderation policy and UX;
+- labels, navigation, and account selection; and
+- how typed module results fold into app state.
+
+Protocol-defined moderation schemas, validation, and reconstructed moderation
+state belong to the owning module. How the product applies and presents that
+state belongs to the app.
 
 ## Choosing the owner
 
-Use this decision order:
+1. Universal store/sync/routing/signing machinery belongs in core.
+2. A fact or state machine defined by one protocol belongs in that exact
+   protocol module.
+3. A closed constructor over public values may live in a module, app package,
+   or third-party convenience package.
+4. Behavior products can reasonably disagree about belongs in app code after
+   delivery.
 
-1. **Is it generic store/sync/routing/signing machinery?** It belongs in core.
-2. **Is it a fact or state machine defined by a NIP/protocol?** It belongs in
-   the opt-in protocol module that owns that specification.
-3. **Is it a closed declaration over existing public values?** It may be a
-   reusable helper in that module or in a third-party package.
-4. **Would different products reasonably choose different behavior?** It
-   belongs in the app after delivery.
-
-The primitive path remains public and explainable, but a semantic module
-operation need not pretend to be only a one-line filter recipe. Some protocols
-correctly own multi-event state, validation, and contextual routing.
+The fact that many apps want a convenience is evidence for packaging, not
+permission to make its content model core.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Troubleshooting & FAQ](26-troubleshooting.md) · [Index](README.md) · [Patterns & anti-patterns](28-patterns.md) →</sub>
+<sub>[Index](README.md) · Related: [Protocol module authoring](32-extending.md) · [Source and routing context](17-relays.md) · [Kind-diverse examples](31-gallery.md)</sub>

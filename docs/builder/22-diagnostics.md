@@ -1,122 +1,107 @@
-# Diagnostics: the permanent proof surface
+# Diagnostics is the permanent proof surface
 
-**Status: CURRENT + TARGET.** The engine, FFI, Swift stream, and Falsifier
-screen currently expose exact wire filters, subscription counts, lane and
-author coverage, inbound event counts, and current aggregate relay watermarks.
-Connection, AUTH, retry, limit, and full source-plan evidence are target
-extensions.
-
-After this chapter you will know how to answer "what did NMP actually ask, and
-what happened at each planned source?" without inventing a global health score.
-
-## Diagnostics explains; it never controls
-
-Apps declare demand while the engine expands bindings, plans relays, coalesces
-compatible work, and syncs. Diagnostics is a read-only projection of those same
-compiler, store, transport, and outbox facts. Observing it cannot change
-routing, coverage, delivery, or retry.
-
-The current snapshot exposes, per relay:
-
-- exact wire filter JSON;
-- open wire-subscription count;
-- lane counts and authors served/reverse coverage;
-- events received by kind; and
-- current per-filter watermark state.
-
-Every value comes from engine state. The wire JSON is the actual serialized
-filter, not a reconstruction by the app.
-
-## Swift integration today
-
-`observeDiagnostics()` returns an `AsyncSequence` of full current snapshots:
+NMP owns machinery the app deliberately does not. Diagnostics makes every
+invisible decision inspectable without becoming a control API.
 
 ```swift
-struct DiagnosticsView: View {
-    let engine: NMPEngine
-    @State private var snapshot = DiagnosticsSnapshot()
-
-    var body: some View {
-        List(snapshot.relays) { relay in
-            Section(relay.relay) {
-                LabeledContent("Wire subs", value: "\(relay.wireSubCount)")
-                LabeledContent("Authors served", value: "\(relay.authorsServed)")
-                ForEach(relay.filters, id: \.self) { json in
-                    Text(json).font(.caption2.monospaced())
-                }
-                ForEach(relay.eventsByKind, id: \.kind) { entry in
-                    LabeledContent("kind:\(entry.kind)", value: "\(entry.count)")
-                }
-            }
-        }
-        .task {
-            for await value in engine.observeDiagnostics() {
-                snapshot = value
-            }
-        }
-    }
+for await snapshot in engine.observeDiagnostics() {
+    diagnosticsModel.apply(snapshot)
 }
 ```
 
-The current stream emits an initial snapshot immediately. Rust diagnostics use
-a single-slot latest-wins mailbox; Swift additionally frame-coalesces and uses
-`bufferingNewest(1)`. A slow screen receives the newest complete local
-diagnostic state rather than a growing backlog.
+Observing diagnostics cannot change demand, routes, retry, limits, or store
+state.
 
-## Reading the current facts
+## Demand and source plan
 
-**Was any source planned?** If `relays` is empty, no current wire plan exists.
-`uncoveredAuthorCount` explains demand for which the router could not find a
-source under its current facts and cap.
+For every active descriptor, show:
 
-**What reached the wire?** `relay.filters` is the exact REQ filter JSON. Compare
-it to the declared selection and any printed binding expansion.
+- selection plus expanded binding graph;
+- source authority and access context;
+- descriptor/plan revision;
+- graph nodes and reference counts;
+- compiled atoms and route reasons;
+- authors/protocol objects served by each source; and
+- explicit uncovered/shortfall reasons.
 
-**What arrived?** `eventsByKind` counts verified inbound events by relay and
-kind. A correct filter with zero inbound events is different from a filter that
-was never sent.
+## Exact relay work
 
-**Which planned relay finished its request?** The current relay coverage entry
-records `Unknown` or `CompleteUpTo` for that relay/filter. Read the latter only
-as a source/window fact. It does not mean the query is globally complete or
-that an empty local result is authoritative for all of Nostr.
+For every relay, show:
 
-**How was demand shared?** Wire-subscription count, exact filters, lane counts,
-authors served, and reverse coverage show whether compatible demand coalesced
-and whether the cap left shortfall.
+- connection generation and connecting/open/disconnected state;
+- exact wire filter JSON and subscription id/count;
+- coalescing rule and participating descriptors;
+- AUTH challenge, identity/policy reference, result, and error;
+- EOSE and negentropy session facts;
+- per-filter watermark intervals;
+- events received by kind; and
+- backpressure or forced-disconnect reason.
 
-## Target additions
+The wire filter is the actual serialized request, not a reconstruction in the
+app.
 
-The permanent target surface also retains:
+## Store and query state
 
-- descriptor selection, source authority, access context, and plan revision;
-- connection generation and connecting/disconnected state;
-- AUTH required, selected identity/policy reference, success, rejection, and
-  error facts;
-- EOSE and negentropy session facts per exact request;
-- graph, wire, relay, and result limits plus explicit shortfall reasons;
-- ingress pressure, backpressure, and forced-disconnect reasons;
-- pending signer obligations and per-relay write attempt/retry facts; and
-- dropped intermediate observation-frame counts and history aggregation bounds.
+Show:
 
-Ordinary query snapshots carry only compact evidence useful to app UX. The raw
-relay plan and proof trail remain here.
+- canonical row/revision counts;
+- local versus relay provenance;
+- pending versus signed local rows;
+- replaceable supersession, deletion, expiry, and GC counters;
+- cache/watermark invalidation caused by eviction; and
+- the compact evidence revision emitted to each ordinary query.
 
-## A reliable debugging order
+## Write state
 
-1. Inspect whether the descriptor produced a source plan and whether any demand
-   is explicitly uncovered.
-2. Compare the exact wire filters to the declared selection/binding expansion.
-3. Inspect connection and AUTH facts for each planned source.
-4. Compare request completion/watermarks with inbound event counts.
-5. Inspect local shortfall or limit evidence.
-6. If events arrived and canonical rows exist but the UI is empty, inspect the
-   app's fold, sort, and presentation policy.
+For every retained receipt/open intent, show:
 
-This produces evidence, not a verdict. Diagnostics should never emit
-`syncHealth`, `globallySynced`, or a fabricated success score.
+- stable intent and receipt ids;
+- durability/retention policy;
+- expected and selected signer identity reference;
+- pending/signed state and cancellation/compensation;
+- current route revisions and their typed reasons;
+- per-relay attempt ordinal, eligibility, outcome, and retry deadline;
+- AUTH/offline blocking that does not consume an attempt; and
+- terminal receipt retention/aggregation boundary.
+
+Raw secret keys, bearer tokens, plaintext private messages, and decrypted
+content never appear.
+
+## Limits and scheduler
+
+Show configured/effective limits, current utilization, graph/wire/result
+shortfall, dropped intermediate snapshot counts, ingress queue pressure,
+scheduler backlog, concurrency, and next real deadlines.
+
+Diagnostics reports facts. It does not synthesize `syncHealth`,
+`globallySynced`, `authoritativeEmpty`, or a single success score.
+
+## Debugging order
+
+1. Did the descriptor produce a source plan?
+2. What exact authority and access context produced each lane?
+3. What exact filter reached each relay?
+4. Did the connection or AUTH state prevent the request?
+5. What arrived and what per-source EOSE/watermark evidence exists?
+6. Did a local cap/queue produce explicit shortfall?
+7. If canonical rows exist but the UI is empty, inspect the app's fold,
+   product policy, ordering, and rendering.
+
+This order finds the owning layer instead of guessing from an empty screen.
+
+## Delivery contract
+
+Diagnostics is a bounded latest-state stream. A slow screen may skip
+intermediate frames and must eventually receive the newest complete local
+diagnostic revision. Durable receipt history remains independently
+reattachable; diagnostics is not its only storage.
+
+Every NMP falsifier renders this as a permanent screen; that is the acceptance
+test made visible. A production app may keep the raw surface behind support or
+developer UI, and most product screens will use only the compact evidence in
+their query snapshots. The diagnostic data itself remains available and
+testable even when ordinary users never open it.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Provenance](21-provenance.md) · [Index](README.md) · [Threading & lifecycle](23-threading-lifecycle.md) →</sub>
+<sub>[Index](README.md) · Related: [Evidence without completeness](11-coverage.md) · [Source and routing context](17-relays.md) · [Troubleshooting](26-troubleshooting.md)</sub>

@@ -1,158 +1,131 @@
-# Consuming results: rows, snapshots, and presentation ownership
+# Query snapshots and presentation ownership
 
-**Status: CURRENT + TARGET.** `observe -> AsyncSequence`, `Row`, and the
-latest-snapshot Swift bridge are built. The target snapshot replaces aggregate
-`Coverage` with cache and per-source acquisition evidence.
+Observing a demand yields the newest complete **local** state represented by a
+snapshot. It does not yield raw relay callbacks and it does not claim global
+Nostr completeness.
 
-After this chapter you can take a live query, iterate it, fold each delivery
-into your own view state, and render raw protocol values. You will also know
-which newest-state coalescing is built and which end-to-end bounds remain open.
+## Snapshot shape
 
-## What comes back: raw rows
-
-Every delivered event is a `Row` — verbatim, no formatting, no display concept anywhere on it:
+Illustrative target spelling:
 
 ```swift
-// Packages/NMP/Sources/NMP/Row.swift
-public struct Row: Sendable, Identifiable, Hashable {
-    public let id: String
-    public let pubkey: String        // hex, 64 chars — NOT an npub
-    public let createdAt: UInt64     // Unix seconds — NOT a formatted date
-    public let kind: UInt16
-    public let tags: [[String]]      // each inner array is one raw tag, verbatim
-    public let content: String       // for kind:0, the raw JSON string
-    public let sig: String
+struct NMPQuerySnapshot {
+    let revision: UInt64
+    let rows: [NMPRow]
+    let cache: CacheEvidence
+    let acquisition: [SourceEvidence]
+    let shortfall: [Shortfall]
 }
 ```
 
-This is bug-ledger #12 made structural: the engine emits raw tokens because the vocabulary to express presentation is *absent* from it, not because a lint forbids formatting. There is no `displayName`, no `formattedDate`, no `npub` field to reach for — and the convenience layer never re-adds one. Turning `a1b2…` into `@alice` or `1720…` into "3:14 PM" is your job, every time. That is not an oversight; it is the boundary. (See *What NMP does NOT do*.)
+- `rows` are current canonical store winners matching the selection.
+- `cache` identifies the local revision and retained provenance represented.
+- `acquisition` reports compact facts for currently planned sources and access
+  contexts.
+- `shortfall` reports demand atoms with no covering source and local limits that
+  prevented intended acquisition. A planned source's connection or AUTH state
+  remains a source-status fact instead.
 
-## How it arrives: an AsyncSequence of snapshots
+Exact wire filters, counters, compiler lanes, and history remain in diagnostics.
 
-`observe(_:)` returns an `NMPQuery`, which *is* an `AsyncSequence`. You iterate it directly — no observer object, no provider, no container to register:
+## Rows are store values, including local pending writes
 
 ```swift
-// The whole read loop. FeedView.swift, trimmed.
-let query = try engine.observe(FeedFilters.follows(kinds: [1]))
-for await batch in query {
-    rows = batch.rows.sorted { $0.createdAt > $1.createdAt }   // app owns order
-    evidence = batch.evidence       // TARGET; current SDK exposes batch.coverage
+struct NMPRow {
+    let event: NMPEvent
+    let provenance: Provenance
+    let signatureState: SignatureState
+}
+
+enum SignatureState {
+    case pending(intentId: IntentId)
+    case signed
 }
 ```
 
-Each element is a `RowBatch` — **the full accumulated snapshot**, never a bare delta:
+A durable accepted draft appears here through the same store query as a relay-
+observed event. The app does not merge a second optimistic collection.
+
+When the signature arrives, the row keeps the same event id and becomes signed.
+When a relay echoes it, provenance grows on the same row. A terminal
+pre-signature cancellation removes it through normal invalidation.
+
+## Snapshots are latest-state streams
+
+A slow observer may skip intermediate frames. The next frame must contain every
+local mutation incorporated through its revision and the evidence/shortfall for
+that same revision.
+
+That permits bounded newest-value delivery:
+
+- Swift can frame-coalesce and buffer the newest snapshot;
+- Kotlin can expose a conflated cold `Flow`; and
+- Rust can use a bounded latest-state receiver/stream.
+
+Skipping an intermediate rendered state is safe. Losing a durable receipt fact
+is not; receipts use persistence and reattachment rather than an unbounded
+observer queue.
+
+## Fold into app state
 
 ```swift
-public struct RowBatch: Sendable {  // CURRENT
-    public let rows: [Row]
-    public let coverage: Coverage
+for await snapshot in try engine.observe(demand) {
+    model.rows = snapshot.rows
+    model.sourceFacts = snapshot.acquisition
+    model.shortfall = snapshot.shortfall
 }
 ```
 
-Under the hood the engine speaks `Added`/`Removed` deltas. The Swift bridge
-applies every delta before coalescing delivery, so a slow consumer may skip
-intermediate snapshots and still receive the newest complete local state. It
-does not sort; ordering remains app policy.
-
-Teardown rides ARC. The subscription lives as long as the iterator does; when the query goes out of scope or its consuming `Task` is cancelled, Rust's `Drop` withdraws the demand automatically. You never *have* to call `cancel()` — it exists only for tearing down early, before ARC would.
+The app may sort, group, rank, filter for presentation, or join rows with
+non-Nostr state after delivery:
 
 ```swift
-// Re-observe on input change: build a NEW filter, let .task(id:) swap queries.
-.task(id: model.kinds) { await observe() }   // old query dropped → demand withdrawn
+model.visibleRows = snapshot.rows
+    .filter(productPolicy.admits)
+    .sorted(using: productPolicy.order)
 ```
 
-### The optional `@Observable` sugar
+Those closures see already-delivered rows. They do not parameterize engine
+demand, source selection, or cursor correctness.
 
-An optional future `@Observable` adapter may wrap the same sequence, but it is
-sugar on top of the primary API, not a separate query lifecycle:
+## Raw event meaning versus protocol modules
+
+Core returns canonical Nostr fields and typed storage metadata. It does not pick
+a display name, decode arbitrary content into one universal model, rank posts,
+or turn tags into navigation.
+
+An enabled protocol module may parse and validate the exact schema it owns. For
+example, a NIP-68 module may project a raw event into a typed photo value. The
+app still chooses layout, labels, ordering, and failure presentation.
+
+## Observation lifetime
+
+The native handle owns demand lifetime:
+
+- ending a Swift `for await` loop releases its observation;
+- cancelling a Kotlin collector closes its `Flow` bridge; and
+- dropping a Rust handle decrements demand.
+
+The engine refcounts shared demand and closes only work no remaining descriptor
+requires. The app never mirrors Nostr `REQ` ids or sends `CLOSE` itself.
+
+## Replacing a descriptor
+
+If ordinary app state changes a non-reactive part of the demand, construct a new
+value and observe it using the UI/runtime lifecycle you already have:
 
 ```swift
-// TARGET shape, not currently shipped
-@Observable public final class NMPQuerySnapshot {
-    public private(set) var rows: [Row] = []
-    public private(set) var evidence: QueryEvidence   // TARGET
-    public init(_ query: NMPQuery) { /* consumes the AsyncSequence in a Task */ }
-}
-```
-
-The `AsyncSequence` handle is deliberately primary; the view-binding object is a thin optional layer. (Binding a view-only object as the *primary* API is the SwiftData trap the SDK avoids — see the cross-platform contract in the design guidelines.)
-
-### Rust delivers the same shapes as deltas
-
-On Rust you get the deltas directly — same values, platform-native delivery. There is no accumulation bridge; you fold them yourself over a blocking `recv` (D8 — blocking recv, never a poll loop):
-
-```rust
-// nmp_engine::Handle
-let (_handle, rows_rx) = engine.subscribe(LiveQuery(my_follows_filter()));
-// RowsMsg = (Vec<RowDelta>, QueryCoverage)
-while let Ok((deltas, coverage)) = rows_rx.recv() {
-    for delta in deltas {
-        match delta {
-            RowDelta::Added(event) => { /* insert */ }
-            RowDelta::Removed(id)  => { /* drop by id */ }
-        }
+.task(id: demand) {
+    for await snapshot in try engine.observe(demand) {
+        model.apply(snapshot)
     }
-    // render with `coverage`
 }
 ```
 
-The desktop-JVM Kotlin package now projects the current snapshot through cold
-`Flow`; full Android and the promoted evidence shape remain open. TypeScript is
-uncommitted.
-
-## Presentation is the app's job — worked
-
-Because rows are raw, every screen formats in app code. From the real feed view:
-
-```swift
-private func shortHex(_ hex: String) -> String {
-    guard hex.count > 16 else { return hex }
-    return "\(hex.prefix(8))…\(hex.suffix(8))"
-}
-private func formatted(_ unixSeconds: UInt64) -> String {
-    Date(timeIntervalSince1970: TimeInterval(unixSeconds))
-        .formatted(date: .abbreviated, time: .shortened)
-}
-```
-
-A `kind:0` profile arrives as `row.content` holding raw JSON — *you* decode it and pick which field is the display name. A `p`-tag is `["p", "<hex>", "<relay-hint>"]` — you read index 1. The engine deliberately can't do any of this for you; if it could, it would be encoding one app's display decisions as framework, which is the exact line v1's feed framework died on.
-
-## The result-evidence matrix
-
-There are no exceptions sprinkled through the stream. Problems are typed states, and they arrive on two different surfaces:
-
-| You want to know… | Where it lives | What you see |
-|---|---|---|
-| Did the query *fail to construct*? | `observe(_:)` throws | `NMPError` (e.g. `.invalidTagName`, `.invalidPublicKey`) — a typed, `Equatable` enum, never a crash |
-| Is it *loading* / are there results yet? | the stream + `rows.isEmpty` | zero rows so far — but that is **not** the same as "no results exist" |
-| What does the cache currently contain? | `snapshot.rows` + cache evidence | matching canonical rows and their persisted context |
-| What are current planned sources doing? | acquisition evidence | connecting, requesting, AUTH-blocked, EOSE, unavailable, failed, or limited |
-| What exactly happened per relay? | diagnostics | exact filters, lanes, connections, AUTH/errors, events, watermarks |
-
-An empty row array means the local canonical store currently has no match. It
-does not prove that no match exists globally. Apps interpret the planned-source
-evidence and can say, for example, "nothing found on the sources checked" or
-"one relay still needs AUTH" without NMP inventing a global health verdict.
-
-## The performance note you must not skip
-
-The local snapshot still costs O(rows) to materialize. Public delivery is
-latest-state: intermediate snapshots may be coalesced after every underlying
-delta has been applied. The engine must bound observer queues and surface local
-limits instead of pushing backlog management onto each app.
-
-Two consequences for how you build:
-
-1. **Diff, don't re-render wholesale.** Give SwiftUI a stable identity to diff against — `Row` is `Identifiable` by `id`, so a `List(rows)` / `ForEach(rows)` already reconciles rather than rebuilding. Do not map the whole array through an expensive formatter on every batch; format lazily per visible cell, or memoize by `row.id`.
-2. **Virtualize large results and request a bound when that matches the
-   product.** SwiftUI's `List` and lazy stacks instantiate only visible rows.
-   A caller-requested `limit` is product selection; it is not a workaround that
-   permits the engine to hide its own queue/graph shortfall. Collection-mode
-   windows remain planned.
-
-With rows in hand and formatting owned, the one remaining question a correct reader must answer is whether "nothing here" means "nothing exists" or "we can't know yet." That is the trust chapter, next.
+Bindings are for dependencies NMP must own and maintain from Nostr/current-
+pubkey state. They are not a requirement to route every app input through an
+NMP registry.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Live queries & the binding grammar](09-binding-grammar.md) · [Index](README.md) · [Coverage: empty vs unknown](11-coverage.md) →</sub>
+<sub>[Index](README.md) · Related: [Binding grammar](09-binding-grammar.md) · [Evidence without completeness](11-coverage.md)</sub>
