@@ -10,13 +10,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nmp_engine::core::{Effect, EngineCore, EngineMsg, QueryCoverage, RowDelta, RowSink};
+use nmp_engine::core::{
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, RowDelta, RowSink, SourceEvidence,
+    SourceStatus,
+};
 use nmp_engine::outbox::{
     Durability, NarrowOnly, PrivateRoute, ReceiptSink, WriteIntent, WritePayload, WriteRouting,
     WriteStatus,
 };
 use nmp_grammar::{Binding, ConcreteFilter, Filter};
-use nmp_resolver::LiveQuery;
+use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};
@@ -477,10 +480,31 @@ fn limited_fetch_never_records_coverage() {
     );
 }
 
-// ---- per-query CompleteUpTo aggregation (ruling §6, unanimity) ---------
+// ---- per-source acquisition evidence (docs/design/
+// scoped-evidence-49-12-plan.md §2/§3, folding #12 into #49) -------------
 
+/// Find `relay`'s [`SourceEvidence`] entry, if any, inside `evidence`.
+fn source_for<'a>(
+    evidence: &'a AcquisitionEvidence,
+    relay: &RelayUrl,
+) -> Option<&'a SourceEvidence> {
+    evidence.sources.iter().find(|s| &s.relay == relay)
+}
+
+fn evidence_from(effects: &[Effect], id: HandleId) -> Option<&AcquisitionEvidence> {
+    effects.iter().find_map(|e| match e {
+        Effect::EmitRows(hid, _, ev) if *hid == id => Some(ev),
+        _ => None,
+    })
+}
+
+/// The direct #12 fix falsifier: two independently-covering relays for the
+/// SAME query never collapse into one verdict -- each relay's own proof (or
+/// lack of it) is visible on its own `SourceEvidence` entry. Replaces the
+/// deleted `QueryCoverage::CompleteUpTo`/`Unknown` unanimity test: there is
+/// no aggregate here for either relay to jointly satisfy or fail.
 #[test]
-fn query_reads_complete_up_to_only_when_every_covering_relay_is_proven() {
+fn per_source_evidence_reflects_each_relays_own_proof_independently() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
@@ -495,16 +519,20 @@ fn query_reads_complete_up_to_only_when_every_covering_relay_is_proven() {
         literal_query(&[1], &a.public_key().to_hex()),
         Box::new(sink.clone()),
     ));
+    let id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(hid, ..) => Some(*hid),
+            _ => None,
+        })
+        .expect("subscribe must emit an initial EmitRows for its own handle");
     let (sub0, _) = req_for(&effects, &relay0);
     let (sub1, _) = req_for(&effects, &relay1);
     let wire0 = wire_sub_string(sub0);
     let wire1 = wire_sub_string(sub1);
 
-    // Only relay0 finishes: the query must stay Unknown (relay1 -- possibly
-    // the sole holder of some event -- hasn't proven anything yet). Nothing
-    // OBSERVABLE changed for the handle (rows: still none; coverage: still
-    // Unknown), so `EmitRows` correctly does not re-fire at all -- the
-    // falsifiable claim is simply that it never reports `CompleteUpTo` here.
+    // Only relay0 finishes: its OWN source flips to a proven watermark;
+    // relay1's source stays unproven -- independently, no joint verdict.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(10u64)));
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -513,14 +541,16 @@ fn query_reads_complete_up_to_only_when_every_covering_relay_is_proven() {
         },
         eose_frame(&wire0),
     ));
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::EmitRows(_, _, QueryCoverage::CompleteUpTo(_)))),
-        "one-of-two covering relays proven must NOT read as complete"
+    let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
+    let r0 = source_for(evidence, &relay0).expect("relay0 must be a source");
+    assert_eq!(r0.reconciled_through, Some(Timestamp::from(10u64)));
+    let r1 = source_for(evidence, &relay1).expect("relay1 must be a source");
+    assert_eq!(
+        r1.reconciled_through, None,
+        "relay1 has proven nothing yet -- its OWN entry must say so independently of relay0"
     );
 
-    // relay1 also finishes: NOW the query is CompleteUpTo the min watermark.
+    // relay1 also finishes: NOW its own entry advances too, still separate.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(20u64)));
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -529,13 +559,176 @@ fn query_reads_complete_up_to_only_when_every_covering_relay_is_proven() {
         },
         eose_frame(&wire1),
     ));
-    let coverage_after_both = effects.iter().find_map(|e| match e {
-        Effect::EmitRows(_, _, cov) => Some(*cov),
-        _ => None,
+    let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
+    let r1 = source_for(evidence, &relay1).expect("relay1 must be a source");
+    assert_eq!(r1.reconciled_through, Some(Timestamp::from(20u64)));
+}
+
+/// #12's own falsifier, reshaped for the deleted-collapse model: a
+/// `Derived` query ($myFollows shape) whose OUTER atom (kind:1 by the
+/// followed author) has a proven coverage row, while the INNER atom (kind:3
+/// -- the follow list itself, by the active identity) has none. The old
+/// `query_coverage` consulted `root_atoms` ONLY, so the inner atom was
+/// invisible to it and the query could report itself `CompleteUpTo` while
+/// the follow-list expansion was entirely unproven. Under
+/// `AcquisitionEvidence` (built over `subtree_atoms`, #12), the inner atom's
+/// covering relay is its OWN source entry, unproven independently of the
+/// outer relay's proof -- no field anywhere implies the feed is settled.
+#[test]
+fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_outer() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    // relay0 hosts `a`'s own kind:3 (the inner/follow-list atom); relay1
+    // hosts `b`'s kind:1 posts (the outer/root atom, once `a` follows `b`).
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay0.clone()])
+        .with_write(b.public_key().to_hex(), [relay1.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+    connect(&mut core, 1, &relay1);
+
+    let my_follows = LiveQuery(Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+            inner: Filter {
+                kinds: Some(BTreeSet::from([3u16])),
+                authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                ..Filter::default()
+            },
+            project: nmp_grammar::Selector::Tag("p".to_string()),
+        }))),
+        ..Filter::default()
     });
+
+    let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
+    let effects = core.handle(EngineMsg::Subscribe(
+        my_follows,
+        Box::new(CapturingSink::default()),
+    ));
+    let id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(hid, ..) => Some(*hid),
+            _ => None,
+        })
+        .expect("subscribe must emit an initial EmitRows for its own handle");
+    // Only the inner atom (kind:3 by `a`) is resolvable at subscribe time --
+    // the outer author set is still empty (no wildcard), so relay0 is the
+    // only wire sub open right now.
+    let (sub0, _) = req_for(&effects, &relay0);
+    let wire0 = wire_sub_string(sub0);
+
+    // `a` follows `b`: the outer atom {kind:1, authors:{b}} now resolves and
+    // opens relay1.
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(10u64)));
+    let contact_list = nmp_resolver::testkit::kind3(&a, &[b.public_key()], 10);
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame(&wire0, contact_list),
+    ));
+    let (sub1, _) = req_for(&effects, &relay1);
+    let wire1 = wire_sub_string(sub1);
+
+    // The OUTER atom's relay (relay1) proves its window; the INNER atom's
+    // relay (relay0, the follow-list itself) never gets an EOSE.
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(20u64)));
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        eose_frame(&wire1),
+    ));
+    let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
+    let outer = source_for(evidence, &relay1).expect("relay1 (outer) must be a source");
     assert_eq!(
-        coverage_after_both,
-        Some(QueryCoverage::CompleteUpTo(Timestamp::from(10u64)))
+        outer.reconciled_through,
+        Some(Timestamp::from(20u64)),
+        "the outer atom's own relay proved its own window"
+    );
+    let inner = source_for(evidence, &relay0).expect(
+        "relay0 (the INNER kind:3 atom's covering relay) must be PRESENT in evidence.sources -- \
+         the whole point of #12 is that interior atoms are consulted, never invisible",
+    );
+    assert_eq!(
+        inner.reconciled_through, None,
+        "the inner atom (the follow-list itself) has proven nothing -- no source anywhere may \
+         imply this feed is settled while the follow-list expansion is unproven"
+    );
+
+    // Now the inner atom's own EOSE arrives: ONLY relay0's entry flips.
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire0),
+    ));
+    let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
+    let inner = source_for(evidence, &relay0).expect("relay0 must still be a source");
+    assert_eq!(inner.reconciled_through, Some(Timestamp::from(30u64)));
+}
+
+/// The orthogonality proof (docs/design/scoped-evidence-49-12-plan.md Q3):
+/// a relay's durable watermark and its current link status are
+/// INDEPENDENT fields, never one enum. A source that proved its window and
+/// then dropped must keep reporting BOTH facts in the SAME snapshot --
+/// `reconciled_through: Some(_)` (the #49 "offline cached rows remain
+/// usable" acceptance criterion) AND `status: Disconnected`, simultaneously.
+#[test]
+fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(hid, ..) => Some(*hid),
+            _ => None,
+        })
+        .expect("subscribe must emit an initial EmitRows for its own handle");
+    let (sub0, _) = req_for(&effects, &relay0);
+    let wire0 = wire_sub_string(sub0);
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(10u64)));
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire0),
+    ));
+    let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
+    let r0 = source_for(evidence, &relay0).expect("relay0 must be a source");
+    assert_eq!(r0.reconciled_through, Some(Timestamp::from(10u64)));
+    assert_eq!(r0.status, SourceStatus::Requesting);
+
+    // relay0 drops. Its watermark must survive; its status must flip.
+    let effects = core.handle(EngineMsg::RelayDisconnected(0));
+    let evidence = evidence_from(&effects, id).expect("a link-status flip must emit EmitRows");
+    let r0 = source_for(evidence, &relay0).expect("relay0 must still be a source");
+    assert_eq!(
+        r0.reconciled_through,
+        Some(Timestamp::from(10u64)),
+        "the prior watermark must survive a disconnect -- offline cached rows remain usable"
+    );
+    assert_eq!(
+        r0.status,
+        SourceStatus::Disconnected,
+        "the link status must independently reflect the drop"
     );
 }
 
