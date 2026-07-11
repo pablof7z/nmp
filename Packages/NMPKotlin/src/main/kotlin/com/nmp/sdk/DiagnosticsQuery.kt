@@ -35,7 +35,7 @@ fun observeDiagnostics(engine: NmpEngineInterface): Flow<DiagnosticsSnapshot> =
                 }
             }
 
-        val handle = engine.observeDiagnostics(observer)
+        val handle = nmpRethrowing { engine.observeDiagnostics(observer) }
 
         awaitClose { handle.cancel() }
     }.conflate()

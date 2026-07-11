@@ -1406,13 +1406,8 @@ dependencies = [
 name = "nmp-ffi"
 version = "0.1.0"
 dependencies = [
- "nmp-engine",
+ "nmp",
  "nmp-grammar",
- "nmp-resolver",
- "nmp-router",
- "nmp-signer",
- "nmp-store",
- "nmp-transport",
  "nostr 0.44.4",
  "uniffi",
 ]

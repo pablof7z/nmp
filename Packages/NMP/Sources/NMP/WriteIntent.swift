@@ -17,19 +17,20 @@ public enum Durability: Sendable, Hashable {
     }
 }
 
-/// Where a write is routed. `.privateNarrow`'s `relays` is the fixed,
-/// fail-closed set itself -- an empty array is exactly how "unroutable" is
-/// expressed; there is no widen operation on this wire.
+/// Where a write is routed. There is deliberately no `.privateNarrow` case
+/// (#22/#52): a private/narrow route must come from a trusted protocol
+/// module's own resolved logic, never a raw relay-URL string an app hands
+/// across this boundary with no way to prove it is actually private --
+/// exactly the "route escape hatch" #22's canonical design rules out. See
+/// `FfiWriteRouting`'s doc.
 public enum WriteRouting: Sendable, Hashable {
     case authorOutbox
     case toInboxes([String])
-    case privateNarrow([String])
 
     func toFfi() -> FfiWriteRouting {
         switch self {
         case .authorOutbox: return .authorOutbox
         case .toInboxes(let recipients): return .toInboxes(recipients: recipients)
-        case .privateNarrow(let relays): return .privateNarrow(relays: relays)
         }
     }
 }
