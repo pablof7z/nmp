@@ -62,6 +62,20 @@ fn kind10002(author: &Keys, write: &RelayUrl, created_at: u64) -> nostr::Event {
         .expect("test fixture event must sign cleanly")
 }
 
+/// A kind:10002 declaring ZERO write relays (no `r` tags at all) -- a
+/// legitimate NIP-65 shape (an author who only reads, or hasn't configured
+/// write relays), NOT the same as "this author's relay list hasn't arrived
+/// yet". `parse_nip65_write_relays` (nmp-engine's own helper) returns an
+/// empty `Vec` for this, which `ingest_relay_list_winner` still feeds
+/// through `RelayDirectory::ingest_write_relays` unconditionally -- the
+/// directory records "known, zero relays" for this author.
+fn kind10002_declaring_no_write_relays(author: &Keys, created_at: u64) -> nostr::Event {
+    EventBuilder::new(Kind::RelayList, "")
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(author)
+        .expect("test fixture event must sign cleanly")
+}
+
 fn follow_feed_query() -> LiveQuery {
     LiveQuery(Filter {
         kinds: Some(BTreeSet::from([1u16])),
@@ -238,5 +252,107 @@ fn resolving_39_authors_one_at_a_time_does_not_churn_the_discovery_sub() {
         log.total_author_resends(),
         log.total_req_count(),
         N * 3,
+    );
+}
+
+/// The load-bearing regression test for ledger #20 (known-empty vs
+/// never-resolved): an author whose kind:10002 explicitly declares ZERO
+/// write relays must eventually let the discovery subscription CLOSE, not
+/// keep it open for the rest of the session. Before this fix,
+/// `sync_discovery` treated `write_relays(author).is_empty()` as "still
+/// needs discovering" -- which is ALSO true forever for a known-empty
+/// author, since their `write_relays` answer never changes. Two authors:
+/// `a` (declares zero write relays) and `b` (declares a real one). Once
+/// BOTH kind:10002 events have arrived, the internal discovery atom must
+/// be fully withdrawn -- `active_demand()` must no longer contain a
+/// kind:10002 atom at all.
+#[test]
+fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
+    let me = Keys::generate();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let indexer = RelayUrl::parse("wss://indexer.example.com").unwrap();
+
+    let dir = LiveDirectory::new([indexer.clone()]);
+    let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
+
+    let _ = connect(&mut core, 0, &indexer);
+    let _ = core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
+    let _ = core.handle(EngineMsg::Subscribe(
+        follow_feed_query(),
+        Box::new(NullSink),
+    ));
+
+    let follows = vec![a.public_key(), b.public_key()];
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame("s", kind3(&me, &follows, 100)),
+    ));
+
+    // Before either kind:10002 arrives, the internal discovery atom must be
+    // open and covering both `a` and `b` -- both are genuinely unresolved.
+    let has_discovery_atom = |core: &EngineCore<MemoryStore>| {
+        core.active_demand()
+            .iter()
+            .any(|atom| atom.kinds == Some(BTreeSet::from([10_002u16])))
+    };
+    assert!(
+        has_discovery_atom(&core),
+        "discovery must be open while both authors are unresolved"
+    );
+
+    // `a` declares ZERO write relays (a legitimate, permanent fact) --
+    // `b` remains unresolved.
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame("s", kind10002_declaring_no_write_relays(&a, 200)),
+    ));
+    assert!(
+        has_discovery_atom(&core),
+        "discovery must stay open while `b` is still genuinely unresolved"
+    );
+
+    // Now `b` resolves too, with a real write relay.
+    let write_relay = RelayUrl::parse("wss://writes.example.com").unwrap();
+    let _ = connect(&mut core, 1, &write_relay);
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame("s", kind10002(&b, &write_relay, 201)),
+    ));
+
+    // `sync_discovery`'s `needed` set is computed over every author any
+    // CURRENT demand atom references -- which includes `me` themself (the
+    // `$myFollows` root atom's own `{kinds:3, authors:{me}}` shape). `me`'s
+    // write-relay set must also resolve (here: zero, same shape as `a`'s)
+    // before discovery can close purely from `a`/`b` resolving -- otherwise
+    // this test would be asserting a fact about `me` staying unresolved
+    // forever, not about the known-empty fix for `a`/`b`.
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame("s", kind10002_declaring_no_write_relays(&me, 202)),
+    ));
+
+    // Both `a` and `b` are now KNOWN (one with zero relays, one with a real
+    // relay), and so is `me` -- the discovery atom must be fully withdrawn.
+    // Before the fix, `a`'s (and `me`'s) permanently-empty `write_relays()`
+    // answer kept `needed` non-empty forever, so this atom would never
+    // close.
+    assert!(
+        !has_discovery_atom(&core),
+        "discovery must close once every followed author is KNOWN (even if \
+         one of them is known to have zero write relays) -- it must not run \
+         forever just because one author's write-relay set is empty"
     );
 }

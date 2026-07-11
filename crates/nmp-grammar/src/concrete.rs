@@ -3,7 +3,6 @@
 //! canonical hash.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{Hash, Hasher};
 
 use crate::tag_name::TagName;
 
@@ -31,55 +30,69 @@ pub struct ConcreteFilter {
     pub limit: Option<usize>,
 }
 
-/// A canonical, stable hash of a [`ConcreteFilter`] — the demand/refcount
-/// key. Deterministic across process runs (unlike `std::collections::HashMap`'s
-/// default `RandomState`, which reseeds per-process): `ConcreteFilter`'s
-/// fields are already canonical (`BTreeSet`/`BTreeMap` normalize member
-/// order regardless of insertion order), and hashing runs through a
-/// fixed-seed FNV-1a [`std::hash::Hasher`] rather than a randomized one.
+/// A canonical, stable, COLLISION-RESISTANT hash of a [`ConcreteFilter`] —
+/// the demand/refcount key, and (via `nmp-store::CoverageKey`) the durable
+/// redb coverage-watermark key. Deterministic across process runs (unlike
+/// `std::collections::HashMap`'s default `RandomState`, which reseeds
+/// per-process).
+///
+/// A 256-bit BLAKE3 digest, NOT a 64-bit hash: `ConcreteFilter`'s contents
+/// are network-controlled (a hostile `kind:3`/`kind:10002` steers a
+/// `Binding::Derived` author set), so this value must resist DELIBERATE
+/// collision construction, not just accidental clashes. A 64-bit hash
+/// (the previous implementation used FNV-1a) is offline-constructible by a
+/// determined attacker; the consequence for `CoverageKey` specifically is a
+/// forged `CompleteUpTo` watermark — a false authoritative-empty — which
+/// erodes the crown-jewel coverage guarantee. BLAKE3 was chosen over
+/// SHA-256 for its performance (this hash is computed on every atom
+/// resolve, not just at rest) with no less cryptographic assurance for this
+/// use case (content-addressing, not password hashing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DescriptorHash(u64);
+pub struct DescriptorHash([u8; 32]);
 
 impl DescriptorHash {
-    /// The raw `u64` hash value.
-    pub fn as_u64(&self) -> u64 {
-        self.0
+    /// The raw 32-byte digest, for use as (part of) a durable storage key.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
 impl std::fmt::Display for DescriptorHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:016x}", self.0)
-    }
-}
-
-/// A fixed-seed FNV-1a hasher. Chosen over `std`'s default `SipHasher`
-/// (reachable only via the randomized `RandomState`) specifically because
-/// its seed is a constant, not a per-process random value — required for
-/// `DescriptorHash` to be stable across runs and processes, which is the
-/// whole point of using it as a durable demand/refcount key.
-struct StableHasher(u64);
-
-const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
-
-impl StableHasher {
-    fn new() -> Self {
-        Self(FNV_OFFSET_BASIS)
-    }
-}
-
-impl Hasher for StableHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= b as u64;
-            self.0 = self.0.wrapping_mul(FNV_PRIME);
+        for byte in &self.0 {
+            write!(f, "{byte:02x}")?;
         }
+        Ok(())
     }
+}
+
+/// Canonical byte encoding of the fields that define a [`ConcreteFilter`]'s
+/// identity, fed into [`blake3::hash`]. `BTreeSet`/`BTreeMap` already
+/// normalize member/key order regardless of insertion order; JSON's own
+/// string quoting/escaping makes the boundary between fields unambiguous
+/// (unlike naive byte concatenation without length-prefixing, which an
+/// attacker could exploit to construct a collision at the FRAMING level
+/// even with a strong underlying hash — e.g. `authors:["ab"], ids:["c"]`
+/// colliding with `authors:["a"], ids:["bc"]`). Tag keys are rendered as
+/// single-character strings rather than via `TagName`'s own (non-`Serialize`)
+/// type -- no derive needed on `ConcreteFilter` itself.
+fn canonical_encoding(f: &ConcreteFilter) -> Vec<u8> {
+    let tags: BTreeMap<String, &BTreeSet<String>> = f
+        .tags
+        .iter()
+        .map(|(k, v)| (k.as_char().to_string(), v))
+        .collect();
+    let encoded = serde_json::json!({
+        "kinds": f.kinds,
+        "authors": f.authors,
+        "ids": f.ids,
+        "tags": tags,
+        "since": f.since,
+        "until": f.until,
+        "limit": f.limit,
+    });
+    serde_json::to_vec(&encoded)
+        .expect("ConcreteFilter's own plain fields always serialize to JSON")
 }
 
 impl ConcreteFilter {
@@ -142,15 +155,16 @@ impl ConcreteFilter {
         f
     }
 
-    /// Canonical, stable hash — the demand/refcount key. Two `ConcreteFilter`
-    /// values built from the same logical set of fields but assembled by
-    /// inserting elements into their `BTreeSet`/`BTreeMap` fields in a
-    /// different order hash identically (`BTreeSet`/`BTreeMap` are already
-    /// order-normalizing; this hash adds run-to-run stability on top).
+    /// Canonical, stable, collision-resistant hash — the demand/refcount
+    /// key (see [`DescriptorHash`]'s doc for why this is BLAKE3, not a
+    /// 64-bit hash). Two `ConcreteFilter` values built from the same
+    /// logical set of fields but assembled by inserting elements into their
+    /// `BTreeSet`/`BTreeMap` fields in a different order hash identically
+    /// (`BTreeSet`/`BTreeMap` are already order-normalizing; `blake3::hash`
+    /// adds run-to-run/process-to-process stability on top, same as the
+    /// FNV implementation this replaced).
     pub fn hash(&self) -> DescriptorHash {
-        let mut hasher = StableHasher::new();
-        Hash::hash(self, &mut hasher);
-        DescriptorHash(hasher.finish())
+        DescriptorHash(*blake3::hash(&canonical_encoding(self)).as_bytes())
     }
 }
 
@@ -196,6 +210,45 @@ mod tests {
         let a = cf(vec!["aa", "bb", "cc"], vec![]);
         let b = cf(vec!["aa", "bb", "dd"], vec![]);
         assert_ne!(a.hash(), b.hash());
+    }
+
+    /// The load-bearing falsifier for this fix: `DescriptorHash` must be a
+    /// 256-bit (32-byte) digest, not the 64-bit FNV-1a value it replaced.
+    /// Width is what makes offline collision construction infeasible again
+    /// (a 64-bit space is small enough to brute-force/meet-in-the-middle
+    /// against an FNV-family hash; 256-bit BLAKE3 is not) -- this pins the
+    /// width so a future change can't silently narrow it back down.
+    #[test]
+    fn descriptor_hash_is_256_bits_wide_not_64() {
+        let a = cf(vec!["aa"], vec![]);
+        assert_eq!(
+            a.hash().as_bytes().len(),
+            32,
+            "DescriptorHash must be a 32-byte (256-bit) digest"
+        );
+    }
+
+    /// Two filters that differ in only ONE byte's worth of author-set
+    /// content (a single trailing character) must still land in
+    /// completely different regions of the digest space -- the avalanche
+    /// property a linear hash like FNV-1a does not reliably give (FNV's
+    /// output bits are cheap, deterministic functions of the input; small
+    /// input deltas can produce small/structured output deltas). This is a
+    /// coarse but real regression guard: assert the two digests disagree in
+    /// a large majority of their bytes, not just "somewhere".
+    #[test]
+    fn hash_avalanches_on_a_single_character_change() {
+        let a = cf(vec!["aa"], vec![]);
+        let b = cf(vec!["ab"], vec![]);
+        let da = *a.hash().as_bytes();
+        let db = *b.hash().as_bytes();
+        let differing_bytes = da.iter().zip(db.iter()).filter(|(x, y)| x != y).count();
+        assert!(
+            differing_bytes > 20,
+            "expected an avalanche (>20/32 bytes differing) for a one-character \
+             change, got only {differing_bytes}/32 -- weak diffusion is exactly \
+             the property that makes a hash offline-collidable"
+        );
     }
 
     #[test]

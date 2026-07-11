@@ -1088,7 +1088,13 @@ impl<S: EventStore> EngineCore<S> {
             .into_iter()
             .filter_map(|atom| atom.authors)
             .flatten()
-            .filter(|author| self.directory.write_relays(author).is_empty())
+            // NOT `write_relays(..).is_empty()`: that collapses "known,
+            // declares zero write relays" into the same signal as "never
+            // resolved", which kept a discovery subscription open FOREVER
+            // for an author who genuinely has no write relays (ledger #20).
+            // `knows_write_relays` distinguishes the two; only a genuinely
+            // unresolved author still needs discovery.
+            .filter(|author| !self.directory.knows_write_relays(author))
             .collect();
 
         if needed.is_empty() {

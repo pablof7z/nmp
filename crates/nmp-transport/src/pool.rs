@@ -24,6 +24,7 @@ use crate::health::RelayHealth;
 mod connect;
 mod frame;
 mod inner;
+mod verify;
 mod worker;
 
 use inner::PoolInner;
