@@ -170,3 +170,36 @@ pub fn kind10003_bookmarks(
         .sign_with_keys(author)
         .expect("test fixture event must sign cleanly")
 }
+
+/// A kind:5 (NIP-09 deletion) event `e`-tagging every id in `targets`.
+/// Mirrors `nmp-store/tests/store_contract.rs`'s own `deletion_event`
+/// fixture — needed here for #34's retraction-seam contract tests
+/// (`docs/design/retraction-and-negative-deltas.md` §1.2/§2), which drive
+/// `MemoryStore`'s real kind:5 processing through `Harness::deliver` rather
+/// than mocking `InsertOutcome::Kind5Processed` directly.
+pub fn deletion(author: &nostr::Keys, targets: &[nostr::EventId], created_at: u64) -> nostr::Event {
+    EventBuilder::new(Kind::EventDeletion, "")
+        .tags(targets.iter().map(|id| Tag::event(*id)))
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(author)
+        .expect("test fixture event must sign cleanly")
+}
+
+/// A kind:1 (text note) carrying a NIP-40 `expiration` tag. Mirrors
+/// `nmp-store/tests/store_contract.rs`'s own `expiring_event` fixture —
+/// needed here for #34's expiry-retraction contract tests
+/// (`docs/design/retraction-and-negative-deltas.md` §3), which drive the
+/// engine's real `store.expire_due`/`resolver.retract` path through a
+/// synthetic-clock `tick` rather than mocking the removed row directly.
+pub fn expiring_kind1(
+    author: &nostr::Keys,
+    content: &str,
+    created_at: u64,
+    expiration: u64,
+) -> nostr::Event {
+    EventBuilder::new(Kind::TextNote, content)
+        .custom_created_at(Timestamp::from(created_at))
+        .tag(Tag::expiration(Timestamp::from(expiration)))
+        .sign_with_keys(author)
+        .expect("test fixture event must sign cleanly")
+}

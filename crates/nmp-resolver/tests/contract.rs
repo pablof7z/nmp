@@ -12,7 +12,7 @@ use nmp_grammar::{
     TagName,
 };
 use nmp_resolver::testkit::{
-    addressable, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
+    addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
 };
 use nmp_resolver::LiveQuery;
 use nostr::{EventBuilder, Keys, Kind};
@@ -620,4 +620,96 @@ fn arbitrary_depth1_shape_needs_no_engine_change() {
     assert_eq!(opened, BTreeSet::from([atom_e1.clone(), atom_e2.clone()]));
     assert!(h.demand().contains(&atom_e1));
     assert!(h.demand().contains(&atom_e2));
+}
+
+// ---- 13/14. Retraction seam (#34,
+// retraction-and-negative-deltas.md §1.2/§1.4) ---------------------------
+
+/// The smoking-gun case (issue #34 / design §0 finding 1): a kind:5
+/// deletion's OWN kind (5) matches no inner filter at all -- the removed
+/// member (a kind:39002 group-membership event) does, but under the OLD
+/// add-only dirty-seed loop nothing about the ARRIVING deletion event would
+/// ever have planted a seed for it. Before #34 this ghosted `g1` in the
+/// outer derived set forever (`recompute_node` re-queries the store, which
+/// no longer holds g1, but the seed to trigger that recompute never fired);
+/// after #34, `removed` feeds the SAME `match_event` test `inserted`
+/// always got, so the retraction is caught with zero shape-luck involved.
+#[test]
+fn derived_set_retracts_deleted_member_that_new_winner_does_not_match() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    let g1_event = kind39002(&a, "g1", &[a.public_key()], 100);
+    let g1_id = g1_event.id;
+    h.deliver(vec![g1_event, kind39002(&a, "g2", &[a.public_key()], 100)]);
+
+    let outer_kinds = [39_000u16, 39_001, 39_002];
+    let outer_g1 = cf_kinds_tag(&outer_kinds, 'd', &["g1"]);
+    let outer_g2 = cf_kinds_tag(&outer_kinds, 'd', &["g2"]);
+    assert!(h.demand().contains(&outer_g1), "g1 open before delete");
+    assert!(h.demand().contains(&outer_g2), "g2 unaffected, sanity");
+
+    let delta = h.deliver(vec![deletion(&a, &[g1_id], 200)]);
+
+    assert!(
+        delta.ops.contains(&DemandOp::Close(outer_g1.clone())),
+        "deleting g1's membership event must close its derived atom even \
+         though the deleting kind:5 event itself matches no inner filter: \
+         {:?}",
+        delta.ops
+    );
+    assert!(
+        !h.demand().contains(&outer_g1),
+        "g1 must be gone from active demand after the delete"
+    );
+    assert!(h.demand().contains(&outer_g2), "g2 must survive untouched");
+}
+
+/// Replace-not-rebuild extends to retraction (design §1.2's witness): only
+/// the retracted member's own atom churns -- the inner (kind:39002, #p)
+/// atom's SHAPE never changes (g2/g3 still match it), so it must show zero
+/// open/close activity, and exactly one atom closes for the one deleted
+/// member.
+#[test]
+fn metrics_witness_only_retracted_member_atoms_churn() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    let g1_event = kind39002(&a, "g1", &[a.public_key()], 100);
+    let g1_id = g1_event.id;
+    h.deliver(vec![
+        g1_event,
+        kind39002(&a, "g2", &[a.public_key()], 100),
+        kind39002(&a, "g3", &[a.public_key()], 100),
+    ]);
+
+    let inner = cf_kinds_tag(&[39_002], 'p', &[&a.public_key().to_hex()]);
+    assert!(h.demand().contains(&inner));
+
+    let before = h.metrics();
+    let delta = h.deliver(vec![deletion(&a, &[g1_id], 200)]);
+    let outer_kinds = [39_000u16, 39_001, 39_002];
+    let outer_g1 = cf_kinds_tag(&outer_kinds, 'd', &["g1"]);
+
+    assert_eq!(delta.ops, vec![DemandOp::Close(outer_g1)]);
+    let after = h.metrics();
+    assert_eq!(
+        after.atoms_closed - before.atoms_closed,
+        1,
+        "replace-not-rebuild: only g1's own atom closes"
+    );
+    assert_eq!(
+        after.atoms_opened - before.atoms_opened,
+        0,
+        "no atom opens on a pure retraction"
+    );
+    assert!(
+        h.demand().contains(&inner),
+        "the inner (kind:39002, #p) atom is untouched -- same shape, still \
+         matched by g2/g3"
+    );
 }
