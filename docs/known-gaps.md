@@ -12,6 +12,10 @@ Honest running list of things built-but-incomplete or deliberately deferred, so 
 
 - **Decrypt-result feedback path missing (M3-C, plan §8 item 2).** `Effect::RequestDecrypt` is an explicit no-op; there is no `EngineMsg` to feed a decrypt result back into ingest. Needed for reading NIP-17 DMs / private NIP-51 items (ledger #12 encrypted-content path). Deferred with E/negentropy still open; not on the falsifier's feed path.
 
+- **Reconnect loses negentropy-first temporarily (M3-E).** On reconnect, subs previously routed negentropy-first are replayed as plain REQ (safe, correct — just less efficient) until the next real demand change re-routes them. A "reroute negentropy-first on reconnect" refinement was deferred. Perf, not correctness.
+
+- **No time driver for liveness/timeout sweeps (M3-E).** The 30s liveness-deadline sweep (`tick()`) is real and unit-tested against a synthetic clock, but nothing drives it periodically in the live runtime — D8 forbids a fixed-rate poll-loop timer thread, and `Handle` has no `tick` verb. A **D8-compliant** driver is needed (event-driven: a sleep-until-next-deadline that wakes on the real deadline, or a mio timeout on the engine loop — NOT fixed-rate polling). The falsifier's feed path works without it; needs a design decision at M4.
+
 ## Security hardening deferred
 
 - **Secret zeroization not harvested (M3-A3, old-repo V-55).** `nmp-signer` holds `nostr::Keys` without the old repo's zeroize/raw-bytes secret-residency hardening. Reasonable to defer, but a real security property to restore before any v2 ship. Owner: post-M3 security pass.
