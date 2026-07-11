@@ -112,7 +112,10 @@ fn accept_local_seeds_the_derived_add_path() {
         BTreeSet::from([atom_a.clone(), atom_b.clone(), atom_c.clone()]),
         "the three followed authors' outer atoms open off the LOCAL edit"
     );
-    assert!(closed(&delta).is_empty(), "nothing closes on a first insert");
+    assert!(
+        closed(&delta).is_empty(),
+        "nothing closes on a first insert"
+    );
 
     let after = h.metrics();
     assert_eq!(after.atoms_opened - before.atoms_opened, 3);
@@ -212,7 +215,10 @@ fn superseding_local_edit_adds_and_removes_through_one_react() {
     );
 
     let demand = h.demand();
-    assert!(demand.contains(&atom_a) && demand.contains(&atom_b), "a,b untouched");
+    assert!(
+        demand.contains(&atom_a) && demand.contains(&atom_b),
+        "a,b untouched"
+    );
     assert!(demand.contains(&atom_d), "d present");
     assert!(!demand.contains(&atom_c), "c gone");
 }
