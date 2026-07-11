@@ -12,7 +12,9 @@ import NMPFFI
 public enum NMPError: Error, Sendable, Equatable {
     case invalidTagName(String)
     case invalidPublicKey(String)
+    case invalidEventId(String)
     case invalidRelayUrl(String)
+    case invalidTag([String])
     case invalidSecretKey
     case signerHasNoPublicKey
     case storeOpenFailed(String)
@@ -21,7 +23,9 @@ public enum NMPError: Error, Sendable, Equatable {
         switch ffi {
         case .InvalidTagName(let got): self = .invalidTagName(got)
         case .InvalidPublicKey(let got): self = .invalidPublicKey(got)
+        case .InvalidEventId(let got): self = .invalidEventId(got)
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
+        case .InvalidTag(let got): self = .invalidTag(got)
         case .InvalidSecretKey: self = .invalidSecretKey
         case .SignerHasNoPublicKey: self = .signerHasNoPublicKey
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)

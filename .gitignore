@@ -12,10 +12,12 @@ xcuserdata/
 # M4 packaging outputs (scripts/build-swift-xcframework.sh) -- regenerated
 # from source, never committed: /gen holds the raw uniffi-bindgen dump, and
 # Packages/NMP/NMP.xcframework + Packages/NMP/Sources/NMPFFI/nmp_ffi.swift
-# are its split (headers-only vs Swift-source) outputs. A later builder's
-# hand-written Package.swift + Sources/NMP/ (the ergonomic layer) belong in
-# Packages/NMP too and SHOULD be committed once they exist -- only the
-# generated/compiled pieces are ignored here.
+# are its split (headers-only vs Swift-source) outputs. Package.swift +
+# Sources/NMP/ (the hand-written ergonomic layer) ARE committed -- only the
+# generated/compiled pieces are ignored here. A clean clone must run the
+# build script once before `swift build`/`swift test` work; see
+# Packages/NMP/README.md (#18) and the `swift-package` CI job, which proves
+# this exact path from a fresh checkout on every push.
 /gen
 /Packages/NMP/NMP.xcframework
 /Packages/NMP/Sources/NMPFFI

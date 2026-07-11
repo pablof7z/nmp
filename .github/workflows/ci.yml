@@ -24,3 +24,31 @@ jobs:
 
       - name: cargo test (workspace)
         run: cargo test --workspace
+
+  # Clean-clone Swift package smoke test (#18): `Packages/NMP/Package.swift`
+  # depends on a binary xcframework + generated UniFFI bindings that are
+  # deliberately NOT committed (see `.gitignore`/`Packages/NMP/README.md`).
+  # This job starts from a genuinely fresh checkout every run, so it fails
+  # loudly the moment that build-from-source path breaks -- exactly the
+  # guarantee the acceptance criteria asks for.
+  swift-package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Add Apple targets (sim + macOS slices)
+        run: rustup target add aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin
+
+      - name: Build NMP.xcframework + generated bindings (sim-only, no signing needed)
+        run: scripts/build-swift-xcframework.sh --sim-only
+
+      - name: swift build
+        run: swift build
+        working-directory: Packages/NMP
+
+      - name: swift test
+        run: swift test
+        working-directory: Packages/NMP
