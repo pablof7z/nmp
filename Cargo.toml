@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "nmp-grammar",
-    "nmp-store",
-    "nmp-resolver",
-    "nmp-router",
-    "nmp-transport",
-    "nmp-signer",
-    "nmp-engine",
-    "nmp-demo",
-    "nmp-ffi",
+    "crates/nmp-grammar",
+    "crates/nmp-store",
+    "crates/nmp-resolver",
+    "crates/nmp-router",
+    "crates/nmp-transport",
+    "crates/nmp-signer",
+    "crates/nmp-engine",
+    "crates/nmp-demo",
+    "crates/nmp-ffi",
 ]
 
 [workspace.package]
@@ -20,12 +20,12 @@ publish = false
 
 [workspace.dependencies]
 nostr = "0.44.4"
-nmp-grammar = { path = "nmp-grammar" }
-nmp-store = { path = "nmp-store" }
-nmp-resolver = { path = "nmp-resolver" }
-nmp-router = { path = "nmp-router" }
-nmp-transport = { path = "nmp-transport" }
-nmp-signer = { path = "nmp-signer" }
-nmp-engine = { path = "nmp-engine" }
+nmp-grammar = { path = "crates/nmp-grammar" }
+nmp-store = { path = "crates/nmp-store" }
+nmp-resolver = { path = "crates/nmp-resolver" }
+nmp-router = { path = "crates/nmp-router" }
+nmp-transport = { path = "crates/nmp-transport" }
+nmp-signer = { path = "crates/nmp-signer" }
+nmp-engine = { path = "crates/nmp-engine" }
 proptest = "1"
 uniffi = "0.29"
