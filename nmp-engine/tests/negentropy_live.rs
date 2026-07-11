@@ -151,8 +151,8 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        LocalKeySigner::new(a.clone()),
     );
+    handle.add_signer(LocalKeySigner::new(a.clone()));
 
     // Bootstrap: a's own (empty) kind:1 feed -- this is what actually opens
     // the connection to `url` and kicks off the capability probe.

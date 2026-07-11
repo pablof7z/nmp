@@ -177,15 +177,18 @@ fn main() {
         directory,
         ROUTER_CAP,
         PoolConfig::default(),
-        signer,
     );
+    handle.add_signer(signer);
 
-    // Read-side identity is the TARGET we're viewing, independent of the
-    // signer's own key (sign/publish is orthogonal to which feed we watch
-    // -- see nmp-signer::LocalKeySigner's doc: the signer only checks that
-    // an unsigned template's pubkey matches ITS key at Publish time, never
-    // at SetActivePubkey time).
-    handle.set_active_pubkey(Some(target));
+    // Read-side identity is the TARGET we're viewing. M4 §5 couples the read
+    // root and the active signing capability behind ONE verb
+    // (`set_active_account`) so a real account switch can never leave them
+    // pointing at different accounts -- but browsing a target you hold no
+    // key for is still legal: the registry simply has no signer registered
+    // under `target`, so any publish attempted while viewing it terminates
+    // `WriteStatus::Failed` (no active signer) rather than silently signing
+    // under the wrong key.
+    handle.set_active_account(Some(target));
 
     let my_follows = build_follow_feed_query();
 

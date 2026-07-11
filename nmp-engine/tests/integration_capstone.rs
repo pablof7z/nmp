@@ -205,7 +205,6 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),
                 ..PoolConfig::default()
             },
-            LocalKeySigner::new(a.clone()),
         );
 
         let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
@@ -242,7 +241,6 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_secs(3600)),
                 ..PoolConfig::default()
             },
-            LocalKeySigner::new(a.clone()),
         );
 
         // THE assertion: a's shape reads back from cache, offline, as
@@ -342,8 +340,9 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        LocalKeySigner::new(a.clone()),
     );
+    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle.set_active_account(Some(a.public_key()));
 
     let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
 
@@ -436,8 +435,9 @@ async fn write_ack_per_relay_over_real_relays() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        LocalKeySigner::new(a.clone()),
     );
+    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle.set_active_account(Some(a.public_key()));
 
     let unsigned = UnsignedEvent::new(
         a.public_key(),
@@ -585,10 +585,10 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        LocalKeySigner::new(a.clone()),
     );
+    handle.add_signer(LocalKeySigner::new(a.clone()));
 
-    handle.set_active_pubkey(Some(a.public_key()));
+    handle.set_active_account(Some(a.public_key()));
     let (_qh, rows_rx) = handle.subscribe(LiveQuery(follows_minus_mutes_filter()));
 
     // Publish a's contact list naming BOTH b and c.

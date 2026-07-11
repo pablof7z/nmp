@@ -165,10 +165,10 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        LocalKeySigner::new(a.clone()),
     );
 
-    handle.set_active_pubkey(Some(a.public_key()));
+    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle.set_active_account(Some(a.public_key()));
 
     // $myFollows shape: kind:1 authored by whoever `a`'s kind:3 contact
     // list (#p-projected) currently names -- identical shape to M1's own
@@ -264,14 +264,16 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     relay_b.shutdown();
 }
 
-/// Structural grep-guard (M3 plan §5 test 14): `Handle`'s public surface is
-/// exactly the four verbs (`subscribe`/`unsubscribe`/`set_active_pubkey`/
-/// `publish`) plus `shutdown` -- no `relays:` parameter, no open-REQ method
-/// anywhere on it (ledger #2/#3 preserved at the top edge). Asserted by
-/// reading this crate's own source rather than by reflection (Rust has
-/// none) -- the same "grep-guard" idiom the plan itself names.
+/// Structural grep-guard (M3 plan §5 test 14, widened by M4 §5):
+/// `Handle`'s public surface is exactly the five verbs (`subscribe`/
+/// `unsubscribe`/`add_signer`/`set_active_account`/`publish`) plus
+/// `shutdown` -- no `relays:` parameter, no open-REQ method anywhere on it
+/// (ledger #2/#3 preserved at the top edge; `add_signer` is the one
+/// deliberate widening, closing the multi-account gap). Asserted by reading
+/// this crate's own source rather than by reflection (Rust has none) -- the
+/// same "grep-guard" idiom the plan itself names.
 #[test]
-fn handle_surface_is_exactly_four_verbs_plus_shutdown() {
+fn handle_surface_is_exactly_five_verbs_plus_shutdown() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runtime/mod.rs"))
         .expect("read runtime/mod.rs");
 
@@ -294,8 +296,9 @@ fn handle_surface_is_exactly_four_verbs_plus_shutdown() {
     }
     methods.sort_unstable();
     let mut expected = vec![
+        "add_signer",
         "publish",
-        "set_active_pubkey",
+        "set_active_account",
         "shutdown",
         "subscribe",
         "unsubscribe",
@@ -303,7 +306,7 @@ fn handle_surface_is_exactly_four_verbs_plus_shutdown() {
     expected.sort_unstable();
     assert_eq!(
         methods, expected,
-        "Handle must expose exactly the four verbs + shutdown -- no relays:/open-REQ method"
+        "Handle must expose exactly the five verbs + shutdown -- no relays:/open-REQ method"
     );
 
     // Scan CODE lines only (skip `///`/`//` doc/comment prose, which is

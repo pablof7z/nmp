@@ -56,7 +56,7 @@ use std::thread::{self, JoinHandle};
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
-use nmp_signer::{SignerOp, SigningCapability};
+use nmp_signer::{SignerError, SignerOp, SigningCapability};
 use nmp_store::EventStore;
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId};
 
@@ -115,7 +115,56 @@ enum Cmd {
         query: LiveQuery,
         reply: Sender<(HandleId, Receiver<RowsMsg>)>,
     },
+    /// Register a new signing capability (M4 §5: `SignerRegistry`). The
+    /// reply carries the pubkey the engine thread's registry keyed it under
+    /// (`None` if `signer.public_key()` itself returned `None` — there is no
+    /// key to register it against, so it is dropped rather than stored
+    /// unreachably).
+    AddSigner {
+        signer: Box<dyn SigningCapability + Send>,
+        reply: Sender<Option<PublicKey>>,
+    },
     Shutdown,
+}
+
+/// Every signing capability the engine thread currently holds, keyed by its
+/// own public key, plus which one currently backs `Effect::RequestSign` (M4
+/// §5: closes the known multi-account gap). `Handle::set_active_account` is
+/// the ONE app-facing verb that moves both this registry's `active` pointer
+/// AND `EngineCore`'s read root together (P3: identity is one input — see
+/// the `Cmd::Engine(EngineMsg::SetActivePubkey(..))` arm in `engine_loop`),
+/// so reads and writes can never independently point at different accounts.
+#[derive(Default)]
+struct SignerRegistry {
+    signers: HashMap<PublicKey, Box<dyn SigningCapability + Send>>,
+    active: Option<PublicKey>,
+}
+
+impl SignerRegistry {
+    /// Register `signer` under its own `public_key()`, replacing any prior
+    /// capability already registered for that key. Returns the key it was
+    /// registered under (`None` if the capability reports no key at all).
+    fn add(&mut self, signer: Box<dyn SigningCapability + Send>) -> Option<PublicKey> {
+        let pk = signer.public_key();
+        if let Some(pk) = pk {
+            self.signers.insert(pk, signer);
+        }
+        pk
+    }
+
+    /// Move the active pointer. `None` is a legal, deliberate state — a
+    /// logged-out / read-only session (M4 §5: "the engine may start with
+    /// zero accounts").
+    fn set_active(&mut self, pk: Option<PublicKey>) {
+        self.active = pk;
+    }
+
+    /// The capability currently backing `Effect::RequestSign`, if any is
+    /// both set active AND still registered.
+    fn active_signer(&self) -> Option<&(dyn SigningCapability + Send)> {
+        let pk = self.active?;
+        self.signers.get(&pk).map(AsRef::as_ref)
+    }
 }
 
 /// One dedicated engine OS thread (§2 position 2) plus the pool-bridge
@@ -128,24 +177,25 @@ pub struct EngineThread {
 }
 
 impl EngineThread {
-    /// Spawn the engine thread + the pool-bridge thread. `store`/`directory`/
-    /// `signer` are constructed by the CALLER but moved whole into the
-    /// engine thread's closure and built into `EngineCore` there — they
-    /// never cross back out, which is what lets `EngineCore` itself stay
-    /// `!Send`-friendly (only `Send + 'static` values ever cross the thread
-    /// boundary, exactly once, at spawn time).
+    /// Spawn the engine thread + the pool-bridge thread. `store`/`directory`
+    /// are constructed by the CALLER but moved whole into the engine
+    /// thread's closure and built into `EngineCore` there — they never cross
+    /// back out, which is what lets `EngineCore` itself stay `!Send`-friendly
+    /// (only `Send + 'static` values ever cross the thread boundary, exactly
+    /// once, at spawn time). The engine starts with an EMPTY `SignerRegistry`
+    /// (zero accounts, read-only) — matching a logged-out launch (M4 §5);
+    /// the caller registers accounts afterward via [`Handle::add_signer`] and
+    /// picks one via [`Handle::set_active_account`].
     #[must_use]
-    pub fn spawn<S, D, Sig>(
+    pub fn spawn<S, D>(
         store: S,
         directory: D,
         cap: usize,
         pool_config: PoolConfig,
-        signer: Sig,
     ) -> (Self, Handle)
     where
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
-        Sig: SigningCapability + Send + 'static,
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let (pool_evt_tx, pool_evt_rx) = mpsc::channel::<PoolEvent>();
@@ -163,7 +213,7 @@ impl EngineThread {
         let self_inbox = cmd_tx.clone();
         let engine_join = thread::Builder::new()
             .name("nmp-engine".to_string())
-            .spawn(move || engine_loop(store, directory, cap, pool, signer, &cmd_rx, &self_inbox))
+            .spawn(move || engine_loop(store, directory, cap, pool, &cmd_rx, &self_inbox))
             .expect("nmp-engine: engine thread spawn must succeed");
 
         (
@@ -237,26 +287,29 @@ type Preambles = HashMap<RelayUrl, HashMap<SubId, String>>;
 /// The engine thread's body: construct `EngineCore` (this is the ONLY place
 /// it is ever built — it never leaves this stack frame), then block on
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
-fn engine_loop<S, D, Sig>(
+fn engine_loop<S, D>(
     store: S,
     directory: D,
     cap: usize,
     pool: Pool,
-    signer: Sig,
     cmd_rx: &Receiver<Cmd>,
     self_inbox: &Sender<Cmd>,
 ) where
     S: EventStore,
     D: RelayDirectory + 'static,
-    Sig: SigningCapability,
 {
     let mut core = EngineCore::new(store, Box::new(directory), cap);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
     let mut preambles: Preambles = Preambles::new();
+    let mut registry = SignerRegistry::default();
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             Cmd::Shutdown => break,
+            Cmd::AddSigner { signer, reply } => {
+                let pk = registry.add(signer);
+                let _ = reply.send(pk);
+            }
             Cmd::Subscribe { query, reply } => {
                 let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
                 // `on_subscribe` always emits exactly one `Effect::EmitRows`
@@ -285,7 +338,7 @@ fn engine_loop<S, D, Sig>(
                     &pool,
                     &mut row_channels,
                     &mut preambles,
-                    &signer,
+                    &registry,
                     self_inbox,
                 );
             }
@@ -298,7 +351,23 @@ fn engine_loop<S, D, Sig>(
                     &pool,
                     &mut row_channels,
                     &mut preambles,
-                    &signer,
+                    &registry,
+                    self_inbox,
+                );
+            }
+            Cmd::Engine(EngineMsg::SetActivePubkey(pk)) => {
+                // P3, M4 §5: the read root and the active signing capability
+                // move TOGETHER here, so `Handle::set_active_account` (this
+                // command's app-facing name) can never leave them pointing
+                // at different accounts.
+                registry.set_active(pk);
+                let effects = core.handle(EngineMsg::SetActivePubkey(pk));
+                dispatch_effects(
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut preambles,
+                    &registry,
                     self_inbox,
                 );
             }
@@ -309,7 +378,7 @@ fn engine_loop<S, D, Sig>(
                     &pool,
                     &mut row_channels,
                     &mut preambles,
-                    &signer,
+                    &registry,
                     self_inbox,
                 );
             }
@@ -325,25 +394,25 @@ fn engine_loop<S, D, Sig>(
 }
 
 /// Execute every `Effect` `EngineCore::handle` returned, in order.
-fn dispatch_effects<Sig: SigningCapability>(
+fn dispatch_effects(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
     preambles: &mut Preambles,
-    signer: &Sig,
+    registry: &SignerRegistry,
     self_inbox: &Sender<Cmd>,
 ) {
     for effect in effects {
-        dispatch_effect(effect, pool, row_channels, preambles, signer, self_inbox);
+        dispatch_effect(effect, pool, row_channels, preambles, registry, self_inbox);
     }
 }
 
-fn dispatch_effect<Sig: SigningCapability>(
+fn dispatch_effect(
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
     preambles: &mut Preambles,
-    signer: &Sig,
+    registry: &SignerRegistry,
     self_inbox: &Sender<Cmd>,
 ) {
     match effect {
@@ -354,21 +423,37 @@ fn dispatch_effect<Sig: SigningCapability>(
             let json = ClientMessage::event(event).as_json();
             let _ = pool.send(handle, WireFrame::Text(json));
         }
-        Effect::RequestSign(id, unsigned) => match signer.sign(unsigned) {
-            SignerOp::Ready(result) => {
-                let _ = self_inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(id, result)));
-            }
-            SignerOp::Pending(rx) => {
-                // A single blocking recv on a fresh thread, then exactly one
-                // forwarded message -- D8-compliant (no poll loop), and
-                // keeps the engine thread itself from ever blocking on a
-                // remote signer round-trip.
-                let inbox = self_inbox.clone();
-                thread::spawn(move || {
-                    if let Ok(result) = rx.recv() {
-                        let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(id, result)));
-                    }
-                });
+        // M4 §5: the active signer is looked up fresh on every `RequestSign`
+        // (never cached at spawn time) so a `set_active_account` switch is
+        // observed by the very next publish. No active/registered signer is
+        // NOT a panic -- it is fed through the identical `SignerCompleted`
+        // completion path a real signer failure would take, so
+        // `EngineCore::on_signer_completed`'s existing `Err` arm (untouched)
+        // is what turns it into `WriteStatus::Failed`, exactly as if the
+        // signer itself had rejected the op.
+        Effect::RequestSign(id, unsigned) => match registry.active_signer() {
+            Some(signer) => match signer.sign(unsigned) {
+                SignerOp::Ready(result) => {
+                    let _ = self_inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(id, result)));
+                }
+                SignerOp::Pending(rx) => {
+                    // A single blocking recv on a fresh thread, then exactly
+                    // one forwarded message -- D8-compliant (no poll loop),
+                    // and keeps the engine thread itself from ever blocking
+                    // on a remote signer round-trip.
+                    let inbox = self_inbox.clone();
+                    thread::spawn(move || {
+                        if let Ok(result) = rx.recv() {
+                            let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(id, result)));
+                        }
+                    });
+                }
+            },
+            None => {
+                let _ = self_inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
+                    id,
+                    Err(SignerError::Unavailable),
+                )));
             }
         },
         Effect::RequestDecrypt(..) => {
@@ -530,13 +615,15 @@ fn close_frame_text(sub_id: &SubId) -> String {
     ClientMessage::close(wire_id).as_json()
 }
 
-/// The cheap, `Clone + Send` app-facing handle. Exactly four verbs plus
+/// The cheap, `Clone + Send` app-facing handle. Exactly five verbs plus
 /// `shutdown` (ledger #2/#3 preserved at the top edge — plan §5 test 14
-/// grep-guards this structural property):
+/// grep-guards this structural property; M4 §5 adds `add_signer` to close
+/// the multi-account gap, the one deliberate widening of this surface):
 ///
 /// - `subscribe(LiveQuery) -> (QueryHandle, Receiver<RowsMsg>)`
 /// - `unsubscribe(QueryHandle)`
-/// - `set_active_pubkey(Option<PublicKey>)`
+/// - `add_signer(impl SigningCapability) -> Option<PublicKey>`
+/// - `set_active_account(Option<PublicKey>)`
 /// - `publish(WriteIntent) -> Receiver<WriteStatus>`
 /// - `shutdown()`
 ///
@@ -580,9 +667,41 @@ impl Handle {
             .send(Cmd::Engine(EngineMsg::Unsubscribe(handle.0)));
     }
 
-    /// Re-root every reactive query against a new (or no) active identity
-    /// (P3: identity is a pure input, never ambient).
-    pub fn set_active_pubkey(&self, pk: Option<PublicKey>) {
+    /// Register a signing/crypto capability, keyed by its own `public_key()`
+    /// (M4 §5: `SignerRegistry`). Registering a signer does NOT make it
+    /// active — call [`Self::set_active_account`] to actually switch reads
+    /// and writes onto it. Blocks briefly (one engine-thread round trip,
+    /// same discipline as [`Self::subscribe`]) and returns the key it was
+    /// registered under, or `None` if the capability reported no key at all.
+    ///
+    /// # Panics
+    /// If the engine thread has already shut down.
+    pub fn add_signer<Sig>(&self, signer: Sig) -> Option<PublicKey>
+    where
+        Sig: SigningCapability + Send + 'static,
+    {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::AddSigner {
+                signer: Box::new(signer),
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: add_signer() called after the engine thread shut down");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine thread dropped the add_signer reply")
+    }
+
+    /// Re-root every reactive query AND the active signing capability
+    /// together onto `pk` (or onto neither, for `None`) — P3: identity is a
+    /// pure input, never ambient, and M4 §5's structural fix for the
+    /// known account-switching gap: one verb moves both halves so reads and
+    /// writes can never diverge onto different accounts. `pk` need not
+    /// already be registered via [`Self::add_signer`] — e.g. read-only
+    /// browsing of an account this app holds no key for is legal; any
+    /// `publish` attempted while active in that state simply terminates
+    /// `WriteStatus::Failed` (no active signer), never a panic.
+    pub fn set_active_account(&self, pk: Option<PublicKey>) {
         let _ = self.inbox.send(Cmd::Engine(EngineMsg::SetActivePubkey(pk)));
     }
 
