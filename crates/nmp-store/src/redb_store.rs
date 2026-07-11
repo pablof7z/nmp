@@ -828,6 +828,110 @@ fn process_kind5_deletions(
     Ok(deleted)
 }
 
+/// Atomically transition every intent in `owners` whose OWN journal is
+/// still `Pending` to `Signed`, using `canonical_event` as the frozen
+/// bytes each owner's journal now reflects, dropping each owner's own
+/// displaced stash too (R6) and closing each owner's own kind:5
+/// suppression claims if `canonical_event` is a deletion (running the
+/// FULL, permanent [`process_kind5_deletions`] once, not per-owner).
+/// Architecture review requirement (issue #2 P0 correction, codex-nova
+/// ruling): `promote_signed`, [`reinsert_stashed_in_txn`]'s dedup
+/// collision, and `insert`'s relay-dedup onto a pending sentinel must all
+/// fan out IDENTICALLY — an offline co-owner signer must never strand a
+/// receipt behind an event that's already validly signed, regardless of
+/// HOW that signature became canonical. Mirrors
+/// `MemoryStore::fan_out_signed` exactly. Returns every intent THIS call
+/// actually transitioned (an already-`Signed` owner is left untouched and
+/// excluded).
+#[allow(clippy::too_many_arguments)]
+fn fan_out_signed_in_txn(
+    events: &mut redb::Table<'_, &str, &str>,
+    addr_index: &mut redb::Table<'_, &str, &str>,
+    tombstones: &mut redb::Table<'_, &str, &str>,
+    addr_tombstones: &mut redb::Table<'_, &str, &str>,
+    expiration_index: &mut redb::Table<'_, &str, &str>,
+    by_author: &mut redb::Table<'_, &str, &str>,
+    by_kind: &mut redb::Table<'_, &str, &str>,
+    outbox_intents: &mut redb::Table<'_, &str, &str>,
+    outbox_receipts: &mut redb::Table<'_, &str, &str>,
+    outbox_displaced: &mut redb::Table<'_, &str, &str>,
+    outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
+    owners: &BTreeSet<IntentId>,
+    canonical_event: &Event,
+) -> Result<Vec<IntentId>, PersistenceError> {
+    let mut transitioned = Vec::new();
+    let is_deletion = canonical_event.kind == Kind::EventDeletion;
+    let canonical_json = canonical_event.as_json();
+    for owner_id in owners {
+        let owner_key = intent_key(*owner_id);
+        outbox_displaced
+            .remove(owner_key.as_str())
+            .map_err(persist_err)?;
+        let owner_intent_json = outbox_intents
+            .get(owner_key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string());
+        if let Some(owner_intent_json) = owner_intent_json {
+            let mut owner_record: OutboxIntentRecord =
+                serde_json::from_str(&owner_intent_json).expect("redb: decode outbox intent");
+            if owner_record.sig_state != IntentSigState::Signed {
+                owner_record.sig_state = IntentSigState::Signed;
+                owner_record.frozen_json = canonical_json.clone();
+                let encoded_owner =
+                    serde_json::to_string(&owner_record).expect("redb: encode outbox intent");
+                outbox_intents
+                    .insert(owner_key.as_str(), encoded_owner.as_str())
+                    .map_err(persist_err)?;
+                update_outbox_receipt(
+                    outbox_receipts,
+                    owner_record.receipt_id,
+                    ReceiptState::Signed,
+                )?;
+                transitioned.push(*owner_id);
+            }
+        }
+        if is_deletion {
+            let claims_json = outbox_kind5_claims
+                .remove(owner_key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string());
+            if let Some(claims_json) = claims_json {
+                let claims: Vec<SuppressClaimRecord> =
+                    serde_json::from_str(&claims_json).expect("redb: decode claims");
+                for claim in claims {
+                    match claim {
+                        SuppressClaimRecord::Id(id_key) => {
+                            remove_claimant_in_txn(outbox_suppress_by_id, &id_key, *owner_id)?;
+                        }
+                        SuppressClaimRecord::Addr { key: addr_key, .. } => {
+                            remove_addr_claimant_in_txn(
+                                outbox_suppress_by_addr,
+                                &addr_key,
+                                *owner_id,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if is_deletion {
+        process_kind5_deletions(
+            events,
+            addr_index,
+            tombstones,
+            addr_tombstones,
+            expiration_index,
+            by_author,
+            by_kind,
+            canonical_event,
+        )?;
+    }
+    Ok(transitioned)
+}
+
 /// The PENDING half of kind:5 processing (architecture review requirement
 /// — see [`SuppressClaimRecord`]'s doc): stages a REVERSIBLE suppression
 /// claim over every e-tag id target and a-tag address target `deleting`
@@ -987,6 +1091,35 @@ fn find_displaced_key_by_event_id_in_txn(
     Ok(None)
 }
 
+/// Find ANY displaced-stash entry (regardless of which intent owns it)
+/// whose frozen event id matches `frozen_id`. Architecture review
+/// requirement (issue #2 P0 correction, codex-nova ruling): `accept_write`'s
+/// duplicate detection must search the DISPLACED stash too, not only the
+/// live `EVENTS` row — a duplicate accepted while its canonical predecessor
+/// is currently sitting displaced (superseded by a later local edit, not
+/// yet restored) must ALSO join that stash entry's owner set, or it would
+/// be silently treated as a fresh insert and strand its own obligation
+/// outside the shared ownership entirely. Unlike
+/// [`find_displaced_key_by_event_id_in_txn`] (which only matches an entry a
+/// SPECIFIC intent already owns), this is used for a BRAND NEW intent that
+/// owns nothing yet, so it must match on event id alone.
+fn find_any_displaced_key_by_event_id_in_txn(
+    outbox_displaced: &redb::Table<'_, &str, &str>,
+    frozen_id: EventId,
+) -> Result<Option<String>, PersistenceError> {
+    for entry in outbox_displaced.iter().map_err(persist_err)? {
+        let (key, value) = entry.map_err(persist_err)?;
+        let record: StoredEventRecord =
+            serde_json::from_str(value.value()).expect("redb: decode stored event");
+        if let Ok(event) = Event::from_json(&record.event_json) {
+            if event.id == frozen_id {
+                return Ok(Some(key.value().to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Re-admit a durably-stashed predecessor `se` through the ordinary
 /// dedup/tombstone/supersession rules `insert` runs, preserving its FULL
 /// original provenance (both relay `seen` history and any `local` origin)
@@ -1002,11 +1135,17 @@ fn find_displaced_key_by_event_id_in_txn(
 fn reinsert_stashed_in_txn(
     events: &mut redb::Table<'_, &str, &str>,
     addr_index: &mut redb::Table<'_, &str, &str>,
-    tombstones: &redb::Table<'_, &str, &str>,
-    addr_tombstones: &redb::Table<'_, &str, &str>,
+    tombstones: &mut redb::Table<'_, &str, &str>,
+    addr_tombstones: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
     by_author: &mut redb::Table<'_, &str, &str>,
     by_kind: &mut redb::Table<'_, &str, &str>,
+    outbox_intents: &mut redb::Table<'_, &str, &str>,
+    outbox_receipts: &mut redb::Table<'_, &str, &str>,
+    outbox_displaced: &mut redb::Table<'_, &str, &str>,
+    outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
+    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
     se: StoredEvent,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
     let id_hex = se.event.id.to_hex();
@@ -1016,9 +1155,15 @@ fn reinsert_stashed_in_txn(
         .map_err(persist_err)?
         .map(|guard| guard.value().to_string());
     if let Some(existing_json) = existing_json {
-        // Extremely unlikely (a relay redelivered this exact id while it
-        // sat in the stash) — merge whatever the stash's `seen` adds; keep
-        // whatever `local` the live row already has.
+        // Architecture review requirement (issue #2 P0 correction,
+        // codex-nova ruling): union the owner sets and apply Signed
+        // dominance — never silently drop the stashed entry's OWN
+        // ownership/signature-state fact just because this exact id
+        // happens to already be held. If the union newly becomes Signed
+        // for previously-Pending owners, fan out to all of them — the
+        // SAME invariant `promote_signed` enforces explicitly, since a
+        // dedup collision here is functionally no different from a relay
+        // independently confirming the signature.
         let mut record: StoredEventRecord =
             serde_json::from_str(&existing_json).expect("redb: decode stored event");
         let mut provenance = Provenance {
@@ -1028,12 +1173,64 @@ fn reinsert_stashed_in_txn(
         for (relay, at) in &se.provenance.seen {
             provenance.merge_observation(&RelayObserved::new(relay.clone(), *at));
         }
+        let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
+        let mut result_event = se.event.clone();
+        if let Some(stashed_local) = &se.provenance.local {
+            let existing_signed = provenance
+                .local
+                .as_ref()
+                .is_some_and(|l| l.sig_state == SigState::Signed);
+            let stashed_signed = stashed_local.sig_state == SigState::Signed;
+            if !existing_signed && stashed_signed {
+                result_event.sig = se.event.sig;
+            }
+            let mut owners = provenance
+                .local
+                .as_ref()
+                .map(|l| l.owners.clone())
+                .unwrap_or_default();
+            owners.extend(stashed_local.owners.iter().copied());
+            let result_signed = existing_signed || stashed_signed;
+            provenance.local = Some(LocalOrigin {
+                owners: owners.clone(),
+                sig_state: if result_signed {
+                    SigState::Signed
+                } else {
+                    SigState::Pending
+                },
+            });
+            if result_signed && !existing_signed {
+                fan_out_owners = Some(owners);
+            }
+        }
         record.provenance = provenance.seen.clone();
         record.local = provenance.local.clone();
+        if fan_out_owners.is_some() {
+            record.event_json = result_event.as_json();
+        }
         let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
         events
             .insert(id_hex.as_str(), encoded.as_str())
             .map_err(persist_err)?;
+        if let Some(owners) = &fan_out_owners {
+            fan_out_signed_in_txn(
+                events,
+                addr_index,
+                tombstones,
+                addr_tombstones,
+                expiration_index,
+                by_author,
+                by_kind,
+                outbox_intents,
+                outbox_receipts,
+                outbox_displaced,
+                outbox_kind5_claims,
+                outbox_suppress_by_id,
+                outbox_suppress_by_addr,
+                owners,
+                &result_event,
+            )?;
+        }
         let event = Event::from_json(&record.event_json).expect("redb: decode event json");
         return Ok(Some(StoredEvent { event, provenance }));
     }
@@ -1343,6 +1540,24 @@ impl EventStore for RedbStore {
                 .open_table(BY_AUTHOR)
                 .expect("redb: open by_author");
             let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+            let mut outbox_intents = write_txn
+                .open_table(OUTBOX_INTENTS)
+                .expect("redb: open outbox_intents");
+            let mut outbox_receipts = write_txn
+                .open_table(OUTBOX_RECEIPTS)
+                .expect("redb: open outbox_receipts");
+            let mut outbox_displaced = write_txn
+                .open_table(OUTBOX_DISPLACED)
+                .expect("redb: open outbox_displaced");
+            let mut outbox_kind5_claims = write_txn
+                .open_table(OUTBOX_KIND5_CLAIMS)
+                .expect("redb: open outbox_kind5_claims");
+            let mut outbox_suppress_by_id = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ID)
+                .expect("redb: open outbox_suppress_by_id");
+            let mut outbox_suppress_by_addr = write_txn
+                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+                .expect("redb: open outbox_suppress_by_addr");
             let id_hex = event.id.to_hex();
 
             let existing_json = events
@@ -1362,16 +1577,62 @@ impl EventStore for RedbStore {
                     local: record.local,
                 };
                 let grew = provenance.merge_observation(&from);
+                // Architecture review requirement (issue #2 P0 correction,
+                // codex-nova ruling): a relay delivering the real signed
+                // event for a still-Pending local draft is functionally the
+                // SAME signature-adoption/fan-out invariant `promote_signed`
+                // performs explicitly — adopt it, mark every co-owner
+                // `Signed`, and fan out, rather than silently keeping our
+                // own sentinel forever (`event` here is, by this door's own
+                // contract, always a genuine relay delivery, never our OWN
+                // sentinel, so its signature is always safe to adopt).
+                let needs_adoption = provenance
+                    .local
+                    .as_ref()
+                    .is_some_and(|l| l.sig_state == SigState::Pending);
+                let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
+                if needs_adoption {
+                    let mut local = provenance
+                        .local
+                        .clone()
+                        .expect("just checked this row carries local provenance");
+                    local.sig_state = SigState::Signed;
+                    fan_out_owners = Some(local.owners.clone());
+                    provenance.local = Some(local);
+                }
                 // `merge_observation` never touches `local` (a relay echo
                 // of an already-local row keeps its local provenance,
-                // retraction doc §4.1) — `provenance.local` is unchanged,
-                // written straight back.
+                // retraction doc §4.1) — `provenance.local` is otherwise
+                // unchanged, written straight back.
                 record.provenance = provenance.seen;
                 record.local = provenance.local;
+                if fan_out_owners.is_some() {
+                    record.event_json = event.as_json();
+                }
                 let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
                 events
                     .insert(id_hex.as_str(), encoded.as_str())
                     .expect("redb: update event provenance");
+                if let Some(owners) = &fan_out_owners {
+                    fan_out_signed_in_txn(
+                        &mut events,
+                        &mut addr_index,
+                        &mut tombstones,
+                        &mut addr_tombstones,
+                        &mut expiration_index,
+                        &mut by_author,
+                        &mut by_kind,
+                        &mut outbox_intents,
+                        &mut outbox_receipts,
+                        &mut outbox_displaced,
+                        &mut outbox_kind5_claims,
+                        &mut outbox_suppress_by_id,
+                        &mut outbox_suppress_by_addr,
+                        owners,
+                        &event,
+                    )
+                    .expect("redb: fan out adopted signature");
+                }
                 InsertOutcome::Duplicate {
                     provenance_grew: grew,
                 }
@@ -1965,192 +2226,274 @@ impl EventStore for RedbStore {
             let existing_json = existing.map(|guard| guard.value().to_string());
             let is_deletion = frozen.kind == Kind::EventDeletion;
 
+            // Dedup detection: checked against BOTH the live `EVENTS` row
+            // AND every OTHER intent's `OUTBOX_DISPLACED` stash (issue #2
+            // P0 correction, codex-nova ruling) — a duplicate accepted
+            // while its canonical predecessor is currently sitting
+            // displaced (superseded by a later local edit, not yet
+            // restored) must ALSO join that stash entry's owner set,
+            // otherwise it would be silently treated as a fresh insert and
+            // strand its own obligation outside the shared ownership
+            // entirely. See `find_any_displaced_key_by_event_id_in_txn`'s
+            // doc.
+            enum DupLoc {
+                Live,
+                Stash(String),
+            }
+            let dup_loc = if existing_json.is_some() {
+                Some(DupLoc::Live)
+            } else {
+                find_any_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen.id)?
+                    .map(DupLoc::Stash)
+            };
+
             // Same tombstone-refusal + dedup-by-id + replaceable/addressable
             // supersession rules `insert` runs — see this fn's own doc and
             // `AcceptOutcome`'s. `Refused` is the ONLY branch that skips
             // both the journal write below AND `IntentId`/receipt-id
             // allocation.
-            let (result, displaced): (AcceptOutcome, Option<StoredEvent>) =
-                if let Some(existing_json) = existing_json {
-                    let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
-                    let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
-                    let mut existing_record: StoredEventRecord =
-                        serde_json::from_str(&existing_json).expect("redb: decode stored event");
-                    // codex-nova ruling: a row with NO local provenance at
-                    // all is purely relay-observed — its `event_json`'s
-                    // signature is by construction already real (never a
-                    // sentinel, since `insert` only ever stores what a
-                    // relay actually delivered), so it counts as "already
-                    // signed" exactly like a locally-owned row whose own
-                    // `sig_state` is `Signed`.
-                    let already_signed = existing_record
-                        .local
-                        .as_ref()
-                        .map(|l| l.sig_state == SigState::Signed)
-                        .unwrap_or(true);
+            let (result, displaced): (AcceptOutcome, Option<StoredEvent>) = if let Some(dup_loc) =
+                dup_loc
+            {
+                let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
+                let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
+                let existing_json_for_dup = match &dup_loc {
+                    DupLoc::Live => existing_json.clone().expect("checked DupLoc::Live above"),
+                    DupLoc::Stash(key) => outbox_displaced
+                        .get(key.as_str())
+                        .map_err(persist_err)?
+                        .expect("just found this key")
+                        .value()
+                        .to_string(),
+                };
+                let mut existing_record: StoredEventRecord =
+                    serde_json::from_str(&existing_json_for_dup)
+                        .expect("redb: decode stored event");
+                // codex-nova ruling: a row with NO local provenance at
+                // all is purely relay-observed — its `event_json`'s
+                // signature is by construction already real (never a
+                // sentinel, since `insert` only ever stores what a
+                // relay actually delivered), so it counts as "already
+                // signed" exactly like a locally-owned row whose own
+                // `sig_state` is `Signed`.
+                let already_signed = existing_record
+                    .local
+                    .as_ref()
+                    .map(|l| l.sig_state == SigState::Signed)
+                    .unwrap_or(true);
 
-                    // Architecture review correction (issue #2, team-lead
-                    // decision): this new intent joins the existing row's
-                    // owner set — an exact `Duplicate` must retain
-                    // INDEPENDENT ownership rather than being silently
-                    // coalesced into whichever intent already backs the
-                    // row (see `LocalOrigin`'s doc for why coalescing was
-                    // rejected). This now applies even to a PURELY
-                    // relay-observed row (codex-nova ruling): its `local`
-                    // becomes `Some` for the first time, tracking this
-                    // intent's own obligation.
-                    let mut owners = existing_record
-                        .local
-                        .as_ref()
-                        .map(|l| l.owners.clone())
-                        .unwrap_or_default();
-                    owners.insert(intent_id);
-                    let row_sig_state = existing_record
-                        .local
-                        .as_ref()
-                        .map(|l| l.sig_state)
-                        .unwrap_or(SigState::Signed);
-                    existing_record.local = Some(LocalOrigin {
-                        owners,
-                        sig_state: row_sig_state,
-                    });
-                    let encoded =
-                        serde_json::to_string(&existing_record).expect("redb: encode stored event");
-                    events
-                        .insert(id_hex.as_str(), encoded.as_str())
-                        .map_err(persist_err)?;
-
-                    // Issue #61 P0 correction: an exact-duplicate kind:5
-                    // intent must own an INDEPENDENT suppression claim
-                    // too — otherwise cancelling the canonical original
-                    // while this duplicate remains pending would
-                    // incorrectly reveal a target it is still obligated
-                    // to delete. Only meaningful while still PENDING — an
-                    // already-signed kind:5's tombstones are already
-                    // permanent, nothing provisional left to claim.
-                    if frozen.kind == Kind::EventDeletion && !already_signed {
-                        let (_hidden, claims) = process_kind5_deletions_provisional_in_txn(
-                            &events,
-                            &addr_index,
-                            &mut outbox_suppress_by_id,
-                            &mut outbox_suppress_by_addr,
-                            intent_id,
-                            &frozen,
-                        )?;
-                        let encoded_claims =
-                            serde_json::to_string(&claims).expect("redb: encode claims");
-                        outbox_kind5_claims
-                            .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
+                // Architecture review correction (issue #2, team-lead
+                // decision): this new intent joins the existing row's
+                // owner set — an exact `Duplicate` must retain
+                // INDEPENDENT ownership rather than being silently
+                // coalesced into whichever intent already backs the
+                // row (see `LocalOrigin`'s doc for why coalescing was
+                // rejected). This now applies even to a PURELY
+                // relay-observed row (codex-nova ruling): its `local`
+                // becomes `Some` for the first time, tracking this
+                // intent's own obligation.
+                let mut owners = existing_record
+                    .local
+                    .as_ref()
+                    .map(|l| l.owners.clone())
+                    .unwrap_or_default();
+                owners.insert(intent_id);
+                let row_sig_state = existing_record
+                    .local
+                    .as_ref()
+                    .map(|l| l.sig_state)
+                    .unwrap_or(SigState::Signed);
+                existing_record.local = Some(LocalOrigin {
+                    owners,
+                    sig_state: row_sig_state,
+                });
+                let encoded =
+                    serde_json::to_string(&existing_record).expect("redb: encode stored event");
+                match &dup_loc {
+                    DupLoc::Live => {
+                        events
+                            .insert(id_hex.as_str(), encoded.as_str())
                             .map_err(persist_err)?;
                     }
-
-                    let row = record_to_stored_event(&existing_record);
-
-                    // codex-nova ruling: a duplicate of an ALREADY-signed
-                    // row (local or relay) must itself start `Signed`,
-                    // journaling the CANONICAL bytes (`row.event`, not
-                    // this call's own sentinel-signed `frozen`) — an
-                    // offline co-owner signer must never strand a receipt
-                    // behind an event that's already validly signed, and
-                    // there is nothing left for THIS intent to sign. The
-                    // shared R7 journal-write section below picks these
-                    // overridden values up.
-                    if already_signed {
-                        frozen = row.event.clone();
-                        sig_state = IntentSigState::Signed;
-                        receipt_state = ReceiptState::Signed;
+                    DupLoc::Stash(key) => {
+                        outbox_displaced
+                            .insert(key.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
                     }
+                }
 
-                    (
-                        AcceptOutcome::Duplicate {
-                            intent_id,
-                            receipt_id,
-                            row,
-                        },
-                        None,
-                    )
-                } else if tombstone_refuses(&tombstones, &addr_tombstones, &frozen)? {
-                    (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
-                } else {
-                    let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
-                    let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
-                    let local = LocalOrigin {
-                        owners: BTreeSet::from([intent_id]),
-                        sig_state: SigState::Pending,
-                    };
-                    let stored = StoredEvent {
-                        event: frozen.clone(),
-                        provenance: Provenance {
-                            seen: BTreeMap::new(),
-                            local: Some(local),
-                        },
-                    };
-                    let encoded = encode_stored_event(&stored);
+                // Issue #61 P0 correction: an exact-duplicate kind:5
+                // intent must own an INDEPENDENT suppression claim
+                // too — otherwise cancelling the canonical original
+                // while this duplicate remains pending would
+                // incorrectly reveal a target it is still obligated
+                // to delete. Only meaningful while still PENDING — an
+                // already-signed kind:5's tombstones are already
+                // permanent, nothing provisional left to claim.
+                if frozen.kind == Kind::EventDeletion && !already_signed {
+                    let (_hidden, claims) = process_kind5_deletions_provisional_in_txn(
+                        &events,
+                        &addr_index,
+                        &mut outbox_suppress_by_id,
+                        &mut outbox_suppress_by_addr,
+                        intent_id,
+                        &frozen,
+                    )?;
+                    let encoded_claims =
+                        serde_json::to_string(&claims).expect("redb: encode claims");
+                    outbox_kind5_claims
+                        .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
+                        .map_err(persist_err)?;
+                }
 
-                    match address_key_for(&frozen) {
-                        None => {
-                            events
-                                .insert(id_hex.as_str(), encoded.as_str())
+                let row = record_to_stored_event(&existing_record);
+
+                // codex-nova ruling: a duplicate of an ALREADY-signed
+                // row (local or relay) must itself start `Signed`,
+                // journaling the CANONICAL bytes (`row.event`, not
+                // this call's own sentinel-signed `frozen`) — an
+                // offline co-owner signer must never strand a receipt
+                // behind an event that's already validly signed, and
+                // there is nothing left for THIS intent to sign. The
+                // shared R7 journal-write section below picks these
+                // overridden values up.
+                if already_signed {
+                    frozen = row.event.clone();
+                    sig_state = IntentSigState::Signed;
+                    receipt_state = ReceiptState::Signed;
+                }
+
+                (
+                    AcceptOutcome::Duplicate {
+                        intent_id,
+                        receipt_id,
+                        row,
+                    },
+                    None,
+                )
+            } else if tombstone_refuses(&tombstones, &addr_tombstones, &frozen)? {
+                (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
+            } else {
+                let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
+                let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
+                let local = LocalOrigin {
+                    owners: BTreeSet::from([intent_id]),
+                    sig_state: SigState::Pending,
+                };
+                let stored = StoredEvent {
+                    event: frozen.clone(),
+                    provenance: Provenance {
+                        seen: BTreeMap::new(),
+                        local: Some(local),
+                    },
+                };
+                let encoded = encode_stored_event(&stored);
+
+                match address_key_for(&frozen) {
+                    None => {
+                        events
+                            .insert(id_hex.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
+                        by_author
+                            .insert(
+                                by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .map_err(persist_err)?;
+                        by_kind
+                            .insert(
+                                by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                id_hex.as_str(),
+                            )
+                            .map_err(persist_err)?;
+                        if let Some(ts) = frozen.tags.expiration().copied() {
+                            let exp_key = expiration_key(ts, &frozen.id);
+                            expiration_index
+                                .insert(exp_key.as_str(), id_hex.as_str())
                                 .map_err(persist_err)?;
-                            by_author
-                                .insert(
-                                    by_author_key(&frozen.pubkey, &frozen.id).as_str(),
-                                    id_hex.as_str(),
-                                )
+                        }
+                        // Architecture review correction: a
+                        // locally-composed kind:5 draft stages a
+                        // REVERSIBLE suppression claim over every
+                        // target it names, immediately, in this same
+                        // transaction — issue #2's "no app optimistic
+                        // mirror" promise extends to local deletions
+                        // too. Kind:5 has no replaceable/addressable
+                        // address, so this branch is the only one it
+                        // can ever reach (mirrors `insert`'s own
+                        // kind:5 invariant). See
+                        // `SuppressClaimRecord`'s doc for why this
+                        // hides rather than removes: `compensate_write`
+                        // can then simply drop the claim (nothing to
+                        // re-insert, the row never left), and the
+                        // target's OWN `promote_signed`/
+                        // `compensate_write` keep working on exactly
+                        // the row they always did.
+                        if is_deletion {
+                            let (hidden, claims) = process_kind5_deletions_provisional_in_txn(
+                                &events,
+                                &addr_index,
+                                &mut outbox_suppress_by_id,
+                                &mut outbox_suppress_by_addr,
+                                intent_id,
+                                &frozen,
+                            )?;
+                            let encoded_claims =
+                                serde_json::to_string(&claims).expect("redb: encode claims");
+                            outbox_kind5_claims
+                                .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
                                 .map_err(persist_err)?;
-                            by_kind
-                                .insert(
-                                    by_kind_key(frozen.kind, &frozen.id).as_str(),
-                                    id_hex.as_str(),
-                                )
-                                .map_err(persist_err)?;
-                            if let Some(ts) = frozen.tags.expiration().copied() {
-                                let exp_key = expiration_key(ts, &frozen.id);
-                                expiration_index
-                                    .insert(exp_key.as_str(), id_hex.as_str())
-                                    .map_err(persist_err)?;
-                            }
-                            // Architecture review correction: a
-                            // locally-composed kind:5 draft stages a
-                            // REVERSIBLE suppression claim over every
-                            // target it names, immediately, in this same
-                            // transaction — issue #2's "no app optimistic
-                            // mirror" promise extends to local deletions
-                            // too. Kind:5 has no replaceable/addressable
-                            // address, so this branch is the only one it
-                            // can ever reach (mirrors `insert`'s own
-                            // kind:5 invariant). See
-                            // `SuppressClaimRecord`'s doc for why this
-                            // hides rather than removes: `compensate_write`
-                            // can then simply drop the claim (nothing to
-                            // re-insert, the row never left), and the
-                            // target's OWN `promote_signed`/
-                            // `compensate_write` keep working on exactly
-                            // the row they always did.
-                            if is_deletion {
-                                let (hidden, claims) = process_kind5_deletions_provisional_in_txn(
-                                    &events,
-                                    &addr_index,
-                                    &mut outbox_suppress_by_id,
-                                    &mut outbox_suppress_by_addr,
+                            (
+                                AcceptOutcome::Kind5Processed {
                                     intent_id,
-                                    &frozen,
-                                )?;
-                                let encoded_claims =
-                                    serde_json::to_string(&claims).expect("redb: encode claims");
-                                outbox_kind5_claims
-                                    .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
+                                    receipt_id,
+                                    row: stored,
+                                    hidden,
+                                },
+                                None,
+                            )
+                        } else {
+                            (
+                                AcceptOutcome::Inserted {
+                                    intent_id,
+                                    receipt_id,
+                                    row: stored,
+                                },
+                                None,
+                            )
+                        }
+                    }
+                    Some(addr_key) => {
+                        let addr_key_str = addr_key.to_redb_key();
+                        let current = addr_index.get(addr_key_str.as_str()).map_err(persist_err)?;
+                        let current_id_hex = current.map(|guard| guard.value().to_string());
+
+                        match current_id_hex {
+                            None => {
+                                events
+                                    .insert(id_hex.as_str(), encoded.as_str())
                                     .map_err(persist_err)?;
-                                (
-                                    AcceptOutcome::Kind5Processed {
-                                        intent_id,
-                                        receipt_id,
-                                        row: stored,
-                                        hidden,
-                                    },
-                                    None,
-                                )
-                            } else {
+                                addr_index
+                                    .insert(addr_key_str.as_str(), id_hex.as_str())
+                                    .map_err(persist_err)?;
+                                by_author
+                                    .insert(
+                                        by_author_key(&frozen.pubkey, &frozen.id).as_str(),
+                                        id_hex.as_str(),
+                                    )
+                                    .map_err(persist_err)?;
+                                by_kind
+                                    .insert(
+                                        by_kind_key(frozen.kind, &frozen.id).as_str(),
+                                        id_hex.as_str(),
+                                    )
+                                    .map_err(persist_err)?;
+                                if let Some(ts) = frozen.tags.expiration().copied() {
+                                    let exp_key = expiration_key(ts, &frozen.id);
+                                    expiration_index
+                                        .insert(exp_key.as_str(), id_hex.as_str())
+                                        .map_err(persist_err)?;
+                                }
                                 (
                                     AcceptOutcome::Inserted {
                                         intent_id,
@@ -2160,15 +2503,29 @@ impl EventStore for RedbStore {
                                     None,
                                 )
                             }
-                        }
-                        Some(addr_key) => {
-                            let addr_key_str = addr_key.to_redb_key();
-                            let current =
-                                addr_index.get(addr_key_str.as_str()).map_err(persist_err)?;
-                            let current_id_hex = current.map(|guard| guard.value().to_string());
+                            Some(current_id_hex) => {
+                                let current_guard = events
+                                    .get(current_id_hex.as_str())
+                                    .map_err(persist_err)?
+                                    .expect("addr_index must always point at a stored event");
+                                let current_json = current_guard.value().to_string();
+                                drop(current_guard);
+                                let current_event = decode_stored_event(&current_json).event;
 
-                            match current_id_hex {
-                                None => {
+                                if candidate_wins(&frozen, &current_event) {
+                                    let current_id = EventId::from_hex(&current_id_hex)
+                                        .expect("redb: decode addr_index id");
+                                    let replaced = remove_row_in_txn(
+                                        &mut events,
+                                        &mut addr_index,
+                                        &mut expiration_index,
+                                        &mut by_author,
+                                        &mut by_kind,
+                                        current_id,
+                                        |_| true,
+                                    )?
+                                    .expect("addr_index must always point at a stored event");
+
                                     events
                                         .insert(id_hex.as_str(), encoded.as_str())
                                         .map_err(persist_err)?;
@@ -2194,84 +2551,28 @@ impl EventStore for RedbStore {
                                             .map_err(persist_err)?;
                                     }
                                     (
-                                        AcceptOutcome::Inserted {
+                                        AcceptOutcome::Superseded {
                                             intent_id,
                                             receipt_id,
                                             row: stored,
+                                            replaced: Box::new(replaced.clone()),
+                                        },
+                                        Some(replaced),
+                                    )
+                                } else {
+                                    (
+                                        AcceptOutcome::Stale {
+                                            intent_id,
+                                            receipt_id,
                                         },
                                         None,
                                     )
                                 }
-                                Some(current_id_hex) => {
-                                    let current_guard = events
-                                        .get(current_id_hex.as_str())
-                                        .map_err(persist_err)?
-                                        .expect("addr_index must always point at a stored event");
-                                    let current_json = current_guard.value().to_string();
-                                    drop(current_guard);
-                                    let current_event = decode_stored_event(&current_json).event;
-
-                                    if candidate_wins(&frozen, &current_event) {
-                                        let current_id = EventId::from_hex(&current_id_hex)
-                                            .expect("redb: decode addr_index id");
-                                        let replaced = remove_row_in_txn(
-                                            &mut events,
-                                            &mut addr_index,
-                                            &mut expiration_index,
-                                            &mut by_author,
-                                            &mut by_kind,
-                                            current_id,
-                                            |_| true,
-                                        )?
-                                        .expect("addr_index must always point at a stored event");
-
-                                        events
-                                            .insert(id_hex.as_str(), encoded.as_str())
-                                            .map_err(persist_err)?;
-                                        addr_index
-                                            .insert(addr_key_str.as_str(), id_hex.as_str())
-                                            .map_err(persist_err)?;
-                                        by_author
-                                            .insert(
-                                                by_author_key(&frozen.pubkey, &frozen.id).as_str(),
-                                                id_hex.as_str(),
-                                            )
-                                            .map_err(persist_err)?;
-                                        by_kind
-                                            .insert(
-                                                by_kind_key(frozen.kind, &frozen.id).as_str(),
-                                                id_hex.as_str(),
-                                            )
-                                            .map_err(persist_err)?;
-                                        if let Some(ts) = frozen.tags.expiration().copied() {
-                                            let exp_key = expiration_key(ts, &frozen.id);
-                                            expiration_index
-                                                .insert(exp_key.as_str(), id_hex.as_str())
-                                                .map_err(persist_err)?;
-                                        }
-                                        (
-                                            AcceptOutcome::Superseded {
-                                                intent_id,
-                                                receipt_id,
-                                                row: stored,
-                                                replaced: Box::new(replaced.clone()),
-                                            },
-                                            Some(replaced),
-                                        )
-                                    } else {
-                                        (
-                                            AcceptOutcome::Stale {
-                                                intent_id,
-                                                receipt_id,
-                                            },
-                                            None,
-                                        )
-                                    }
-                                }
                             }
                         }
                     }
-                };
+                }
+            };
 
             // R7: the intent's full journal payload AND the retained
             // receipt record commit in this SAME transaction as the
@@ -2386,7 +2687,6 @@ impl EventStore for RedbStore {
                         .expect("redb: decode frozen event json");
                     let frozen_id = frozen_event.id;
                     let frozen_id_hex = frozen_id.to_hex();
-                    let is_deletion = frozen_event.kind == Kind::EventDeletion;
 
                     // Architecture review correction (load-bearing): is
                     // this intent AMONG the owners of the LIVE row at its
@@ -2568,88 +2868,29 @@ impl EventStore for RedbStore {
                     // co-owner separately calls `promote_signed` itself.
                     // An offline co-owner signer that never calls back
                     // must never strand its receipt behind an event
-                    // that's already validly signed. Each owner's own
-                    // displaced stash (if any) is dropped too (R6) and,
-                    // for a kind:5 draft, each owner's own suppression
-                    // claims commit to authoritative permanent tombstones
-                    // alongside `intent_id`'s.
-                    let mut co_signed = Vec::new();
-                    for owner_id in &owners {
-                        let owner_key = intent_key(*owner_id);
-                        outbox_displaced
-                            .remove(owner_key.as_str())
-                            .map_err(persist_err)?;
-                        let owner_intent_json = outbox_intents
-                            .get(owner_key.as_str())
-                            .map_err(persist_err)?
-                            .map(|guard| guard.value().to_string());
-                        if let Some(owner_intent_json) = owner_intent_json {
-                            let mut owner_record: OutboxIntentRecord =
-                                serde_json::from_str(&owner_intent_json)
-                                    .expect("redb: decode outbox intent");
-                            if owner_record.sig_state != IntentSigState::Signed {
-                                owner_record.sig_state = IntentSigState::Signed;
-                                owner_record.frozen_json = row.event.as_json();
-                                let encoded_owner = serde_json::to_string(&owner_record)
-                                    .expect("redb: encode outbox intent");
-                                outbox_intents
-                                    .insert(owner_key.as_str(), encoded_owner.as_str())
-                                    .map_err(persist_err)?;
-                                update_outbox_receipt(
-                                    &mut outbox_receipts,
-                                    owner_record.receipt_id,
-                                    ReceiptState::Signed,
-                                )?;
-                                if *owner_id != intent_id {
-                                    co_signed.push(*owner_id);
-                                }
-                            }
-                        }
-                        if is_deletion {
-                            let claims_json = outbox_kind5_claims
-                                .remove(owner_key.as_str())
-                                .map_err(persist_err)?
-                                .map(|guard| guard.value().to_string());
-                            if let Some(claims_json) = claims_json {
-                                let claims: Vec<SuppressClaimRecord> =
-                                    serde_json::from_str(&claims_json)
-                                        .expect("redb: decode claims");
-                                for claim in claims {
-                                    match claim {
-                                        SuppressClaimRecord::Id(id_key) => {
-                                            remove_claimant_in_txn(
-                                                &mut outbox_suppress_by_id,
-                                                &id_key,
-                                                *owner_id,
-                                            )?;
-                                        }
-                                        SuppressClaimRecord::Addr { key: addr_key, .. } => {
-                                            remove_addr_claimant_in_txn(
-                                                &mut outbox_suppress_by_addr,
-                                                &addr_key,
-                                                *owner_id,
-                                            )?;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if is_deletion {
-                        // Run once, not per-owner: this is a single
-                        // physical operation on the shared underlying
-                        // targets, not a per-intent one.
-                        process_kind5_deletions(
-                            &mut events,
-                            &mut addr_index,
-                            &mut tombstones,
-                            &mut addr_tombstones,
-                            &mut expiration_index,
-                            &mut by_author,
-                            &mut by_kind,
-                            &row.event,
-                        )?;
-                    }
+                    // that's already validly signed. Shared with
+                    // `reinsert_stashed_in_txn`'s dedup collision and
+                    // `insert`'s relay-dedup-onto-pending path.
+                    let co_signed: Vec<IntentId> = fan_out_signed_in_txn(
+                        &mut events,
+                        &mut addr_index,
+                        &mut tombstones,
+                        &mut addr_tombstones,
+                        &mut expiration_index,
+                        &mut by_author,
+                        &mut by_kind,
+                        &mut outbox_intents,
+                        &mut outbox_receipts,
+                        &mut outbox_displaced,
+                        &mut outbox_kind5_claims,
+                        &mut outbox_suppress_by_id,
+                        &mut outbox_suppress_by_addr,
+                        &owners,
+                        &row.event,
+                    )?
+                    .into_iter()
+                    .filter(|owner_id| *owner_id != intent_id)
+                    .collect();
 
                     PromoteOutcome::Promoted {
                         row: Box::new(row),
@@ -2671,8 +2912,8 @@ impl EventStore for RedbStore {
         let outcome = {
             let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
             let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-            let tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
-            let addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
+            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
@@ -2828,11 +3069,17 @@ impl EventStore for RedbStore {
                             Some(json) => reinsert_stashed_in_txn(
                                 &mut events,
                                 &mut addr_index,
-                                &tombstones,
-                                &addr_tombstones,
+                                &mut tombstones,
+                                &mut addr_tombstones,
                                 &mut expiration_index,
                                 &mut by_author,
                                 &mut by_kind,
+                                &mut outbox_intents,
+                                &mut outbox_receipts,
+                                &mut outbox_displaced,
+                                &mut outbox_kind5_claims,
+                                &mut outbox_suppress_by_id,
+                                &mut outbox_suppress_by_addr,
                                 decode_stored_event(&json),
                             )?
                             .map(Box::new),

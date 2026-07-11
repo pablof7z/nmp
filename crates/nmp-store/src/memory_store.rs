@@ -268,13 +268,74 @@ impl MemoryStore {
     fn reinsert_stashed(&mut self, se: StoredEvent) -> Option<StoredEvent> {
         let event = se.event.clone();
 
-        if let Some(existing) = self.by_id.get_mut(&event.id) {
-            for (relay, at) in &se.provenance.seen {
-                existing
-                    .provenance
-                    .merge_observation(&RelayObserved::new(relay.clone(), *at));
+        if self.by_id.contains_key(&event.id) {
+            // Architecture review requirement (issue #2 P0 correction,
+            // codex-nova ruling): union the owner sets and apply Signed
+            // dominance — never silently drop the stashed entry's OWN
+            // ownership/signature-state fact just because this exact id
+            // happens to already be held. If the union newly becomes
+            // Signed for previously-Pending owners, fan out to all of
+            // them — the SAME invariant `promote_signed` enforces
+            // explicitly, since a dedup collision here is functionally
+            // no different from a relay independently confirming the
+            // signature.
+            let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
+            {
+                let existing = self
+                    .by_id
+                    .get_mut(&event.id)
+                    .expect("just checked this id exists");
+                for (relay, at) in &se.provenance.seen {
+                    existing
+                        .provenance
+                        .merge_observation(&RelayObserved::new(relay.clone(), *at));
+                }
+                if let Some(stashed_local) = &se.provenance.local {
+                    let existing_signed = existing
+                        .provenance
+                        .local
+                        .as_ref()
+                        .is_some_and(|l| l.sig_state == SigState::Signed);
+                    let stashed_signed = stashed_local.sig_state == SigState::Signed;
+                    if !existing_signed && stashed_signed {
+                        existing.event.sig = se.event.sig;
+                    }
+                    let mut owners = existing
+                        .provenance
+                        .local
+                        .as_ref()
+                        .map(|l| l.owners.clone())
+                        .unwrap_or_default();
+                    owners.extend(stashed_local.owners.iter().copied());
+                    let result_signed = existing_signed || stashed_signed;
+                    existing.provenance.local = Some(LocalOrigin {
+                        owners: owners.clone(),
+                        sig_state: if result_signed {
+                            SigState::Signed
+                        } else {
+                            SigState::Pending
+                        },
+                    });
+                    if result_signed && !existing_signed {
+                        fan_out_owners = Some(owners);
+                    }
+                }
             }
-            return Some(existing.clone());
+            if let Some(owners) = fan_out_owners {
+                let canonical = self
+                    .by_id
+                    .get(&event.id)
+                    .expect("just updated this row")
+                    .event
+                    .clone();
+                self.fan_out_signed(&owners, &canonical);
+            }
+            return Some(
+                self.by_id
+                    .get(&event.id)
+                    .expect("just updated this row")
+                    .clone(),
+            );
         }
         if self.tombstone_refuses(&event) {
             return None;
@@ -591,6 +652,55 @@ impl MemoryStore {
             }
         }
     }
+
+    /// Atomically transition every intent in `owners` whose OWN journal is
+    /// still `Pending` to `Signed`, using `canonical_event` as the frozen
+    /// bytes each owner's journal now reflects, dropping each owner's own
+    /// displaced stash too (R6) and closing each owner's own kind:5
+    /// suppression claims if `canonical_event` is a deletion (running the
+    /// FULL, permanent `process_kind5_deletions` once, not per-owner).
+    /// Architecture review requirement (issue #2 P0 correction, codex-nova
+    /// ruling): `promote_signed`, `reinsert_stashed`'s dedup collision,
+    /// and `insert`'s relay-dedup onto a pending sentinel must all fan out
+    /// IDENTICALLY — an offline co-owner signer must never strand a
+    /// receipt behind an event that's already validly signed, regardless
+    /// of HOW that signature became canonical. Returns every intent THIS
+    /// call actually transitioned (an already-`Signed` owner is left
+    /// untouched and excluded).
+    fn fan_out_signed(
+        &mut self,
+        owners: &BTreeSet<IntentId>,
+        canonical_event: &Event,
+    ) -> Vec<IntentId> {
+        let mut transitioned = Vec::new();
+        let is_deletion = canonical_event.kind == Kind::EventDeletion;
+        for owner_id in owners {
+            self.outbox_displaced.remove(owner_id);
+            if let Some(record) = self.outbox_intents.get_mut(owner_id) {
+                if record.sig_state != IntentSigState::Signed {
+                    record.sig_state = IntentSigState::Signed;
+                    record.frozen = canonical_event.clone();
+                    transitioned.push(*owner_id);
+                }
+            }
+            if let Some(receipt) = self
+                .outbox_receipts
+                .values_mut()
+                .find(|r| r.intent_id == Some(*owner_id))
+            {
+                receipt.state = ReceiptState::Signed;
+            }
+            if is_deletion {
+                if let Some(claims) = self.outbox_kind5_claims.remove(owner_id) {
+                    self.drop_kind5_claims(*owner_id, &claims);
+                }
+            }
+        }
+        if is_deletion {
+            self.process_kind5_deletions(canonical_event);
+        }
+        transitioned
+    }
 }
 
 /// True iff `se` is a locally-authored row still awaiting a signature —
@@ -619,8 +729,45 @@ impl EventStore for MemoryStore {
 
         // Dedup-by-id FIRST: merge provenance, no index churn, before any
         // tombstone or supersession logic (ledger #5).
-        if let Some(existing) = self.by_id.get_mut(&event.id) {
-            let grew = existing.provenance.merge_observation(&from);
+        if self.by_id.contains_key(&event.id) {
+            let mut fan_out: Option<(BTreeSet<IntentId>, Event)> = None;
+            let grew;
+            {
+                let existing = self
+                    .by_id
+                    .get_mut(&event.id)
+                    .expect("just checked this id exists");
+                grew = existing.provenance.merge_observation(&from);
+                // Architecture review requirement (issue #2 P0
+                // correction, codex-nova ruling): a relay delivering the
+                // real signed event for a still-PENDING local draft is
+                // functionally the SAME signature-adoption/fan-out
+                // invariant `promote_signed` performs explicitly — adopt
+                // it, mark every co-owner `Signed`, and fan out, rather
+                // than silently keeping our own sentinel forever (a
+                // caller-supplied `event` here is, by this door's own
+                // contract, always a genuine relay delivery — never our
+                // OWN sentinel — so its signature is always safe to
+                // adopt).
+                let needs_adoption = existing
+                    .provenance
+                    .local
+                    .as_ref()
+                    .is_some_and(|l| l.sig_state == SigState::Pending);
+                if needs_adoption {
+                    existing.event.sig = event.sig;
+                    let local = existing
+                        .provenance
+                        .local
+                        .as_mut()
+                        .expect("just checked this row carries local provenance");
+                    local.sig_state = SigState::Signed;
+                    fan_out = Some((local.owners.clone(), existing.event.clone()));
+                }
+            }
+            if let Some((owners, canonical)) = fan_out {
+                self.fan_out_signed(&owners, &canonical);
+            }
             return InsertOutcome::Duplicate {
                 provenance_grew: grew,
             };
@@ -865,14 +1012,40 @@ impl EventStore for MemoryStore {
         // (that always arrives through `insert`, after this row's real
         // signature already replaced the sentinel — see `promote_signed`'s
         // doc). The intent is still journaled: it still gets signed and
-        // delivered even though it does not WIN a fresh row here.
-        if self.by_id.contains_key(&frozen.id) {
+        // delivered even though it does not WIN a fresh row here. Checked
+        // against BOTH the live `EVENTS` row AND every OTHER intent's
+        // `OUTBOX_DISPLACED` stash (issue #2 P0 correction, codex-nova
+        // ruling): a duplicate accepted while its canonical predecessor
+        // is currently sitting displaced (superseded by a later local
+        // edit, not yet restored) must ALSO join that stash entry's owner
+        // set — otherwise it would be silently treated as a fresh insert,
+        // stranding it outside the shared ownership entirely.
+        enum DupLoc {
+            Live,
+            Stash(IntentId),
+        }
+        let dup_loc = if self.by_id.contains_key(&frozen.id) {
+            Some(DupLoc::Live)
+        } else {
+            self.outbox_displaced
+                .iter()
+                .find(|(_, se)| se.event.id == frozen.id)
+                .map(|(k, _)| DupLoc::Stash(*k))
+        };
+        if let Some(dup_loc) = dup_loc {
             let frozen_id = frozen.id;
-            let existing = self
-                .by_id
-                .get(&frozen_id)
-                .expect("just checked this id exists")
-                .clone();
+            let existing = match dup_loc {
+                DupLoc::Live => self
+                    .by_id
+                    .get(&frozen_id)
+                    .expect("just checked this id exists")
+                    .clone(),
+                DupLoc::Stash(stash_key) => self
+                    .outbox_displaced
+                    .get(&stash_key)
+                    .expect("just found this key")
+                    .clone(),
+            };
             // codex-nova ruling: a row with NO local provenance at all is
             // purely relay-observed — its `event.sig` is by construction
             // already real (never a sentinel, since `insert` only ever
@@ -908,14 +1081,26 @@ impl EventStore for MemoryStore {
                 .as_ref()
                 .map(|l| l.sig_state)
                 .unwrap_or(SigState::Signed);
-            self.by_id
-                .get_mut(&frozen_id)
-                .expect("just checked this id exists")
-                .provenance
-                .local = Some(LocalOrigin {
+            let updated_local = Some(LocalOrigin {
                 owners,
                 sig_state: row_sig_state,
             });
+            match dup_loc {
+                DupLoc::Live => {
+                    self.by_id
+                        .get_mut(&frozen_id)
+                        .expect("just checked this id exists")
+                        .provenance
+                        .local = updated_local;
+                }
+                DupLoc::Stash(stash_key) => {
+                    self.outbox_displaced
+                        .get_mut(&stash_key)
+                        .expect("just found this key")
+                        .provenance
+                        .local = updated_local;
+                }
+            }
 
             // Issue #61 P0 correction: an exact-duplicate kind:5 intent
             // must own an INDEPENDENT suppression claim too — otherwise
@@ -928,11 +1113,18 @@ impl EventStore for MemoryStore {
             if frozen.kind == Kind::EventDeletion && !already_signed {
                 self.process_kind5_deletions_provisional(intent_id, &frozen);
             }
-            let row = self
-                .by_id
-                .get(&frozen_id)
-                .expect("just checked this id exists")
-                .clone();
+            let row = match dup_loc {
+                DupLoc::Live => self
+                    .by_id
+                    .get(&frozen_id)
+                    .expect("just checked this id exists")
+                    .clone(),
+                DupLoc::Stash(stash_key) => self
+                    .outbox_displaced
+                    .get(&stash_key)
+                    .expect("just found this key")
+                    .clone(),
+            };
 
             // codex-nova ruling: a duplicate of an ALREADY-signed row
             // (local or relay) must itself start `Signed`, journaling the
@@ -1106,7 +1298,6 @@ impl EventStore for MemoryStore {
             return Ok(PromoteOutcome::NotFound);
         }
         let frozen_id = intent_record.frozen.id;
-        let is_deletion = intent_record.frozen.kind == Kind::EventDeletion;
 
         // Architecture review correction (load-bearing): is this intent
         // AMONG the owners of the LIVE row at its own frozen id? A
@@ -1231,43 +1422,14 @@ impl EventStore for MemoryStore {
         // sign atomically transitions EVERY co-owner's OWN journal/
         // receipt to `Signed` against the SAME canonical bytes, in THIS
         // SAME call — never lazily deferred until (or unless) each
-        // co-owner separately calls `promote_signed` itself. An offline
-        // co-owner signer that never calls back must never strand its
-        // receipt behind an event that's already validly signed. Each
-        // owner's own displaced stash (if any) is dropped too (R6) and,
-        // for a kind:5 draft, each owner's own suppression claims commit
-        // to authoritative permanent tombstones alongside `intent_id`'s.
-        let mut co_signed = Vec::new();
-        for owner_id in &owners {
-            self.outbox_displaced.remove(owner_id);
-            if let Some(record) = self.outbox_intents.get_mut(owner_id) {
-                if record.sig_state != IntentSigState::Signed {
-                    record.sig_state = IntentSigState::Signed;
-                    record.frozen = row.event.clone();
-                    if *owner_id != intent_id {
-                        co_signed.push(*owner_id);
-                    }
-                }
-            }
-            if let Some(receipt) = self
-                .outbox_receipts
-                .values_mut()
-                .find(|r| r.intent_id == Some(*owner_id))
-            {
-                receipt.state = ReceiptState::Signed;
-            }
-            if is_deletion {
-                if let Some(claims) = self.outbox_kind5_claims.remove(owner_id) {
-                    self.drop_kind5_claims(*owner_id, &claims);
-                }
-            }
-        }
-        if is_deletion {
-            // Run once, not per-owner: this is a single physical
-            // operation on the shared underlying targets, not a
-            // per-intent one — see `process_kind5_deletions`'s own doc.
-            self.process_kind5_deletions(&row.event);
-        }
+        // co-owner separately calls `promote_signed` itself. `co_signed`
+        // excludes `intent_id` itself (already conveyed by `Promoted`'s
+        // own `row`).
+        let co_signed = self
+            .fan_out_signed(&owners, &row.event)
+            .into_iter()
+            .filter(|owner_id| *owner_id != intent_id)
+            .collect();
 
         Ok(PromoteOutcome::Promoted {
             row: Box::new(row),
