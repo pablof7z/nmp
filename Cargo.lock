@@ -1369,6 +1369,7 @@ name = "nmp-engine"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "libc",
  "negentropy",
  "nmp-grammar",
  "nmp-resolver",
@@ -1378,9 +1379,11 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing-subscriber",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
