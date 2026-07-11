@@ -46,33 +46,26 @@ struct OutboxIntentRecord {
     accepted_at: Timestamp,
 }
 
-/// What a PENDING (unsigned) kind:5 draft provisionally did at
-/// `accept_write` time, staged alongside its intent so `promote_signed`
-/// can finish/commit it and `compensate_write` can atomically reverse it
-/// (architecture review requirement, codex-nova verdict: "all provisional
-/// semantic side effects must compensate atomically before signature
-/// promotion... especially delete/tombstone effects" — cancelling a
-/// pending delete must restore the content, not just close the intent's
-/// journal). Only e-tag (id) targets are processed provisionally here —
-/// a-tag (addressable) targets are DEFERRED to `promote_signed` (see its
-/// doc for why the ceiling-based addr-tombstone mechanism is not safely
-/// provisional in the presence of concurrent writers). This is NOT a
-/// second category of PERMANENT tombstone: retraction doc §7's "PERMANENT,
-/// never GC-claimed" ruling governs tombstones from a SIGNED/published
-/// kind:5 only. A provisional entry here still refuses redelivery of its
-/// target while pending (`deleted_ids`/`TOMBSTONES` don't distinguish
-/// provisional from authoritative — existence is existence), but it is
-/// reversible: deleted outright on cancel, simply left in place (already
-/// correct) on promote.
-#[derive(Debug, Clone, Default)]
-struct Kind5Stash {
-    /// Every currently-held e-tag target this draft provisionally
-    /// removed — restored (full original provenance) on cancel.
-    deleted: Vec<StoredEvent>,
-    /// The exact `deleted_ids` composite keys this draft wrote fresh —
-    /// removed outright on cancel (nothing else could have depended on
-    /// them yet, since they didn't exist before this draft).
-    id_tombstone_keys: Vec<(EventId, PublicKey)>,
+/// A single provisional kind:5 suppression claim (architecture review
+/// requirement — codex-nova's suppression-claim model, replacing a
+/// withdrawn design that physically moved a target row into a per-intent
+/// stash: that made the target's OWN `promote_signed`/`compensate_write`
+/// blind to it, since neither searches a stash, and made an exact-
+/// `Duplicate` kind:5 intent's promotion unsound — it committed a real
+/// deletion with no stash of its own to reverse if something went wrong).
+/// A claim names EITHER an e-tag id target (keyed exactly like
+/// `deleted_ids`: `(target id, claiming author)`, so a future arrival at
+/// that id is only ever suppressed if its real author — fixed by the id's
+/// hash — matches) OR an a-tag address target (keyed like `deleted_addrs`:
+/// the address alone, since `AddressKey` already encodes the pubkey and
+/// authorization was checked immediately at claim-creation time, exactly
+/// as `process_kind5_deletions` already does for the permanent case).
+/// NEVER moves or removes the row it names — see `MemoryStore::
+/// suppress_by_id`/`suppress_by_addr`'s doc for how visibility is decided.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SuppressClaim {
+    Id(EventId, PublicKey),
+    Addr(AddressKey),
 }
 
 /// An address-tombstone's durable fact: which kind:5 event set the
@@ -154,12 +147,21 @@ pub struct MemoryStore {
     /// `outbox_intents`'s open-work rows (architecture review correction —
     /// see `ReceiptState`'s doc). Never pruned by this unit.
     outbox_receipts: HashMap<u64, RecoveredReceipt>,
-    /// `OUTBOX_KIND5_STASH` mirror: what a still-open, pending kind:5
-    /// intent provisionally deleted, kept reversible until
-    /// `promote_signed` (commits it — drops the stash, the deletion
-    /// already stands) or `compensate_write` (reverses it) — see
-    /// `Kind5Stash`'s doc.
-    outbox_kind5_stash: HashMap<IntentId, Kind5Stash>,
+    /// Every still-open kind:5 intent's OWN suppression claims (see
+    /// [`SuppressClaim`]'s doc) — dropped wholesale by `promote_signed`
+    /// (after committing the deletion for real) or `compensate_write`
+    /// (reversing it, nothing else to do).
+    outbox_kind5_claims: HashMap<IntentId, Vec<SuppressClaim>>,
+    /// Reverse index: which intents currently claim a given `(target id,
+    /// claiming author)` pair — consulted by `is_suppressed` to decide
+    /// `query` visibility. More than one intent can claim the SAME target
+    /// (two independent pending deletes of the same event before either
+    /// signs or cancels) — hidden while ANY claim applies, visible again
+    /// only once EVERY claim on it is gone.
+    suppress_by_id: HashMap<(EventId, PublicKey), HashSet<IntentId>>,
+    /// Reverse index for address claims, same treatment as
+    /// [`Self::suppress_by_id`].
+    suppress_by_addr: HashMap<AddressKey, HashSet<IntentId>>,
 }
 
 impl MemoryStore {
@@ -427,38 +429,115 @@ impl MemoryStore {
     }
 
     /// The PENDING half of kind:5 processing (architecture review
-    /// requirement — see `Kind5Stash`'s doc): applies ONLY the e-tag (id)
-    /// target deletions, immediately and REVERSIBLY. Unlike
-    /// `process_kind5_deletions`, a-tag (addressable) targets are left
-    /// entirely untouched here — deferred to `promote_signed`, which runs
-    /// the FULL `process_kind5_deletions` (idempotent for the e-tags this
-    /// already handled; fresh for any a-tags). Returns the removed rows
-    /// (to restore on cancel) and the exact `deleted_ids` keys written (to
-    /// remove on cancel) — see `Kind5Stash`.
+    /// requirement — see [`SuppressClaim`]'s doc): stages a REVERSIBLE
+    /// suppression claim over every e-tag id target and a-tag address
+    /// target this draft names, hiding whatever row currently lives there
+    /// from `query` — via `is_suppressed`, consulted at read time — WITHOUT
+    /// moving or removing it from `by_id`/`addr_index`. `promote_signed`
+    /// later drops these claims and runs the FULL, permanent
+    /// `process_kind5_deletions`; `compensate_write` just drops them (the
+    /// target reappears immediately — nothing to re-insert, it never
+    /// left). Returns the rows that just became hidden (for
+    /// `AcceptOutcome::Kind5Processed`).
     fn process_kind5_deletions_provisional(
         &mut self,
+        intent_id: IntentId,
         deleting: &Event,
-    ) -> (Vec<StoredEvent>, Vec<(EventId, PublicKey)>) {
-        let mut deleted = Vec::new();
-        let mut tombstone_keys = Vec::new();
+    ) -> Vec<StoredEvent> {
+        let mut hidden = Vec::new();
+        let mut claims = Vec::new();
 
         let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
         for target_id in target_ids {
-            let authorized_and_held = self
-                .by_id
-                .get(&target_id)
-                .is_some_and(|se| se.event.pubkey == deleting.pubkey);
-            if authorized_and_held {
-                if let Some(removed) = self.remove(target_id, RetractReason::Deleted) {
-                    deleted.push(removed);
+            self.suppress_by_id
+                .entry((target_id, deleting.pubkey))
+                .or_default()
+                .insert(intent_id);
+            claims.push(SuppressClaim::Id(target_id, deleting.pubkey));
+            if let Some(se) = self.by_id.get(&target_id) {
+                if se.event.pubkey == deleting.pubkey {
+                    hidden.push(se.clone());
                 }
             }
-            self.deleted_ids
-                .insert((target_id, deleting.pubkey), deleting.id);
-            tombstone_keys.push((target_id, deleting.pubkey));
         }
 
-        (deleted, tombstone_keys)
+        let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
+        for coord in coords {
+            if coord.public_key != deleting.pubkey {
+                // NIP-09 author-only: a coordinate naming a pubkey other
+                // than this deletion's own author carries no authority at
+                // all here — skip entirely, no claim staged.
+                continue;
+            }
+            let Some(key) = address_key_for_coordinate(&coord) else {
+                continue;
+            };
+            self.suppress_by_addr
+                .entry(key.clone())
+                .or_default()
+                .insert(intent_id);
+            claims.push(SuppressClaim::Addr(key.clone()));
+            if let Some(current_id) = self.addr_index.get(&key).copied() {
+                if let Some(se) = self.by_id.get(&current_id) {
+                    hidden.push(se.clone());
+                }
+            }
+        }
+
+        self.outbox_kind5_claims.insert(intent_id, claims);
+        hidden
+    }
+
+    /// `true` iff `se` is currently hidden by ANY still-open kind:5
+    /// suppression claim — consulted by `query` and `gc`. Never affects
+    /// `by_id`/`addr_index` themselves: a suppressed row is fully present,
+    /// just filtered out of read results (see [`SuppressClaim`]'s doc).
+    fn is_suppressed(&self, se: &StoredEvent) -> bool {
+        if self
+            .suppress_by_id
+            .get(&(se.event.id, se.event.pubkey))
+            .is_some_and(|claimants| !claimants.is_empty())
+        {
+            return true;
+        }
+        if let Some(key) = address_key_for(&se.event) {
+            if self
+                .suppress_by_addr
+                .get(&key)
+                .is_some_and(|claimants| !claimants.is_empty())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove `intent_id` from every reverse-index entry `claims` named,
+    /// pruning any claimant set left empty — shared by `promote_signed`
+    /// (after committing the deletion) and `compensate_write` (reversing
+    /// it). Never touches `by_id`/`addr_index`: a claim is pure,
+    /// independently-droppable metadata.
+    fn drop_kind5_claims(&mut self, intent_id: IntentId, claims: &[SuppressClaim]) {
+        for claim in claims {
+            match claim {
+                SuppressClaim::Id(target_id, author) => {
+                    if let Some(claimants) = self.suppress_by_id.get_mut(&(*target_id, *author)) {
+                        claimants.remove(&intent_id);
+                        if claimants.is_empty() {
+                            self.suppress_by_id.remove(&(*target_id, *author));
+                        }
+                    }
+                }
+                SuppressClaim::Addr(key) => {
+                    if let Some(claimants) = self.suppress_by_addr.get_mut(key) {
+                        claimants.remove(&intent_id);
+                        if claimants.is_empty() {
+                            self.suppress_by_addr.remove(key);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -599,8 +678,13 @@ impl EventStore for MemoryStore {
         // iterating it and matching is "current winners only" by
         // construction. Matching is delegated entirely to
         // `nostr::Filter::match_event`; no hand-rolled matching here.
+        // `is_suppressed` additionally excludes anything a still-open
+        // kind:5 intent has provisionally claimed (architecture review
+        // requirement — see `SuppressClaim`'s doc): the row stays fully
+        // present in `by_id`, only hidden from this read path.
         self.by_id
             .values()
+            .filter(|se| !self.is_suppressed(se))
             .filter(|se| filter.match_event(&se.event, MatchEventOptions::new()))
             .cloned()
             .collect()
@@ -642,13 +726,19 @@ impl EventStore for MemoryStore {
         // an unsigned pending row (Fable checkpoint R5 — an open intent
         // must never be evicted before it ever signs; once
         // `promote_signed` flips it to `Signed` it becomes an ordinary
-        // event again, GC-able like any other under `claims`).
+        // event again, GC-able like any other under `claims`). A row
+        // currently hidden by a still-open kind:5 suppression claim is
+        // pinned the same way (architecture review requirement — GC must
+        // never evict a target a pending cancel/promote can still act on;
+        // NIP-40 expiry may still remove it, that's a separate, accepted
+        // path).
         let victims: Vec<EventId> = self
             .by_id
             .iter()
             .filter(|(_, se)| {
                 address_key_for(&se.event).is_none()
                     && !is_open_local_intent(se)
+                    && !self.is_suppressed(se)
                     && !claims.is_claimed(&se.event)
             })
             .map(|(id, _)| *id)
@@ -756,33 +846,26 @@ impl EventStore for MemoryStore {
                 self.index_expiration(&stored);
                 self.by_id.insert(stored.event.id, stored.clone());
                 // Architecture review correction: a locally-composed
-                // kind:5 draft runs the SAME author-verified
-                // tombstone-write processing `insert` runs for a
-                // relay-observed kind:5, immediately, in this same call —
+                // kind:5 draft stages a REVERSIBLE suppression claim over
+                // every target it names, immediately, in this same call —
                 // issue #2's "no app optimistic mirror" promise extends to
                 // local deletions too (kind:5 has no replaceable/
                 // addressable address, so this branch is the only one it
                 // can ever reach, mirroring `insert`'s own kind:5
-                // invariant). Only the e-tag half runs provisionally/
-                // reversibly here — see `Kind5Stash`'s doc — so the whole
-                // effect can be atomically reversed by `compensate_write`
-                // if this draft is cancelled before it ever signs.
+                // invariant). See `SuppressClaim`'s doc for why this
+                // hides rather than removes: `compensate_write` can then
+                // simply drop the claim (nothing to re-insert, the row
+                // never left), and the target's OWN promote_signed/
+                // compensate_write keep working on exactly the row they
+                // always did.
                 if is_deletion {
-                    let (deleted, id_tombstone_keys) =
-                        self.process_kind5_deletions_provisional(&frozen);
-                    self.outbox_kind5_stash.insert(
-                        intent_id,
-                        Kind5Stash {
-                            deleted: deleted.clone(),
-                            id_tombstone_keys,
-                        },
-                    );
+                    let hidden = self.process_kind5_deletions_provisional(intent_id, &frozen);
                     (
                         AcceptOutcome::Kind5Processed {
                             intent_id,
                             receipt_id,
                             row: stored,
-                            deleted,
+                            hidden,
                         },
                         None,
                     )
@@ -978,16 +1061,20 @@ impl EventStore for MemoryStore {
             receipt.state = ReceiptState::Signed;
         }
 
-        // Architecture review requirement (kind:5 provisional-tombstone
-        // commit): this intent's PENDING delete effects (if any — see
-        // `Kind5Stash`) become AUTHORITATIVE the moment it signs. Nothing
-        // needs undoing for the e-tag half already applied at accept time
-        // (it's already sitting there, correctly, as a permanent fact once
-        // this drops the stash); the a-tag half was deliberately deferred
-        // until now — run the FULL kind:5 processing so any addressable
-        // targets are finally (and only now) removed.
+        // Architecture review requirement (kind:5 suppression-claim
+        // commit): this intent's PENDING delete becomes AUTHORITATIVE the
+        // moment it signs. Drop this intent's OWN claims (their job is
+        // done — the deletion no longer needs to be provisional) and run
+        // the FULL, permanent `process_kind5_deletions`, which does not
+        // care whether a claim existed at all: it operates directly on
+        // `by_id`/`addr_index` (this is also what makes promoting an
+        // exact-`Duplicate` kind:5 intent sound even though a `Duplicate`
+        // never staged its own claim — see `AcceptOutcome::Kind5Processed`'s
+        // doc).
         if is_deletion {
-            self.outbox_kind5_stash.remove(&intent_id);
+            if let Some(claims) = self.outbox_kind5_claims.remove(&intent_id) {
+                self.drop_kind5_claims(intent_id, &claims);
+            }
             self.process_kind5_deletions(&row.event);
         }
 
@@ -1058,17 +1145,35 @@ impl EventStore for MemoryStore {
             .and_then(|displaced| self.reinsert_stashed(displaced))
             .map(Box::new);
 
-        // Architecture review requirement (kind:5 provisional-tombstone
-        // reversal): if this was a still-pending kind:5 draft, atomically
-        // undo everything it provisionally did — remove its tombstone
-        // claims and restore every target it removed. Cancelling a delete
-        // must bring the content back, not merely close the journal.
-        if let Some(stash) = self.outbox_kind5_stash.remove(&intent_id) {
-            for key in stash.id_tombstone_keys {
-                self.deleted_ids.remove(&key);
-            }
-            for deleted in stash.deleted {
-                self.reinsert_stashed(deleted);
+        // Architecture review requirement (kind:5 suppression-claim
+        // reversal): if this was a still-pending kind:5 draft, drop its
+        // OWN claims outright — nothing was ever moved or removed, so
+        // there is nothing to re-insert; the target reappears in `query`
+        // the instant no claim names it anymore. `revealed` names every
+        // target that ACTUALLY became visible again, excluding one still
+        // hidden by some OTHER intent's overlapping claim, or already
+        // gone for good because a different intent already promoted its
+        // own deletion of the same target (see `AcceptOutcome::
+        // Kind5Processed`'s doc on why that stays sound even for an
+        // exact-`Duplicate` intent that never staged a claim of its own).
+        let mut revealed = Vec::new();
+        if let Some(claims) = self.outbox_kind5_claims.remove(&intent_id) {
+            self.drop_kind5_claims(intent_id, &claims);
+            let mut seen_targets = HashSet::new();
+            for claim in &claims {
+                let target_id = match claim {
+                    SuppressClaim::Id(target_id, _) => Some(*target_id),
+                    SuppressClaim::Addr(key) => self.addr_index.get(key).copied(),
+                };
+                if let Some(target_id) = target_id {
+                    if seen_targets.insert(target_id) {
+                        if let Some(se) = self.by_id.get(&target_id) {
+                            if !self.is_suppressed(se) {
+                                revealed.push(se.clone());
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1080,7 +1185,7 @@ impl EventStore for MemoryStore {
             receipt.state = ReceiptState::Compensated;
         }
 
-        Ok(CompensateOutcome::Compensated { restored })
+        Ok(CompensateOutcome::Compensated { restored, revealed })
     }
 
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {

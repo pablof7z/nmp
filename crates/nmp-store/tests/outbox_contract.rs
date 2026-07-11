@@ -18,6 +18,7 @@ use nmp_store::{
     InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState,
     RedbStore, RefuseReason, RelayObserved, RetractReason, SigState, WriteDurability,
 };
+use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 fn keys() -> Keys {
@@ -244,7 +245,7 @@ fn compensate_removes_pending_and_restores_displaced() {
             .compensate_write(intent_b)
             .expect("compensate_write persistence");
         match compensated {
-            CompensateOutcome::Compensated { restored } => {
+            CompensateOutcome::Compensated { restored, .. } => {
                 let restored = restored.expect("the displaced predecessor is restored");
                 assert_eq!(restored.event.id, frozen_a_id);
             }
@@ -837,7 +838,7 @@ fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
             .expect("compensate persistence");
         assert!(matches!(
             compensated_stale2,
-            CompensateOutcome::Compensated { restored: None }
+            CompensateOutcome::Compensated { restored: None, .. }
         ));
     });
 }
@@ -883,7 +884,7 @@ fn chained_local_supersession_promote_displaced_then_cancel_newer_restores_signe
         .compensate_write(intent_b)
         .expect("compensate persistence");
     match compensated_b {
-        CompensateOutcome::Compensated { restored } => {
+        CompensateOutcome::Compensated { restored, .. } => {
             let restored = restored.expect("A restored");
             assert_eq!(restored.event.id, frozen_a_id);
             assert_eq!(
@@ -930,7 +931,7 @@ fn chained_local_supersession_cancel_displaced_then_cancel_newer_never_resurrect
             .expect("compensate persistence");
         assert!(matches!(
             compensated_a,
-            CompensateOutcome::Compensated { restored: None }
+            CompensateOutcome::Compensated { restored: None, .. }
         ));
 
         // Cancel B — must find NOTHING to restore (A was permanently
@@ -939,7 +940,7 @@ fn chained_local_supersession_cancel_displaced_then_cancel_newer_never_resurrect
             .compensate_write(intent_b)
             .expect("compensate persistence");
         match compensated_b {
-            CompensateOutcome::Compensated { restored } => {
+            CompensateOutcome::Compensated { restored, .. } => {
                 assert!(
                     restored.is_none(),
                     "a cancelled intent must never be resurrected by a later, unrelated compensation"
@@ -1052,11 +1053,14 @@ fn expiry_orphans_pending_intent_still_compensable() {
 /// Architecture-review blocker: a locally-composed kind:5 draft did not run
 /// any tombstone-write processing at accept time, so its targets stayed
 /// visible until the relay echoed the deletion back — conflicting with
-/// issue #2's "no app optimistic mirror" promise. `accept_write` must run
-/// the SAME author-verified tombstone-write processing `insert` runs, in
-/// the SAME transaction, so the delete is immediate and local.
+/// issue #2's "no app optimistic mirror" promise. `accept_write` must
+/// stage a suppression claim, in the SAME transaction, so the target is
+/// hidden immediately and locally (architecture review requirement —
+/// codex-nova's suppression-claim model, replacing a withdrawn design
+/// that physically moved the target row into a per-intent stash; see
+/// `AcceptOutcome::Kind5Processed`'s doc for why that was unsound).
 #[test]
-fn kind5_immediate_delete_removes_target_before_relay_echo() {
+fn kind5_immediate_delete_hides_target_before_relay_echo() {
     for_each_backend(|store| {
         let k = keys();
         // The target is already held (e.g. relay-observed earlier).
@@ -1073,83 +1077,40 @@ fn kind5_immediate_delete_removes_target_before_relay_echo() {
         // echo of the deletion itself.
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
+        let intent = outcome.journaled_intent_id().expect("journaled");
         match &outcome {
-            AcceptOutcome::Kind5Processed { deleted, .. } => {
-                assert_eq!(deleted.len(), 1);
-                assert_eq!(deleted[0].event.id, target_id);
+            AcceptOutcome::Kind5Processed { hidden, .. } => {
+                assert_eq!(hidden.len(), 1);
+                assert_eq!(hidden[0].event.id, target_id);
             }
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
 
-        // Immediate, local, optimistic delete — the target is gone right
-        // now, no relay round-trip needed.
+        // Immediate, local, optimistic HIDE — the target disappears from
+        // `query` right now, no relay round-trip needed.
         assert!(store.query(&Filter::new().id(target_id)).is_empty());
 
-        // A later redelivery of the (byte-identical) target is refused as
-        // tombstoned.
-        let redelivered = EventBuilder::new(Kind::TextNote, "please delete me")
-            .custom_created_at(Timestamp::from(50))
-            .sign_with_keys(&k)
-            .expect("sign redelivered target");
-        assert_eq!(redelivered.id, target_id);
-        let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
-        let reinsert = store.insert(
-            redelivered,
-            RelayObserved::new(relay2, Timestamp::from(300)),
-        );
-        assert!(matches!(
-            reinsert,
-            InsertOutcome::Refused(RefuseReason::Tombstoned)
-        ));
-    });
-}
-
-/// Architecture-review requirement (codex-nova verdict: "all provisional
-/// semantic side effects must compensate atomically before signature
-/// promotion... especially delete/tombstone effects"): cancelling a still-
-/// PENDING kind:5 draft must reverse its accept-time optimistic delete
-/// atomically, restoring every target it removed — not merely close the
-/// journal and leave the content gone.
-#[test]
-fn pending_kind5_delete_reverses_on_cancel_restoring_targets() {
-    for_each_backend(|store| {
-        let k = keys();
-        let target = EventBuilder::new(Kind::TextNote, "please delete me")
-            .custom_created_at(Timestamp::from(50))
-            .sign_with_keys(&k)
-            .expect("sign target");
-        let target_id = target.id;
-        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
-
-        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
-        let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
-        let intent = outcome.journaled_intent_id().expect("journaled");
-        assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
-
-        // Cancel BEFORE signing — the provisional delete must reverse
-        // atomically.
+        // It was never actually removed: cancelling brings it straight
+        // back, reported via `revealed`.
         let compensated = store
             .compensate_write(intent)
             .expect("compensate persistence");
-        assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
-
-        let rows = store.query(&Filter::new().id(target_id));
-        assert_eq!(
-            rows.len(),
-            1,
-            "cancelling a pending kind:5 delete must restore its target"
-        );
-        assert_eq!(rows[0].event.id, target_id);
+        match compensated {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert_eq!(revealed.len(), 1);
+                assert_eq!(revealed[0].event.id, target_id);
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
     });
 }
 
 /// Architecture-review requirement (the other half of the same fork): once
-/// a pending kind:5 draft actually SIGNS, its provisional tombstone claims
-/// become AUTHORITATIVE — permanent, per retraction-and-negative-deltas.md
-/// §7 — and can no longer be reversed by a (now-invalid) later
-/// `compensate_write`.
+/// a pending kind:5 draft actually SIGNS, its suppression claims become
+/// AUTHORITATIVE — the target is permanently, really removed, per
+/// retraction-and-negative-deltas.md §7 — and can no longer be reversed by
+/// a (now-invalid) later `compensate_write`.
 #[test]
 fn pending_kind5_delete_commits_to_permanent_on_promote() {
     for_each_backend(|store| {
@@ -1213,12 +1174,177 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
     });
 }
 
-/// Architecture-review requirement: a provisional tombstone must refuse
-/// redelivery of its target WHILE the intent is still pending — exactly
-/// like a permanent one would — and that refusal must clear the instant
-/// the intent is cancelled.
+/// Architecture-review requirement (codex-nova's suppression-claim model):
+/// unlike a PERMANENT tombstone, a provisional suppression claim never
+/// refuses an `insert` — a redelivered target is accepted and stored
+/// normally (dedup-by-id merges provenance, same as any other redelivery),
+/// it just stays hidden from `query` until the claim clears. This is the
+/// key behavioral difference from the withdrawn stash-based design (which
+/// had no live row left to dedup against in the first place).
 #[test]
-fn provisional_tombstone_refuses_redelivery_while_pending_then_clears_on_cancel() {
+fn late_arrival_while_hidden_is_stored_not_refused_and_reveals_on_cancel() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(
+            target.clone(),
+            RelayObserved::new(relay, Timestamp::from(50)),
+        );
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
+        let intent = outcome.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // A relay redelivery of the byte-identical target WHILE hidden —
+        // must be accepted (dedup-by-id), NEVER `Refused`.
+        let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
+        let reinsert = store.insert(target, RelayObserved::new(relay2, Timestamp::from(300)));
+        assert!(
+            matches!(reinsert, InsertOutcome::Duplicate { .. }),
+            "a redelivered target hidden by a PENDING claim must be accepted, not refused, got {reinsert:?}"
+        );
+
+        // Still hidden — the claim is still open.
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Cancel — reveals it, with the redelivered observation's
+        // provenance intact (proving the row was never actually removed).
+        let compensated = store
+            .compensate_write(intent)
+            .expect("compensate persistence");
+        match compensated {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert_eq!(revealed.len(), 1);
+                assert_eq!(
+                    revealed[0].provenance.seen.len(),
+                    2,
+                    "both the original and redelivered observations must have merged into the same retained row"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+    });
+}
+
+/// codex-nova P0 falsifier: a target's OWN `promote_signed` must remain
+/// fully functional while it is hidden by an UNRELATED pending kind:5
+/// intent's suppression claim. The withdrawn Kind5Stash design moved the
+/// target row out of `EVENTS` entirely, making the target's own intent
+/// blind to it (neither `promote_signed` nor `compensate_write` searches a
+/// stash); the suppression-claim model never moves anything, so this must
+/// just work.
+#[test]
+fn target_signs_while_hidden() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_t, signed_t) = compose(&k, Kind::TextNote, "target", 50);
+        let target_id = frozen_t.id;
+        let outcome_t = do_accept(store, accept(frozen_t, k.public_key(), 50));
+        let intent_t = outcome_t.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_t, AcceptOutcome::Inserted { .. }));
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome_d = do_accept(store, accept(deletion, k.public_key(), 100));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
+        assert!(
+            store.query(&Filter::new().id(target_id)).is_empty(),
+            "hidden while D is pending"
+        );
+
+        // Sign the TARGET while it is hidden by D's still-open claim.
+        let promoted_t = store
+            .promote_signed(intent_t, signed_t.sig)
+            .expect("promote persistence");
+        match promoted_t {
+            PromoteOutcome::Promoted { row } => {
+                assert_eq!(row.event.id, target_id);
+                assert_eq!(row.event.sig, signed_t.sig);
+            }
+            other => panic!("expected Promoted even while hidden, got {other:?}"),
+        }
+
+        // Cancel D — must reveal the SIGNED bytes, not a stale sentinel.
+        let compensated_d = store
+            .compensate_write(intent_d)
+            .expect("compensate persistence");
+        match compensated_d {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert_eq!(revealed.len(), 1);
+                assert_eq!(
+                    revealed[0].event.sig, signed_t.sig,
+                    "must reveal the REAL signature, not a stale sentinel"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        let rows = store.query(&Filter::new().id(target_id));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.sig, signed_t.sig);
+    });
+}
+
+/// codex-nova P0 falsifier (the other half): cancelling the TARGET's own
+/// intent must remain fully functional while it is hidden by an UNRELATED
+/// pending kind:5 intent's claim, and a LATER cancel of the delete must
+/// never resurrect the properly-cancelled target.
+#[test]
+fn target_cancels_while_hidden() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_t, _signed_t) = compose(&k, Kind::TextNote, "target", 50);
+        let target_id = frozen_t.id;
+        let outcome_t = do_accept(store, accept(frozen_t, k.public_key(), 50));
+        let intent_t = outcome_t.journaled_intent_id().expect("journaled");
+
+        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome_d = do_accept(store, accept(deletion, k.public_key(), 100));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Cancel the TARGET's own intent while hidden — must actually
+        // remove it (the ordinary is-live compensate path, unaffected by
+        // suppression).
+        let compensated_t = store
+            .compensate_write(intent_t)
+            .expect("compensate persistence");
+        assert!(matches!(
+            compensated_t,
+            CompensateOutcome::Compensated { restored: None, .. }
+        ));
+
+        // Cancel D — must find NOTHING to reveal: the target is truly
+        // gone (properly cancelled by its own owner), not merely hidden.
+        let compensated_d = store
+            .compensate_write(intent_d)
+            .expect("compensate persistence");
+        match compensated_d {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert!(
+                    revealed.is_empty(),
+                    "a properly-cancelled target must never be resurrected by an unrelated delete's cancel"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+    });
+}
+
+/// codex-nova P0 falsifier: two INDEPENDENT pending kind:5 intents naming
+/// the SAME target must both need to clear before it reappears — hidden
+/// while EITHER claim applies, visible again only once BOTH are dropped.
+#[test]
+fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
     for_each_backend(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
@@ -1229,13 +1355,122 @@ fn provisional_tombstone_refuses_redelivery_while_pending_then_clears_on_cancel(
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
         store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
 
-        let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
-        let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
-        let intent = outcome.journaled_intent_id().expect("journaled");
-        assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
+        // D1 and D2: two DIFFERENT (non-byte-identical) kind:5 drafts,
+        // both naming the same target.
+        let deletion_1 = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let outcome_1 = do_accept(store, accept(deletion_1, k.public_key(), 100));
+        let intent_1 = outcome_1.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_1, AcceptOutcome::Kind5Processed { .. }));
 
-        // Still pending — a fresh redelivery of the byte-identical target
-        // must be refused, same as a permanent tombstone would.
+        let deletion_2 = deletion_event(&k, vec![Tag::event(target_id)], 101);
+        let outcome_2 = do_accept(store, accept(deletion_2, k.public_key(), 101));
+        let intent_2 = outcome_2.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_2, AcceptOutcome::Kind5Processed { .. }));
+
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Cancel D1 — D2's claim still applies, target stays hidden.
+        let compensated_1 = store
+            .compensate_write(intent_1)
+            .expect("compensate persistence");
+        match compensated_1 {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert!(
+                    revealed.is_empty(),
+                    "D2's overlapping claim must keep the target hidden"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Cancel D2 — the last claim; the target must reappear now.
+        let compensated_2 = store
+            .compensate_write(intent_2)
+            .expect("compensate persistence");
+        match compensated_2 {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert_eq!(revealed.len(), 1);
+                assert_eq!(revealed[0].event.id, target_id);
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+    });
+}
+
+/// codex-nova P0 falsifier: an exact-`Duplicate` kind:5 intent's own
+/// promotion must commit the deletion for real even though it never
+/// staged its own suppression claim (only the ORIGINAL, canonical intent
+/// did) — and cancelling the ORIGINAL afterward must never undo it. The
+/// withdrawn Kind5Stash design got this backwards: a stashed row was the
+/// ONLY thing giving the deletion effect, so promoting a claim-less
+/// Duplicate committed nothing durable of its own, and cancelling the
+/// canonical original could remove the shared row out from under the
+/// duplicate's already-promoted deletion.
+#[test]
+fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
+    for_each_backend(|store| {
+        let k = keys();
+        let target = EventBuilder::new(Kind::TextNote, "please delete me")
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&k)
+            .expect("sign target");
+        let target_id = target.id;
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+
+        let signed_deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let frozen_deletion = Event::new(
+            signed_deletion.id,
+            signed_deletion.pubkey,
+            signed_deletion.created_at,
+            signed_deletion.kind,
+            signed_deletion.tags.clone(),
+            signed_deletion.content.clone(),
+            sentinel_signature(),
+        );
+
+        // A: the canonical, first-accepted draft — the one that actually
+        // stages the suppression claim.
+        let outcome_a = do_accept(store, accept(frozen_deletion.clone(), k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_a, AcceptOutcome::Kind5Processed { .. }));
+
+        // B: a byte-identical Duplicate — accept_write's dedup-by-id fast
+        // path returns `Duplicate` WITHOUT staging its own claim.
+        let outcome_b = do_accept(store, accept(frozen_deletion, k.public_key(), 100));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
+
+        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+
+        // Promote B — must commit the deletion for real, permanently.
+        let promoted_b = store
+            .promote_signed(intent_b, signed_deletion.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_b, PromoteOutcome::Promoted { .. }));
+
+        // Cancel A afterward — must NOT undo B's now-permanent deletion.
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        match compensated_a {
+            CompensateOutcome::Compensated { revealed, .. } => {
+                assert!(
+                    revealed.is_empty(),
+                    "cancelling A must never undo B's already-promoted, permanent deletion"
+                );
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+        assert!(
+            store.query(&Filter::new().id(target_id)).is_empty(),
+            "the target must stay permanently deleted"
+        );
+
+        // The PERMANENT tombstone (retraction doc §7) now refuses a fresh
+        // redelivery, same as any other promoted kind:5.
         let redelivered = EventBuilder::new(Kind::TextNote, "please delete me")
             .custom_created_at(Timestamp::from(50))
             .sign_with_keys(&k)
@@ -1243,29 +1478,94 @@ fn provisional_tombstone_refuses_redelivery_while_pending_then_clears_on_cancel(
         assert_eq!(redelivered.id, target_id);
         let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
         let reinsert = store.insert(
-            redelivered.clone(),
-            RelayObserved::new(relay2.clone(), Timestamp::from(300)),
+            redelivered,
+            RelayObserved::new(relay2, Timestamp::from(300)),
         );
         assert!(matches!(
             reinsert,
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         ));
+    });
+}
 
-        // Cancel — the provisional claim clears, and the SAME redelivery
-        // must now be accepted.
-        let compensated = store
-            .compensate_write(intent)
-            .expect("compensate persistence");
-        assert!(matches!(compensated, CompensateOutcome::Compensated { .. }));
-
-        let reinsert2 = store.insert(
-            redelivered,
-            RelayObserved::new(relay2, Timestamp::from(300)),
+/// codex-nova requirement: the suppression-claim model handles a-tag
+/// (addressable) targets the SAME way as e-tag ones — no longer deferred
+/// to promotion (the withdrawn Kind5Stash design's ceiling-based PERMANENT
+/// addr-tombstone mechanism was not safely provisional; a suppression
+/// claim, being pure reversible metadata, has no such problem — see
+/// `AcceptOutcome::Kind5Processed`'s doc).
+#[test]
+fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_g1, _signed_g1) = compose_with_tags(
+            &k,
+            Kind::from(30_003u16),
+            "g1 body",
+            50,
+            vec![Tag::identifier("g1")],
         );
+        let g1_id = frozen_g1.id;
+        let outcome_g1 = do_accept(store, accept(frozen_g1, k.public_key(), 50));
+        assert!(matches!(outcome_g1, AcceptOutcome::Inserted { .. }));
+        assert_eq!(store.query(&Filter::new().id(g1_id)).len(), 1);
+
+        let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
+        let signed_deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::coordinate(coord, None))
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&k)
+            .expect("sign a-tag deletion");
+        let frozen_deletion = Event::new(
+            signed_deletion.id,
+            signed_deletion.pubkey,
+            signed_deletion.created_at,
+            signed_deletion.kind,
+            signed_deletion.tags.clone(),
+            signed_deletion.content.clone(),
+            sentinel_signature(),
+        );
+
+        let outcome_d = do_accept(store, accept(frozen_deletion, k.public_key(), 100));
+        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
+        match &outcome_d {
+            AcceptOutcome::Kind5Processed { hidden, .. } => {
+                assert_eq!(hidden.len(), 1);
+                assert_eq!(hidden[0].event.id, g1_id);
+            }
+            other => panic!("expected Kind5Processed, got {other:?}"),
+        }
         assert!(
-            !matches!(reinsert2, InsertOutcome::Refused(_)),
-            "cancelling a pending kind:5 delete must clear its provisional tombstone claim, got {reinsert2:?}"
+            store.query(&Filter::new().id(g1_id)).is_empty(),
+            "the addressable winner must be hidden immediately"
         );
+
+        let promoted_d = store
+            .promote_signed(intent_d, signed_deletion.sig)
+            .expect("promote persistence");
+        assert!(matches!(promoted_d, PromoteOutcome::Promoted { .. }));
+        assert!(
+            store.query(&Filter::new().id(g1_id)).is_empty(),
+            "must stay gone — now permanently deleted"
+        );
+
+        // The PERMANENT addr-tombstone ceiling now blocks an
+        // at-or-before-ceiling redelivery, same as `insert`'s own kind:5
+        // a-tag path.
+        let older_replay = EventBuilder::new(Kind::from(30_003u16), "old g1")
+            .tag(Tag::identifier("g1"))
+            .custom_created_at(Timestamp::from(70))
+            .sign_with_keys(&k)
+            .expect("sign older replay");
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        let stale_reinsert = store.insert(
+            older_replay,
+            RelayObserved::new(relay, Timestamp::from(300)),
+        );
+        assert!(matches!(
+            stale_reinsert,
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        ));
     });
 }
 
@@ -1305,7 +1605,7 @@ fn compensating_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
             .expect("compensate persistence");
         assert!(matches!(
             compensated_b,
-            CompensateOutcome::Compensated { restored: None }
+            CompensateOutcome::Compensated { restored: None, .. }
         ));
 
         // A's stash entry must still be intact — cancelling C must still
@@ -1314,7 +1614,7 @@ fn compensating_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
             .compensate_write(intent_c)
             .expect("compensate persistence");
         match compensated_c {
-            CompensateOutcome::Compensated { restored } => {
+            CompensateOutcome::Compensated { restored, .. } => {
                 let restored = restored
                     .expect("A's stash must survive compensating the unrelated Duplicate intent B");
                 assert_eq!(restored.event.id, frozen_a_id);
@@ -1358,7 +1658,7 @@ fn promoting_a_duplicate_intent_never_touches_an_unrelated_intents_stash() {
             .compensate_write(intent_c)
             .expect("compensate persistence");
         match compensated_c {
-            CompensateOutcome::Compensated { restored } => {
+            CompensateOutcome::Compensated { restored, .. } => {
                 let restored = restored
                     .expect("A's stash must survive promoting the unrelated Duplicate intent B");
                 assert_eq!(restored.event.id, frozen_a_id);
