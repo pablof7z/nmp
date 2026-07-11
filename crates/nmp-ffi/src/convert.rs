@@ -39,8 +39,20 @@ pub enum FfiError {
     InvalidPublicKey {
         got: String,
     },
+    /// A `FfiBinding::Literal` value in the `ids` field position was not a
+    /// valid 32-byte-hex event id.
+    InvalidEventId {
+        got: String,
+    },
     InvalidRelayUrl {
         got: String,
+    },
+    /// A raw `[String; N]` tag in a `FfiWriteIntent` did not parse as a
+    /// valid nostr tag (`Tag::parse`) -- e.g. an empty array. Rejecting the
+    /// whole intent here (rather than silently dropping the malformed tag)
+    /// is what keeps the signed event identical to what the app composed.
+    InvalidTag {
+        got: Vec<String>,
     },
     /// `add_account`'s secret key did not parse as a valid nostr key (hex or
     /// bech32 `nsec`).
@@ -62,7 +74,9 @@ impl std::fmt::Display for FfiError {
         match self {
             Self::InvalidTagName { got } => write!(f, "invalid tag name: {got:?}"),
             Self::InvalidPublicKey { got } => write!(f, "invalid public key hex: {got:?}"),
+            Self::InvalidEventId { got } => write!(f, "invalid event id hex: {got:?}"),
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
+            Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerHasNoPublicKey => write!(f, "signer reported no public key"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
@@ -131,10 +145,48 @@ fn set_algebra_to_ffi(a: GSetAlgebra) -> FfiSetAlgebra {
     }
 }
 
-pub fn binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiError> {
+/// Which field a [`FfiBinding::Literal`] is being parsed for -- `authors`
+/// and `ids` carry a hex-encoding invariant that `ConcreteFilter::to_nostr`
+/// (nmp-grammar) later PANICS on if violated (its own doc: "a genuine
+/// invariant violation upstream, not a reachable user input error"). This
+/// boundary is exactly that upstream: a foreign-supplied `Literal` string is
+/// unchecked until here, so an FFI caller passing a bad hex string must get
+/// a typed [`FfiError`], never let the panic fire two crates downstream.
+/// Tag values have no such invariant (`to_nostr` never parses them as
+/// hex) so `Tag` values pass through unchecked, same as before.
+#[derive(Clone, Copy)]
+enum LiteralField {
+    Authors,
+    Ids,
+    Tag,
+}
+
+fn validate_literal(field: LiteralField, value: String) -> Result<String, FfiError> {
+    match field {
+        LiteralField::Authors => {
+            parse_pubkey(&value)?;
+            Ok(value)
+        }
+        LiteralField::Ids => {
+            nostr::EventId::from_hex(&value)
+                .map_err(|_| FfiError::InvalidEventId { got: value.clone() })?;
+            Ok(value)
+        }
+        LiteralField::Tag => Ok(value),
+    }
+}
+
+fn binding_from_ffi(b: FfiBinding, field: LiteralField) -> Result<GBinding, FfiError> {
     Ok(match b {
-        FfiBinding::Literal { values } => GBinding::Literal(values.into_iter().collect()),
-        FfiBinding::Reactive { field } => GBinding::Reactive(identity_field_from_ffi(field)),
+        FfiBinding::Literal { values } => GBinding::Literal(
+            values
+                .into_iter()
+                .map(|v| validate_literal(field, v))
+                .collect::<Result<_, _>>()?,
+        ),
+        FfiBinding::Reactive { field: id_field } => {
+            GBinding::Reactive(identity_field_from_ffi(id_field))
+        }
         FfiBinding::Derived { derived } => GBinding::Derived(Box::new(GDerived {
             inner: filter_from_ffi(derived.inner.clone())?,
             project: selector_from_ffi(derived.project.clone())?,
@@ -145,7 +197,7 @@ pub fn binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiError> {
                 .operands
                 .iter()
                 .cloned()
-                .map(binding_from_ffi)
+                .map(|op| binding_from_ffi(op, field))
                 .collect::<Result<_, _>>()?,
         })),
     })
@@ -177,12 +229,21 @@ pub fn binding_to_ffi(b: GBinding) -> FfiBinding {
 pub fn filter_from_ffi(f: FfiFilter) -> Result<GFilter, FfiError> {
     let mut tags = BTreeMap::new();
     for (k, v) in f.tags {
-        tags.insert(tag_name_from_ffi(&k)?, binding_from_ffi(v)?);
+        tags.insert(
+            tag_name_from_ffi(&k)?,
+            binding_from_ffi(v, LiteralField::Tag)?,
+        );
     }
     Ok(GFilter {
         kinds: f.kinds.map(|ks| ks.into_iter().collect()),
-        authors: f.authors.map(binding_from_ffi).transpose()?,
-        ids: f.ids.map(binding_from_ffi).transpose()?,
+        authors: f
+            .authors
+            .map(|b| binding_from_ffi(b, LiteralField::Authors))
+            .transpose()?,
+        ids: f
+            .ids
+            .map(|b| binding_from_ffi(b, LiteralField::Ids))
+            .transpose()?,
         tags,
         since: f.since,
         until: f.until,
@@ -345,14 +406,16 @@ pub fn parse_relay_url(url: &str) -> Result<RelayUrl, FfiError> {
     })
 }
 
-fn tags_from_ffi(tags: Vec<Vec<String>>) -> Vec<Tag> {
-    // A malformed raw tag array (empty, or otherwise unparseable) is simply
-    // dropped rather than failing the whole publish -- the durable-write
-    // contract (ledger #9) is about delivery, not template validation; a
-    // template this malformed will fail as a signature/content mismatch
-    // downstream if it matters, never silently corrupting an adjacent tag.
+/// A malformed raw tag array (empty, or otherwise unparseable) REJECTS the
+/// whole intent rather than being silently dropped: a signer that drops one
+/// tag from a template can sign a DIFFERENT event than the app composed
+/// (e.g. a reply losing its `e` tag becomes a root note) -- exactly the
+/// tag-integrity hole `filter_map(...).ok()` used to open. Every tag either
+/// parses or the whole `write_intent_from_ffi` call fails closed with a
+/// typed [`FfiError::InvalidTag`] naming the offending raw tag.
+fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
     tags.into_iter()
-        .filter_map(|t| Tag::parse(t).ok())
+        .map(|t| Tag::parse(t.clone()).map_err(|_| FfiError::InvalidTag { got: t }))
         .collect()
 }
 
@@ -365,7 +428,7 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         pubkey,
         Timestamp::from(intent.created_at),
         nostr::Kind::from(intent.kind),
-        tags_from_ffi(intent.tags),
+        tags_from_ffi(intent.tags)?,
         intent.content,
     );
 
@@ -508,5 +571,132 @@ mod tests {
                 got: "zz".to_string()
             })
         );
+    }
+
+    /// The core regression test for the panic-turned-typed-error: a
+    /// `Literal` value in the `authors` field position that is NOT valid
+    /// hex used to sail through `binding_from_ffi` unchecked and only blow
+    /// up later, as a PANIC, inside `ConcreteFilter::to_nostr` (nmp-grammar)
+    /// -- two crates downstream of the actual bad input, and un-catchable
+    /// by the caller. It must now fail AT THIS BOUNDARY with a typed error.
+    #[test]
+    fn invalid_literal_author_hex_is_a_typed_error_not_a_panic() {
+        let ffi = FfiFilter {
+            authors: Some(FfiBinding::Literal {
+                values: vec!["not-valid-hex".to_string()],
+            }),
+            ..FfiFilter::default()
+        };
+        assert_eq!(
+            filter_from_ffi(ffi),
+            Err(FfiError::InvalidPublicKey {
+                got: "not-valid-hex".to_string()
+            })
+        );
+    }
+
+    /// Same invariant, `ids` field position (a distinct hex-decoding path
+    /// in `ConcreteFilter::to_nostr` -- `EventId::from_hex`, not
+    /// `PublicKey::from_hex` -- so it gets its own falsifier).
+    #[test]
+    fn invalid_literal_id_hex_is_a_typed_error_not_a_panic() {
+        let ffi = FfiFilter {
+            ids: Some(FfiBinding::Literal {
+                values: vec!["also-not-hex".to_string()],
+            }),
+            ..FfiFilter::default()
+        };
+        assert_eq!(
+            filter_from_ffi(ffi),
+            Err(FfiError::InvalidEventId {
+                got: "also-not-hex".to_string()
+            })
+        );
+    }
+
+    /// A `Literal` nested inside a `SetOp` at the `authors` position must
+    /// still be validated -- the field position propagates through
+    /// `SetOp`'s operands, it isn't lost the moment a binding gets
+    /// composite.
+    #[test]
+    fn invalid_literal_inside_set_op_authors_operand_is_a_typed_error() {
+        let ffi = FfiFilter {
+            authors: Some(FfiBinding::SetOp {
+                set_op: std::sync::Arc::new(FfiSetOp {
+                    op: FfiSetAlgebra::Union,
+                    operands: vec![FfiBinding::Literal {
+                        values: vec!["garbage".to_string()],
+                    }],
+                }),
+            }),
+            ..FfiFilter::default()
+        };
+        assert_eq!(
+            filter_from_ffi(ffi),
+            Err(FfiError::InvalidPublicKey {
+                got: "garbage".to_string()
+            })
+        );
+    }
+
+    /// Tag VALUES (as opposed to the tag NAME/key) carry no hex invariant
+    /// downstream (`ConcreteFilter::to_nostr` never parses a tag value as
+    /// hex) -- a non-hex `Literal` at a tag position must still round-trip,
+    /// not be rejected by the new authors/ids validation.
+    #[test]
+    fn non_hex_literal_tag_value_is_still_accepted() {
+        let mut tags = HashMap::new();
+        tags.insert(
+            "d".to_string(),
+            FfiBinding::Literal {
+                values: vec!["my-identifier-not-hex".to_string()],
+            },
+        );
+        let ffi = FfiFilter {
+            tags,
+            ..FfiFilter::default()
+        };
+        let grammar = filter_from_ffi(ffi.clone()).expect("tag values need no hex validation");
+        assert_eq!(filter_to_ffi(grammar), ffi);
+    }
+
+    fn valid_write_intent() -> FfiWriteIntent {
+        FfiWriteIntent {
+            pubkey: pk_hex(),
+            created_at: 100,
+            kind: 1,
+            tags: vec![vec!["e".to_string(), "e".repeat(64)]],
+            content: "hello".to_string(),
+            durability: FfiDurability::Ephemeral,
+            routing: FfiWriteRouting::AuthorOutbox,
+        }
+    }
+
+    #[test]
+    fn well_formed_write_intent_parses_ok() {
+        let intent = valid_write_intent();
+        let parsed = write_intent_from_ffi(intent).expect("well-formed intent must parse");
+        match parsed.payload {
+            GWritePayload::Unsigned(u) => assert_eq!(u.tags.len(), 1),
+            GWritePayload::Signed(_) => {
+                panic!("write_intent_from_ffi must always build an Unsigned payload")
+            }
+        }
+    }
+
+    /// The tag-integrity regression test: a malformed raw tag (here, an
+    /// empty array -- `Tag::parse` rejects it) used to be silently DROPPED
+    /// by `tags_from_ffi`'s `filter_map(...).ok()`, so the signed event
+    /// would differ from what the app composed (e.g. a reply silently
+    /// losing its `e` tag and becoming a root note). The whole intent must
+    /// now fail closed with a typed error instead.
+    #[test]
+    fn malformed_tag_rejects_whole_write_intent_not_silently_dropped() {
+        let mut intent = valid_write_intent();
+        intent.tags.push(Vec::new()); // empty tag array: Tag::parse rejects this
+        match write_intent_from_ffi(intent) {
+            Err(err) => assert_eq!(err, FfiError::InvalidTag { got: Vec::new() }),
+            Ok(_) => panic!("a malformed tag must fail closed, not silently drop"),
+        }
     }
 }
