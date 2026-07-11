@@ -103,22 +103,64 @@ pub enum InsertOutcome {
     /// iff the merge actually changed the provenance map (M1's no-op stub
     /// becomes a real merge in M3 — ledger #5).
     Duplicate { provenance_grew: bool },
-    /// A replaceable/addressable winner changed; `replaced` is the id of the
-    /// event that is no longer the current winner for that address.
+    /// A replaceable/addressable winner changed. `replaced` is the evicted
+    /// row itself, handed back whole: the store is holding it at the exact
+    /// moment of eviction, and this is the only moment it can be returned
+    /// (retraction-and-negative-deltas.md §1.1) — the resolver's dirty-seed
+    /// and the optimistic-write rollback path both need to `match_event`
+    /// and re-insert this row after the store has already dropped it.
     Superseded {
-        /// The event id that was superseded (dropped from the store).
-        replaced: EventId,
+        /// The full row that was superseded (dropped from the store).
+        /// Boxed so the common `Inserted`/`Duplicate`/`Stale` variants stay
+        /// small — `Superseded` is the rare, eviction-only case.
+        replaced: Box<StoredEvent>,
     },
     /// This event is older than the current winner for its
     /// replaceable/addressable address (or ties on `created_at` but does not
     /// win the lexicographic id tie-break). Rejected: dropped, never stored.
     Stale,
+    /// Refused at the door: never stored, nothing to retract
+    /// (retraction-and-negative-deltas.md §1.1/§2/§3).
+    Refused(RefuseReason),
+}
+
+/// Why an [`EventStore::insert`] refused an event outright, before it ever
+/// touched an index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefuseReason {
+    /// The event's NIP-40 `expiration` tag is already in the past at the
+    /// moment of insert (checked against the `RelayObserved` clock the
+    /// caller passed in). Wired in this unit.
+    AlreadyExpired,
+    /// The event's id (or, for an addressable/replaceable target, its
+    /// address) was tombstoned by an earlier verified kind:5 deletion from
+    /// the same author. Not produced anywhere yet — the kind:5 processing
+    /// unit (a separate #23 child) is what constructs this variant; it
+    /// lands here now so that unit's match sites compile against a stable
+    /// shape.
+    Tombstoned,
+}
+
+/// Why an [`EventStore::remove`] call is removing a row. Exists so
+/// diagnostics can count retractions per cause, and so `remove` reads as
+/// self-documentingly *not* a general delete API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetractReason {
+    /// An optimistic local write was rejected (or its whole intent failed)
+    /// before ever being accepted.
+    Rejected,
+    /// Removed by a verified kind:5 deletion from the event's own author.
+    Deleted,
+    /// Removed because its NIP-40 `expiration` deadline passed.
+    Expired,
 }
 
 /// The single mutating door onto the event store.
 pub trait EventStore {
-    /// Insert an event observed via `from`. Dedup-by-id FIRST — on a hit,
-    /// merge `from` into the existing row's provenance and return
+    /// Insert an event observed via `from`. An already-expired event (NIP-40,
+    /// judged against `from.at`) is `Refused` before anything else runs —
+    /// never stored, nothing to retract. Otherwise dedup-by-id FIRST — on a
+    /// hit, merge `from` into the existing row's provenance and return
     /// `Duplicate{provenance_grew}` with NO index churn; otherwise run
     /// replaceable/addressable supersession (unchanged M1 semantics).
     fn insert(&mut self, event: Event, from: RelayObserved) -> InsertOutcome;
@@ -126,6 +168,25 @@ pub trait EventStore {
     /// Query current winners only (never a superseded/stale event), matched
     /// via `nostr::Filter::match_event`, each with its provenance attached.
     fn query(&self, filter: &Filter) -> Vec<StoredEvent>;
+
+    /// Remove `id` from the store — clearing both the id index and, if `id`
+    /// is the current replaceable/addressable winner for its address, the
+    /// address index too — and hand back the removed row whole, or `None`
+    /// if `id` was not held. Engine-facing only (kind:5 processing,
+    /// optimistic-write rejection); never a general delete API.
+    fn remove(&mut self, id: EventId, reason: RetractReason) -> Option<StoredEvent>;
+
+    /// Drain every row whose NIP-40 `expiration` is `<= now`, removing each
+    /// one and returning the full rows. Minimal seam for this unit: reads
+    /// expiration straight off whatever is currently stored (no persistent
+    /// expiration index yet — that is the NIP-40 unit's job), so this is
+    /// honest but O(stored rows) per call.
+    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent>;
+
+    /// The earliest NIP-40 `expiration` deadline among currently stored
+    /// rows, or `None` if nothing carries one. Same minimal-seam caveat as
+    /// [`EventStore::expire_due`].
+    fn next_expiration(&self) -> Option<Timestamp>;
 
     /// Record that `relay` has proven `proven` for `filter`'s window-erased
     /// shape (ruling §1/§3). Merge-only: no public lowering path exists

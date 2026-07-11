@@ -22,7 +22,7 @@ use std::path::Path;
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
-use nostr::{Event, Filter, JsonUtil, RelayUrl, Timestamp};
+use nostr::{Event, EventId, Filter, JsonUtil, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +33,7 @@ use crate::coverage::{
 };
 use crate::{
     ClaimSet, CoverageInterval, CoverageKey, EventStore, GcReport, InsertOutcome, Provenance,
-    RelayObserved, StoredEvent,
+    RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 
 const EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
@@ -98,6 +98,12 @@ impl RedbStore {
 
 impl EventStore for RedbStore {
     fn insert(&mut self, event: Event, from: RelayObserved) -> InsertOutcome {
+        // Refused at the door FIRST: an already-expired event is never
+        // stored, so it never touches dedup or supersession at all.
+        if event.is_expired_at(&from.at) {
+            return InsertOutcome::Refused(RefuseReason::AlreadyExpired);
+        }
+
         let write_txn = self.db.begin_write().expect("redb: begin_write");
         let outcome = {
             let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
@@ -179,7 +185,12 @@ impl EventStore for RedbStore {
                                     .expect("redb: decode current winner event json");
 
                                 if candidate_wins(&event, &current_event) {
-                                    let replaced = current_event.id;
+                                    let replaced = StoredEvent {
+                                        event: current_event,
+                                        provenance: Provenance {
+                                            seen: current_record.provenance,
+                                        },
+                                    };
                                     events
                                         .remove(current_id_hex.as_str())
                                         .expect("redb: remove superseded event");
@@ -189,7 +200,9 @@ impl EventStore for RedbStore {
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
                                         .expect("redb: update addr_index");
-                                    InsertOutcome::Superseded { replaced }
+                                    InsertOutcome::Superseded {
+                                        replaced: Box::new(replaced),
+                                    }
                                 } else {
                                     InsertOutcome::Stale
                                 }
@@ -223,6 +236,83 @@ impl EventStore for RedbStore {
             }
         }
         out
+    }
+
+    fn remove(&mut self, id: EventId, _reason: RetractReason) -> Option<StoredEvent> {
+        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let removed = {
+            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
+            let mut addr_index = write_txn
+                .open_table(ADDR_INDEX)
+                .expect("redb: open addr_index");
+            let id_hex = id.to_hex();
+
+            let existing_json = events
+                .get(id_hex.as_str())
+                .expect("redb: get event")
+                .map(|guard| guard.value().to_string());
+
+            match existing_json {
+                None => None,
+                Some(json) => {
+                    let record: StoredEventRecord =
+                        serde_json::from_str(&json).expect("redb: decode stored event");
+                    let event =
+                        Event::from_json(&record.event_json).expect("redb: decode event json");
+
+                    events.remove(id_hex.as_str()).expect("redb: remove event");
+
+                    // Clear the address index too, but only if it still
+                    // points at the row we just removed.
+                    if let Some(addr_key) = address_key_for(&event) {
+                        let addr_key_str = addr_key.to_redb_key();
+                        let still_points_here = addr_index
+                            .get(addr_key_str.as_str())
+                            .expect("redb: get addr_index")
+                            .map(|guard| guard.value().to_string())
+                            == Some(id_hex.clone());
+                        if still_points_here {
+                            addr_index
+                                .remove(addr_key_str.as_str())
+                                .expect("redb: remove addr_index");
+                        }
+                    }
+
+                    Some(StoredEvent {
+                        event,
+                        provenance: Provenance {
+                            seen: record.provenance,
+                        },
+                    })
+                }
+            }
+        };
+        write_txn.commit().expect("redb: commit remove");
+        removed
+    }
+
+    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
+        // Minimal seam (no persistent expiration index yet): read
+        // expiration straight off whatever `query` would return today, then
+        // remove each due row through the same `remove` door.
+        let due_ids: Vec<EventId> = self
+            .query(&Filter::new())
+            .into_iter()
+            .filter(|se| se.event.is_expired_at(&now))
+            .map(|se| se.event.id)
+            .collect();
+
+        due_ids
+            .into_iter()
+            .filter_map(|id| self.remove(id, RetractReason::Expired))
+            .collect()
+    }
+
+    fn next_expiration(&self) -> Option<Timestamp> {
+        self.query(&Filter::new())
+            .into_iter()
+            .filter_map(|se| se.event.tags.expiration().copied())
+            .min()
     }
 
     fn record_coverage(

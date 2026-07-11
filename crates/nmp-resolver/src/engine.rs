@@ -408,7 +408,13 @@ impl<S: EventStore> Engine<S> {
         for (event, from) in events {
             match self.store.insert(event.clone(), from) {
                 InsertOutcome::Inserted | InsertOutcome::Superseded { .. } => changed.push(event),
-                InsertOutcome::Duplicate { .. } | InsertOutcome::Stale => {}
+                // Never stored -- neither is "changed": a duplicate/stale
+                // event was already reflected in the store, and a refused
+                // event (already-expired, or future tombstoned) never
+                // entered it at all.
+                InsertOutcome::Duplicate { .. }
+                | InsertOutcome::Stale
+                | InsertOutcome::Refused(_) => {}
             }
         }
         if changed.is_empty() {
