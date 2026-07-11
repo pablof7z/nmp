@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
+use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, Timestamp};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins, AddressKey};
@@ -13,9 +14,37 @@ use crate::coverage::{
     coverage_key, merge_interval, shape_matches, shrink_after_eviction, window_erase,
 };
 use crate::{
-    ClaimSet, CoverageInterval, CoverageKey, EventStore, GcReport, InsertOutcome, Provenance,
-    RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
+    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PromoteOutcome,
+    Provenance, RecoveredIntent, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
+    WriteDurability,
 };
+
+/// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
+/// plan.md §2.2) as retained in memory. `MemoryStore` implements the same
+/// door SEMANTICS as `RedbStore` so the two backends can never diverge on
+/// the outbox contract (this struct is the in-memory mirror of
+/// `RedbStore`'s `OUTBOX_INTENTS` JSON record) — but carries no durability
+/// guarantee of its own (Fable checkpoint Q4): `recover_outbox` always
+/// returns empty, because nothing here survives a process crash by
+/// construction. Its fields are therefore write-only from this backend's
+/// own perspective (never read back by `MemoryStore` itself, only kept in
+/// lockstep with what `accept_write`/`promote_signed` would persist on
+/// `RedbStore`) — `#[allow(dead_code)]` records that deliberately, rather
+/// than dropping the fields and letting the two backends' journal shapes
+/// silently diverge.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct OutboxIntentRecord {
+    receipt_id: u64,
+    frozen: Event,
+    expected_pubkey: PublicKey,
+    signing_identity_ref: String,
+    durability: WriteDurability,
+    routing: String,
+    sig_state: IntentSigState,
+    accepted_at: Timestamp,
+}
 
 /// An address-tombstone's durable fact: which kind:5 event set the
 /// deletion ceiling, and (diagnostics only — the ceiling comparison alone
@@ -76,12 +105,118 @@ pub struct MemoryStore {
     /// every removal so `expire_due`/`next_expiration` never rescan the
     /// whole store (retraction-and-negative-deltas.md §3.1).
     expiration_index: BTreeMap<Timestamp, HashSet<EventId>>,
+    /// `OUTBOX_INTENTS` mirror (crashsafe-accepted-2-3-plan.md §2.2) — one
+    /// entry per still-open locally-accepted write intent.
+    outbox_intents: HashMap<IntentId, OutboxIntentRecord>,
+    /// `OUTBOX_DISPLACED` mirror: the predecessor each open intent
+    /// evicted, if any, kept durable-in-memory until `promote_signed` or
+    /// `compensate_write` drops it.
+    outbox_displaced: HashMap<IntentId, StoredEvent>,
 }
 
 impl MemoryStore {
     /// A new, empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Write (or overwrite) one `OUTBOX_INTENTS` row plus its
+    /// `OUTBOX_DISPLACED` stash, if any — `accept_write`'s journal half of
+    /// the "one atomic commit" (in-memory: same call, no separate
+    /// transaction to span).
+    #[allow(clippy::too_many_arguments)]
+    fn journal_intent(
+        &mut self,
+        intent_id: IntentId,
+        receipt_id: u64,
+        frozen: Event,
+        expected_pubkey: PublicKey,
+        signing_identity_ref: String,
+        durability: WriteDurability,
+        routing: String,
+        sig_state: IntentSigState,
+        accepted_at: Timestamp,
+        displaced: Option<StoredEvent>,
+    ) {
+        self.outbox_intents.insert(
+            intent_id,
+            OutboxIntentRecord {
+                receipt_id,
+                frozen,
+                expected_pubkey,
+                signing_identity_ref,
+                durability,
+                routing,
+                sig_state,
+                accepted_at,
+            },
+        );
+        if let Some(displaced) = displaced {
+            self.outbox_displaced.insert(intent_id, displaced);
+        }
+    }
+
+    /// Re-admit a durably-stashed predecessor `se` through the ordinary
+    /// dedup/tombstone/supersession rules `insert` runs, preserving its
+    /// FULL original provenance (both relay `seen` history and any `local`
+    /// origin) rather than reconstructing it from a single fresh
+    /// observation — the compensating re-insert retraction-and-negative-
+    /// deltas.md §4.2 describes ("through the same one door... wins its
+    /// address back by ordinary supersession rules"), never an
+    /// un-supersede operation. Returns the row as it now stands if `se`
+    /// actually (re)claims a slot; `None` if it is refused, deduped away,
+    /// or loses the address race (`Stale` — the correct, silent §3.4
+    /// outcome for a re-offered grand-predecessor: nothing churns).
+    fn reinsert_stashed(&mut self, se: StoredEvent) -> Option<StoredEvent> {
+        let event = se.event.clone();
+
+        if let Some(existing) = self.by_id.get_mut(&event.id) {
+            for (relay, at) in &se.provenance.seen {
+                existing
+                    .provenance
+                    .merge_observation(&RelayObserved::new(relay.clone(), *at));
+            }
+            return Some(existing.clone());
+        }
+        if self.tombstone_refuses(&event) {
+            return None;
+        }
+
+        match address_key_for(&event) {
+            None => {
+                self.index_expiration(&se);
+                self.by_id.insert(event.id, se.clone());
+                Some(se)
+            }
+            Some(key) => match self.addr_index.get(&key).copied() {
+                None => {
+                    self.index_expiration(&se);
+                    self.by_id.insert(event.id, se.clone());
+                    self.addr_index.insert(key, event.id);
+                    Some(se)
+                }
+                Some(current_id) => {
+                    let current_event = &self
+                        .by_id
+                        .get(&current_id)
+                        .expect("addr_index must always point at a stored event")
+                        .event;
+                    if candidate_wins(&event, current_event) {
+                        let replaced = self
+                            .by_id
+                            .remove(&current_id)
+                            .expect("addr_index must always point at a stored event");
+                        self.unindex_expiration(&replaced);
+                        self.index_expiration(&se);
+                        self.by_id.insert(event.id, se.clone());
+                        self.addr_index.insert(key, event.id);
+                        Some(se)
+                    } else {
+                        None
+                    }
+                }
+            },
+        }
     }
 
     /// Add `se` to the expiration index if it carries a NIP-40 `expiration`
@@ -204,6 +339,19 @@ impl MemoryStore {
 
         deleted
     }
+}
+
+/// True iff `se` is a locally-authored row still awaiting a signature —
+/// the GC-exclusion predicate (Fable checkpoint R5), shared by `gc`'s
+/// candidacy filter.
+fn is_open_local_intent(se: &StoredEvent) -> bool {
+    matches!(
+        se.provenance.local,
+        Some(LocalOrigin {
+            sig_state: SigState::Pending,
+            ..
+        })
+    )
 }
 
 impl EventStore for MemoryStore {
@@ -366,14 +514,22 @@ impl EventStore for MemoryStore {
     fn gc(&mut self, claims: &ClaimSet) -> GcReport {
         let mut report = GcReport::default();
 
-        // Regular events (no address key) matched by no live claim are the
-        // ONLY GC candidates: replaceable/addressable current winners are
-        // never in this set at all, so they are retained unconditionally,
-        // by construction — never merely "protected by a check".
+        // Regular events (no address key) matched by no live claim, AND not
+        // an open (unsigned) local intent, are the ONLY GC candidates:
+        // replaceable/addressable current winners are never in this set at
+        // all (retained unconditionally, by construction), and neither is
+        // an unsigned pending row (Fable checkpoint R5 — an open intent
+        // must never be evicted before it ever signs; once
+        // `promote_signed` flips it to `Signed` it becomes an ordinary
+        // event again, GC-able like any other under `claims`).
         let victims: Vec<EventId> = self
             .by_id
             .iter()
-            .filter(|(_, se)| address_key_for(&se.event).is_none() && !claims.is_claimed(&se.event))
+            .filter(|(_, se)| {
+                address_key_for(&se.event).is_none()
+                    && !is_open_local_intent(se)
+                    && !claims.is_claimed(&se.event)
+            })
             .map(|(id, _)| *id)
             .collect();
 
@@ -407,5 +563,178 @@ impl EventStore for MemoryStore {
         }
 
         report
+    }
+
+    fn accept_write(&mut self, accept: AcceptWrite) -> AcceptOutcome {
+        let AcceptWrite {
+            intent_id,
+            receipt_id,
+            frozen,
+            expected_pubkey,
+            signing_identity_ref,
+            durability,
+            routing,
+            sig_state,
+            accepted_at,
+        } = accept;
+
+        // Refused at the door FIRST, same as `insert`: never journaled,
+        // nothing to recover (R3).
+        if frozen.is_expired_at(&accepted_at) {
+            return AcceptOutcome::Refused(RefuseReason::AlreadyExpired);
+        }
+        if self.tombstone_refuses(&frozen) {
+            return AcceptOutcome::Refused(RefuseReason::Tombstoned);
+        }
+
+        let local = LocalOrigin {
+            intent_id,
+            sig_state: SigState::Pending,
+            accepted_at,
+        };
+
+        // Dedup-by-id: an edge case (a fresh intent's frozen id colliding
+        // with an already-held row), NOT the ordinary relay-echo hand-off
+        // (that always arrives through `insert`, after this row's real
+        // signature already replaced the sentinel — see `promote_signed`'s
+        // doc). The intent is still journaled: it still gets signed and
+        // delivered even though it does not (re)claim the row here.
+        if let Some(existing) = self.by_id.get(&frozen.id) {
+            let row = existing.clone();
+            self.journal_intent(
+                intent_id,
+                receipt_id,
+                frozen,
+                expected_pubkey,
+                signing_identity_ref,
+                durability,
+                routing,
+                sig_state,
+                accepted_at,
+                None,
+            );
+            return AcceptOutcome::Duplicate { row };
+        }
+
+        let stored = StoredEvent {
+            event: frozen.clone(),
+            provenance: Provenance::local_origin(local),
+        };
+
+        let (outcome, displaced) = match address_key_for(&stored.event) {
+            None => {
+                self.index_expiration(&stored);
+                self.by_id.insert(stored.event.id, stored.clone());
+                (AcceptOutcome::Inserted { row: stored }, None)
+            }
+            Some(key) => match self.addr_index.get(&key).copied() {
+                None => {
+                    let id = stored.event.id;
+                    self.index_expiration(&stored);
+                    self.by_id.insert(id, stored.clone());
+                    self.addr_index.insert(key, id);
+                    (AcceptOutcome::Inserted { row: stored }, None)
+                }
+                Some(current_id) => {
+                    let current_event = &self
+                        .by_id
+                        .get(&current_id)
+                        .expect("addr_index must always point at a stored event")
+                        .event;
+
+                    if candidate_wins(&stored.event, current_event) {
+                        let new_id = stored.event.id;
+                        let replaced = self
+                            .by_id
+                            .remove(&current_id)
+                            .expect("addr_index must always point at a stored event");
+                        self.unindex_expiration(&replaced);
+                        self.index_expiration(&stored);
+                        self.by_id.insert(new_id, stored.clone());
+                        self.addr_index.insert(key, new_id);
+                        (
+                            AcceptOutcome::Superseded {
+                                row: stored,
+                                replaced: Box::new(replaced.clone()),
+                            },
+                            Some(replaced),
+                        )
+                    } else {
+                        (AcceptOutcome::Stale, None)
+                    }
+                }
+            },
+        };
+
+        self.journal_intent(
+            intent_id,
+            receipt_id,
+            frozen,
+            expected_pubkey,
+            signing_identity_ref,
+            durability,
+            routing,
+            sig_state,
+            accepted_at,
+            displaced,
+        );
+
+        outcome
+    }
+
+    fn promote_signed(&mut self, id: EventId, sig: Signature) -> PromoteOutcome {
+        let Some(se) = self.by_id.get_mut(&id) else {
+            return PromoteOutcome::NotFound;
+        };
+        let Some(local) = se.provenance.local.as_mut() else {
+            return PromoteOutcome::NotFound;
+        };
+        let intent_id = local.intent_id;
+        local.sig_state = SigState::Signed;
+        se.event.sig = sig;
+        let row = se.clone();
+
+        // Same transaction (in-memory: same call), per R6 — durably drop
+        // the displaced stash so recovery after a promote never sees it.
+        self.outbox_displaced.remove(&intent_id);
+        if let Some(record) = self.outbox_intents.get_mut(&intent_id) {
+            record.sig_state = IntentSigState::Signed;
+            record.frozen = row.event.clone();
+        }
+
+        PromoteOutcome::Promoted { row: Box::new(row) }
+    }
+
+    fn compensate_write(&mut self, id: EventId) -> CompensateOutcome {
+        let Some(intent_id) = self
+            .by_id
+            .get(&id)
+            .and_then(|se| se.provenance.local.as_ref())
+            .filter(|local| local.sig_state == SigState::Pending)
+            .map(|local| local.intent_id)
+        else {
+            return CompensateOutcome::NotFound;
+        };
+
+        // §4.2: `remove(id, Rejected)` writes no tombstone (`remove` never
+        // writes one — only kind:5 processing does), then re-insert the
+        // stashed predecessor through the SAME one door — ordinary
+        // supersession, never an un-supersede operation.
+        self.remove(id, RetractReason::Rejected);
+        self.outbox_intents.remove(&intent_id);
+        let restored = self
+            .outbox_displaced
+            .remove(&intent_id)
+            .and_then(|displaced| self.reinsert_stashed(displaced))
+            .map(Box::new);
+
+        CompensateOutcome::Compensated { restored }
+    }
+
+    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+        // Fable checkpoint Q4: crash-safety is a `RedbStore`-only backend
+        // property. Nothing here survives a real process crash, so there
+        // is nothing to recover, by construction.
+        Vec::new()
     }
 }

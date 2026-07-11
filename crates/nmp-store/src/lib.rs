@@ -22,9 +22,29 @@
 //! tracked in a persistent index so `expire_due`/`next_expiration` are
 //! index-backed, not O(stored rows).
 //!
+//! Durable write-outbox (`docs/design/crashsafe-accepted-2-3-plan.md`,
+//! issues #2/#3, Fable checkpoint verdict Q2): this crate is now the event
+//! **and** durable-outbox store — one atomic `redb::Database` boundary. A
+//! locally-authored write intent enters through [`EventStore::accept_write`]
+//! (the same dedup/tombstone/supersession rules `insert` runs, stamping
+//! local provenance + [`SigState::Pending`] instead of a `RelayObserved`),
+//! committing the pending row AND the durable intent/displaced-stash journal
+//! in ONE transaction. [`EventStore::promote_signed`] swaps the real
+//! signature in place (zero id churn — a NIP-01 id never depends on `sig`)
+//! and durably drops the displaced stash. [`EventStore::compensate_write`]
+//! undoes a pre-signature-terminated intent: `remove(id, Rejected)` (no
+//! tombstone — the row was never validly signed) plus a compensating
+//! re-`insert` of whatever it displaced, through the same one door.
+//! [`EventStore::recover_outbox`] replays every still-open intent after a
+//! restart. Every policy decision (retry ownership, deadline scheduling,
+//! signer orchestration) stays in `nmp-engine`; the store exposes only these
+//! typed doors — never raw table/transaction access.
+//!
 //! Explicitly out of scope for M3 step A1 (owned by later steps): signature
-//! verification, the engine's send-time attribution snapshots (this crate
-//! only stores whatever interval it is told to record).
+//! verification (the `nostr::Event::verify` call an accepted signer result
+//! must pass happens in `nmp-engine`, before `promote_signed` is ever
+//! called), the engine's send-time attribution snapshots (this crate only
+//! stores whatever interval it is told to record).
 
 mod address_key;
 mod coverage;
@@ -38,14 +58,62 @@ pub use redb_store::RedbStore;
 use std::collections::BTreeMap;
 
 use nmp_grammar::ConcreteFilter;
-use nostr::{Event, EventId, Filter, RelayUrl, Timestamp};
+use nostr::secp256k1::schnorr::Signature;
+use nostr::{Event, EventId, Filter, PublicKey, RelayUrl, Timestamp};
+use serde::{Deserialize, Serialize};
+
+/// Stable identifier for a durable write intent, assigned by the caller
+/// (`nmp-engine`) and persisted in `OUTBOX_INTENTS`/carried on the pending
+/// row's [`LocalOrigin`] — unlike an in-memory receipt counter, it survives
+/// restart. The store never allocates one, and never infers a "next free"
+/// value from the currently-open set: a caller (U3/U4) MUST allocate from a
+/// durable, monotonically-advancing high-water mark that is never reset by
+/// recovery, so a value is never reused across the store's ENTIRE lifetime
+/// — not just while an intent using it is still open. Seeding an allocator
+/// only past the max *currently-open* recovered id is UNSOUND: R8 deletes
+/// `OUTBOX_INTENTS` rows once an intent terminates, so an id freed that way
+/// looks "never used" to a naive open-set scan and can collide with a
+/// retained `OUTBOX_ATTEMPTS` row from the terminated intent that reused
+/// it — issue #3's "receipt ids remain stable and unique across restart"
+/// requires uniqueness for the store's whole lifetime, not merely among
+/// what recovery currently sees open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct IntentId(pub u64);
+
+/// Signature state of a locally-authored row, as data on the row itself
+/// (`docs/design/retraction-and-negative-deltas.md` §4.1 — "not a second
+/// query path or committed/pending authority split"). Exposed on
+/// [`LocalOrigin`] so the app surface can always tell a sentinel-sig
+/// pending row from a really-signed one (Fable checkpoint Q1 condition a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SigState {
+    /// The row's `sig` is [`sentinel_signature`] — not yet signed.
+    Pending,
+    /// The row carries a real, caller-verified signature.
+    Signed,
+}
+
+/// A locally-authored row's provenance (issue #2's "`Local` origin; a row
+/// *field*, exactly ledger #5's shape"). Set iff this row entered through
+/// [`EventStore::accept_write`] rather than [`EventStore::insert`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalOrigin {
+    pub intent_id: IntentId,
+    pub sig_state: SigState,
+    pub accepted_at: Timestamp,
+}
 
 /// Per-relay provenance for one stored event: which relays have delivered
 /// this exact event id, and the latest wall-clock time each one did so
 /// (ledger #5). A first-class field of the stored row, not a sidecar.
+/// `local` is `Some` iff the row was locally authored (issue #2) — it is
+/// preserved (never cleared) across a later relay echo merging into `seen`:
+/// the app's "sending…" chip resolves off `seen.is_empty()`, not off
+/// `local`'s presence (retraction doc §4.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Provenance {
     pub seen: BTreeMap<RelayUrl, Timestamp>,
+    pub local: Option<LocalOrigin>,
 }
 
 impl Provenance {
@@ -53,7 +121,16 @@ impl Provenance {
     pub(crate) fn first_observation(from: RelayObserved) -> Self {
         let mut seen = BTreeMap::new();
         seen.insert(from.relay, from.at);
-        Self { seen }
+        Self { seen, local: None }
+    }
+
+    /// A fresh `Provenance` for a row entering through `accept_write`: no
+    /// relay has observed it yet, but it carries local provenance.
+    pub(crate) fn local_origin(local: LocalOrigin) -> Self {
+        Self {
+            seen: BTreeMap::new(),
+            local: Some(local),
+        }
     }
 
     /// Merge one more observation in. Returns `true` iff this observation
@@ -61,6 +138,8 @@ impl Provenance {
     /// timestamp for a relay already seen. A redelivery from a relay at an
     /// equal-or-earlier timestamp than what is already recorded changes
     /// nothing and returns `false` — no index churn on a no-op merge.
+    /// Never touches `local` — a relay echo of an already-local row keeps
+    /// its local provenance (retraction doc §4.1).
     pub(crate) fn merge_observation(&mut self, from: &RelayObserved) -> bool {
         match self.seen.get(&from.relay) {
             None => {
@@ -74,6 +153,18 @@ impl Provenance {
             Some(_) => false,
         }
     }
+}
+
+/// The sentinel signature every pending row's frozen body carries until
+/// [`EventStore::promote_signed`] swaps in the real one (Fable checkpoint
+/// Q1, APPROVED): a NIP-01 id is `hash([0,pubkey,created_at,kind,tags,
+/// content])` — the signature is not an id input — so an all-zero 64-byte
+/// value round-trips through `nostr::Event`/JSON/`Filter::match_event`
+/// unverified (schnorr `Signature` parsing is length-checked only) and the
+/// id is final before a real signature exists.
+pub fn sentinel_signature() -> Signature {
+    Signature::from_slice(&[0u8; 64])
+        .expect("64 zero bytes is always a structurally valid (length-checked) schnorr signature")
 }
 
 /// A stored event plus its provenance. What `query` returns — every caller
@@ -170,6 +261,173 @@ pub enum RetractReason {
     Expired,
 }
 
+/// Durability class of a write intent, as store-owned persisted data — the
+/// store never interprets it (retry/backoff policy stays in `nmp-engine`,
+/// crashsafe-accepted-2-3-plan.md §7 Q2's boundary constraint), it only
+/// journals and returns it verbatim. `Ephemeral` is deliberately absent:
+/// per the plan's R4, an `Ephemeral` write never reaches `accept_write` at
+/// all — it keeps today's direct-publish path with no journal row, no
+/// pending store row, no receipt (ledger #9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WriteDurability {
+    Durable,
+    AtMostOnce,
+}
+
+/// Journal-level signature state of an `OUTBOX_INTENTS` row (Fable
+/// checkpoint R1) — a FINER granularity than the row-level [`SigState`]
+/// the app sees: `AwaitingSigner` and `Pending` both project as
+/// `SigState::Pending` to the app (both are "not yet signed"), but the
+/// engine needs the extra distinction on restart to know whether a signer
+/// attach should re-trigger `RequestSign` (`AwaitingSigner`) or whether a
+/// sign request was already in flight and its response is simply lost
+/// (`Pending` — safe to re-request; double-signing after a crash is
+/// harmless, same id either valid signature promotes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntentSigState {
+    /// No signer for `expected_pubkey` was attached at acceptance.
+    AwaitingSigner,
+    /// A signer is (or was) in flight; the row's `sig` is still
+    /// [`sentinel_signature`].
+    Pending,
+    /// [`EventStore::promote_signed`] has run; the row carries a real
+    /// signature.
+    Signed,
+}
+
+/// The full journal payload for one locally-accepted write intent (Fable
+/// checkpoint R7): everything #3's "one crash-atomic commit" enumerates,
+/// gathered into one struct so `accept_write` can commit it and the pending
+/// row in a single `redb::WriteTransaction` — atomicity is structural, not
+/// a calling convention.
+pub struct AcceptWrite {
+    pub intent_id: IntentId,
+    /// The engine's own `ReceiptId`, persisted so it can be reattached
+    /// after restart (issue #3: "receipt ids remain stable and unique
+    /// across restart").
+    pub receipt_id: u64,
+    /// The frozen, unsigned NIP-01 body: pubkey/created_at/kind/tags/
+    /// content are final and `event.id` is already `EventId::new(..)` over
+    /// exactly those fields (the signature is not an id input — Q1).
+    /// `event.sig` must be [`sentinel_signature`] until
+    /// [`EventStore::promote_signed`] swaps in the real one.
+    pub frozen: Event,
+    /// The pinned signing identity (#43 "pins the chosen identity at
+    /// acceptance"). Ordinarily equal to `frozen.pubkey`; kept as an
+    /// explicit field because it is a distinct journal fact (#2's "expected
+    /// pubkey"), not merely derivable convenience.
+    pub expected_pubkey: PublicKey,
+    /// Opaque placeholder the store persists and returns verbatim — #47
+    /// gives it real meaning; this frame only pins the persistence hook
+    /// (Fable checkpoint Q5).
+    pub signing_identity_ref: String,
+    pub durability: WriteDurability,
+    /// Opaque, engine-owned routing snapshot at acceptance — persisted and
+    /// returned verbatim by `recover_outbox`. The store never interprets
+    /// routing semantics; §5's append-only-revision ownership stays in
+    /// `nmp-engine`.
+    pub routing: String,
+    /// The intent's sig state AT ACCEPTANCE — always `AwaitingSigner` or
+    /// `Pending`, never `Signed` (a row only reaches `Signed` through
+    /// `promote_signed`).
+    pub sig_state: IntentSigState,
+    pub accepted_at: Timestamp,
+}
+
+/// The result of an [`EventStore::accept_write`] call — mirrors
+/// [`InsertOutcome`]'s shape (Fable checkpoint: "reuses the widened
+/// `Superseded` shape so the resolver sorts it exactly like a relay
+/// insert"), minus `Kind5Processed`: a locally-composed kind:5 draft is
+/// stored like any other pending row through this door; its NIP-09
+/// tombstone *write* side effects apply once it is relay-observed (the
+/// ordinary `insert` path), not at local acceptance — out of this frame's
+/// scope (the plan requires only that `accept_write` reuse the tombstone
+/// *refusal* check `insert` runs, not `insert`'s deletion-processing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptOutcome {
+    /// Brand-new pending row, no address competition.
+    Inserted { row: StoredEvent },
+    /// This exact event id was already held (see `Provenance::local_origin`'s
+    /// doc — an edge case, not the relay-echo hand-off, which goes through
+    /// ordinary `insert`/dedup instead).
+    Duplicate { row: StoredEvent },
+    /// The pending row won a replaceable/addressable address, evicting
+    /// `replaced` — durably stashed by the caller into `OUTBOX_DISPLACED`
+    /// in the SAME transaction, so pre-signature compensation
+    /// (`compensate_write`) can restore it (retraction doc §4.2).
+    Superseded {
+        row: StoredEvent,
+        replaced: Box<StoredEvent>,
+    },
+    /// This intent lost its address race to an existing, newer winner.
+    /// The intent is still journaled (still gets signed and delivered —
+    /// only `Refused` below skips the journal) but produces no pending row.
+    Stale,
+    /// Refused at the door — the same tombstone/expiry refusal `insert`
+    /// runs. Terminal typed failure to the caller (R3): NOTHING is
+    /// journaled — no intent row, no pending row, no receipt residue.
+    Refused(RefuseReason),
+}
+
+/// The result of an [`EventStore::promote_signed`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromoteOutcome {
+    /// The sentinel signature was swapped for `sig` in place (same id, same
+    /// EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND entries — zero churn) and
+    /// `SigState` flipped to `Signed`. The durable `OUTBOX_DISPLACED` stash
+    /// for this intent (if any) was deleted in the same transaction (R6).
+    /// Boxed for the same reason `InsertOutcome::Superseded` is: keeps the
+    /// common `NotFound` variant small.
+    Promoted { row: Box<StoredEvent> },
+    /// No local pending row with this id — already promoted, already
+    /// compensated, or never accepted through `accept_write`.
+    NotFound,
+}
+
+/// The result of an [`EventStore::compensate_write`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompensateOutcome {
+    /// The pending row was removed (`remove(id, Rejected)` — no tombstone,
+    /// the row was never validly signed) and, if it had displaced a
+    /// predecessor, that predecessor was re-inserted through the same one
+    /// door and is returned here (`None` if it displaced nothing, or the
+    /// re-offered predecessor came back `Stale` — retraction doc §3.4). The
+    /// intent's `OUTBOX_INTENTS`/`OUTBOX_DISPLACED` rows were deleted in
+    /// the same transaction. Boxed for the same reason
+    /// `InsertOutcome::Superseded` is: keeps the common `NotFound` variant
+    /// small.
+    Compensated { restored: Option<Box<StoredEvent>> },
+    /// No local pending row with this id — already promoted (compensation
+    /// is pre-signature only, retraction doc §4.2's "Promotion
+    /// correction"), already compensated, or never accepted through
+    /// `accept_write`.
+    NotFound,
+}
+
+/// One still-open intent replayed by [`EventStore::recover_outbox`] on
+/// boot. The pending row itself is NOT re-inserted — it is already live in
+/// the store (committed atomically at `accept_write` time) and query-visible
+/// from the first post-boot subscription; this is only the journal metadata
+/// `nmp-engine` needs to rebuild its in-memory `PendingWrite`/
+/// `event_to_receipt` bookkeeping (plan §2.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredIntent {
+    pub intent_id: IntentId,
+    pub receipt_id: u64,
+    pub frozen: Event,
+    pub expected_pubkey: PublicKey,
+    pub signing_identity_ref: String,
+    pub durability: WriteDurability,
+    pub routing: String,
+    pub sig_state: IntentSigState,
+    /// The predecessor this intent displaced, if any — still durable
+    /// (`OUTBOX_DISPLACED` is deleted only by `promote_signed` or
+    /// `compensate_write`, never by `recover_outbox`), so a post-restart
+    /// cancellation can still restore it.
+    pub displaced: Option<StoredEvent>,
+    pub accepted_at: Timestamp,
+}
+
 /// The single mutating door onto the event store.
 pub trait EventStore {
     /// Insert an event observed via `from`. An already-expired event (NIP-40,
@@ -234,5 +492,55 @@ pub trait EventStore {
     /// row's proven interval and that row's retained shape matches it, the
     /// row is shrunk (or deleted, if the shrink empties it) in the same step
     /// — a watermark must never claim coverage of data no longer held.
+    ///
+    /// GC exclusion for open intents (Fable checkpoint R5): a row with
+    /// local provenance still in `SigState::Pending` is NEVER a GC
+    /// candidate, regardless of `claims` — structurally the same
+    /// unconditional retention already given to replaceable/addressable
+    /// winners, so an unsigned pending row can never be evicted before it
+    /// ever signs. Once `promote_signed` flips it to `Signed`, it is an
+    /// ordinary event again, GC-able like any other under `claims`.
     fn gc(&mut self, claims: &ClaimSet) -> GcReport;
+
+    /// Accept a durably-owned local write intent (issues #2/#3): runs the
+    /// SAME tombstone-refusal and replaceable/addressable supersession
+    /// rules `insert` runs against `accept.frozen`, but stamps
+    /// `Provenance::local_origin` instead of a `RelayObserved`, and commits
+    /// the resulting row together with `accept`'s full journal payload
+    /// (`OUTBOX_INTENTS` + `OUTBOX_DISPLACED`, if a predecessor was
+    /// evicted) in ONE transaction (Fable checkpoint R7) — a crash mid-call
+    /// leaves either nothing recoverable or a fully `recover_outbox`-able
+    /// `Accepted`. `Refused` writes nothing at all (R3).
+    fn accept_write(&mut self, accept: AcceptWrite) -> AcceptOutcome;
+
+    /// Swap the sentinel signature on the local pending row `id` for the
+    /// real `sig`, in place (same id — a NIP-01 id never depends on `sig`
+    /// — so this is a value update, not a remove/re-add), and flip its
+    /// `SigState` to `Signed`. In the SAME transaction: `OUTBOX_INTENTS`'s
+    /// `sig_state` flips to `Signed`, and the intent's `OUTBOX_DISPLACED`
+    /// stash (if any) is durably deleted (R6) — recovery after a promote
+    /// must never see a stale displaced stash. The caller must have already
+    /// validated `sig` against the frozen body/pubkey/id
+    /// (`nostr::Event::verify`) — this door does not re-verify (signature
+    /// verification is explicitly out of scope for this crate).
+    fn promote_signed(&mut self, id: EventId, sig: Signature) -> PromoteOutcome;
+
+    /// Pre-signature compensation only (retraction doc §4.2's "Promotion
+    /// correction": once `promote_signed` has run, relay ACK/reject/timeout
+    /// is receipt-only and NEVER reaches this door). In ONE transaction:
+    /// `remove(id, Rejected)` (no tombstone), re-`insert` the intent's
+    /// durably-stashed `displaced` predecessor (if any) through the same
+    /// one door — it wins its address back by ordinary supersession, never
+    /// an un-supersede operation — and delete the intent's
+    /// `OUTBOX_INTENTS`/`OUTBOX_DISPLACED` rows.
+    fn compensate_write(&mut self, id: EventId) -> CompensateOutcome;
+
+    /// Read every still-open intent back out of the durable journal on
+    /// boot (issue #3 §2.3). Read-only: the pending rows themselves are
+    /// already live in the store (committed at `accept_write` time) — this
+    /// returns only the journal metadata `nmp-engine` needs to rebuild its
+    /// in-memory write-outbox bookkeeping. `MemoryStore` always returns
+    /// empty (Fable checkpoint Q4: crash-safety is a `RedbStore`-only
+    /// backend property, not a contract `EventStore` itself promises).
+    fn recover_outbox(&self) -> Vec<RecoveredIntent>;
 }
