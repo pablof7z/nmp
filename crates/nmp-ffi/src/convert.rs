@@ -18,13 +18,14 @@ use nmp_grammar::{
     Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp, TagName,
 };
 use nmp_router::Lane;
-use nostr::{PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nostr::secp256k1::schnorr::Signature;
+use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 use crate::types::{
     FfiBinding, FfiCoverage, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
     FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiWriteIntent, FfiWriteRouting,
-    FfiWriteStatus,
+    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiWriteIntent, FfiWritePayload,
+    FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every way a value crossing this boundary can fail to parse -- typed
@@ -67,6 +68,18 @@ pub enum FfiError {
     StoreOpenFailed {
         reason: String,
     },
+    /// A `FfiWritePayload::Signed`'s `sig` did not parse as a valid 64-byte
+    /// hex schnorr signature.
+    InvalidSignature {
+        got: String,
+    },
+    /// A `FfiWritePayload::Signed` whose fields parsed but did not pass
+    /// `nostr::Event::verify` -- the id does not hash to these fields, or
+    /// the signature does not verify against `pubkey`. Rejected HERE (#32):
+    /// the engine never sees, and never publishes, this event.
+    InvalidSignedEvent {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for FfiError {
@@ -80,6 +93,8 @@ impl std::fmt::Display for FfiError {
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerHasNoPublicKey => write!(f, "signer reported no public key"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
+            Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
+            Self::InvalidSignedEvent { reason } => write!(f, "invalid signed event: {reason}"),
         }
     }
 }
@@ -422,18 +437,80 @@ fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
         .collect()
 }
 
-/// `FfiWriteIntent -> nmp_engine::outbox::WriteIntent`. Always constructs an
-/// `Unsigned` payload -- see `FfiWriteIntent`'s own doc for why `Signed` is
-/// out of M4's FFI scope.
-pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, FfiError> {
-    let pubkey = parse_pubkey(&intent.pubkey)?;
-    let unsigned = UnsignedEvent::new(
-        pubkey,
-        Timestamp::from(intent.created_at),
-        nostr::Kind::from(intent.kind),
-        tags_from_ffi(intent.tags)?,
-        intent.content,
+/// A `FfiWritePayload::Signed`'s fields -> a verified `nostr::Event`. Every
+/// field is parsed with the same typed-error discipline as the rest of this
+/// module, then the reconstructed event is run through `Event::verify`
+/// (id + schnorr signature, the same capability `nmp-transport`'s ingest
+/// gate reuses) -- a malformed or non-verifying event never reaches
+/// `write_intent_from_ffi`'s caller as anything but a typed [`FfiError`],
+/// so `nmp-engine` can never be handed garbage to publish verbatim (#32).
+fn signed_event_from_ffi(
+    id: String,
+    pubkey: String,
+    created_at: u64,
+    kind: u16,
+    tags: Vec<Vec<String>>,
+    content: String,
+    sig: String,
+) -> Result<SignedEvent, FfiError> {
+    let event_id = EventId::from_hex(&id).map_err(|_| FfiError::InvalidEventId { got: id })?;
+    let public_key = parse_pubkey(&pubkey)?;
+    let parsed_tags = tags_from_ffi(tags)?;
+    let signature = sig
+        .parse::<Signature>()
+        .map_err(|_| FfiError::InvalidSignature { got: sig })?;
+
+    let event = SignedEvent::new(
+        event_id,
+        public_key,
+        Timestamp::from(created_at),
+        nostr::Kind::from(kind),
+        parsed_tags,
+        content,
+        signature,
     );
+    event.verify().map_err(|e| FfiError::InvalidSignedEvent {
+        reason: e.to_string(),
+    })?;
+    Ok(event)
+}
+
+/// `FfiWriteIntent -> nmp_engine::outbox::WriteIntent`. `Unsigned` builds an
+/// `UnsignedEvent` template the engine signs internally; `Signed` (#32)
+/// verifies the caller-supplied event and passes it through verbatim -- see
+/// `signed_event_from_ffi`.
+pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, FfiError> {
+    let payload = match intent.payload {
+        FfiWritePayload::Unsigned {
+            pubkey,
+            created_at,
+            kind,
+            tags,
+            content,
+        } => {
+            let pubkey = parse_pubkey(&pubkey)?;
+            let unsigned = UnsignedEvent::new(
+                pubkey,
+                Timestamp::from(created_at),
+                nostr::Kind::from(kind),
+                tags_from_ffi(tags)?,
+                content,
+            );
+            GWritePayload::Unsigned(unsigned)
+        }
+        FfiWritePayload::Signed {
+            id,
+            pubkey,
+            created_at,
+            kind,
+            tags,
+            content,
+            sig,
+        } => {
+            let event = signed_event_from_ffi(id, pubkey, created_at, kind, tags, content, sig)?;
+            GWritePayload::Signed(event)
+        }
+    };
 
     let durability = match intent.durability {
         FfiDurability::Durable => GDurability::Durable,
@@ -462,7 +539,7 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
     };
 
     Ok(GWriteIntent {
-        payload: GWritePayload::Unsigned(unsigned),
+        payload,
         durability,
         routing,
     })
@@ -665,11 +742,13 @@ mod tests {
 
     fn valid_write_intent() -> FfiWriteIntent {
         FfiWriteIntent {
-            pubkey: pk_hex(),
-            created_at: 100,
-            kind: 1,
-            tags: vec![vec!["e".to_string(), "e".repeat(64)]],
-            content: "hello".to_string(),
+            payload: FfiWritePayload::Unsigned {
+                pubkey: pk_hex(),
+                created_at: 100,
+                kind: 1,
+                tags: vec![vec!["e".to_string(), "e".repeat(64)]],
+                content: "hello".to_string(),
+            },
             durability: FfiDurability::Ephemeral,
             routing: FfiWriteRouting::AuthorOutbox,
         }
@@ -682,7 +761,7 @@ mod tests {
         match parsed.payload {
             GWritePayload::Unsigned(u) => assert_eq!(u.tags.len(), 1),
             GWritePayload::Signed(_) => {
-                panic!("write_intent_from_ffi must always build an Unsigned payload")
+                panic!("an Unsigned FfiWritePayload must build an Unsigned GWritePayload")
             }
         }
     }
@@ -696,10 +775,113 @@ mod tests {
     #[test]
     fn malformed_tag_rejects_whole_write_intent_not_silently_dropped() {
         let mut intent = valid_write_intent();
-        intent.tags.push(Vec::new()); // empty tag array: Tag::parse rejects this
+        let FfiWritePayload::Unsigned { tags, .. } = &mut intent.payload else {
+            unreachable!("valid_write_intent always builds Unsigned")
+        };
+        tags.push(Vec::new()); // empty tag array: Tag::parse rejects this
         match write_intent_from_ffi(intent) {
             Err(err) => assert_eq!(err, FfiError::InvalidTag { got: Vec::new() }),
             Ok(_) => panic!("a malformed tag must fail closed, not silently drop"),
+        }
+    }
+
+    /// A real signed event (`EventBuilder::sign_with_keys`), rendered field-
+    /// for-field into a `FfiWritePayload::Signed` the same way an app would
+    /// after receiving one from an external signer / NIP-46 bunker.
+    fn signed_write_intent() -> (nostr::Event, FfiWriteIntent) {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "presigned")
+            .sign_with_keys(&keys)
+            .expect("test fixture must sign cleanly");
+        let intent = FfiWriteIntent {
+            payload: FfiWritePayload::Signed {
+                id: event.id.to_hex(),
+                pubkey: event.pubkey.to_hex(),
+                created_at: event.created_at.as_secs(),
+                kind: event.kind.as_u16(),
+                tags: event.tags.iter().map(|t| t.clone().to_vec()).collect(),
+                content: event.content.clone(),
+                sig: event.sig.to_string(),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+        };
+        (event, intent)
+    }
+
+    /// #32's core contract: a pre-signed event round-trips to the engine's
+    /// `WritePayload::Signed` byte-identical -- same id, same sig -- never
+    /// re-derived.
+    #[test]
+    fn ffi_publishes_presigned_event_verbatim() {
+        let (original, intent) = signed_write_intent();
+        let parsed = write_intent_from_ffi(intent).expect("a genuinely signed event must parse");
+        match parsed.payload {
+            GWritePayload::Signed(event) => {
+                assert_eq!(event.id, original.id);
+                assert_eq!(event.sig, original.sig);
+                assert_eq!(event.pubkey, original.pubkey);
+                assert_eq!(event.content, original.content);
+            }
+            GWritePayload::Unsigned(_) => {
+                panic!("a Signed FfiWritePayload must build a Signed GWritePayload")
+            }
+        }
+    }
+
+    /// #32: the sign stage is a structural no-op for `Signed` -- there is no
+    /// `UnsignedEvent` anywhere in the `Signed` arm to hand a signer, so this
+    /// is falsified at the type level as much as the runtime one; this test
+    /// pins the runtime half (the exact bytes handed in are the exact bytes
+    /// that would reach `Effect::RequestSign` if this were mistakenly routed
+    /// there -- it never is, per `on_publish`).
+    #[test]
+    fn ffi_presigned_never_resigned() {
+        let (original, intent) = signed_write_intent();
+        let parsed = write_intent_from_ffi(intent).expect("a genuinely signed event must parse");
+        let GWritePayload::Signed(event) = parsed.payload else {
+            panic!("a Signed FfiWritePayload must build a Signed GWritePayload")
+        };
+        // A re-sign would mint a fresh id/sig; verbatim pass-through keeps
+        // the caller's own id/sig, which only "same as original" can prove.
+        assert_eq!(event.id, original.id);
+        assert_eq!(event.sig, original.sig);
+    }
+
+    /// #32: a signature that does not verify against the claimed id/pubkey
+    /// must fail closed with a typed error, never reach the engine.
+    #[test]
+    fn ffi_rejects_malformed_signed_event() {
+        let (_original, mut intent) = signed_write_intent();
+        let FfiWritePayload::Signed { content, .. } = &mut intent.payload else {
+            unreachable!("signed_write_intent always builds Signed")
+        };
+        // Tamper with the content after signing: id/sig no longer match it.
+        *content = "tampered".to_string();
+
+        match write_intent_from_ffi(intent) {
+            Err(FfiError::InvalidSignedEvent { .. }) => {}
+            Err(other) => {
+                panic!("expected InvalidSignedEvent, got a different FfiError: {other:?}")
+            }
+            Ok(_) => panic!("a tampered signed event must fail closed, not parse"),
+        }
+    }
+
+    /// A `sig` that isn't even valid hex is a distinct, earlier failure mode
+    /// from a well-formed-but-non-verifying signature.
+    #[test]
+    fn ffi_rejects_signed_event_with_unparseable_signature() {
+        let (_original, mut intent) = signed_write_intent();
+        let FfiWritePayload::Signed { sig, .. } = &mut intent.payload else {
+            unreachable!("signed_write_intent always builds Signed")
+        };
+        *sig = "not-hex".to_string();
+
+        match write_intent_from_ffi(intent) {
+            Err(FfiError::InvalidSignature { got }) => assert_eq!(got, "not-hex"),
+            Err(other) => panic!("expected InvalidSignature, got a different FfiError: {other:?}"),
+            Ok(_) => panic!("an unparseable sig must fail closed, not parse"),
         }
     }
 }

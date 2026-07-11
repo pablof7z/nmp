@@ -83,18 +83,51 @@ final class FilterBuilderTests: XCTestCase {
 
     func testWriteIntentConversion() {
         let intent = WriteIntent(
-            pubkey: String(repeating: "b", count: 64),
-            createdAt: 1_700_000_000,
-            kind: 1,
-            tags: [["t", "nostr"]],
-            content: "hello from NMP",
+            payload: .unsigned(
+                pubkey: String(repeating: "b", count: 64),
+                createdAt: 1_700_000_000,
+                kind: 1,
+                tags: [["t", "nostr"]],
+                content: "hello from NMP"
+            ),
             durability: .durable,
             routing: .authorOutbox
         )
         let ffi = intent.toFfi()
-        XCTAssertEqual(ffi.content, "hello from NMP")
         XCTAssertEqual(ffi.durability, .durable)
         XCTAssertEqual(ffi.routing, .authorOutbox)
-        XCTAssertEqual(ffi.tags, [["t", "nostr"]])
+        guard case .unsigned(_, _, _, let tags, let content) = ffi.payload else {
+            return XCTFail("expected an unsigned payload")
+        }
+        XCTAssertEqual(content, "hello from NMP")
+        XCTAssertEqual(tags, [["t", "nostr"]])
+    }
+
+    /// #32: a `.signed` payload round-trips to `FfiWritePayload.signed`
+    /// field-for-field -- the Swift mirror of the Rust
+    /// `ffi_publishes_presigned_event_verbatim` test.
+    func testSignedWriteIntentConversion() {
+        let intent = WriteIntent(
+            payload: .signed(
+                id: String(repeating: "a", count: 64),
+                pubkey: String(repeating: "b", count: 64),
+                createdAt: 1_700_000_000,
+                kind: 1,
+                tags: [["e", String(repeating: "c", count: 64)]],
+                content: "presigned",
+                sig: String(repeating: "d", count: 128)
+            ),
+            durability: .durable,
+            routing: .authorOutbox
+        )
+        let ffi = intent.toFfi()
+        guard case .signed(let id, let pubkey, _, _, let tags, let content, let sig) = ffi.payload else {
+            return XCTFail("expected a signed payload")
+        }
+        XCTAssertEqual(id, String(repeating: "a", count: 64))
+        XCTAssertEqual(pubkey, String(repeating: "b", count: 64))
+        XCTAssertEqual(content, "presigned")
+        XCTAssertEqual(tags, [["e", String(repeating: "c", count: 64)]])
+        XCTAssertEqual(sig, String(repeating: "d", count: 128))
     }
 }
