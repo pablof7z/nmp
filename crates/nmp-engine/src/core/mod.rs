@@ -390,7 +390,7 @@ impl<S: EventStore> EngineCore<S> {
             self.router.diagnostics(),
             self.router.plan(),
             &self.events_by_relay_kind,
-            |relay, filter| self.get_coverage(filter, relay),
+            |relay, key| self.resolver.store().get_coverage(key, relay),
         )
     }
 
@@ -511,6 +511,12 @@ impl<S: EventStore> EngineCore<S> {
         let id = qh.id();
         let mut effects = Vec::new();
         self.recompile(&mut effects);
+        // A new query can change the capped greedy source plan for EVERY
+        // existing query, even when their rows are unchanged. Refresh the
+        // survivors against the newly-finalized plan before installing the
+        // new handle; otherwise their "current-plan" evidence can retain a
+        // source that the router just dropped (or omit one it just added).
+        self.refresh_all_handles(&mut effects);
         self.handles.insert(
             id,
             HandleState {
@@ -529,6 +535,9 @@ impl<S: EventStore> EngineCore<S> {
         self.handles.remove(&id);
         let mut effects = Vec::new();
         self.recompile(&mut effects);
+        // Removing one query can free capped-plan capacity and therefore
+        // change the planned sources of every surviving handle.
+        self.refresh_all_handles(&mut effects);
         effects
     }
 
@@ -1404,12 +1413,11 @@ impl<S: EventStore> EngineCore<S> {
     /// (ruling §3), so the relay's ongoing live tail still needs an open
     /// REQ once the backlog is settled.
     ///
-    /// Coverage crediting (ledger #7) is NOT immediate when a backfill is
+    /// Evidence crediting (ledger #7) is NOT immediate when a backfill is
     /// needed: recording "complete" before the backfilled events are
-    /// actually ingested would be exactly the "authoritative-empty that is
-    /// really a hole" failure the ruling exists to prevent (a reader could
-    /// observe `CompleteUpTo` on a store that is still, transiently,
-    /// missing precisely the events negentropy just proved are missing).
+    /// actually ingested would create a reconciled watermark over a store
+    /// that is still, transiently, missing precisely the events negentropy
+    /// just proved are missing.
     /// `pending_neg_credit` defers the credit to the backfill sub's OWN
     /// EOSE (`on_relay_frame`), by which point the events are already
     /// ingested (EVENT frames precede EOSE, NIP-01). An empty `need_ids`
@@ -1558,7 +1566,10 @@ impl<S: EventStore> EngineCore<S> {
     /// effect directly. Rows are computed over `root_atoms` alone (delivery
     /// shape unchanged); evidence is computed over `subtree_atoms` (#12: the
     /// query's FULL subtree, interior `Derived` atoms included).
-    fn rows_and_evidence_for(&self, id: HandleId) -> (BTreeMap<EventId, nostr::Event>, AcquisitionEvidence) {
+    fn rows_and_evidence_for(
+        &self,
+        id: HandleId,
+    ) -> (BTreeMap<EventId, nostr::Event>, AcquisitionEvidence) {
         let root_atoms = self.resolver.root_atoms(id);
         let mut by_id: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
         for atom in &root_atoms {

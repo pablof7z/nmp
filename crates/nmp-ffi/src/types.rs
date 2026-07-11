@@ -166,7 +166,7 @@ pub enum FfiRowDelta {
 /// §4) -- the closed, honest per-source link-status vocabulary for the
 /// scoped, per-query [`FfiAcquisitionEvidence`] surface. Ratified names,
 /// codex-nova-governed: no variant/field may be added beyond this list, and
-/// no completeness/sync/isComplete aggregate may ever be added anywhere on
+/// no query-level aggregate may ever be added anywhere on
 /// this surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiSourceStatus {
@@ -210,9 +210,8 @@ pub enum FfiShortfallFact {
 /// `nmp::AcquisitionEvidence` mirror (`docs/design/scoped-evidence-49-12-plan.md`
 /// §4, folding #12 into #49) -- per-SOURCE facts for a query's full subtree
 /// (interior `Derived` atoms included), plus an explicit shortfall list.
-/// Replaces the deleted `FfiCoverage::CompleteUpTo | Unknown` aggregate:
-/// NO field here is, or may ever become, a global completeness/sync/
-/// isComplete verdict -- an app rolls per-source facts into its own
+/// Replaces the deleted query-level aggregate: NO field here is, or may ever
+/// become, a global verdict -- an app rolls per-source facts into its own
 /// progress policy, NMP never does that rollup for it.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiAcquisitionEvidence {
@@ -225,7 +224,7 @@ pub struct FfiAcquisitionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiRowBatch {
     pub deltas: Vec<FfiRowDelta>,
-    pub coverage: FfiAcquisitionEvidence,
+    pub evidence: FfiAcquisitionEvidence,
 }
 
 /// `nmp::Durability` mirror (a typed PROPERTY of a write, not a routing

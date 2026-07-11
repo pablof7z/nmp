@@ -11,7 +11,7 @@ struct FeedView: View {
     let model: AppModel
 
     @State private var rows: [Row] = []
-    @State private var evidence: AcquisitionEvidence = AcquisitionEvidence()
+    @State private var evidence: AcquisitionEvidence?
 
     var body: some View {
         NavigationStack {
@@ -61,7 +61,7 @@ struct FeedView: View {
     // (`docs/design/scoped-evidence-49-12-plan.md` §4). This falsifier's own
     // rendering choice, not an NMP-provided aggregate.
     private var evidenceText: String {
-        if evidence.sources.isEmpty && evidence.shortfall.isEmpty {
+        guard let evidence else {
             return "no evidence yet"
         }
         let sourceCount = evidence.sources.count
@@ -71,7 +71,7 @@ struct FeedView: View {
 
     private func observe() async {
         rows = []
-        evidence = AcquisitionEvidence()
+        evidence = nil
         guard let query = try? model.engine.observe(FeedFilters.follows(kinds: model.kinds)) else {
             return
         }

@@ -102,20 +102,12 @@ public enum ShortfallFact: Sendable, Hashable {
 /// A query's scoped acquisition evidence
 /// (`docs/design/scoped-evidence-49-12-plan.md` §4): per-source facts over
 /// the query's full subtree, plus an explicit shortfall list. Deliberately
-/// NOT a completeness/sync/isComplete verdict -- an app reads which source
+/// NOT a query-level verdict -- an app reads which source
 /// has proven what and rolls that into its own progress policy; NMP never
 /// does that rollup for it.
 public struct AcquisitionEvidence: Sendable, Hashable {
     public let sources: [SourceEvidence]
     public let shortfall: [ShortfallFact]
-
-    /// A default empty evidence value -- used as the initial value before
-    /// the first real batch arrives (mirrors `DiagnosticsSnapshot`'s own
-    /// default-empty `public init`).
-    public init(sources: [SourceEvidence] = [], shortfall: [ShortfallFact] = []) {
-        self.sources = sources
-        self.shortfall = shortfall
-    }
 
     init(_ ffi: FfiAcquisitionEvidence) {
         sources = ffi.sources.map(SourceEvidence.init)

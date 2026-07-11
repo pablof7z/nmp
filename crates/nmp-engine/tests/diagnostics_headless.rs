@@ -297,3 +297,70 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
         "after EOSE the same filter's coverage must flip to a proven interval"
     );
 }
+
+#[test]
+fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let a_hex = a.public_key().to_hex();
+    let b_hex = b.public_key().to_hex();
+    let relay = RelayUrl::parse("wss://coalesced.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a_hex.clone(), [relay.clone()])
+        .with_write(b_hex.clone(), [relay.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay);
+
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &a_hex),
+        Box::new(NullSink),
+    ));
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &b_hex),
+        Box::new(NullSink),
+    ));
+    let sub = sub_id_for(&effects, &relay).clone();
+
+    let before = core.diagnostics_snapshot();
+    let entry = &before.relays[0];
+    assert_eq!(entry.coverage.len(), 1, "AuthorUnion must be one wire REQ");
+    assert!(entry.filters[0].contains(&a_hex));
+    assert!(entry.filters[0].contains(&b_hex));
+    assert!(entry.coverage[0].coverage.is_none());
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(25)));
+    // The same sub-id has two in-flight REQs: the original single-author
+    // request and its AuthorUnion overwrite. The first EOSE can only credit
+    // their safe intersection (A); the second terminates the wide request
+    // and credits both absorbed atom keys.
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire_sub_string(&sub)),
+    ));
+    assert!(
+        core.diagnostics_snapshot().relays[0].coverage[0]
+            .coverage
+            .is_none(),
+        "one absorbed atom is still unproven after only the older REQ's EOSE"
+    );
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire_sub_string(&sub)),
+    ));
+
+    let after = core.diagnostics_snapshot();
+    assert_eq!(
+        after.relays[0].coverage[0].coverage,
+        Some(nmp_store::CoverageInterval {
+            from: Timestamp::from(0),
+            through: Timestamp::from(25),
+        }),
+        "the wide request is proven through the common interval of its absorbed narrow atoms"
+    );
+}

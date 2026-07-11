@@ -41,8 +41,8 @@ use crate::types::{FfiFilter, FfiWriteIntent};
 pub struct NmpEngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
     /// -> a persistent `RedbStore` opened at that path (the same file
-    /// reopened across restarts is what makes a cold, offline read
-    /// authoritative -- ledger #7).
+    /// reopened across restarts is what preserves source-scoped evidence for
+    /// a cold, offline read -- ledger #7).
     pub store_path: Option<String>,
     pub indexer_relays: Vec<String>,
     /// Operator app relay set (`Lane::AppRelay`). Default empty.

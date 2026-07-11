@@ -17,9 +17,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use nostr::{JsonUtil, RelayUrl};
 
-use nmp_grammar::ConcreteFilter;
-use nmp_router::{Diagnostics, Lane, RelayPlan};
-use nmp_store::CoverageInterval;
+use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
+use nmp_store::{CoverageInterval, CoverageKey};
 
 /// One filter's proven coverage state at one relay (parallel to
 /// [`RelayDiagnosticsSnapshot::filters`] — same order, same rendering).
@@ -83,7 +82,7 @@ pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_relay_kind: &HashMap<RelayUrl, BTreeMap<u16, u64>>,
-    get_coverage: impl Fn(&RelayUrl, &ConcreteFilter) -> Option<CoverageInterval>,
+    get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
 ) -> DiagnosticsSnapshot {
     let mut relays = Vec::new();
     for (relay, rd) in &diag.per_relay {
@@ -104,7 +103,7 @@ pub(crate) fn build(
                 let text = req.filter.to_nostr().as_json();
                 FilterCoverageEntry {
                     filter: text,
-                    coverage: get_coverage(relay, &req.filter),
+                    coverage: request_coverage(relay, req, &get_coverage),
                 }
             })
             .collect();
@@ -131,4 +130,27 @@ pub(crate) fn build(
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
     }
+}
+
+/// The exact common interval proven for a (possibly coalesced) wire request.
+/// Attribution persists evidence under every narrow atom key in
+/// `WireReq::absorbed`, never under the widened filter's own hash. A wide
+/// AuthorUnion/KindUnion request is therefore proven only over the
+/// intersection shared by ALL absorbed atoms; an absent atom row or disjoint
+/// intervals yields `None` rather than fabricating a wire-filter watermark.
+fn request_coverage(
+    relay: &RelayUrl,
+    req: &WireReq,
+    get_coverage: &impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
+) -> Option<CoverageInterval> {
+    let mut keys = req.absorbed.iter().copied();
+    let first = get_coverage(relay, keys.next()?)?;
+    keys.try_fold(first, |common, key| {
+        let next = get_coverage(relay, key)?;
+        let intersection = CoverageInterval {
+            from: common.from.max(next.from),
+            through: common.through.min(next.through),
+        };
+        (intersection.from <= intersection.through).then_some(intersection)
+    })
 }

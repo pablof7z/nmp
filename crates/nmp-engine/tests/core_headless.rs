@@ -5,14 +5,14 @@
 //! every "relay" interaction here is a scripted `EngineMsg::RelayConnected`/
 //! `RelayFrame` fed directly to `EngineCore::handle`, exactly as the ruling's
 //! own reasoning demands (send-time snapshots, the EOSE intersection rule,
-//! `limit` poisoning, and per-query `CompleteUpTo`/`Unknown` aggregation).
+//! `limit` poisoning, and per-query scoped acquisition evidence).
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::{
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, RowDelta, RowSink, SourceEvidence,
-    SourceStatus,
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, RowDelta, RowSink, ShortfallFact,
+    SourceEvidence, SourceStatus,
 };
 use nmp_engine::outbox::{
     Durability, NarrowOnly, PrivateRoute, ReceiptSink, WriteIntent, WritePayload, WriteRouting,
@@ -496,6 +496,166 @@ fn evidence_from(effects: &[Effect], id: HandleId) -> Option<&AcquisitionEvidenc
         Effect::EmitRows(hid, _, ev) if *hid == id => Some(ev),
         _ => None,
     })
+}
+
+#[test]
+fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
+    let mut core = new_core(FixtureDirectory::new());
+    let unresolved = LiveQuery(Filter {
+        kinds: Some(BTreeSet::from([9999u16])),
+        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+        ..Filter::default()
+    });
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        unresolved,
+        Box::new(CapturingSink::default()),
+    ));
+    let evidence = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(_, _, evidence) => Some(evidence),
+            _ => None,
+        })
+        .expect("a new subscription must emit its initial evidence");
+
+    assert!(evidence.sources.is_empty());
+    assert_eq!(evidence.shortfall, vec![ShortfallFact::NoResolvedDemand]);
+}
+
+#[test]
+fn resolved_atom_without_a_planned_relay_reports_no_planned_source() {
+    let a = Keys::generate();
+    let atom = cf(&[9999], &[&a.public_key().to_hex()]);
+    let mut core = new_core(FixtureDirectory::new());
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let evidence = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(_, _, evidence) => Some(evidence),
+            _ => None,
+        })
+        .expect("a new subscription must emit its initial evidence");
+
+    assert!(evidence.sources.is_empty());
+    assert_eq!(
+        evidence.shortfall,
+        vec![ShortfallFact::NoPlannedSource { atom }]
+    );
+}
+
+#[test]
+fn equal_evidence_on_reconnect_does_not_spuriously_emit_rows() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://stable-evidence.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let first_connect = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 7,
+            generation: 1,
+        },
+        relay.clone(),
+    ));
+    assert!(
+        first_connect
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(..))),
+        "Connecting -> Requesting is a real evidence change"
+    );
+
+    let unchanged_reconnect = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 7,
+            generation: 2,
+        },
+        relay,
+    ));
+    assert!(
+        unchanged_reconnect
+            .iter()
+            .all(|effect| !matches!(effect, Effect::EmitRows(..))),
+        "deterministically equal source evidence must not produce a duplicate row batch"
+    );
+}
+
+#[test]
+fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let r1 = RelayUrl::parse("wss://r1.example.com").unwrap();
+    let r2 = RelayUrl::parse("wss://r2.example.com").unwrap();
+    let r3 = RelayUrl::parse("wss://r3.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [r2.clone(), r3.clone()])
+        .with_write(b.public_key().to_hex(), [r1.clone(), r2.clone()]);
+    let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 2);
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let a_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(id, _, _) => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    let a_initial = evidence_from(&effects, a_id).unwrap();
+    assert_eq!(
+        a_initial
+            .sources
+            .iter()
+            .map(|source| source.relay.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([r2.clone(), r3.clone()])
+    );
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[9999], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let b_id = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitRows(id, _, _) if *id != a_id => Some(*id),
+            _ => None,
+        })
+        .next()
+        .expect("the second subscription must emit its own initial batch");
+    let a_while_b_is_live = evidence_from(&effects, a_id)
+        .expect("adding B changes A's capped current plan and must refresh A");
+    assert_eq!(
+        a_while_b_is_live
+            .sources
+            .iter()
+            .map(|source| source.relay.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([r2.clone()]),
+        "the shared r2 plus lexicographically earlier r1 exhaust the cap while B is live"
+    );
+
+    let effects = core.handle(EngineMsg::Unsubscribe(b_id));
+    let a_after_b_is_removed = evidence_from(&effects, a_id)
+        .expect("removing B frees cap for r3 and must refresh surviving A");
+    assert_eq!(
+        a_after_b_is_removed
+            .sources
+            .iter()
+            .map(|source| source.relay.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([r2, r3])
+    );
 }
 
 /// The direct #12 fix falsifier: two independently-covering relays for the

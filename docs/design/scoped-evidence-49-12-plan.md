@@ -1,16 +1,26 @@
 # Scoped acquisition evidence — #49 / #12 / #8 (evidence half)
 
-- **Status:** IMPLEMENTATION PLAN (Opus designer). No code written. #43 step-5 frame.
+- **Status:** IMPLEMENTATION IN PROGRESS. U1/U2/U2.5 are implemented on the
+  #49/#12 branch; the cohesive Rust/FFI/Swift/Kotlin surface wave and its
+  falsifiers are being completed before the PR is proposed for merge. #43
+  step-5 frame.
 - **Scope:** Replace the engine-global `QueryCoverage::CompleteUpTo | Unknown`
   query-result value with **rows + compact, per-current-plan acquisition
   evidence**; fix derived-query coverage to account for interior atoms (#12);
   reserve the AUTH phase in the per-source evidence vocabulary (#8 evidence half).
+- **Issue disposition:** this cohesive wave closes #12 and advances the evidence
+  half of #49. It does **not** close #49: full descriptor identity
+  (`selection + source authority + access context`) and context-isolated
+  persistence/coalescing remain tracked there and in `docs/known-gaps.md`.
 - **Nature: this is a REWORK, not a greenfield add.** The coverage-watermark
   substrate (`nmp-store::coverage`, `attribution.rs`) already exists and is
   correctly scoped; the collapse into a global claim lives in exactly one place
   (`coverage_query.rs`) plus its FFI projection. That is what this frame deletes.
-- **Governs a public surface change** → rides the #52 governance protocol
-  (surface-change-log entry + snapshot regen + synchronized falsifiers + parity).
+- **Governs a public surface change** → the #49/#12 PR records the complete
+  surface delta in its body and updates synchronized falsifiers. The missing
+  change-log/snapshot infrastructure is not improvised here: Unit D builds
+  parity after this shape settles, then Unit F creates the first governance
+  baseline and reconciles every accumulated delta.
 
 Authoritative contract (from #43 / #49 / `docs/known-gaps.md` /
 `docs/design/query-demand-and-evidence.md`):
@@ -270,34 +280,29 @@ in one PR):**
 
 ---
 
-## 5. Surface governance (#52) — mandatory
+## 5. Surface governance (#52) — coordinated order
 
-This is a public Rust-facade + FFI + Swift + Kotlin shape change, so it must ride
-the protocol `design-canonical-facade-52` / `build-52-a-facade` are standing up
-(`docs/design/canonical-facade-52-plan.md` §5). Required in the same PR:
+This is a public Rust-facade + FFI + Swift + Kotlin shape change. The repository
+does not yet contain `docs/surface-change-log.md`, `docs/surface/*.txt`, or the
+Unit-D parity harness. Creating lookalike infrastructure inside #49/#12 would
+fragment Unit F's ownership and produce a baseline it would have to replace.
+The coordinated order is therefore:
 
-1. **`docs/surface-change-log.md` entry** (7 fields):
-   - *Failure evidence:* #49, #12 (interior-atom lie), #8; the known-gaps
-     "Current `Coverage` over-interprets relay evidence" bullet.
-   - *Cross-surface impact:* Rust `QueryCoverage`→`AcquisitionEvidence`; FFI
-     `FfiCoverage`→`FfiAcquisitionEvidence`; Swift/Kotlin `on_batch` signature.
-   - *Persistence impact:* **NONE** — store coverage rows/redb keys unchanged
-     (state this explicitly; it's the load-bearing containment of the change).
-   - *Diagnostics impact:* `FilterCoverageEntry` retyped; per-relay watermark
-     evidence retained, AUTH/EOSE/error facts added.
-   - *Updated falsifiers:* reshaped `coverage_query` tests, reshaped #12
-     falsifier (§3), parity-harness evidence assertions.
-   - *Superseded path removed:* `QueryCoverage` + `FfiCoverage` deleted, no alias.
-   - *Human signoff:* owner + PR/date.
-2. **Regenerate `docs/surface/nmp-facade.txt` + `nmp-ffi.udl.txt`** → the diff is
-   the governed artifact; the `surface-governance` CI gate fails if the snapshot
-   moves without a same-PR log entry.
-3. **Parity harness (`crates/nmp-parity`, #52 unit D):** its coverage assertions
-   currently compare `FfiCoverage` across facade + FFI. They must be updated in
-   lockstep to assert identical `AcquisitionEvidence`. **Coordinate directly with
-   `build-52-a-facade` / `design-canonical-facade-52`** — this is the primary
-   collision seam. Do not land the FFI reshape until the parity harness is
-   reshaped with it, or the gate/parity breaks.
+1. **The #49/#12 surface PR lands the cohesive shape and falsifiers.** Its PR
+   body records the full delta: failure evidence; Rust/FFI/Swift/Kotlin impact;
+   no persistence-schema impact; diagnostics' distinct interval type; updated
+   falsifiers; and the deleted paths (`QueryCoverage`/`FfiCoverage`, no alias).
+2. **Unit D builds `nmp-parity` on the settled shape.** It proves the canonical
+   Rust facade and FFI project identical `AcquisitionEvidence`; this PR does not
+   touch or pre-empt that lane.
+3. **Unit F creates the first change-log/snapshot baseline.** It captures all
+   accumulated surface deltas, including #49/#12, in the canonical artifact
+   format and CI gate rather than asking each earlier surface PR to invent one.
+
+Generated UniFFI Swift/Kotlin bindings and both hand-written SDK projections
+remain same-PR requirements for #49/#12. The deferral above applies only to the
+absent governance/parity infrastructure, never to the actual public surface or
+its current falsifiers.
 
 ---
 
@@ -310,14 +315,16 @@ built by parallel agents in the SAME worktree, in dependency order:
 | Unit | Crate / files | Depends on | Collision / coordination |
 |---|---|---|---|
 | **U1 — subtree accessor** | `nmp-resolver`: `subtree_atoms(id)` over `atoms_in_structural_order` | — | Internal crate, no governed surface. Isolated. |
-| **U2 — evidence core (heart; folds #12)** | `nmp-engine/core/coverage_query.rs` rewrite → `acquisition_evidence`; new `AcquisitionEvidence`/`SourceAcquisition`/`SourceState`/`AuthPhase`/`ShortfallFact`; rewire `rows_and_coverage_for`, `Effect::EmitRows`, `HandleState` | U1 | Store READ path only (`get_coverage`) — **does not touch `nmp-store/coverage.rs`**, so minimal collision with #2/#3 store work (`build-23-*`, `build-store-internals`, `build-store-query-rescan`). Confirm no schema change with them. |
-| **U3 — diagnostics retype** | `nmp-engine/core/diagnostics.rs`: `FilterCoverageEntry` off `QueryCoverage`; add AUTH/EOSE/error facts | U2 (type deletion) | Parallel with U4. |
-| **U4 — FFI + observer** | `nmp-ffi/{types,convert,facade,observer}.rs`; Swift/Kotlin regen | U2 | Parallel with U3. **Governed surface** → §5. Coordinate `build-52-a-facade`, `build-kotlin-falsifier`, `build-swift-batching-cleanclone`. |
-| **U5 — governance + falsifiers + parity** | `docs/surface-change-log.md`, snapshot regen, reshaped `coverage_query`/#12 falsifiers, `nmp-parity` evidence assertions, known-gaps bullet update, this doc's heuristic recorded durably | U2–U4 | **Coordinate `design-canonical-facade-52`** (parity + gate). |
+| **U2 — evidence core (heart; folds #12)** | `nmp-engine/core/coverage_query.rs` rewrite → `acquisition_evidence`; new `AcquisitionEvidence`/`SourceEvidence`/`SourceStatus`/`AuthPhase`/`ShortfallFact`; rewire `rows_and_coverage_for`, `Effect::EmitRows`, `HandleState` | U1 | Store READ path only (`get_coverage`) — **does not touch `nmp-store/coverage.rs`**, so minimal collision with #2/#3 store work. No persistence schema change. |
+| **U3 — diagnostics retype** | `nmp-engine/core/diagnostics.rs`: `FilterCoverageEntry.coverage` becomes `Option<CoverageInterval>`; coalesced wire-request diagnostics intersect the persisted intervals of every absorbed narrow atom | U2 (type deletion) | Query evidence and diagnostics remain deliberately distinct. AUTH/error status population stays tracked by #8/#51. |
+| **U4 — facade + FFI + native SDKs** | `nmp`, `nmp-consumer-check`, `nmp-ffi/{types,convert,facade,observer}.rs`; generated bindings; hand-written Swift/Kotlin Row/Query/Diagnostics mirrors | U2 | Same-wave governed surface. Full delta is recorded in the PR body under §5's coordinated order. |
+| **U5 — falsifiers + recorded surface delta** | Reshaped engine/BDD/FFI/Swift/Kotlin falsifiers, known-gaps truth update, this doc's heuristic, and the complete cross-surface delta recorded in the PR body | U2–U4 | This wave does **not** invent the absent parity/snapshot/change-log infrastructure. Unit D adds parity on the settled shape next; Unit F creates and reconciles the first baseline after D. |
 
-Order: **U1 → U2 → {U3, U4} → U5.** Scope `cargo test -p nmp-resolver -p
-nmp-engine -p nmp-ffi` + `nmp-parity` + the doctrine-lint smoke; never full
-workspace (agent test-scoping rule).
+Order for this wave: **U1 → U2 → {U3, U4} → U5.** Scope `cargo test -p
+nmp-resolver -p nmp-engine -p nmp -p nmp-consumer-check -p nmp-ffi -p
+nmp-bdd`, generated Swift/Kotlin bindings, both SDK suites where the host
+toolchains exist, and `cargo build --workspace`. Follow-on order is **Unit D
+parity → Unit F governance baseline**.
 
 ---
 
@@ -518,22 +525,12 @@ will ever populate.
   The only overlap is textual in `core/mod.rs` (their seam: `on_publish`/
   outbox; ours: `refresh_handle`/`rows_and_coverage_for` — disjoint regions).
   Coordinate merge order, no design dependency either way.
-- **vs #52: start U1–U3 now; merge after E+F land.** U1–U3 are engine-internal
-  (under #52 everything below `nmp` is explicitly unstable — not governed
-  surface). But the type deletion breaks `nmp-ffi` in-workspace, so the one PR
-  necessarily includes U4, and U4 is a governed change. This frame must
-  **not** improvise its own change-log file or snapshot format — two agents
-  defining the governance artifact is a duplicate-plan violation; F owns the
-  format, E owns the snapshots. Since E depends on A+B, the effective merge
-  prerequisite is **#52 A0 → A → B → E → F landed** (all in flight, all
-  small), with this frame's log entry riding the real protocol as its second
-  real entry (after the #41 verify reshape). **D (parity) is NOT a hard
-  prerequisite:** if `nmp-parity` exists by merge time, reshape its evidence
-  assertions in lockstep (plan §5.3 stands); if not, D is simply built later
-  on the final shape — cheaper, no interim churn — and this PR's falsifiers
-  (engine + bdd + Swift/Kotlin tests) carry the burden. Add `crates/nmp` to
-  U4's scope; coordinate with `build-52-a-facade` so the facade's query
-  surface is reshaped once, not built on `Coverage` and immediately re-cut.
+- **vs #52: the facade prerequisites have landed; #49 now settles the shape
+  before D/F.** The cohesive PR necessarily includes `crates/nmp`, `nmp-ffi`,
+  generated bindings, and both hand-written SDKs. It records the full delta in
+  its PR body without inventing the absent change-log/snapshot artifacts.
+  Unit D then builds parity on this settled evidence vocabulary; Unit F follows
+  by creating the first canonical baseline and reconciling accumulated deltas.
 - **Build order inside the frame: unchanged** — U1 → U2 → {U3, U4} → U5, one
   shared worktree, one PR; test scope as written plus
   `Packages/NMP`/`NMPKotlin` test suites (the wrappers have their own tests:
@@ -554,8 +551,9 @@ will ever populate.
 6. Deterministic `sources` ordering + `PartialEq` + no-spurious-emit falsifier.
 7. No roll-up anywhere, including no convenience aggregate on the Swift/Kotlin
    wrappers; reviewers watch for `isComplete`-shaped helpers.
-8. Merge gate: after #52 units E+F exist; log entry + snapshot regen ride the
-   real protocol. Parity lockstep only if `nmp-parity` exists by then.
+8. Coordinated gate: #49/#12 records its full surface delta in the PR body;
+   Unit D builds parity after the shape lands; Unit F then creates and
+   reconciles the first change-log/snapshot baseline.
 9. Prose sweep of the deleted vocabulary in doc comments (leak list item 5);
    update the known-gaps "over-interprets relay evidence" bullet in U5 as
    planned.

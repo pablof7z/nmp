@@ -232,7 +232,10 @@ impl<S: EventStore> Engine<S> {
         let Some(&root) = self.handle_to_root.get(&id) else {
             return BTreeSet::new();
         };
-        self.graph.atoms_in_structural_order(root).into_iter().collect()
+        self.graph
+            .atoms_in_structural_order(root)
+            .into_iter()
+            .collect()
     }
 
     pub fn graph_snapshot(&self) -> GraphSnapshot {

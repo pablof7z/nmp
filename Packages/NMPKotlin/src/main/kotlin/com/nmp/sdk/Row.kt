@@ -47,8 +47,8 @@ sealed class AuthPhase {
     companion object {
         fun from(ffi: FfiAuthPhase): AuthPhase =
             when (ffi) {
-                is FfiAuthPhase.AwaitingPolicy -> AwaitingPolicy
-                is FfiAuthPhase.AwaitingSignature -> AwaitingSignature
+                FfiAuthPhase.AWAITING_POLICY -> AwaitingPolicy
+                FfiAuthPhase.AWAITING_SIGNATURE -> AwaitingSignature
             }
     }
 }
@@ -125,12 +125,12 @@ sealed class ShortfallFact {
 /** A query's scoped acquisition evidence
  * (`docs/design/scoped-evidence-49-12-plan.md` §4): per-source facts over
  * the query's full subtree, plus an explicit shortfall list. Deliberately
- * NOT a completeness/sync/isComplete verdict -- an app reads which source
+ * NOT a query-level verdict -- an app reads which source
  * has proven what and rolls that into its own progress policy; NMP never
  * does that rollup for it. */
 data class AcquisitionEvidence(
-    val sources: List<SourceEvidence> = emptyList(),
-    val shortfall: List<ShortfallFact> = emptyList(),
+    val sources: List<SourceEvidence>,
+    val shortfall: List<ShortfallFact>,
 ) {
     companion object {
         fun from(ffi: FfiAcquisitionEvidence): AcquisitionEvidence =

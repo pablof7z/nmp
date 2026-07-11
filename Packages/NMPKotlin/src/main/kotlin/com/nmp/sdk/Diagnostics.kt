@@ -6,6 +6,7 @@
 package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiDiagnosticsSnapshot
+import uniffi.nmp_ffi.FfiCoverageInterval
 import uniffi.nmp_ffi.FfiFilterCoverage
 import uniffi.nmp_ffi.FfiKindCount
 import uniffi.nmp_ffi.FfiLaneCount
@@ -27,12 +28,23 @@ data class LaneCount(val lane: String, val count: UInt) {
     }
 }
 
+/** A proven, retained `[from, through]` interval -- the diagnostics-only
+ * watermark. It is deliberately distinct from query-scoped
+ * `AcquisitionEvidence`. */
+data class CoverageInterval(val from: ULong, val through: ULong) {
+    companion object {
+        fun from(ffi: FfiCoverageInterval): CoverageInterval = CoverageInterval(ffi.from, ffi.through)
+    }
+}
+
 /** One filter's proven coverage state at one relay. `filter` is the EXACT
  * wire JSON this coverage state is for -- the same rendering as the
- * parallel entry in `RelayDiagnostics.filters`. */
-data class FilterCoverage(val filter: String, val coverage: Coverage) {
+ * parallel entry in `RelayDiagnostics.filters`. `null` means this exact
+ * `(relay, filter)` interval remains unproven. */
+data class FilterCoverage(val filter: String, val coverage: CoverageInterval?) {
     companion object {
-        fun from(ffi: FfiFilterCoverage): FilterCoverage = FilterCoverage(ffi.filter, Coverage.from(ffi.coverage))
+        fun from(ffi: FfiFilterCoverage): FilterCoverage =
+            FilterCoverage(ffi.filter, ffi.coverage?.let { CoverageInterval.from(it) })
     }
 }
 

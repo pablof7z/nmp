@@ -139,7 +139,7 @@ fn spawn_relay(port: u16) -> LocalRelay {
 
 /// Phase 1 (online): subscribe against a real relay, wait for the plain
 /// REQ/EOSE round trip to land 3 seeded events AND the query's relay
-/// source to reach a proven `reconciled_through` (an authoritative
+/// source to reach a proven `reconciled_through` (a source-scoped
 /// watermark, persisted to the `RedbStore` file). Phase 2 (offline): shut
 /// the relay down, spawn a brand-new engine on the SAME redb file,
 /// subscribe the SAME query again. The FIRST batch on the fresh
@@ -148,7 +148,7 @@ fn spawn_relay(port: u16) -> LocalRelay {
 /// available with zero network round trips: this test asserts that batch
 /// already shows the 3 persisted rows AND a `reconciled_through: Some(_)`
 /// on the relay's own source entry, proving the watermark survived the
-/// restart and makes a cold, offline read authoritative rather than a
+/// restart and makes a cold, offline read evidence-backed rather than a
 /// (wrongly) empty cache-miss. This fresh process never once connects to
 /// the (now-dead) relay, so the SAME source's `status` reads `Connecting`
 /// throughout -- the load-bearing orthogonality proof
@@ -165,7 +165,7 @@ fn spawn_relay(port: u16) -> LocalRelay {
 /// engine -- the falsifier's other half: "no row = not covered" must still
 /// hold, offline, distinguishing a genuine unknown from a proven-empty
 /// watermark. If either half regresses (offline reads unproven when it
-/// should be proven, or a never-synced shape reads proven when it should
+/// should be proven, or a never-reconciled shape reads proven when it should
 /// be unproven), ledger #7 is not real and this assertion fails loudly
 /// rather than being softened.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -232,8 +232,7 @@ async fn watermark_cold_start_offline() {
             wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, evidence| {
                 let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
                 ids == post_ids
-                    && source_for(evidence, &url)
-                        .is_some_and(|s| s.reconciled_through.is_some())
+                    && source_for(evidence, &url).is_some_and(|s| s.reconciled_through.is_some())
             }),
             "phase 1 (online) must fetch all 3 seeded posts and reach a proven \
              reconciled_through via a real EOSE"
@@ -282,9 +281,10 @@ async fn watermark_cold_start_offline() {
                         s.reconciled_through.is_some() && s.status == SourceStatus::Connecting
                     })
             }),
-            "offline cold read must be AUTHORITATIVE: a proven reconciled_through from the \
-             persisted watermark, serving the 3 cached rows with zero network, coexisting with \
-             a Connecting link status -- if reconciled_through is None, ledger #7 is not real"
+            "offline cold read must retain source-scoped evidence: a proven \
+             reconciled_through for this relay, serving the 3 cached rows with zero network, \
+             coexisting with a Connecting link status -- if reconciled_through is None, \
+             ledger #7 is not real"
         );
 
         // Control: b's shape has no coverage row anywhere and must read an
@@ -297,7 +297,7 @@ async fn watermark_cold_start_offline() {
                 rows.is_empty()
                     && source_for(evidence, &url).is_some_and(|s| s.reconciled_through.is_none())
             }),
-            "a never-synced shape must read an unproven reconciled_through, never a proven one \
+            "a never-reconciled shape must read an unproven reconciled_through, never a proven one \
              -- a proven-empty watermark must not be confused with a genuine cache-miss"
         );
 

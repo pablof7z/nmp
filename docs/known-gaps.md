@@ -12,11 +12,12 @@ about current code:
   `selection + source authority + access context` end to end. Hashing,
   coalescing, routing, evidence, FFI, Swift, and Kotlin must project the same
   semantic descriptor. See `docs/design/query-demand-and-evidence.md`.
-- **Current `Coverage` over-interprets relay evidence.** `Unknown` versus
-  aggregate `CompleteUpTo` and the builder's authoritative-empty language must
-  become rows plus compact per-current-plan acquisition facts. Diagnostics keep
-  exact per-relay EOSE/watermark/AUTH/error evidence; no public global
-  completeness or `syncHealth` state remains.
+- **Scoped acquisition evidence is built, but its reserved transport states
+  are not populated yet.** Query snapshots now carry rows plus compact
+  per-current-plan source facts and explicit shortfalls; diagnostics retains
+  exact per-relay/filter intervals as a distinct type. `AwaitingAuth` and
+  `AuthDenied` land with #8, and `Error` lands with #51. Full source-authority
+  and access-context identity remains part of the descriptor gap above (#49).
 - **Durable `Accepted` is not crash-safe acceptance of a canonical pending
   row.** The intent journal, receipt, frozen unsigned body, stable pending row,
   displaced replaceable state, and initial retry state are not yet one atomic
@@ -76,7 +77,7 @@ about current code:
 
 - **Supersession retraction blindness - base design complete, pending-write section superseded (build pending).** The resolver still needs the symmetric negative-delta lane described in `docs/design/retraction-and-negative-deltas.md`: store commits return inserted and removed rows, and resolver invalidation consumes both. That mechanism remains correct for supersession, kind:5, NIP-40 expiry, and explicit pre-signature cancellation. The document's optimistic-write details are no longer canonical: a durable accepted row has typed `Pending(intentId) | Signed(signature)` state; missing signer waits indefinitely; only cancellation or terminal **pre-signature** failure retracts and compensates a displaced replaceable; relay rejection after signing changes receipt evidence only. `docs/design/durable-write-signing-and-retry.md` owns that correction. Kind:5 tombstone retention remains an owner decision. Not yet built.
 
-- **~~Four bounded correctness fixes from the external-feedback triage~~ LANDED (merge `9220f65`).** (1) Signature-verification gate at the network layer (`nmp-transport` frame seam) — kind-independent, verify-once per event id (redelivery string-compares the cached sig, no re-schnorr), invalid sig → drop + `RelayHealth::invalid_signature_count`; cache reads never re-verified. Makes ledger #5 honest. (2) FFI no longer panics on malformed `Literal` hex (typed error) and no longer silently drops malformed tags (`tags_from_ffi` returns `Result` — NMP can't sign a different event than the app composed). (3) `DescriptorHash`/`CoverageKey` widened FNV-64 → BLAKE3 256-bit (a network-controlled, durable-and-refcount key must be collision-resistant; a forged collision there would forge a `CompleteUpTo`). (4) `coalesce` never merges limited filters (relay-side truncation under-fetch), and a known-zero-write-relay author stops perpetual discovery.
+- **~~Four bounded correctness fixes from the external-feedback triage~~ LANDED (merge `9220f65`).** (1) Signature-verification gate at the network layer (`nmp-transport` frame seam) — kind-independent, verify-once per event id (redelivery string-compares the cached sig, no re-schnorr), invalid sig → drop + `RelayHealth::invalid_signature_count`; cache reads never re-verified. Makes ledger #5 honest. (2) FFI no longer panics on malformed `Literal` hex (typed error) and no longer silently drops malformed tags (`tags_from_ffi` returns `Result` — NMP can't sign a different event than the app composed). (3) `DescriptorHash`/`CoverageKey` widened FNV-64 → BLAKE3 256-bit (a network-controlled, durable-and-refcount key must be collision-resistant; a forged collision there would attach a watermark fact to the wrong filter). (4) `coalesce` never merges limited filters (relay-side truncation under-fetch), and a known-zero-write-relay author stops perpetual discovery.
 
 ## Security hardening deferred
 

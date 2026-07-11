@@ -10,7 +10,10 @@ import Observation
 @Observable
 public final class NMPQuerySnapshot {
     public private(set) var rows: [Row] = []
-    public private(set) var evidence: AcquisitionEvidence = AcquisitionEvidence(sources: [], shortfall: [])
+    /// `nil` until the first real query batch arrives. An empty evidence
+    /// value is not manufactured here: the engine always reports an explicit
+    /// shortfall when no source/demand fact exists.
+    public private(set) var evidence: AcquisitionEvidence?
 
     private var consumeTask: Task<Void, Never>?
 

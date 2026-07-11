@@ -1,4 +1,4 @@
-Feature: The current aggregate unknown state is not a row
+Feature: Empty local rows remain distinct from acquisition evidence
   @ledger-7
   Scenario: Emptiness is only claimed when it is proven
     Given only 1 indexer relay is configured
