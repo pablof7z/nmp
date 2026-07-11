@@ -32,11 +32,11 @@ use nostr::{
     UnsignedEvent,
 };
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{Binding, ConcreteFilter, Filter};
 use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
 use nmp_router::{
-    DiscoveryKinds, RelayDirectory, RelayLimits, Router, RuleRegistry, SubId, WireDelta, WireOp,
-    WireReq,
+    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayLimits, Router, RuleRegistry,
+    SubId, WireDelta, WireOp, WireReq,
 };
 use nmp_signer::SignerError;
 use nmp_store::{CoverageKey, EventStore, RelayObserved};
@@ -53,6 +53,15 @@ use crate::outbox::{
 /// again on the same generation -- `tick`'s own staleness sweep is the only
 /// caller of this constant).
 const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
+
+/// NIP-65 Relay List Metadata — the kind the self-bootstrapping outbox (M5)
+/// auto-discovers for any author the current demand references but whose
+/// write relays the directory doesn't know yet (see [`EngineCore::
+/// sync_discovery`]). Already a member of `nmp_router::DiscoveryKinds`'s
+/// default set, so the router routes this atom to the configured indexers
+/// with NO router-side changes of its own -- the same `build_candidates`
+/// eligibility check that already applies to kind:3/kind:0/kind:10050.
+const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 use attribution::AttributionState;
 pub use coverage_query::QueryCoverage;
@@ -266,6 +275,19 @@ pub struct EngineCore<S: EventStore> {
     /// the missing events actually landed (ledger #7 -- see
     /// `finish_neg_session`'s doc comment).
     pending_neg_credit: HashMap<SubId, SubId>,
+    /// The self-bootstrapping outbox (M5): an internal, engine-owned
+    /// resolver subscription discovering kind:10002 for exactly the authors
+    /// current demand references but whose write relays are still unknown
+    /// (see [`Self::sync_discovery`]). `None` when no author currently needs
+    /// discovering. The app never sees this handle or this atom -- it rides
+    /// the SAME demand/atom/router machinery every other subscription does,
+    /// never a parallel subscription system.
+    discovery_handle: Option<QueryHandle>,
+    /// The exact author set `discovery_handle` (if any) is currently open
+    /// for -- compared against the freshly-computed "needed" set on every
+    /// `sync_discovery` call so the subscription is only replaced when the
+    /// set actually changes, not on every recompile.
+    discovery_authors: BTreeSet<PubkeyHex>,
 }
 
 impl<S: EventStore> EngineCore<S> {
@@ -290,6 +312,8 @@ impl<S: EventStore> EngineCore<S> {
             neg_sessions: HashMap::new(),
             pending_backfills: BTreeSet::new(),
             pending_neg_credit: HashMap::new(),
+            discovery_handle: None,
+            discovery_authors: BTreeSet::new(),
         }
     }
 
@@ -779,10 +803,21 @@ impl<S: EventStore> EngineCore<S> {
 
         match msg {
             RelayMessage::Event { event, .. } => {
+                let event = event.into_owned();
+                // M5 self-bootstrapping outbox: a kind:10002 needs its
+                // author's write relays fed into the live directory BEFORE
+                // `recompile()` runs, so the very same recompile that
+                // ingested it can already route that author's content atoms
+                // to the newly-known relay (see `ingest_relay_list_winner`'s
+                // doc for why this re-reads the store's winner rather than
+                // trusting this frame directly).
+                let relay_list_author =
+                    (event.kind == nostr::Kind::RelayList).then_some(event.pubkey);
                 let observed = RelayObserved::new(relay, self.clock);
-                let _delta = self
-                    .resolver
-                    .ingest_observed(vec![(event.into_owned(), observed)]);
+                let _delta = self.resolver.ingest_observed(vec![(event, observed)]);
+                if let Some(author) = relay_list_author {
+                    self.ingest_relay_list_winner(author);
+                }
                 self.recompile(&mut effects);
                 self.refresh_all_handles(&mut effects);
             }
@@ -881,6 +916,7 @@ impl<S: EventStore> EngineCore<S> {
     /// has no token to pass, so its `Req` arm always falls through to the
     /// plain-REQ branch below, every time.
     fn recompile(&mut self, effects: &mut Vec<Effect>) {
+        self.sync_discovery();
         let demand = self.resolver.active_demand();
         self.attribution.observe_demand(demand.iter());
         let wire_delta: WireDelta = self
@@ -943,6 +979,89 @@ impl<S: EventStore> EngineCore<S> {
         if !kept.is_empty() {
             effects.push(Effect::Wire(WireDelta { ops: kept }));
         }
+    }
+
+    /// The self-bootstrapping outbox (M5, `docs/known-gaps.md`'s
+    /// "RelayDirectory" gap): keep an internal kind:10002 discovery
+    /// subscription open for EXACTLY the authors current demand references
+    /// whose write relays `self.directory` doesn't know yet -- never more,
+    /// never a permanent/whole-graph scan. Called at the top of every
+    /// `recompile` (i.e. on every subscribe/unsubscribe/re-root/ingest), so
+    /// it reacts to both directions of change: a newly-demanded author with
+    /// unknown relays gets discovered; an author who is no longer demanded
+    /// (or whose relays just became known) drops out of the discovery set.
+    ///
+    /// Deliberately reuses the ordinary resolver subscribe/unsubscribe
+    /// machinery rather than hand-rolling a parallel subscription system:
+    /// the discovery atom this produces (`kinds:[10002], authors:{needed}`)
+    /// is just another entry in `resolver.active_demand()`, so the router's
+    /// EXISTING discovery-kind eligibility (`DiscoveryKinds` already
+    /// contains 10002) is what routes it to the configured indexers -- no
+    /// router-side change was needed for that half at all. A content atom
+    /// for an author with no known write relays simply routes nowhere in
+    /// the meantime (never an indexer fallback -- "indexers are never a
+    /// content fallback").
+    fn sync_discovery(&mut self) {
+        let needed: BTreeSet<PubkeyHex> = self
+            .resolver
+            .active_demand()
+            .into_iter()
+            .filter_map(|atom| atom.authors)
+            .flatten()
+            .filter(|author| self.directory.write_relays(author).is_empty())
+            .collect();
+
+        if needed == self.discovery_authors {
+            return; // no change -- leave whatever subscription exists untouched.
+        }
+
+        // Drop whatever discovery subscription is currently open (its
+        // `Drop` impl only ENQUEUES the withdrawal -- draining happens
+        // below, either by `resolver.subscribe`'s own drain-on-entry or,
+        // when there is nothing to replace it with, by the explicit
+        // `poll_pending_drops` flush).
+        self.discovery_handle = None;
+        self.discovery_authors = needed.clone();
+
+        if needed.is_empty() {
+            let _ = self.resolver.poll_pending_drops();
+            return;
+        }
+
+        let query = LiveQuery(Filter {
+            kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
+            authors: Some(Binding::Literal(needed)),
+            ..Filter::default()
+        });
+        let (handle, _delta) = self.resolver.subscribe(query);
+        self.discovery_handle = Some(handle);
+    }
+
+    /// After ingesting a possible kind:10002 event for `author`, re-read the
+    /// store's CURRENT winning relay-list event for them -- never trust the
+    /// just-arrived frame directly. `EventStore::query` only ever returns
+    /// the current replaceable-event winner (`nmp-store`'s own contract), so
+    /// this is correct regardless of cross-relay arrival order: a stale/
+    /// older copy that already lost the replaceable race at `insert` time
+    /// can never overwrite the directory with worse data than what the
+    /// store itself considers authoritative.
+    fn ingest_relay_list_winner(&mut self, author: nostr::PublicKey) {
+        let filter = ConcreteFilter {
+            kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
+            authors: Some(BTreeSet::from([author.to_hex()])),
+            ..ConcreteFilter::default()
+        };
+        let Some(winner) = self
+            .resolver
+            .store()
+            .query(&filter.to_nostr())
+            .into_iter()
+            .next()
+        else {
+            return;
+        };
+        let relays = parse_nip65_write_relays(&winner.event);
+        self.directory.ingest_write_relays(author.to_hex(), relays);
     }
 
     /// Open a real negentropy reconciliation for `filter` against `probed`
@@ -1213,4 +1332,27 @@ impl<S: EventStore> EngineCore<S> {
             coverage_query::query_coverage(&atoms, self.router.plan(), self.resolver.store());
         (by_id, coverage)
     }
+}
+
+/// Parse NIP-65 `r` tags off a kind:10002 event into its WRITE relay set
+/// (lane `Nip65Write`): an absent marker or an explicit `"write"` marker is
+/// a write relay; an explicit `"read"` marker is excluded. Mirrors
+/// `nmp-demo`'s former one-shot bootstrap parse exactly (the same NIP-65
+/// semantics), now run reactively per event instead of once up front.
+fn parse_nip65_write_relays(event: &nostr::Event) -> Vec<LanedRelay> {
+    event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            if s.first().map(String::as_str) != Some("r") {
+                return None;
+            }
+            let url = RelayUrl::parse(s.get(1)?).ok()?;
+            match s.get(2).map(String::as_str) {
+                Some("read") => None,
+                _ => Some(LanedRelay::new(url, Lane::Nip65Write)),
+            }
+        })
+        .collect()
 }
