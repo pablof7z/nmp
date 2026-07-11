@@ -18,3 +18,15 @@ tungstenite = { version = "0.29", default-features = false, features = [
     "handshake",
     "rustls-tls-webpki-roots",
 ] }
+# Minimal AUTH-frame sniff in `pool::frame` (NIP-42 `["AUTH", ...]` shape);
+# already in the workspace's dependency graph transitively via `nostr`.
+serde_json = "1"
+
+[dev-dependencies]
+# In-process test relay (test 7 / the MockRelay round-trip): connect, REQ,
+# receive EVENT+EOSE, CLOSE, disconnect+reconnect+replay. Async under the
+# hood (nostr-sdk); confined to dev-dependencies and `#[tokio::test]` — the
+# production `Pool` above stays free of any imposed runtime (D8).
+nostr-relay-builder = "0.45.0-alpha.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
