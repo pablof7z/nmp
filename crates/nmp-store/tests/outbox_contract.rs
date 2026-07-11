@@ -2307,6 +2307,120 @@ fn duplicate_accepted_while_stashed_survives_restart() {
     }
 }
 
+/// codex-nova ruling (cross-door reachability finding, backend-parity
+/// falsifier for `reinsert_stashed`'s own id-collision branch): this branch
+/// is NOT unreachable through the public `EventStore` door -- it is reached
+/// by mixing the ordinary `remove`/`insert` doors with the outbox doors.
+/// Concrete path: accept local addressable A; accept newer local B so A is
+/// displaced into B's stash; remove B through the ORDINARY store door
+/// (bypassing `compensate_write` entirely -- e.g. the caller is reacting to
+/// B's own NIP-40 expiry or an unrelated GC-adjacent removal); a relay then
+/// delivers the REAL signed form of A's exact event id through the
+/// ordinary `insert` door -- since A is not live (B's slot, now empty,
+/// governs address competition) and A is not yet in EVENTS either, this is
+/// a plain fresh insert, landing A live with `local: None` (purely
+/// relay-observed) while A's OLD sentinel-signed, locally-owned copy still
+/// sits in B's stash. Compensating B then unconditionally restores B's OWN
+/// stash entry (A) through `reinsert_stashed`, colliding with the row the
+/// relay just planted. The union + Signed-dominance + adopt-signature +
+/// fan-out logic must all fire: A's canonical row keeps the relay's real
+/// signature, A's owner set is preserved, and -- the specific bug this
+/// falsifier catches -- A's own still-open local intent must be told the
+/// row is `Signed` even though the EXISTING (not the stashed) side was the
+/// one already carrying the real signature.
+#[test]
+fn reinsert_stashed_collision_with_relay_signed_row_adopts_and_fans_out() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
+        let frozen_a_id = frozen_a.id;
+        let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
+        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
+
+        // B supersedes A -- A is displaced into B's stash, owned by {A},
+        // still Pending.
+        let (frozen_b, _signed_b) = compose(&k, Kind::ContactList, "b", 200);
+        let frozen_b_id = frozen_b.id;
+        let outcome_b = do_accept(store, accept(frozen_b, k.public_key(), 200));
+        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
+        assert!(matches!(outcome_b, AcceptOutcome::Superseded { .. }));
+
+        // Remove B through the ORDINARY store door -- NOT compensate_write
+        // -- freeing the address slot while B's own OUTBOX_INTENTS/
+        // OUTBOX_DISPLACED entries (still holding A) are left untouched.
+        let removed_b = store.remove(frozen_b_id, RetractReason::Rejected);
+        assert!(removed_b.is_some(), "B must have been live to remove");
+        assert!(store.query(&Filter::new().id(frozen_b_id)).is_empty());
+
+        // A relay delivers A's REAL signed bytes through the ordinary
+        // `insert` door. A is not live (B's slot is now empty) and not yet
+        // in EVENTS -- this is a plain fresh insert: A becomes live with
+        // `local: None`, a genuine (non-sentinel) signature.
+        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
+        let insert_outcome = store.insert(
+            signed_a.clone(),
+            RelayObserved::new(relay, Timestamp::from(100)),
+        );
+        assert!(matches!(insert_outcome, InsertOutcome::Inserted));
+        let rows = store.query(&Filter::new().id(frozen_a_id));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.sig, signed_a.sig);
+        assert!(
+            rows[0].provenance.local.is_none(),
+            "the relay-planted row must start purely relay-observed"
+        );
+
+        // Compensating B unconditionally restores B's OWN displaced stash
+        // entry (A, sentinel-signed, owned by {intent_a}, Pending) --
+        // colliding with the relay-planted live row for A's exact id.
+        let compensated_b = store
+            .compensate_write(intent_b)
+            .expect("compensate persistence");
+        match compensated_b {
+            CompensateOutcome::Compensated { restored, .. } => {
+                let restored = restored.expect("A's stash entry must survive the collision");
+                assert_eq!(restored.event.id, frozen_a_id);
+                assert_eq!(
+                    restored.event.sig, signed_a.sig,
+                    "the row must keep the REAL (relay) signature, never regress to A's stale sentinel"
+                );
+                let local = restored
+                    .provenance
+                    .local
+                    .expect("A's stash-side ownership must be adopted onto the collided row");
+                assert_eq!(
+                    local.sig_state,
+                    SigState::Signed,
+                    "Signed dominance: the relay side was already signed"
+                );
+                assert!(local.owners.contains(&intent_a));
+            }
+            other => panic!("expected Compensated, got {other:?}"),
+        }
+
+        // The specific bug this falsifier targets: A's own still-open
+        // local intent must have been told the row is Signed -- NOT left
+        // stranded at Pending just because the EXISTING (relay) side, not
+        // the stashed side, was the one already carrying the real
+        // signature.
+        let promoted_a = store
+            .promote_signed(intent_a, signed_a.sig)
+            .expect("promote persistence");
+        assert!(
+            matches!(promoted_a, PromoteOutcome::NotFound),
+            "A's own journal must already be Signed (fanned out during the collision), not still open"
+        );
+        let compensated_a = store
+            .compensate_write(intent_a)
+            .expect("compensate persistence");
+        assert!(
+            matches!(compensated_a, CompensateOutcome::NotFound),
+            "compensation is pre-signature only -- A's journal is already Signed"
+        );
+    });
+}
+
 /// Issue #2 required falsifier #4 (kind:5 variant): an exact-`Duplicate`
 /// kind:5 intent's OWN independent suppression claim (issue #61 P0
 /// correction) must keep a target hidden after the canonical original is
