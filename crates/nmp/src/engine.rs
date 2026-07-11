@@ -345,7 +345,10 @@ mod tests {
     fn tampered_signed_publish_fails_closed_with_no_accepted() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
-        let mut event = nostr::EventBuilder::new(nostr::Kind::TextNote, "original")
+        // An arbitrary caller-owned kind, not any NIP-01 core schema --
+        // docs/known-gaps.md's v2-contract promotion forbids baking a
+        // kind:1-first bias into the facade's own acceptance fixtures.
+        let mut event = nostr::EventBuilder::new(nostr::Kind::Custom(9999), "original")
             .sign_with_keys(&keys)
             .expect("test fixture must sign cleanly");
         // Tamper the content after signing: id/sig no longer match it, but
@@ -413,7 +416,7 @@ mod tests {
             payload: WritePayload::Unsigned(nostr::UnsignedEvent::new(
                 Keys::generate().public_key(),
                 nostr::Timestamp::now(),
-                nostr::Kind::TextNote,
+                nostr::Kind::Custom(9999),
                 Vec::new(),
                 "unreachable",
             )),
@@ -447,16 +450,80 @@ mod tests {
     /// panic and must still run the same teardown path (the review's
     /// RAII-shutdown blocker: a bare `Mutex<Option<Inner>>` drop would
     /// detach `EngineThread`'s join handles while `engine_loop` kept
-    /// running with `self_inbox` still open).
+    /// running with `self_inbox` still open). This variant has no live
+    /// observer at all; [`drop_with_live_observers_tears_down_within_bound_and_disconnects_cleanly`]
+    /// below is the same claim with a query AND a diagnostics subscription
+    /// still open at drop time.
     #[test]
     fn drop_without_explicit_shutdown_does_not_panic() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         drop(engine);
     }
 
+    /// The RAII-shutdown claim, proven with LIVE handles rather than an
+    /// idle engine: drop an `Engine` while a query [`Subscription`] AND a
+    /// [`DiagnosticsSubscription`] are still open, and prove (a) `Drop`'s
+    /// `shutdown`+`join` completes within a bounded wait rather than
+    /// hanging -- the regression this whole fix guards against is
+    /// detaching `EngineThread`'s join handles while `engine_loop` kept
+    /// running with live subscribers still registered; (b) both channels
+    /// observe a clean disconnect afterward, not a hang; (c) dropping the
+    /// surviving handles once the engine is already gone does not panic --
+    /// `Handle::unsubscribe`/`DiagnosticsHandle::cancel` are already
+    /// fire-and-forget (`let _ = self.inbox.send(...)`), so this pins that
+    /// tolerance holds end-to-end through a real `Drop`, not only in
+    /// isolation.
+    #[test]
+    fn drop_with_live_observers_tears_down_within_bound_and_disconnects_cleanly() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+
+        let subscription = engine.observe(probe_query()).expect("engine is open");
+        let diagnostics = engine.observe_diagnostics().expect("engine is open");
+
+        // Drain the one proactive delivery each stream makes on open (a
+        // fresh subscribe always gets one -- possibly empty -- batch;
+        // `observe_diagnostics` delivers the CURRENT snapshot immediately)
+        // so the post-drop assertions below observe a disconnect, not
+        // leftover backlog.
+        subscription
+            .recv()
+            .expect("a fresh subscribe delivers one batch before anything else happens");
+        diagnostics
+            .recv()
+            .expect("observe_diagnostics delivers the current snapshot immediately");
+
+        let start = std::time::Instant::now();
+        drop(engine);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "Drop must tear EngineThread down within a bounded wait, not hang \
+             (took {elapsed:?})"
+        );
+
+        match subscription.recv() {
+            Err(_) => {}
+            Ok(msg) => panic!(
+                "query channel must disconnect once the dropped engine's thread has \
+                 fully exited, got another batch instead: {msg:?}"
+            ),
+        }
+        assert!(
+            diagnostics.recv().is_none(),
+            "diagnostics channel must disconnect (None) once the engine is dropped"
+        );
+
+        // Both surviving handles' own `Drop` (unsubscribe/cancel) must not
+        // panic even though the engine that owned them is already gone.
+        drop(subscription);
+        drop(diagnostics);
+    }
+
     fn probe_query() -> LiveQuery {
         LiveQuery(nmp_grammar::Filter {
-            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            // An arbitrary caller-owned kind, not any NIP-01 core schema --
+            // see this module's other fixtures for why.
+            kinds: Some(std::collections::BTreeSet::from([9999u16])),
             ..nmp_grammar::Filter::default()
         })
     }
