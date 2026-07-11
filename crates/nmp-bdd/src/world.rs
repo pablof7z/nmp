@@ -39,6 +39,20 @@ pub const EVENTUALLY: Duration = Duration::from_secs(5);
 /// which exits early on success; keeping this small is what keeps the whole
 /// suite's wall-clock bounded -- see the crate's `timeout 240` contract).
 pub const NEVER: Duration = Duration::from_millis(1200);
+/// Bounded wait for a relay that just came back to be recontacted by the
+/// engine's own reconnect+resubscribe (#60) -- deliberately its OWN, larger
+/// budget rather than reusing `EVENTUALLY` for the whole
+/// reconnect-then-observe pipeline. `nmp-transport`'s `backoff::jittered`
+/// adds up to 5s of per-URL deterministic jitter on top of the small
+/// `reconnect_delay_initial` this world configures, and that URL always
+/// contains an OS-assigned ephemeral port -- so the jitter offset silently
+/// varies run to run. Folding this wait into `EVENTUALLY` (or just raising
+/// `EVENTUALLY`) would still race that jitter on an unlucky port; this
+/// constant instead bounds the ACTUAL reconnect signal
+/// (`ScriptedRelay::wait_contacted`) with enough headroom to cover the
+/// worst-case jitter, so every step AFTER "relay comes back" runs against an
+/// already-reconnected relay and never has to absorb that variance itself.
+pub const RECONNECT: Duration = Duration::from_secs(8);
 
 /// The canonical name for the scenario's own (implicit "I"/"my") account --
 /// every `my`/`I`-phrased step resolves through this one name, so "my
@@ -675,6 +689,16 @@ impl NmpWorld {
     /// engine's own `Pool` reconnects to the SAME `RelayUrl` it already had
     /// open and replays its current subscriptions there with no
     /// resubscribe.
+    ///
+    /// Does NOT return until that reconnect+resubscribe has actually
+    /// happened (#60): the fresh instance's own `ContactLog` starts at zero,
+    /// so `wait_contacted` blocks (bounded by `RECONNECT`, no spin-poll) for
+    /// its first REQ/EVENT -- concrete proof the `Pool` is back, rather than
+    /// letting this step return immediately and leaving every later step
+    /// (`Bob posts a note`, `Then my feed shows ...`) to absorb whatever's
+    /// left of the reconnect's own (jittered, run-to-run-varying) backoff
+    /// delay out of ITS fixed window. See `RECONNECT`'s doc for why this is
+    /// a dedicated budget, not a bigger `EVENTUALLY`.
     pub async fn relay_comes_back(&mut self, name: &str) {
         let port = self.relays[name].port();
         let config = self.relay_configs.get(name).cloned().unwrap_or_default();
@@ -682,6 +706,11 @@ impl NmpWorld {
         // `runtime_integration.rs`'s own reconnect half.
         tokio::time::sleep(Duration::from_millis(150)).await;
         let fresh = ScriptedRelay::start_on_port(port, &config).await;
+        assert!(
+            fresh.wait_contacted(RECONNECT).await,
+            "nmp-bdd: relay {name:?} was not recontacted within {RECONNECT:?} of coming back -- \
+             the engine's Pool did not reconnect/resubscribe in time"
+        );
         self.relays.insert(name.to_string(), fresh);
     }
 

@@ -8,12 +8,18 @@
 //!   the world, per the approach doc §2.3), wired through `LocalRelay`'s own
 //!   `WritePolicy`/`QueryPolicy` plugin points;
 //! - **a world-side "was this relay ever contacted" observable**
-//!   (`ScriptedRelay::contacted`), bumped by those SAME policy hooks on
-//!   every inbound EVENT/REQ. This is deliberately independent of the
-//!   engine's own `DiagnosticsSnapshot`: a `must-never` scenario asserting
-//!   "no relay outside the plan was ever contacted" must not take the
-//!   engine's self-report as its only witness, or a diagnostics bug could
-//!   silently make the ledger scenario un-falsifiable.
+//!   (`ScriptedRelay::contacted`/`contact_count`/`wait_contacted`), bumped by
+//!   those SAME policy hooks on every inbound EVENT/REQ. This is
+//!   deliberately independent of the engine's own `DiagnosticsSnapshot`: a
+//!   `must-never` scenario asserting "no relay outside the plan was ever
+//!   contacted" must not take the engine's self-report as its only witness,
+//!   or a diagnostics bug could silently make the ledger scenario
+//!   un-falsifiable. `wait_contacted` is the same log's BOUNDED-WAIT half
+//!   (#60): a freshly rebound relay instance (`start_on_port`, used by the
+//!   reconnect scenario) starts its own count at zero, so blocking on its
+//!   first contact is a deterministic "the engine's `Pool` reconnected and
+//!   resubscribed here" signal, rather than a fixed-timeout guess racing an
+//!   unrelated, run-to-run-varying backoff delay.
 //!
 //! Deliberately NOT a glob import of `nostr_relay_builder::prelude::*` in
 //! the signature-facing parts of this module: that re-exports a DIFFERENT
@@ -25,6 +31,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use nostr::RelayUrl;
 
@@ -55,12 +62,58 @@ pub struct RelayConfig {
     pub reject_queries: bool,
 }
 
+/// Contact count + a `Notify` so a caller can WAIT (bounded, no spin-poll --
+/// same idiom as `NmpWorld`'s `FeedState`/`ReceiptState`/`DiagFeed`) for the
+/// NEXT contact rather than guessing how long one takes to arrive. This is
+/// what makes the reconnect scenario's "relay comes back" step deterministic
+/// (#60): instead of assuming the engine's `Pool` has already reconnected and
+/// resubscribed by some fixed wall-clock offset, the world can wait for THIS
+/// relay instance's OWN evidence that a REQ/EVENT actually reached it again.
+#[derive(Debug, Default)]
+struct ContactLog {
+    count: AtomicU64,
+    notify: tokio::sync::Notify,
+}
+
+impl ContactLog {
+    fn record(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    fn count(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Bounded wait for the count to become nonzero -- never a spin-poll
+    /// loop. Just pinning `Notify::notified()`'s returned future does NOT
+    /// yet register it as a waiter (that only happens once the future is
+    /// polled), so a `record()` -> `notify_waiters()` racing between the
+    /// second `count()` check and this future's first poll would otherwise
+    /// notify zero waiters and be silently lost -- the classic `Notify`
+    /// lost-wakeup trap. `Notified::enable()` is Tokio's documented fix:
+    /// it registers the waiter immediately, without consuming a poll, so
+    /// calling it BEFORE the second check closes that exact window.
+    async fn wait_contacted(&self, timeout: Duration) -> bool {
+        if self.count() > 0 {
+            return true;
+        }
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.count() > 0 {
+            return true;
+        }
+        tokio::time::timeout(timeout, notified).await.is_ok()
+    }
+}
+
 /// One running in-process relay + its contacted-log.
 pub struct ScriptedRelay {
     pub url: RelayUrl,
     port: u16,
     relay: LocalRelay,
-    contacted: Arc<AtomicU64>,
+    contacted: Arc<ContactLog>,
 }
 
 impl ScriptedRelay {
@@ -77,7 +130,7 @@ impl ScriptedRelay {
     /// `nmp-engine/tests/runtime_integration.rs` uses, so the engine's own
     /// `Pool` reconnects to the SAME `RelayUrl` it already had open.
     pub async fn start_on_port(port: u16, config: &RelayConfig) -> Self {
-        let contacted = Arc::new(AtomicU64::new(0));
+        let contacted = Arc::new(ContactLog::default());
 
         let relay = LocalRelayBuilder::default()
             .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
@@ -159,7 +212,7 @@ impl ScriptedRelay {
     /// world-side half of a `must-never` "no relay outside the plan was
     /// ever contacted" assertion (see the module doc).
     pub fn contacted(&self) -> bool {
-        self.contacted.load(Ordering::SeqCst) > 0
+        self.contacted.count() > 0
     }
 
     /// How many times this relay's write/query policy has been invoked --
@@ -167,7 +220,18 @@ impl ScriptedRelay {
     /// "untouched" assertion (a relay whose count hasn't moved since a
     /// snapshot received no NEW REQ/EVENT at all).
     pub fn contact_count(&self) -> u64 {
-        self.contacted.load(Ordering::SeqCst)
+        self.contacted.count()
+    }
+
+    /// Bounded wait (no spin-poll -- see [`ContactLog::wait_contacted`]) for
+    /// this relay instance to be contacted at least once. The deterministic
+    /// "has the engine's `Pool` actually reconnected and resubscribed here
+    /// yet" signal the reconnect scenario needs (#60): a freshly rebound
+    /// instance's `ContactLog` starts at zero, so the first contact IS the
+    /// resubscribe-after-reconnect event, whenever it actually lands --
+    /// never a guess at how long that takes.
+    pub async fn wait_contacted(&self, timeout: Duration) -> bool {
+        self.contacted.wait_contacted(timeout).await
     }
 
     /// Stop accepting connections (used by the reconnect/drop-and-come-back
@@ -199,7 +263,7 @@ pub fn free_port() -> u16 {
 
 #[derive(Debug)]
 struct LoggingWritePolicy {
-    contacted: Arc<AtomicU64>,
+    contacted: Arc<ContactLog>,
     reject: bool,
 }
 
@@ -209,7 +273,7 @@ impl WritePolicy for LoggingWritePolicy {
         _event: &'a nostr_relay_builder::prelude::Event,
         _addr: &'a SocketAddr,
     ) -> nostr_relay_builder::prelude::BoxedFuture<'a, WritePolicyResult> {
-        self.contacted.fetch_add(1, Ordering::SeqCst);
+        self.contacted.record();
         let reject = self.reject;
         Box::pin(async move {
             if reject {
@@ -226,7 +290,7 @@ impl WritePolicy for LoggingWritePolicy {
 
 #[derive(Debug)]
 struct LoggingQueryPolicy {
-    contacted: Arc<AtomicU64>,
+    contacted: Arc<ContactLog>,
     reject: bool,
 }
 
@@ -236,7 +300,7 @@ impl QueryPolicy for LoggingQueryPolicy {
         _query: &'a mut nostr_relay_builder::prelude::Filter,
         _addr: &'a SocketAddr,
     ) -> nostr_relay_builder::prelude::BoxedFuture<'a, QueryPolicyResult> {
-        self.contacted.fetch_add(1, Ordering::SeqCst);
+        self.contacted.record();
         let reject = self.reject;
         Box::pin(async move {
             if reject {
@@ -248,5 +312,62 @@ impl QueryPolicy for LoggingQueryPolicy {
                 QueryPolicyResult::Accept
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Falsifier for the lost-wakeup trap `wait_contacted` must close
+    /// (caught pre-merge on #60/PR #72 by codex-nova review): a bare
+    /// `tokio::pin!(notify.notified())` does NOT register the future as a
+    /// waiter -- only polling (or `enable()`) does -- so a `record()`
+    /// landing between the "already contacted?" recheck and this future's
+    /// first poll would notify zero waiters under `notify_waiters()` and be
+    /// silently dropped. This pins the actual contract `wait_contacted`
+    /// relies on: call `enable()` first, and a contact recorded after that
+    /// point but strictly before the future is ever polled must still be
+    /// observed.
+    #[tokio::test]
+    async fn enabled_notified_future_observes_a_contact_recorded_before_its_first_poll() {
+        let log = ContactLog::default();
+        let notified = log.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        // Exactly the ordering `wait_contacted`'s internal race window
+        // allows: contact recorded after `enable()`, strictly before the
+        // future's first poll (this test never polled it before this line).
+        log.record();
+
+        tokio::time::timeout(Duration::from_millis(200), notified)
+            .await
+            .expect(
+                "an enable()d waiter must still observe a contact recorded before its first poll",
+            );
+    }
+
+    /// End-to-end sibling: `wait_contacted` itself must observe a
+    /// GENUINELY concurrent `record()` (a second task on a real
+    /// multi-thread runtime, not this same synchronous sequence) --
+    /// repeated many times to build confidence against scheduler-dependent
+    /// flakiness, the same reason #60's own reconnect fix was proven 5x
+    /// back-to-back rather than once. Would have been flaky/failing
+    /// intermittently against the pre-`enable()` version of `wait_contacted`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wait_contacted_observes_a_concurrent_record_under_repeated_trials() {
+        for _ in 0..200 {
+            let log = Arc::new(ContactLog::default());
+            let recorder = {
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    log.record();
+                })
+            };
+            let seen = log.wait_contacted(Duration::from_millis(500)).await;
+            recorder.await.expect("recorder task must not panic");
+            assert!(seen, "wait_contacted missed a concurrent record()");
+        }
     }
 }
