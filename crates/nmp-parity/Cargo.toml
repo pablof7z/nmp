@@ -1,0 +1,19 @@
+[package]
+name = "nmp-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Product-level semantic parity harness for the direct Rust and FFI NMP facades."
+
+[lib]
+doctest = false
+
+[dependencies]
+nostr.workspace = true
+nmp.workspace = true
+nmp-ffi.workspace = true
+nmp-bdd.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -28,12 +28,14 @@
 //! cross-version value (keypairs, seeded events) is bridged explicitly by
 //! hex/id string round-trip (`mirror_keys`).
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use nostr::RelayUrl;
+use nostr::{JsonUtil, RelayUrl};
 
 use nostr_relay_builder::builder::{
     LocalRelayBuilder, QueryPolicy, QueryPolicyResult, WritePolicy, WritePolicyResult,
@@ -75,6 +77,37 @@ struct ContactLog {
     notify: tokio::sync::Notify,
 }
 
+#[derive(Debug, Default)]
+struct QueryLog {
+    by_kind: Mutex<BTreeMap<u16, u64>>,
+}
+
+impl QueryLog {
+    fn record(&self, query: &nostr_relay_builder::prelude::Filter) {
+        let value = serde_json::to_value(query)
+            .expect("nmp-bdd: scripted relay query must serialize for observation");
+        let Some(kinds) = value.get("kinds").and_then(serde_json::Value::as_array) else {
+            return;
+        };
+        let mut counts = self
+            .by_kind
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for kind in kinds.iter().filter_map(serde_json::Value::as_u64) {
+            *counts.entry(kind as u16).or_default() += 1;
+        }
+    }
+
+    fn count(&self, kind: u16) -> u64 {
+        self.by_kind
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&kind)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 impl ContactLog {
     fn record(&self) {
         self.count.fetch_add(1, Ordering::SeqCst);
@@ -114,6 +147,7 @@ pub struct ScriptedRelay {
     port: u16,
     relay: LocalRelay,
     contacted: Arc<ContactLog>,
+    queries: Arc<QueryLog>,
 }
 
 impl ScriptedRelay {
@@ -131,6 +165,7 @@ impl ScriptedRelay {
     /// `Pool` reconnects to the SAME `RelayUrl` it already had open.
     pub async fn start_on_port(port: u16, config: &RelayConfig) -> Self {
         let contacted = Arc::new(ContactLog::default());
+        let queries = Arc::new(QueryLog::default());
 
         let relay = LocalRelayBuilder::default()
             .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
@@ -141,6 +176,7 @@ impl ScriptedRelay {
             })
             .query_policy(LoggingQueryPolicy {
                 contacted: contacted.clone(),
+                queries: queries.clone(),
                 reject: config.reject_queries,
             })
             .build();
@@ -156,6 +192,7 @@ impl ScriptedRelay {
             port,
             relay,
             contacted,
+            queries,
         }
     }
 
@@ -207,6 +244,40 @@ impl ScriptedRelay {
             .expect("nmp-bdd: seeding a fixture contact list must succeed");
     }
 
+    /// Seed an already-signed workspace event verbatim into this relay.
+    /// JSON round-tripping bridges the two pinned `nostr` crate versions
+    /// without re-signing, which lets product-level parity tests compare
+    /// every raw row token (including the signature) exactly.
+    pub async fn seed_signed_event(&self, event: &nostr::Event) {
+        let event: RelayEvent = serde_json::from_str(&event.as_json())
+            .expect("nmp-bdd: bridge signed fixture across nostr crate versions");
+        self.relay
+            .add_event(event)
+            .await
+            .expect("nmp-bdd: seeding a fixture event must succeed");
+    }
+
+    /// Seed the author's NIP-65 relay list, naming this relay as an
+    /// unmarked read+write relay. The facade parity scenario uses the real
+    /// discovery path before publishing; it never injects a mechanism-level
+    /// directory fixture into either product surface.
+    pub async fn seed_own_relay_list(&self, author: &nostr::Keys, created_at: u64) {
+        let relay_keys = mirror_keys(author);
+        let relay_url = self.url.to_string();
+        let event = RelayEventBuilder::new(nostr_relay_builder::prelude::Kind::RelayList, "")
+            .tag(
+                nostr_relay_builder::prelude::Tag::parse(["r".to_string(), relay_url])
+                    .expect("nmp-bdd: relay-list fixture tag must parse"),
+            )
+            .custom_created_at(nostr_relay_builder::prelude::Timestamp::from(created_at))
+            .finalize(&relay_keys)
+            .expect("nmp-bdd: relay-list fixture must sign cleanly");
+        self.relay
+            .add_event(event)
+            .await
+            .expect("nmp-bdd: seeding a relay-list fixture must succeed");
+    }
+
     /// True iff this relay's write or query policy has been invoked at
     /// least once -- i.e. some REQ or EVENT actually reached it. The
     /// world-side half of a `must-never` "no relay outside the plan was
@@ -221,6 +292,15 @@ impl ScriptedRelay {
     /// snapshot received no NEW REQ/EVENT at all).
     pub fn contact_count(&self) -> u64 {
         self.contacted.count()
+    }
+
+    /// Number of inbound REQs admitted to this relay's `QueryPolicy` whose
+    /// filter named `kind` (whether the policy later accepts or rejects the
+    /// query). This relay-side admission witness is independent of engine
+    /// diagnostics; parity tests conjunct it with engine event counts to
+    /// prove every admitted fixture response was processed before advancing.
+    pub fn query_count_for_kind(&self, kind: u16) -> u64 {
+        self.queries.count(kind)
     }
 
     /// Bounded wait (no spin-poll -- see [`ContactLog::wait_contacted`]) for
@@ -291,16 +371,18 @@ impl WritePolicy for LoggingWritePolicy {
 #[derive(Debug)]
 struct LoggingQueryPolicy {
     contacted: Arc<ContactLog>,
+    queries: Arc<QueryLog>,
     reject: bool,
 }
 
 impl QueryPolicy for LoggingQueryPolicy {
     fn admit_query<'a>(
         &'a self,
-        _query: &'a mut nostr_relay_builder::prelude::Filter,
+        query: &'a mut nostr_relay_builder::prelude::Filter,
         _addr: &'a SocketAddr,
     ) -> nostr_relay_builder::prelude::BoxedFuture<'a, QueryPolicyResult> {
         self.contacted.record();
+        self.queries.record(query);
         let reject = self.reject;
         Box::pin(async move {
             if reject {

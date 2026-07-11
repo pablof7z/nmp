@@ -190,15 +190,25 @@ type mirroring and string parsing.
 
 ## 3. Parity tests (acceptance evidence item 1)
 
-**Strategy: same operations, two entry points, identical observables, against
-shared loopback relays.** Reuse `nmp-bdd`'s real in-process `ScriptedRelay`
-(world.rs / relays.rs) — both surfaces can point at their real
-`ws://127.0.0.1:port` URLs, so no mock and no mechanism-injection is needed for
-parity itself.
+**Implementation status (2026-07-11): Unit D is implemented by this change.**
+The executable proof lives in `crates/nmp-parity`; Units E/F remain separate.
 
-A parity driver expresses each scenario abstractly (configure indexer =
-scripted-relay URL; add account; observe `$myFollows`; publish an intent) and
-runs it twice:
+**Strategy: same operations, two entry points, identical observables, against
+isolated instances of one shared loopback-relay implementation.** Reuse
+`nmp-bdd`'s real in-process `ScriptedRelay` (world.rs / relays.rs) — both
+surfaces point at real `ws://127.0.0.1:port` URLs, so no mock and no
+mechanism-injection is needed for parity itself. The only added relay seams
+seed a pre-signed event verbatim and seed the author's NIP-65 relay list; the
+relay implementation is not copied.
+
+A parity driver expresses each scenario abstractly (configure the scripted
+relay as the indexer; add account; open a bounded empty custom-kind query and
+wait for the seeded NIP-65 fact to discover that same relay as the author's
+read/write relay; cancel the preflight; observe the bounded literal content
+query; publish an intent) and runs it twice. The explicit discovery-settle
+phase keeps discovery/recompile traffic from racing the content snapshot; the
+limited queries honestly retain `coverage: None`, avoiding any comparison of
+uncontrolled wall-clock watermarks.
 
 1. **Direct Rust:** `nmp::Engine::new(EngineConfig { indexer_relays: [scripted], .. })`,
    driving the facade nouns, folding `RowDelta`s into a row set exactly as
@@ -207,16 +217,18 @@ runs it twice:
    builds the same `nmp::Engine`), driven through the FFI types + `RowObserver`/
    `ReceiptObserver`.
 
-Assert identical: accumulated feed rows, `AcquisitionEvidence`, ordered `WriteStatus`
-receipt sequence, and `DiagnosticsSnapshot` shape. **Must include the
-load-bearing case:** publishing a tampered `WritePayload::Signed` fails
-identically on both surfaces (`EngineError::InvalidSignedEvent` ≙
-`FfiError::InvalidSignedEvent`) — the falsifier that proves the guarantee now
-lives in the shared facade, not in FFI alone.
+Assert identical: accumulated rows, `AcquisitionEvidence`, ordered
+`WriteStatus` receipt sequence, and `DiagnosticsSnapshot` shape. The successful
+path uses real loopback REQ/EVENT delivery, live NIP-65 discovery, limited
+source-plan evidence, and a durable write receiving the relay's OK and reaching
+`Acked`. **The load-bearing case follows the ratified A0
+contract, which supersedes the earlier synchronous-error sketch:** publishing a
+tampered `WritePayload::Signed` produces `Failed` as the first and only receipt
+fact on both surfaces, with no `Accepted` and no EVENT/REQ reaching the relay.
 
-Home: a new `crates/nmp-parity` dev/test crate (recommended over extending the
-shared `nmp-bdd`, which other agents touch — collision avoidance). It depends on
-`nmp` + `nmp-ffi` + the scripted-relay helper.
+Home: `crates/nmp-parity`, a product-level dev/test crate separate from the BDD
+step catalog. It depends on `nmp` + `nmp-ffi` + the exported scripted-relay
+helper.
 
 ---
 
@@ -295,7 +307,7 @@ remains provisional" bullet is updated to point at this now-enforced protocol.
 | **A. Facade crate** | new `crates/nmp/*`; workspace `Cargo.toml`. `EngineConfig`, `Engine::new`, two nouns, diagnostics, `add_account`/`set_active_account`, **`publish` Signed-verify**, `EngineError`, re-exports, unstable `from_parts`. | config→store/directory selection; `add_account` from nsec+hex; **tampered `Signed` publish → `InvalidSignedEvent`**; shutdown idempotency. | — (first) | No |
 | **B. FFI rethread** | `crates/nmp-ffi/{facade,convert,lib,types}.rs`, `Cargo.toml`; regenerate `gen/*`. FFI wraps `nmp::Engine`; drop independent verify + mechanism deps; `From<EngineError>` for `FfiError`. | existing `convert.rs` tests stay green; verify inherited (tampered `Signed` still rejected via facade). | A | **Yes — FFI seam. Coordinate with `build-ffi-signed-publish`.** |
 | **C. Demo migration** | `crates/nmp-demo/src/main.rs`, `Cargo.toml`. Replace hand-assembly with `nmp::Engine::new`. | existing `parse_args`/query-builder tests stay green; runs against real relays. | A | No |
-| **D. Parity harness** | new `crates/nmp-parity`. Same ops via facade + FFI over shared scripted relays. | identical feed/coverage/receipts/diagnostics; tampered-`Signed` parity. | A, B | Reuses `nmp-bdd` scripted-relay helper — coordinate. |
+| **D. Parity harness** | `crates/nmp-parity`. Same ops via facade + FFI over isolated instances of the shared scripted relay. | identical rows/`AcquisitionEvidence`/ordered receipts/diagnostics; tampered-`Signed` `Failed`-first-and-only with zero relay contact. | A, B | Implemented by this change; reuses `nmp-bdd` helper without copying it. |
 | **E. Drift CI + snapshots** | `docs/surface/*`, `scripts/regenerate-surface-snapshots.sh`, `.github/workflows/ci.yml` (UDL snapshot test + inventory). | snapshot regen matches committed; FFI-shape change fails fast job. | A, B | No |
 | **F. Governance** | `docs/surface-change-log.md`, `.github/pull_request_template.md`, `surface-governance` gate, README/architecture/known-gaps edits. | same-PR-entry gate fails when snapshot changes without a log entry. | E | No |
 
