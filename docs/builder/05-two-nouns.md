@@ -1,122 +1,68 @@
-# The two nouns and the ownership table
+# Ownership reference
 
-**Status: CURRENT + TARGET.** Both primary operations run today. Their target
-evidence, durable-acceptance, signer-override, and module contracts remain
-partly unbuilt.
+The [mental model](02-mental-model.md) defines the two nouns. This page is the
+quick ownership check to use while designing an app or protocol module.
 
-After this chapter you'll be able to name where any piece of an NMP app belongs — engine, your app, or the UI framework — without guessing, because the whole surface is two nouns and you'll know what each one owns.
+## Workload surface
 
----
+| Work | Input | Output |
+|---|---|---|
+| Live query | closed `Demand = Selection + SourceAuthority + AccessContext` | native stream of rows, cache evidence, acquisition facts, and shortfall |
+| Write intent | immutable draft, durability, typed context, optional signer override | receipt facts; durable intents also own a crash-safe pending row and delivery obligation |
 
-## Everything is one of two nouns
+Identity inputs, capabilities, diagnostics, and modules configure or explain
+those operations. They are not additional app workloads or lifecycle systems.
 
-NMP's public surface is deliberately tiny. There are exactly two things you *do*:
+## Concern ownership
 
-1. **A live query** — a closed selection plus source authority and access
-   context, handed to `observe`. It yields rows plus cache/acquisition evidence.
-2. **A write intent** — an immutable draft plus durability, routing context,
-   and optional signer override, handed to `publish`. It yields a durable receipt.
-
-That's it. Everything else you might reach for is *not a third noun*:
-
-- **Current pubkey** is a reactive input and default signer selection, not a
-  global authority over every query and write.
-- **Capabilities** (signer, decrypt, AUTH policy) are *plug points* — objects the engine invokes at the right moment, that you configure but don't call.
-- **Diagnostics** are a *projection* — a read-only view of what the other planes did.
-
-If you ever feel you need a "session," a "feed manager," a "subscription object," or a "relay pool" as a first-class thing you own, stop: that instinct is the old client-framework fragmentation returning. The answer is always a query you observe, a write you intend, or configuration of the machinery that serves those two. When you think you need a third noun, you almost always need a differently-shaped *value* for one of the two you have.
-
-## The read noun, concretely
-
-Here is the read noun in Swift and in Rust. Same value, two dialects:
-
-```swift
-// Swift — kind:9999 events by whoever the current pubkey's kind:3 names.
-let filter = NMPFilter(
-    kinds: [9999],
-    authors: .derived(
-        inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-        project: .tag("p")
-    ),
-    limit: 200
-)
-for await batch in try engine.observe(filter) {
-    render(batch.rows)          // your code, after delivery
-    show(batch.evidence)        // TARGET: cache + current-source evidence
-}
-```
-
-```rust
-// Rust — the identical value through the Handle.
-let query = LiveQuery(Filter {
-    kinds: Some(BTreeSet::from([9999u16])),
-    authors: Some(Binding::Derived(Box::new(Derived {
-        inner: Filter {
-            kinds: Some(BTreeSet::from([3u16])),
-            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-            ..Filter::default()
-        },
-        project: Selector::Tag(TagName::new('p').unwrap()),
-    }))),
-    ..Filter::default()
-});
-let (_handle, rows_rx) = handle.subscribe(query);
-while let Ok((deltas, coverage)) = rows_rx.recv() { /* fold + render */ }
-```
-
-The field names and shapes are identical because they're serializable values defined once at the FFI seam. What differs is only the reactive wrapper (`AsyncSequence` vs a channel `Receiver`) and the ownership idiom. That's the cross-platform contract.
-
-## The write noun, concretely
-
-```swift
-let receipt = try await engine.publish(draft)              // current signer
-let other = try await engine.publish(draft, as: podcastId) // explicit override
-for await status in receipt.status {
-    // .accepted → .signed → .routed → .sent(relay) → .acked(relay) ...
-}
-```
-
-Apps do not expand ordinary routing into relay lists. Typed protocol context may
-carry source authority, such as a NIP-29 group host; that is not a generic relay
-override.
-
-## The ownership table
-
-This is the whole mental model on one page. For any feature, find the row.
-
-| Concern | NMP owns (engine) | Your app owns | The UI framework owns |
+| Concern | NMP | App | UI/runtime |
 |---|---|---|---|
-| **Which queries exist, and when** | — | ✅ you build `NMPFilter` values and call `observe` | — |
-| **Binding resolution** (`Derived`, `Reactive`, `SetOp`) | ✅ resolves in-engine, incrementally | — | — |
-| **Relay routing** (outbox, lanes, fan-out cap, coalescing) | ✅ compiler output from typed facts and validated protocol context | ❌ no generic app-expanded route list | — |
-| **Sync** (negentropy, coverage watermarks) | ✅ | — | — |
-| **Row delivery + source evidence** | ✅ delivers raw rows + cache/acquisition facts | ✅ interprets and folds them into view state | — |
-| **Ordering / sorting** | ❌ delivers a live set, no order | ✅ ordering is render policy | — |
-| **Formatting** (hex→npub, dates, kind:0 fields) | ❌ raw tokens only (ledger #12) | ✅ all of it, in app code | — |
-| **Signing** | ✅ defaults to current pubkey, pins accepted identity, supports override | ✅ registers identities and chooses an override when exceptional | — |
-| **Write routing + durability + acks** | ✅ | ✅ you compose *what* to write and when | — |
-| **Identity / re-rooting** | ✅ re-resolves only dependent demand | ✅ current-pubkey and account UX | — |
-| **Diagnostics numbers** | ✅ every figure from real engine state | ✅ rendering the screen | ✅ list/section chrome |
-| **View lifecycle, `@State`, teardown** | ✅ demand drops when the handle is released | ✅ where the engine object lives | ✅ `.task`, ARC, scene phase |
+| Canonical Nostr rows and provenance | owns | reads | - |
+| Query binding graph | resolves | declares values | observes stream |
+| Source and relay plan | compiles from typed authority | supplies operator/protocol policy | - |
+| Ordering and ranking | - | owns | renders |
+| Formatting and labels | - | owns | renders |
+| Current-pubkey value | consumes | owns account UX and supplies value | observes app state |
+| Signer material | persists no raw secret | owns identity policy | secure provider may store it |
+| Durable accepted obligation | persists | declares durability | observes receipt |
+| Non-durable obligation | does not resume after process loss | explicitly chooses weaker policy | can reattach to retained receipt facts |
+| Pending row visibility | ordinary store/query path | no overlay | renders row state |
+| Relay outcome interpretation | reports facts | decides product policy | renders policy |
+| Protocol schema/state | exact opt-in module owns | chooses modules and product policy | renders typed values |
+| Diagnostics facts | produces | chooses presentation | renders screen |
+| Observation lifetime | refcounts shared demand | owns engine placement | cancels/releases handles |
 
-Two lines are worth memorizing because they catch the most people:
+## Placement test
 
-- **Ordering and formatting are yours.** The engine hands you a live set of raw-token rows. It is not being lazy — a blessed sort order or a blessed date format is *one app's product decision* pretending to be framework, and baking it in is exactly the bug that killed the v1 feed layer. See how the timeline chapter sorts by `createdAt` and shortens hex pubkeys in *app* code.
-- **Raw app-expanded routing is absent.** Engine discovery and typed protocol
-  authority produce relay plans; diagnostics shows the resulting reasons.
+Ask:
 
-## The modularity principle — the core is tiny; protocol meaning is modular
+> Would another app or platform have to reimplement this to remain correct?
 
-The ownership table governs the API *surface*. A second principle governs *code weight*: **non-primitive, protocol-specific functionality is opt-in and modular, so an app carries only what it uses.**
+If yes, it likely belongs in core or in the exact protocol module that owns the
+specification. If products can legitimately disagree, it belongs in app code
+after delivery.
 
-The core is content-agnostic. Opt-in protocol modules own only the schemas,
-validation, state reconstruction, semantic operations, and routing context of
-their protocol. A module may provide a reusable closed binding such as
-`myFollows`, but core does not bless a feed built from it. A NIP-29 group may
-add group context to a foreign draft without taking ownership of its kind. See
-*[Protocol modules, reusable declarations, and app policy](27-recipes-and-choosing.md)*.
+That puts replaceable semantics, dedup/provenance, source routing, pending-row
+promotion, NIP schema validation, and retry in shared code. It keeps feed
+composition, ranking, product moderation policy, display names, account labels,
+and navigation in the app.
+
+Protocol-defined moderation events and reconstructed moderation state remain
+owned by their protocol module. The app owns how that state affects its product
+and UI.
+
+## Warning signs
+
+The boundary is drifting if an app must own any of these:
+
+- relay `REQ`/`CLOSE` ids;
+- expanded author or relay sets for a derived query;
+- a second optimistic row collection;
+- a timer that polls engine state;
+- signer retry and correlation;
+- NIP event encoding/validation for an enabled module; or
+- an NMP provider, reducer, navigation model, or scene-phase coordinator.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Timeline in 10 minutes](04-ten-minute-timeline.md) · [Index](README.md) · [Your first app in 20 lines](06-first-app.md) →</sub>
+<sub>[Index](README.md) · Related: [Mental model](02-mental-model.md) · [Ten-minute embedding](04-ten-minute-timeline.md) · [Binding grammar](09-binding-grammar.md)</sub>

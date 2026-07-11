@@ -1,124 +1,107 @@
 # Offline, reconnect, and acquisition evidence
 
-**Status: CURRENT + TARGET.** Capability-probed negentropy, persisted
-per-(filter, relay) watermarks, cache replay, and subscription replay are built.
-The target contract replaces aggregate completeness language and adds a
-crash-safe durable outbox with logical retry. Those additions are not shipped
-yet.
+Offline behavior is not a special application mode. NMP serves its persistent
+local replica, reports the evidence it has, and resumes still-declared demand
+when sources become reachable.
 
-After this chapter you will know what survives offline use, what a relay
-watermark actually proves, and which layer owns each kind of retry.
+## Cold reads are local facts
+
+On construction, matching cached rows may be available before any relay
+connects. A query snapshot distinguishes that local cache state from acquisition
+against its currently planned sources.
+
+An empty cached result means only that the local replica has no current match.
+It does not mean no matching event exists on Nostr. A private, unknown, LAN,
+slow, AUTH-gated, or offline relay may hold additional data.
+
+Apps may present offline or partial-source UX from the reported facts. NMP does
+not collapse them into `syncHealth`, `synced`, or global completeness.
+
+## Watermarks are scoped evidence
+
+EOSE or a completed reconciliation proves that one relay finished one request
+shape for one window under one source/access context. Persisting that evidence
+supports restart, incremental acquisition, diagnostics, and avoiding redundant
+work.
+
+It never proves that all matching events everywhere have been found.
+
+A snapshot therefore carries compact status for every planned source, including
+facts such as connecting, reconciled-through, disconnected, AUTH-required, or
+failed, plus explicit shortfall when the plan itself could not cover the whole
+demand. Exact wire filters, EOSE, errors, and watermarks remain available in
+diagnostics.
+
+Evidence changes may emit a new snapshot without a row change.
 
 ## Negentropy is capability-gated
 
-NIP-77 negentropy reconciles sets without replaying every stored event. NMP
-uses it only for a relay that has produced a `ProbedRelay` capability token.
-The token has no public constructor, and the negentropy effect requires one:
+NIP-77 reconciliation is used only after that relay has proved support. The
+capability token has no app constructor; an unprobed or unsupported relay uses
+ordinary REQ acquisition.
 
-```rust
-NegOpen(ProbedRelay, SubId, ConcreteFilter, String)
-```
+Limited filters also require care because relay-side limits do not compose
+freely with set reconciliation or coverage attribution. NMP chooses the safe
+wire mechanism; the app declares the selection.
 
-A bare `RelayUrl` cannot enter that path. Unprobed or unsupported relays use a
-plain REQ. Limited filters also use REQ because relay-side limiting does not
-compose safely with set reconciliation or acquisition attribution.
+## Reconnect restores demand, not app subscriptions
 
-This is bug-class ledger #8: unsupported negentropy is excluded by the type
-shape, not by an app convention.
+When a connection generation ends, NMP discards attribution tied to that
+generation, reconnects according to transport policy, and recompiles/replays the
+still-live wire demand with fresh attribution.
 
-## Watermarks are source evidence, not global truth
+The app does not watch connection state and reopen REQs. Query ownership is the
+source of truth for whether demand still exists.
 
-EOSE or a completed reconciliation proves that one relay finished one request
-shape for one window. NMP persists that fact because it is useful for offline
-cache delivery, restart, avoiding redundant work, and diagnostics.
+An in-progress reconciliation is connection-local. A new connection starts the
+appropriate fresh work for the same semantic demand; it does not pretend a
+half-finished exchange continued unchanged.
 
-It does not prove that every matching event on Nostr has been found. A private,
-unknown, LAN, slow, or currently offline relay may also hold matching data.
+## Write retry has a different owner
 
-The shipping API currently aggregates relay facts into:
+Socket reconnect and publication retry are separate mechanisms:
 
-```text
-Coverage = Unknown | CompleteUpTo(watermark)
-```
+| Concern | Owner |
+|---|---|
+| Reconnect a socket | transport |
+| Correlate one remote signer operation | signer provider |
+| Retry one `(intent, relay)` publication lane | durable outbox |
+| Wake eligible work and cap concurrency | engine deadline scheduler |
 
-Read `CompleteUpTo` narrowly: the sources in the current plan met the current
-aggregation rule up to that watermark. Do not render it as globally complete
-or authoritative empty. The target query snapshot instead returns cached rows
-with compact per-planned-source acquisition and shortfall evidence. Exact
-relay, AUTH, EOSE, error, and watermark facts remain in diagnostics.
+The transport must not hide a durable EVENT buffer below the outbox. For every
+durable lane the outbox persists exact signed bytes and `AttemptStarted` before
+dispatch, then records outcome, ordinal, and next eligibility.
 
-An evidence-only change may still emit a query snapshot with no row mutation.
-For example, one planned relay may reach EOSE while another becomes
-AUTH-blocked. The app receives those facts and decides its own UX; NMP does not
-collapse them into `syncHealth` or `synced`.
+Offline and AUTH-blocked time do not consume attempts. Transient failures advance
+logical backoff. ACK and permanent rejection close their lane. At-most-once
+ambiguity becomes `OutcomeUnknown` and is never blindly resent.
 
-## What survives a reconnect today
+One deadline scheduler sleeps until actual work is eligible. There is no
+fixed-rate polling or one timer thread per intent.
 
-When a relay connection is replaced, the current runtime:
+Explicitly non-durable writes do not resume their publication obligation after
+process loss. Their minimal receipt remains reattachable and reports an explicit
+terminal policy fact instead of disappearing.
 
-1. discards attribution tied to the stale connection generation;
-2. replays still-live planned REQs on the new generation;
-3. reuses a cached NIP-77 capability verdict where valid; and
-4. reacquires per-source evidence as replies arrive.
+## Process restart
 
-The app does not reopen subscriptions or run a polling loop. Live demand is
-derived from query handles; transport reconnection restores the wire work for
-that demand.
+The app reconstructs the engine and declares its query set again. NMP restores:
 
-An in-progress negentropy exchange is connection-local and is not resumed byte
-for byte. The next eligible compile/reconnect establishes fresh work for the
-still-live demand.
+- the canonical local event replica and provenance;
+- source evidence and watermarks;
+- accepted pending rows and signer obligations;
+- signed write lanes, attempts, and retry eligibility; and
+- retained receipt facts.
 
-## Writes have a different durability contract
+Dropping a query owner before termination still means its demand is gone.
+Restart does not invent app queries that no caller declared. Durable writes are
+different: acceptance transfers the obligation to NMP until its explicit
+terminal policy is reached.
 
-Subscription replay and write retry are not the same mechanism.
-
-### Current implementation
-
-- Ephemeral writes are fire-and-forget and are not replayed.
-- Current durable/at-most-once receipts report what happened in this process,
-  but the outbox does not yet persist the full accepted obligation, attempt
-  journal, or retry eligibility required by the target contract.
-- A disconnect may therefore end a current in-flight relay lane as `GaveUp`.
-
-### Target contract
-
-- Transport owns socket reconnection only. It never hides a second durable
-  EVENT buffer.
-- The durable outbox owns each persisted `(intent, relay)` lane, including the
-  exact signed bytes, attempt ordinal, outcome, and `nextEligibleAt`.
-- One deadline scheduler wakes eligible work with logical backoff. It sleeps to
-  real deadlines; there is no fixed-rate polling.
-- Offline or AUTH-blocked time does not consume an attempt.
-- A transient delivery failure advances backoff; a relay ACK or permanent
-  rejection closes that lane.
-- At-most-once ambiguity becomes `OutcomeUnknown` and is never blindly retried.
-
-Dropping a receipt observer does not cancel a target durable intent. Its facts
-are persisted and reattachable by receipt id after restart.
-
-## Cold-start offline behavior
-
-On an offline launch, NMP returns matching cached rows immediately with the
-persisted evidence available for them. The app may show stale data, an offline
-indicator, or an empty local result according to product policy. NMP does not
-call the cache "the truth."
-
-After the app recreates its live queries, reconnect and sync continue from the
-persisted source facts. Query object lifetimes are still app-owned; NMP does not
-install scene-phase machinery or silently recreate an app's query set.
-
-## Current gaps
-
-- The negentropy liveness sweep exists against an injected clock but is not yet
-  driven by the unified deadline scheduler.
-- An already-open plain REQ is not upgraded the instant a NIP-77 probe succeeds;
-  the next relevant recompile chooses the capability-gated path.
-- Crash-safe `Accepted`, persisted signer waiting, durable receipt replay, and
-  logical retry remain target work. See
-  [Durable writes, signing, and retry](../design/durable-write-signing-and-retry.md).
+See [Current implementation status](03-status-map.md) for which parts of this
+contract ship today.
 
 ---
 
 <!-- nav-footer -->
-<sub>← [Tracing demand](18-tracing-demand.md) · [Index](README.md) · [Capabilities](20-capabilities.md) →</sub>
+<sub>[Index](README.md) · [Capabilities](20-capabilities.md) →</sub>

@@ -1,120 +1,140 @@
-# Packaging, build & distribution
+# Packaging and distribution
 
-**Status: BUILT** for iOS/Swift (xcframework + SwiftPM) and Rust (Cargo). The Android AAR (cargo-ndk), web (wasm-bindgen), and per-NIP module packaging are **PLANNED-shape** — the intended pipelines, marked as such. Everything in the Swift and Rust sections is the real, current build.
+An application should consume one supported NMP product for its platform. The
+mechanism crates, generated FFI layer, and native binary are implementation
+details of that product, not alternate ways to assemble an engine.
 
-After this chapter you'll know how the compiled Rust core is packaged for each platform, how to regenerate it, how to pin the FFI version so a core/binding mismatch can't ship, and why the modularity principle means *you compose only the modules you enable* — which is a packaging fact, not just an API one.
+The exact package coordinates remain provisional. See
+[Current implementation status](03-status-map.md) before integrating a shipping
+build.
 
----
+## One facade on every platform
 
-## The shape of an NMP build
+Every supported projection must preserve the same behavioral contract:
 
-Every platform is the same two layers:
+```text
+canonical Rust facade
+  -> Swift value and AsyncSequence projection
+  -> Kotlin value and Flow projection
+  -> direct Rust API
+```
 
-1. **The Rust core** (`nmp-engine` and its sibling crates), compiled to a native library for the target.
-2. **A thin binding layer** that presents the two nouns in the platform's idiom — hand-written ergonomics over UniFFI-generated (Swift/Kotlin) or wasm-bindgen-generated (web) glue.
+Swift and Kotlin wrappers may use native naming, error, cancellation, and secure
+storage conventions. They must not define a second routing, receipt, query, or
+identity model. Direct Rust consumers use the same facade projected over FFI;
+they do not assemble the resolver, store, router, and transport crates by hand.
 
-You never ship Rust source to an app developer. You ship the compiled core plus the binding package. The Swift path below is fully wired; the others follow the identical pattern with a different codegen.
+## Swift
 
-## iOS / Swift — xcframework + SwiftPM (BUILT)
-
-The Swift package at `Packages/NMP` has three targets (`Package.swift`):
+The intended consumer experience is one Swift Package Manager product:
 
 ```swift
-targets: [
-    .binaryTarget(name: "nmp_ffiFFI", path: "NMP.xcframework"),  // compiled Rust core
-    .target(name: "NMPFFI", dependencies: ["nmp_ffiFFI"]),       // uniffi-generated bindings
-    .target(name: "NMP", dependencies: ["NMPFFI"]),              // hand-written ergonomics
-]
-// Only `NMP` is imported by a consuming app. NMPFFI/nmp_ffiFFI are plumbing.
+import NMP
+
+let engine = try NMPEngine(configuration: configuration)
 ```
 
-`NMP.xcframework` and the generated `Sources/NMPFFI/nmp_ffi.swift` are **build artifacts, not committed** (they're in `.gitignore`). Regenerate both with one script:
+That product contains a matched native Rust binary, generated bindings, and a
+small hand-written Swift layer. Applications import only the public `NMP`
+module. Generated `Ffi` records and callback protocols do not enter app code.
 
-```bash
-scripts/build-swift-xcframework.sh            # device + sim + macOS slices
-scripts/build-swift-xcframework.sh --sim-only # skip device (no signing needed)
+The package must support device and simulator builds and expose observations as
+native asynchronous sequences and values. Secret-backed signer providers use
+platform secure storage; the event/outbox database does not become a key vault.
+
+## Kotlin and Android
+
+The intended Android product is an AAR containing the native libraries for its
+supported ABIs, generated Kotlin bindings, and the hand-written `Flow`
+projection:
+
+```kotlin
+val engine = NMPEngine(configuration)
+engine.observe(demand).collect { snapshot ->
+    appState = appState.withSnapshot(snapshot)
+}
 ```
 
-What that script does, in order:
+The Compose app owns coroutine and UI scope. NMP owns demand lifetime beneath
+the observation. Android secure signer providers belong behind Keystore-backed
+capabilities, not in application event storage.
 
-1. `cargo build -p nmp-ffi --release` for each Apple target — `aarch64-apple-ios` (device), `aarch64-apple-ios-sim` + `x86_64-apple-ios` (simulator), `aarch64-apple-darwin` (so `swift test`'s host process, which runs on your Mac's own arch, can link the binary at all).
-2. `lipo` the two simulator arches into one fat staticlib (an xcframework requires arch-disjoint slices, so device stays separate).
-3. Run `uniffi-bindgen` in **library mode** against a compiled staticlib — it reads exported metadata straight out of the binary, no `.udl` file — producing `nmp_ffi.swift` (into the `NMPFFI` target) and the C header + `module.modulemap` (into the xcframework's headers slice).
-4. `xcodebuild -create-xcframework` the device + fat-sim + macOS slices into `Packages/NMP/NMP.xcframework`.
+Desktop JVM proof does not by itself make the Android package complete. The AAR,
+ABI matrix, cancellation, process restart, secure storage, and real-device
+falsifier all belong to the Android acceptance gate.
 
-### Binary vs source distribution
+## Rust
 
-The `nmp-ffi` crate is built as both (`Cargo.toml`):
+Rust applications depend on the canonical `nmp` facade crate. Mechanism crates
+remain available to repository contributors and narrowly scoped advanced test
+harnesses, but they are not a second supported product surface.
 
-```toml
-[lib]
-crate-type = ["staticlib", "lib"]   # staticlib → the xcframework; lib → round-trip unit tests
+An explicitly unstable mechanism feature may expose construction seams while
+the engine is developed. It must be clearly gated, type-complete for its stated
+purpose, and excluded from the normal compatibility promise.
+
+## Optional protocol modules
+
+Core remains content-neutral. Protocol behavior is packaged as opt-in modules
+that depend on the canonical facade:
+
+```text
+nmp core
+nmp-nip29
+nmp-nip68
+nmp-nip17
+...
 ```
 
-- **Binary distribution** (a prebuilt `NMP.xcframework` behind a versioned `binaryTarget` URL) is the shape a *published* SDK takes — an app pulls the package and never compiles Rust. Startup is a plain `dlopen` of an already-linked static core.
-- **Source/local distribution** (a `path:` dependency on `Packages/NMP`, as the Falsifier's `project.yml` uses) is the shape you use *inside the monorepo* or when you want to rebuild the core yourself. `packages: NMP: { path: ../../Packages/NMP }` — four lines, and you're building against local Rust.
+Names are illustrative. The invariant is not.
 
-Either way the app imports exactly one module (`NMP`) and sees zero `Ffi`-prefixed types.
+A module owns only its exact schemas, reconstruction, validation, semantic
+operations, and protocol authority. Enabling NIP-29 may add group operations and
+group-host context. It must not pull a preferred timeline into core or own a
+foreign NIP-68 photo schema merely because a group can publish one.
 
-## Rust — one supported facade (TARGET)
+Platform distribution should preserve opt-in composition where practical. It
+must not require app-side module registration, callbacks, or a second engine
+container.
 
-A Rust consumer must enter through one invariant-preserving facade: the same
-facade `nmp-ffi` projects to Swift and Kotlin. Mechanism crates such as the
-resolver, router, store, and transport are implementation units, not an
-alternative supported app assembly path. The current workspace still exposes
-the `Handle` and individual crates directly; consolidating that surface is
-target work.
+## Binary and binding versions move together
 
-Protocol-specific functionality may use separate crates/features, but each
-module calls the same facade rather than assembling its own engine.
+Generated bindings and their native core are one release artifact. A package
+must not combine bindings generated from one facade revision with a different
+binary.
 
-## Android / Compose — cargo-ndk + AAR (PLANNED-shape)
+The release pipeline therefore:
 
-> **PLANNED-shape.** Not built yet (M6). Intended pipeline, mirroring the Swift path with Android codegen:
+1. builds the Rust facade and native library;
+2. generates bindings from that exact build;
+3. runs Rust/Swift/Kotlin parity fixtures over the same contract;
+4. packages the binary and ergonomic layer together; and
+5. publishes one version with checksums for every binary artifact.
 
-1. `cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build --release` to produce the JNI `.so` per Android ABI.
-2. `uniffi-bindgen` (Kotlin mode) to generate the Kotlin bindings.
-3. Package the `.so`s + generated Kotlin + a thin hand-written ergonomic layer (cold `Flow` delivery) as an **AAR** consumed by a Compose app via Gradle.
+Public-shape changes require explicit review because they affect direct Rust,
+FFI metadata, platform projections, persisted data, diagnostics, and examples.
+That review is governance, not a promise that provisional v2 names cannot
+change.
 
-The two nouns keep their names and shapes; only the codegen and the reactive wrapper (`Flow` instead of `AsyncSequence`) differ.
+## Persistence belongs to the engine instance
 
-## TypeScript / web — wasm-bindgen (PLANNED-shape)
+One persistent store path has one live engine owner. The app chooses the path
+and backup/reset policy; NMP owns the file format and atomic event/outbox
+transactions. Applications must not open or mutate the database directly.
 
-> **PLANNED-shape.** Unconfirmed for v2. Intended pipeline:
+Cold construction may return cached rows before network acquisition completes.
+That is a local replica with scoped evidence, never an authoritative global
+snapshot.
 
-1. `wasm-pack build --target web` (wasm-bindgen) to compile the core to `wasm32` + generated JS/TS glue.
-2. A thin hand-written layer presenting the two nouns as async iterators.
-3. Distributed as an npm package; the store backs onto OPFS-SQLite in the browser.
+## Web is not implied
 
-## FFI version-pinning — the mismatch you must make unshippable
-
-The generated bindings and the compiled core are a *matched pair*: the Swift/Kotlin binding assumes the exact FFI ABI the core exports. Ship a binding generated against core v0.3 over a core binary built at v0.4 and you get memory corruption, not a clean error. So the pin is not optional hygiene — it's a safety boundary.
-
-The rule: **the binding layer and the core binary are versioned and released together, never independently.** Concretely —
-
-- The bindings are *regenerated from the very binary they'll ship with* (step 3 of the Swift script reads metadata out of the compiled staticlib), so a hand-edited or stale `nmp_ffi.swift` can't silently drift — it's overwritten on every build.
-- A binary-distributed `binaryTarget` pins the xcframework by version (and checksum, for a remote URL). Bump the core → rebuild the xcframework → bump the package version → regenerate bindings, as one atomic release. There is no supported path where an app resolves a binding at one version and a core at another.
-- New or changed FFI surface is deliberate and reviewed with its Rust, Swift,
-  Kotlin, persistence, and diagnostics impact. FFI projects the canonical
-  facade; it does not define a second behavior contract.
-
-Treat "the binding and the core came from the same build" as an invariant your release process guarantees, and the mismatch class of bug never reaches a user.
-
-## Binary size & startup budget — and why modularity is the lever
-
-Two budgets matter for an embedded engine: the **binary size** it adds to your app, and the **startup cost** to construct it. Construction is cheap — `NMPEngine(config:)` spins up the engine's interior threads and (with a `storePath`) opens the SQLite store; there's no network round-trip on the critical path, and cold-start reads serve from the persisted cache immediately. The size budget is where your choices show up, and that's the **modularity principle** as a packaging fact:
-
-> **You compose only the protocol modules you enable.** Core remains
-> content-agnostic; a module contributes only its protocol-owned schemas,
-> validation, reconstruction, operations, and routing context.
-
-- **Rust:** intended as separate protocol crates/features over the facade.
-- **Swift/Kotlin/web:** intended as corresponding optional products projecting
-  the same semantics. Exact package mechanics remain provisional.
-
-The practical upshot: your binary size is roughly *core + exactly the protocol modules you chose*, and it doesn't grow because some *other* app needed highlights or long-form. The expensive, permanent thing — the core and the two nouns — stays small on every platform; the protocol surface is à la carte. That's the same win the old NMP genuinely had (an app that didn't care about reactions didn't pack them), now stated as a durable packaging rule rather than an accident of crate layout.
+A native Rust core does not automatically produce a supported browser product.
+WebAssembly, browser persistence, background execution, socket behavior,
+cryptographic capabilities, and package-size limits need their own thesis gate.
+Until that work is explicitly accepted, this guide promises Swift, Kotlin, and
+Rust shapes only.
 
 ---
 
 <!-- nav-footer -->
-<sub>← [Adding NMP to an app you own](07-brownfield.md) · [Index](README.md) · [Live queries & the binding grammar](09-binding-grammar.md) →</sub>
+<sub>[Index](README.md) · [Live queries](09-binding-grammar.md) →</sub>

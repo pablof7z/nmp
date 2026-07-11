@@ -1,128 +1,104 @@
 # Signer, crypto, and AUTH capabilities
 
-**Status: CURRENT + TARGET.** Local signing and NIP-44 crypto traits are built.
-The standard secure-storage provider boundary, NIP-46 reattachment, pinned
-per-write signer override, durable `AwaitingSigner`, completed decrypt return
-path, and NIP-42 policy/evidence model are target work.
+A capability answers one bounded engine request. It does not become arbitrary
+app code inside routing, demand, persistence, or admission.
 
-After this chapter you will know what NMP persists, what the platform signer
-provider owns, and why a capability is not an app callback in an engine
-decision path.
+## Signer provider
 
-## A capability answers a bounded engine request
+The common path registers a provider for an identity and lets current pubkey
+select it by default:
 
-NMP may ask a provider to sign a frozen body, decrypt protocol ciphertext, or
-answer another typed cryptographic operation. The engine owns when that request
-is valid and how the result affects state. The provider owns the operation and
-returns a typed result correlated to that request.
-
-This is not a closure that decides routing, admission, ordering, or demand.
-Opaque app code never enters those correctness paths. The provider cannot
-mutate the store, choose arbitrary relays, or rewrite the frozen body.
-
-## Current signer seam
-
-The Rust signer trait is built, and `LocalKeySigner` can resolve synchronously:
-
-```rust
-pub trait SigningCapability {
-    fn public_key(&self) -> Option<PublicKey>;
-    fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<SignedEvent>;
-}
+```swift
+try engine.attachSigner(provider, for: pubkey)
+let receipt = try engine.publish(.init(draft: draft, durability: .durable))
 ```
 
-`SignerOp` can be ready or pending, which leaves room for a remote operation
-without putting an app callback in the reducer. The current Swift SDK accepts
-an nsec through `addAccount`, registers the resulting local signer, and
-`setActiveAccount` couples that signer to `Reactive(ActivePubkey)`.
+A per-write identity override selects another registered provider without
+changing current pubkey.
 
-That coupling is current implementation truth, not the target authority model.
+At acceptance NMP freezes the body, expected pubkey, final id, and chosen
+identity reference. The provider receives exactly that signing request.
 
-## Target signer selection
+## Provider output is untrusted input
 
-The common path stays small:
+A provider result must:
+
+- contain the identical frozen kind, tags, content, created-at time, pubkey,
+  and id;
+- carry a cryptographically valid signature for the expected pubkey; and
+- correlate to the one outstanding request.
+
+NMP verifies those properties before promoting the canonical row or routing the
+event. A provider cannot substitute another valid event or return a forged one.
+
+This rule applies equally to local, NIP-46, hardware, and app-defined providers.
+
+## Missing provider is receipt state
+
+Once expected author identity is resolved, temporary provider absence does not
+reject a durable intent. The canonical row remains:
 
 ```text
-publish(draft)                    // signer registered for currentPubkey
-publish(draft, as: identityRef)   // explicit exceptional override
+signatureState = Pending(intentId)
 ```
 
-Most apps never pass a signer with each write. The default follows
-`$currentPubkey`; an override supports a podcast key, disposable identity,
-hardware key, delegation, or other non-active identity without re-rooting
-queries.
+The receipt reports:
 
-Signer choice is resolved and pinned before durable `Accepted`. A later
-current-pubkey change cannot redirect the intent. If the matching capability is
-missing or temporarily offline, the canonical pending row and receipt remain
-`AwaitingSigner(pubkey)` until a matching provider attaches or the app cancels.
-Missing NIP-46 connectivity is waiting, not terminal failure.
+```text
+awaitingSigner(pubkey)
+```
 
-Every returned signed event must match the frozen body and expected pubkey
-exactly and verify cryptographically before it can promote the canonical row
-from `Pending(intentId)` to `Signed(signature)`.
+Attaching a matching provider resumes the obligation. The row itself does not
+become `AwaitingSigner`; that is a receipt/capability fact.
 
 ## Secret material boundary
 
-The durable Rust event/outbox store persists obligations, expected pubkeys,
-frozen unsigned bodies, signatures, and receipt facts. It does **not** persist
-raw nsecs or other signing secrets.
+The durable event/outbox store persists obligations, identity references,
+frozen bodies, validated signatures, and receipt facts. It does not persist raw
+nsecs, bunker credentials, hardware secrets, or bearer tokens.
 
-Platform SDKs should ship standard signer providers backed by Keychain,
-Android Keystore, or the platform's equivalent secure facility. That avoids
-forcing every app to hand-roll vault plumbing while leaving product policy in
-the app:
+Platform SDKs provide standard Keychain/Keystore-backed providers. The app owns
+identity import, removal, backup, labels, and login policy and may supply custom
+remote/hardware/memory providers.
 
-- the app owns identity import, removal, backup, labels, and login UX;
-- the SDK owns a standard secure provider implementation;
-- custom NIP-46, hardware, or memory-only providers may implement the same
-  bounded capability seam;
-- the engine owns durable obligations and exact result validation.
+A memory-only key may disappear. NMP does not re-author or silently discard its
+accepted intent; the receipt waits for equivalent provider reattachment or
+explicit cancellation/terminal policy.
 
-A memory-only disposable key may vanish. NMP does not silently discard or
-re-author its accepted intent; the receipt waits for reattachment or explicit
-cancellation.
+## Encrypt and decrypt
 
-## Crypto operations
+Private protocols may request typed encrypt/decrypt operations from the provider
+owning the identity. Core or the exact protocol module validates where the
+result belongs.
 
-NIP-44 encrypt/decrypt is also a typed capability. It may be implemented by the
-same provider that can sign for an identity, but the architectural requirement
-is capability locality, not that secret bytes live in the event store.
+Decryption yields protocol data, not presentation. The app owns formatting,
+labels, thread UI, notifications, and plaintext display policy. Sensitive
+payloads never appear in diagnostics or replay logs.
 
-Decryption produces raw protocol data. Formatting, display names, thread UI,
-and plaintext presentation policy remain app-owned. The current local crypto
-implementation exists; the end-to-end decrypt-result path into public query
-delivery is incomplete.
+## Relay AUTH
 
-## AUTH is source/access context
+NIP-42 can change one relay's answer, so AUTH is part of a demand's access
+context. A protocol/operator policy selects an identity reference as a closed
+value; an app callback does not decide per frame.
 
-NIP-42 can change what a relay returns, so AUTH state participates in a query's
-`AccessContext` and acquisition evidence. It is not a global "active account"
-side effect and not a cache-isolation boundary.
+Diagnostics retains challenge, connection generation, identity/policy
+reference, response result, and error without exposing secrets. Ordinary query
+snapshots receive compact facts such as AUTH required, awaiting capability,
+authenticated, or rejected.
 
-The target policy is a closed value supplied by the app, not a callback. When a
-relay challenges, NMP either applies the declared policy with the selected AUTH
-capability or exposes facts such as `authRequired`, `awaitingSigner`,
-`authenticated`, or `rejected`. Ordinary snapshots carry compact source
-evidence; diagnostics retains the exact relay, challenge, connection, policy,
-and error facts.
+AUTH never silently changes current pubkey, retargets another write, partitions
+the shared cache, or grants protocol-host authority to an arbitrary relay.
 
-AUTH operations do not silently change `$currentPubkey`, the signer pinned to
-another write, or literal multi-account queries.
+## Retry ownership
 
-## Status summary
+- One signer request is owned by the provider adapter and correlated once.
+- Provider connection/AUTH recovery belongs to that adapter.
+- The durable outbox owns publication attempts after signing.
+- The engine's one deadline scheduler owns wakeups and concurrency.
 
-| Surface | Current | Target |
-|---|---|---|
-| Local signer | Built | Standard provider remains supported |
-| Default signer | Coupled to `setActiveAccount` | Signer for `$currentPubkey` |
-| Per-write identity override | Not built | Explicit and pinned at acceptance |
-| Missing remote signer | Process-local pending/failure behavior | Durable `AwaitingSigner` and reattachment |
-| Secret storage | Local signer currently engine-side | Standard platform vault/provider; no raw secret in event/outbox persistence |
-| NIP-44 | Crypto trait built | Complete public result path |
-| NIP-42 | Transport defers AUTH | Typed policy plus source/access evidence |
+No layer starts a polling timer or secretly buffers another layer's durable
+obligation.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Offline & sync](19-offline-sync.md) · [Index](README.md) · [Provenance](21-provenance.md) →</sub>
+<sub>[Index](README.md) · Related: [Identity and signers](16-identity.md) · [Writing and receipts](14-writing.md) · [Provenance and private authority](21-provenance.md)</sub>

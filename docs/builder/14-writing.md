@@ -1,145 +1,209 @@
-# Writing: accepted intent, local state, and relay evidence
+# Drafts, acceptance, pending rows, and receipts
 
-**Status: CURRENT + TARGET.** The current engine signs, routes, and streams
-per-relay statuses. It does not yet implement the full crash-safe acceptance,
-pending cache record, signer reattachment, durable retry, cancellation, or
-receipt reattachment described as TARGET below.
+A write is an intent with an observable receipt, not a call that returns one
+success boolean.
 
-## Enqueued is never converged
+## Start from an immutable draft
 
-A write returns a receipt stream because publication has several independently
-observable stages. `Accepted` means NMP has taken responsibility for the
-declared obligation. It never means a relay accepted the event and never means
-the write converged everywhere.
-
-Relay outcomes remain facts, not a single success boolean. An app decides
-whether one acknowledgement, several acknowledgements, or a particular relay
-is enough for its product.
-
-## What durable `Accepted` must mean
-
-For a durable unsigned write, acceptance is one atomic store transaction that
-records:
-
-- the frozen unsigned event body and its expected author;
-- a stable intent id and selected signer identity;
-- the durable receipt/outbox state;
-- the canonical pending event record visible to ordinary matching queries.
-
-If any part cannot be persisted, the call has not accepted the write. There is
-no state where the app sees a pending row but the outbox cannot resume it, or an
-outbox obligation exists without the row that made the UI reactive.
-
-The app does not wire an optimistic row into a query. Acceptance mutates the
-canonical store; normal query invalidation delivers the change to every
-matching observer.
-
-## One canonical event record
-
-The accepted record has a typed signature state:
-
-```text
-Pending(intentId) | Signed(signature)
+```swift
+let draft = NMPDraft(
+    kind: appKind,
+    tags: appTags,
+    content: encodedContent
+)
 ```
 
-NIP-01 event id can be computed from the frozen body before a signature exists.
-When signing succeeds, the same record is atomically promoted to `Signed`.
-Replaceable, delete, and expiry semantics apply through the ordinary store path
-in both states.
+The draft is unsigned. The engine or an enabled protocol module may validate
+closed typed context, but no stage mutates an already signed event.
 
-If a pre-signature write is cancelled or reaches a terminal protocol failure,
-the pending record is retracted through an ordinary store mutation. Matching
-queries update for the same reason they update after any other store change.
+Publishing declares policy:
 
-## Signer selection
-
-The normal publish path uses the signer registered for the current pubkey. The
-app need not pass a signer object repeatedly:
-
-```text
-publish(draft)
+```swift
+let receipt = try engine.publish(.init(
+    draft: draft,
+    durability: .durable,
+    signer: nil,
+    context: nil
+))
 ```
 
-Exceptional identities use an explicit override:
+- `signer: nil` selects the signer registered for current pubkey.
+- an identity override applies to this intent only;
+- typed protocol context may contribute route/access facts; and
+- the app does not expand ordinary routing into relay arrays.
+
+## Durable acceptance is a transaction
+
+For a durable write, `accepted(intentId)` is emitted only after one crash-atomic
+commit owns:
+
+- the frozen NIP-01 body, expected pubkey, and final event id;
+- a stable intent/receipt id allocated so it cannot be reused after restart;
+- the pinned signer identity reference and durability policy;
+- the canonical local `pending(intentId)` row;
+- any replaceable winner displaced by that row;
+- the open delivery obligation and known route/retry state; and
+- the receipt history needed for later reattachment.
+
+A crash sees all of that or none of it. `Accepted` cannot mean "queued in an
+in-memory channel."
+
+A caller-supplied already-signed event is cryptographically verified at the
+engine acceptance boundary before any pending state, journal row, or `Accepted`
+fact exists. A forged event returns a typed acceptance failure and never reaches
+a relay. No accepted obligation or pending event row is committed.
+
+## The pending row is the optimistic UI
+
+Acceptance inserts the draft through the ordinary store door:
 
 ```text
-publish(draft, as: podcastIdentity)
-publish(draft, as: disposableIdentity)
+StoredRow {
+  eventId: final id,
+  body: frozen body,
+  provenance.local: intentId,
+  signatureState: Pending(intentId)
+}
 ```
 
-The selected identity is frozen at acceptance. Changing the current pubkey
-later cannot redirect the write.
+The row immediately participates in ordinary filtering. If it is the current
+replaceable/addressable winner, matching live queries see it immediately.
+Derived bindings, winner selection, deletes, expiry, GC claims, and query
+invalidation use the same row path as relay-observed events.
 
-When the capability is unavailable, the receipt reports
-`AwaitingSigner(pubkey)` and the pending row remains visible. Registering a
-valid capability later resumes the obligation. NIP-46 being offline is a
-temporary condition, not a reason to discard an accepted write.
+There is no direct write-to-observer callback and no app-side optimistic mirror.
 
-## Durable receipt facts
+Because the signature is not part of a NIP-01 event id, signer success promotes
+the same row:
 
-The exact public enum remains provisional, but the receipt must distinguish:
+```text
+Pending(intentId) -> Signed(signature)
+```
 
-- accepted and awaiting signer;
-- signed and routed;
-- per-relay attempt/sent/ack/rejection evidence;
-- temporary blocked/offline/AUTH states;
-- next eligible retry where applicable;
-- cancellation or terminal protocol failure;
-- `OutcomeUnknown` for an at-most-once attempt whose outcome cannot be known.
+Before promotion, NMP verifies that the signer response matches the frozen body,
+expected pubkey, and id and carries a valid signature.
 
-Receipts are persisted facts keyed by intent id. An app can reattach after
-restart; correctness cannot depend on keeping the original in-memory stream
-alive.
+## Missing signer is a durable state
+
+If the selected signer is unavailable, the row remains visible and the receipt
+reports `awaitingSigner(pubkey)`.
+
+```swift
+for await fact in receipt.facts {
+    switch fact {
+    case .awaitingSigner(let pubkey):
+        showSignerUnavailable(pubkey)
+    default:
+        apply(fact)
+    }
+}
+```
+
+A disconnected NIP-46 session is not terminal failure. The obligation survives
+until a matching provider reattaches, the app cancels it, protocol expiry makes
+it invalid, or a terminal signer/protocol response occurs.
+
+NMP persists the obligation and identity reference, never raw secret material.
+
+## Cancellation and replaceable compensation
+
+Explicit cancellation or terminal pre-signature failure removes the pending row
+through the ordinary store door. If it provisionally displaced a replaceable
+winner, that previous row is offered back through the same insertion logic.
+
+There is no special "un-supersede" API.
+
+Once a valid signature promotes the row, relay ACK, rejection, timeout, and
+retry outcomes change receipt evidence only. They never retract the signed row
+or resurrect its predecessor.
+
+## Receipt facts
+
+Illustrative facts include:
+
+```text
+accepted(intentId, retention)
+awaitingSigner(pubkey)
+signed(eventId)
+routeAdded(relay, reason)
+attemptStarted(relay, ordinal)
+sent(relay, ordinal)
+acked(relay, message?)
+rejected(relay, reason)
+retryEligible(relay, at)
+gaveUp(relay, reason)
+outcomeUnknown(relay)
+cancelled
+failed(reason)
+```
+
+The engine reports observations and durable policy state. It does not collapse
+them into `published = true` or claim convergence over unknowable relays.
+
+Durable receipt history remains addressable after the delivery obligation is
+terminal. Recovery of open work and retention of terminal receipt facts are
+separate concerns; closing an outbox lane must not erase the only reattachment
+record.
 
 ## Durability classes
 
-- **Durable:** NMP retains the obligation until explicit cancellation, a
-  terminal signer/protocol failure, protocol expiry, or the required relay
-  lanes acknowledge it. Temporary signer, relay, AUTH, or network
-  unavailability does not silently close it.
-- **Explicitly non-durable:** suitable for information that becomes worthless
-  when delayed. NMP may forget it according to the declared policy, and the
-  receipt states that weaker promise explicitly.
-- **At-most-once:** NMP never blindly retries an ambiguous attempt. If delivery
-  may have happened but cannot be proven, the terminal fact is
-  `OutcomeUnknown`, not `GaveUp` followed by a resend.
+### Durable
 
-The exact names may change; these behavioral distinctions may not collapse.
+NMP retains the obligation across restart until explicit cancellation, terminal
+signer/protocol failure, protocol expiry, or the required relay lanes become
+terminal under policy. Temporary signer, relay, AUTH, and network unavailability
+do not silently close it.
+
+### Explicitly non-durable
+
+The app declares that delay makes the operation worthless. NMP may keep it only
+for the current process/attempt and does not resume the publication obligation
+after process loss.
+
+It still has a receipt stream and a reattachable minimal receipt record. Its
+acceptance fact carries the weaker retention scope, and verification, routing,
+and relay failures remain observable. If the process ends before a terminal
+handoff fact, reattachment reports an explicit policy-abandoned terminal rather
+than retrying or silently forgetting the write. Non-durable does not mean
+silent fire-and-forget.
+
+### At most once
+
+NMP persists enough handoff evidence to avoid a blind resend. If a crash or
+connection loss makes the outcome unknowable after dispatch, the lane becomes
+`outcomeUnknown`. It is never retried as though no attempt happened.
+
+The names may change. These distinctions may not collapse.
 
 ## Retry ownership
 
-There is one owner per retry domain:
+| Domain | Single owner |
+|---|---|
+| Socket connection | transport reconnects the socket |
+| One remote signing request | signer adapter owns correlation and its connection/AUTH |
+| One `(intent, relay)` delivery lane | durable outbox owns attempts and eligibility |
+| Time and concurrency | one engine deadline scheduler wakes eligible work |
 
-- transport reconnects sockets only;
-- the NIP-46 adapter owns one correlated signer RPC/AUTH exchange;
-- the durable outbox owns persisted per-(intent, relay) delivery attempts;
-- one engine deadline scheduler owns timers and concurrency limits.
+Transport does not hide durable EVENT frames in an independent buffer. The
+outbox persists `attemptStarted` before dispatch, exact signed bytes, ordinal,
+outcome, and next eligibility. Restart resumes from those facts without polling.
 
-Transport must not secretly buffer durable EVENT frames. There are no
-per-intent threads and no polling loops. Attempt ordinal, exact signed bytes,
-outcome, and `nextEligibleAt` are persisted. Offline or AUTH-blocked time does
-not consume an attempt; recovery wakes eligible work; transient failure
-advances logical backoff; an ACK closes that relay lane.
+Offline or AUTH-blocked time does not consume an attempt. Route discovery may
+append a new relay lane without erasing prior evidence or reopening completed
+lanes.
 
-## Routing and protocol context
+## Protocol-aware publication
 
-Generic public writes use engine-owned routing such as author outbox or inbox
-discovery. Apps do not expand those into relay lists.
+An opt-in module can construct a typed operation while preserving the same
+receipt plane:
 
-Some protocols make a relay part of the semantic object. A bound NIP-29 group,
-for example, contributes its host relay and `h` tag when publishing a draft.
-That typed protocol authority is not a generic app-supplied relay override.
+```swift
+let receipt = try group.publish(photoDraft, durability: .durable)
+```
 
-## Current implementation gap
-
-The shipping statuses `accepted`, `awaitingCapability`, `signed`, `routed`,
-`sent`, `acked`, `rejected`, `gaveUp`, and `failed` describe the current
-in-memory path. In particular, current `Accepted` is not yet the crash-safe
-transaction defined above, `gaveUp` currently closes work that durable retry
-must retain, and receipts are not reattachable. Builders should treat those as
-known implementation gaps, not the final contract.
+The group contributes only NIP-29 context; the photo module owns the draft
+schema; core accepts, signs, stores, routes, and reports one intent.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [Delivery-side transforms](13-delivery-transforms.md) · [Index](README.md) · [Editing replaceable state safely](15-editing-replaceable.md) →</sub>
+<sub>[Index](README.md) · Related: [Evidence without completeness](11-coverage.md) · [Identity and signers](16-identity.md) · [Replaceable edits](15-editing-replaceable.md)</sub>

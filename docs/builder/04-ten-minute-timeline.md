@@ -1,279 +1,202 @@
-# Build the current Falsifier timeline in 10 minutes
+# Embed NMP in ten minutes
 
-**Status: BUILT** — every line below runs against the real Swift SDK (`Packages/NMP`) and the real Falsifier app (`apps/Falsifier`). No pseudo-code.
+> **Provisional target API.** This is a design preview of the settled v2
+> experience, not copy-paste documentation for the current SDK. The example
+> uses an app-owned kind so the quickstart does not bless a content model.
 
-After this chapter you'll have a running iOS app that exercises one
-NIP-02-derived query against real relays and proves the rows arrived through
-diagnostics. This is the current M5 fixture, not a preferred NMP content model;
-the outer kinds remain caller-selected.
+We will construct one engine, observe one literal query, publish one durable
+draft, and inspect both result streams. There is no NMP app object or provider.
 
-We build the smallest possible version of the Falsifier app. Everything here is lifted verbatim from `apps/Falsifier/Sources/Falsifier/` — if a line looks too short to be real, that's the point.
+## 1. Define what belongs to the app
 
----
+The app chooses its protocol and presentation policy:
 
-## Minute 0–2 — a project that links NMP
-
-NMP ships as a local SwiftPM package at `Packages/NMP`. The one build artifact it needs — `NMP.xcframework`, the compiled Rust core — is generated, never committed. Build it once:
-
-```bash
-# from the repo root
-scripts/build-swift-xcframework.sh --sim-only
+```swift
+enum AppProtocol {
+    // This number belongs to the app/protocol, not NMP core.
+    static let recordKind: UInt16 = 9_999
+}
 ```
 
-`--sim-only` skips the device slice (no signing identity needed), which is all a simulator run wants. This produces `Packages/NMP/NMP.xcframework` and the generated bindings. (Full details in *Packaging, build & distribution*.)
+In a real protocol, an opt-in NIP module would expose the kind and typed
+builder. Raw kinds remain available for app-owned or experimental protocols.
 
-Now point an app at the package. The Falsifier uses xcodegen; its entire dependency declaration is four lines (`apps/Falsifier/project.yml`):
-
-```yaml
-packages:
-  NMP:
-    path: ../../Packages/NMP
-targets:
-  Falsifier:
-    dependencies:
-      - package: NMP
-        product: NMP
-```
-
-`import NMP` is the whole adoption cost. There is no provider, no container, no NMP-owned app delegate.
-
-## Minute 2–4 — construct the engine, exactly once
-
-The engine is a plain `let` on your own model object. It is not a singleton NMP forces on you, not an `@EnvironmentObject`, not a base class you subclass. This is `AppModel.swift`, trimmed:
+## 2. Construct one engine
 
 ```swift
 import NMP
 
-@Observable
-final class AppModel {
-    let engine: NMPEngine
+let engine = try NMPEngine(configuration: .init(
+    store: .persistent(applicationSupport: "nmp.store"),
+    bootstrap: .indexers([
+        "wss://purplepag.es",
+        "wss://relay.primal.net"
+    ])
+))
 
-    // Typed operator policy: two indexer relays. The engine discovers author
-    // write relays. Raw observe/publish calls take no app-expanded route list.
-    static let indexerRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
+try engine.setCurrentPubkey(currentAccount.pubkey)
+try engine.attachSigner(currentAccount.signerProvider,
+                        for: currentAccount.pubkey)
+```
 
-    var kinds: [UInt16] = [1] // Falsifier default, not an NMP default
-    private(set) var activePubkey: String?
+Bootstrap relays are operator discovery policy. They are not a list that every
+query or write is broadcast to. NMP discovers and compiles actual source lanes
+from demand and typed protocol facts.
 
-    init() throws {
-        let caches = FileManager.default
-            .urls(for: .cachesDirectory, in: .userDomainMask).first
-        let storePath = caches?
-            .appendingPathComponent("nmp-timeline.sqlite").path
-        engine = try NMPEngine(
-            config: NMPConfig(storePath: storePath,
-                              indexerRelays: Self.indexerRelays)
-        )
+Your app decides where this long-lived value lives: a plain model object,
+dependency container you already own, or process service. NMP does not provide
+an application container.
+
+The signer is needed only for the write later in this guide. A read-only app
+sets a current pubkey only when a binding uses it and need not attach any signer.
+
+## 3. Declare a query value
+
+```swift
+let demand = NMPDemand(
+    selection: NMPFilter(
+        kinds: .literal([AppProtocol.recordKind]),
+        authors: .literal([selectedAuthor])
+    ),
+    source: .authorOutboxes,
+    access: .public
+)
+```
+
+This query is deliberately boring. It proves the primitive path without
+smuggling a feed, follows list, profile convention, or favored kind into core.
+
+The three descriptor dimensions matter:
+
+- `selection` decides which canonical rows match;
+- `source` authorizes NIP-65 author-outbox discovery; and
+- `access` says the request is public rather than AUTH-scoped.
+
+## 4. Observe native snapshots
+
+```swift
+for await snapshot in try engine.observe(demand) {
+    rows = snapshot.rows
+
+    for source in snapshot.acquisition {
+        renderSourceFact(source)
+    }
+
+    if !snapshot.shortfall.isEmpty {
+        renderLocalLimits(snapshot.shortfall)
     }
 }
 ```
 
-That's the entire engine lifecycle. `storePath: nil` would give you an in-memory store instead; a path gives you a cache that survives relaunches (cold-start offline reads come for free — see *Offline & sync*). `deinit` shuts the engine down for you; you never have to.
+The first snapshot may contain cached rows before any socket connects. Later
+snapshots update the same local view as sources connect, require AUTH, reach
+EOSE, reconcile a watermark, disconnect, or hit a local limit.
 
-Wire it into a plain SwiftUI `App` (`FalsifierApp.swift`):
+There is no `syncHealth` or global `complete` flag. The app interprets scoped
+facts for its own UX.
+
+In SwiftUI, the loop belongs in the view/model task you already use:
 
 ```swift
-@main
-struct TimelineApp: App {
-    @State private var model: AppModel?
-
-    var body: some Scene {
-        WindowGroup {
-            if let model {
-                ContentView(model: model)
-            } else {
-                ProgressView("Starting NMP engine…")
-                    .task { model = try? AppModel() }
-            }
-        }
+.task(id: demand) {
+    for await snapshot in try engine.observe(demand) {
+        model.apply(snapshot)
     }
 }
 ```
 
-## Minute 4–6 — set the current-pubkey input
+Cancellation and ARC release the observation. The app never sends `CLOSE` or
+reopens a Nostr `REQ` itself.
 
-The shipping API calls this the active account. Architecturally it is the
-current-pubkey input: only reactive queries that reference it should re-root.
-The current SDK also couples its local signer to this call; the target adds a
-per-write identity override and pins signer choice at durable acceptance.
-
-For a real feed you don't even need a secret key: browsing read-only is a first-class state. `setActiveAccount` accepts any pubkey, keyed or not.
+## 5. Publish an immutable draft
 
 ```swift
-extension AppModel {
-    // Read-only: no key involved. Legal, and the fastest way to see data.
-    func browse(pubkeyHex: String) {
-        try? engine.setActiveAccount(pubkeyHex)
-        activePubkey = pubkeyHex
-    }
+let draft = NMPDraft(
+    kind: AppProtocol.recordKind,
+    tags: [],
+    content: encodedRecord
+)
 
-    // CURRENT local-signer API. The target SDK stores secrets behind a
-    // standard platform secure-provider boundary; the event/outbox database
-    // persists obligations, never raw secret material.
-    func logIn(secretKey: String) async {
-        let pubkey = try? await engine.addAccount(secretKey: secretKey)
-        if let pubkey {
-            try? engine.setActiveAccount(pubkey)
-            activePubkey = pubkey
-        }
-    }
+let receipt = try engine.publish(.init(
+    draft: draft,
+    durability: .durable
+))
+
+for await fact in receipt.facts {
+    renderWriteFact(fact)
 }
 ```
 
-For the current tutorial, use a well-known pubkey so the existing fixture has
-live data immediately:
+The signer registered for `$currentPubkey` is the default. The app can override
+it for one operation:
 
 ```swift
-model.browse(pubkeyHex:
-    "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d")
+let receipt = try engine.publish(.init(
+    draft: draft,
+    durability: .durable,
+    signer: .identity(podcastIdentity)
+))
 ```
 
-## Minute 6–8 — the timeline (one query, one loop)
+That override does not change the current pubkey.
 
-Here are both nouns' read half in one screen. The query is a *value* you build; `observe` hands you an `AsyncSequence` of snapshots; you fold each snapshot into your own `@State`. NMP does zero rendering — `Row` carries raw tokens (hex pubkey, Unix timestamp, verbatim content), and formatting them is your app's job.
+## 6. Understand the immediate local result
 
-First, the query. `FeedFilters.follows(kinds:)` is an app-owned reusable
-declaration: it derives authors from the current pubkey's NIP-02 contact list
-and leaves the outer event kinds to the caller. The tutorial passes kind:1 only
-because that is the current Falsifier probe. NMP core exposes no home-feed or
-kind:1 convenience.
+After durable `accepted(intentId)`, any matching query sees the canonical local
+row through the store's normal invalidation path:
 
 ```swift
-import NMP
-
-enum FeedFilters {
-    static func follows(kinds: [UInt16]) -> NMPFilter {
-        NMPFilter(
-            kinds: kinds,
-            authors: .derived(
-                inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-                project: .tag("p")
-            ),
-            limit: 200
-        )
-    }
+switch row.signatureState {
+case .pending(let intentId):
+    renderPending(intentId)
+case .signed:
+    renderPublished()
 }
 ```
 
-Read that binding aloud: *the authors are derived from the `p` tags of the
-kind:3 event authored by the current pubkey.* Changing that input reroots this
-dependent graph. A literal multi-account query would remain live.
+There is no app-maintained optimistic copy. When a signer arrives, the same row
+is promoted because a NIP-01 event id does not include its signature.
 
-Now the view (`FeedView.swift`, trimmed):
+The receipt may then report facts such as:
+
+```text
+accepted(intentId)
+awaitingSigner(pubkey)
+signed(eventId)
+routed(relay)
+attemptStarted(relay, ordinal)
+acked(relay)
+rejected(relay, reason)
+outcomeUnknown(relay)
+```
+
+Those are observations, not a single success boolean.
+
+## 7. Keep diagnostics permanent
 
 ```swift
-struct FeedView: View {
-    let model: AppModel
-    @State private var rows: [Row] = []
-    @State private var coverage: Coverage = .unknown
-
-    var body: some View {
-        List {
-            Section { Text("Coverage: \(coverageText)").font(.caption) }
-            ForEach(rows) { row in
-                VStack(alignment: .leading) {
-                    Text(shortHex(row.pubkey)).font(.caption.monospaced())
-                    Text(row.content)
-                    Text(date(row.createdAt)).font(.caption2)
-                }
-            }
-        }
-        // Re-observe when `kinds` changes: editing the filter builds a NEW
-        // value and .task(id:) tears down the old query, opens a fresh one.
-        // There is no "edit a running query" verb — there's no need for one.
-        .task(id: model.kinds) { await observe() }
-    }
-
-    private func observe() async {
-        rows = []; coverage = .unknown
-        guard let query = try? model.engine
-            .observe(FeedFilters.follows(kinds: model.kinds)) else { return }
-        for await batch in query {
-            rows = batch.rows.sorted { $0.createdAt > $1.createdAt }
-            coverage = batch.coverage
-        }
-    }
-
-    private var coverageText: String {
-        switch coverage {
-        case .unknown: return "unknown"
-        case .completeUpTo(let ts): return "current plan watermark \(date(ts))"
-        }
-    }
-    private func shortHex(_ h: String) -> String {
-        h.count > 16 ? "\(h.prefix(8))…\(h.suffix(8))" : h
-    }
-    private func date(_ s: UInt64) -> String {
-        Date(timeIntervalSince1970: TimeInterval(s))
-            .formatted(date: .abbreviated, time: .shortened)
-    }
+for await diagnostics in engine.observeDiagnostics() {
+    diagnosticsModel.apply(diagnostics)
 }
 ```
 
-Run it. Within a few seconds, notes stream in. Note two things the types forced on you:
+Render the current source plan, exact wire filters, connection/AUTH state,
+events received by relay and kind, coverage watermarks, limits, and write
+attempts. That screen is the proof surface for machinery the app deliberately
+does not own.
 
-- **You sorted the rows.** NMP delivered a set of live rows; *ordering is render policy*, so it's yours. The bridge accumulates the engine's added/removed deltas into a snapshot for you, but it does not pick an order.
-- **The current SDK carries aggregate `Coverage`.** Read it narrowly as facts
-  about the current source plan, not global Nostr completeness. The target
-  snapshot carries compact per-source acquisition and shortfall evidence.
+## What you did not write
 
-## Minute 8–10 — confirm it worked by reading, not trusting
+- a relay pool or subscription manager;
+- a watcher that reopens requests when dependencies change;
+- an optimistic row overlay;
+- a signer retry loop;
+- a transport-owned durable publish buffer;
+- an NMP provider, reducer, or scene-phase hook; or
+- a global-sync interpretation.
 
-A spinner that stopped spinning proves nothing. The honest question is: *what did the engine actually ask, of which relays, and what came back?* That's the diagnostics screen — a live, read-only projection of real engine state, never estimated. It is the acceptance test rendered on screen.
-
-One call, same iteration idiom as a query (`DiagnosticsView.swift`, trimmed):
-
-```swift
-struct DiagnosticsView: View {
-    let model: AppModel
-    @State private var snapshot = DiagnosticsSnapshot()
-
-    var body: some View {
-        List {
-            Section("Summary") {
-                LabeledContent("Relays", value: "\(snapshot.relays.count)")
-                LabeledContent("Uncovered authors",
-                               value: "\(snapshot.uncoveredAuthorCount)")
-            }
-            ForEach(snapshot.relays) { relay in
-                Section(relay.relay) {
-                    LabeledContent("Wire subs", value: "\(relay.wireSubCount)")
-                    LabeledContent("Authors served", value: "\(relay.authorsServed)")
-                    ForEach(relay.eventsByKind, id: \.kind) { kc in
-                        LabeledContent("events kind:\(kc.kind)", value: "\(kc.count)")
-                    }
-                    DisclosureGroup("Exact wire filters (\(relay.filters.count))") {
-                        ForEach(relay.filters, id: \.self) { json in
-                            Text(json).font(.caption2.monospaced())
-                        }
-                    }
-                }
-            }
-        }
-        .task {
-            for await s in model.engine.observeDiagnostics() { snapshot = s }
-        }
-    }
-}
-```
-
-**Read this screen to confirm the rows arrived.** You should see:
-
-- A relay list you never typed — `purplepag.es`, `relay.primal.net`, *and* relays the engine discovered on its own by reading your follows' kind:10002 lists. You supplied two indexers; the engine navigated the rest.
-- Under a relay, **`events kind:1`** with a non-zero count — the actual notes that landed, counted from real ingest.
-- **`events kind:3`** and **`kind:10002`** counts — the contact list and relay lists the engine fetched to resolve your `Derived` binding. That's the machinery you'd otherwise hand-roll, made visible.
-- The **exact wire filter JSON** sent to each relay. Expand it: you'll see the `authors` set the engine resolved from your follows. You never assembled that list; the compiler did.
-
-If the requested-kind counts are climbing and the view is populated, this
-specific probe worked. If it is empty, inspect whether the current-pubkey
-binding resolved, which sources were planned, exact wire filters, connection /
-AUTH state, inbound counts, and shortfall. Diagnostics explains those facts; it
-does not declare a globally complete result.
-
-You now have the current embedding shape: **construct once, set an input,
-observe a query value, render raw tokens yourself, and read diagnostics.**
+That absence is the product.
 
 ---
 
-<!-- nav-footer -->
-<sub>← [What works today](03-status-map.md) · [Index](README.md) · [The two nouns](05-two-nouns.md) →</sub>
+<sub>[Index](README.md) · Related: [Mental model](02-mental-model.md) · [Ownership reference](05-two-nouns.md) · [Binding grammar](09-binding-grammar.md)</sub>
