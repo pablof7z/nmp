@@ -47,6 +47,18 @@ impl Subscription {
     /// call sites where an explicit early teardown reads more clearly than
     /// a scope exit.
     pub fn cancel(self) {}
+
+    /// A cheap, independently-clonable capability to withdraw this
+    /// subscription's demand from elsewhere, decoupled from `recv()`'s
+    /// ownership of the row channel -- exactly the `(Handle, QueryHandle)`
+    /// pair `Drop` itself uses. `recv()` blocks, so a dedicated drain loop
+    /// (e.g. `nmp-ffi`'s `NmpQueryHandle`) must own the whole `Subscription`
+    /// outright; this lets a separate, `Send`-able capability still trigger
+    /// withdrawal immediately, rather than waiting for the drain loop's next
+    /// `recv()` to notice the disconnect.
+    pub fn cancel_handle(&self) -> (Handle, QueryHandle) {
+        (self.handle.clone(), self.query_handle)
+    }
 }
 
 impl Drop for Subscription {
@@ -83,6 +95,13 @@ impl DiagnosticsSubscription {
     /// Withdraw this diagnostics observer now, rather than waiting for
     /// `Drop`.
     pub fn cancel(self) {}
+
+    /// Same rationale as [`Subscription::cancel_handle`] -- `DiagnosticsHandle`
+    /// is already cheaply `Clone` with a non-consuming `cancel(&self)`, so
+    /// this is a plain accessor.
+    pub fn cancel_handle(&self) -> DiagnosticsHandle {
+        self.diag_handle.clone()
+    }
 }
 
 impl Drop for DiagnosticsSubscription {

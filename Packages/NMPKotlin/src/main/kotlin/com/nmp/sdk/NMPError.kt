@@ -12,7 +12,14 @@ import uniffi.nmp_ffi.FfiException
 
 /** Every way a call into the engine can fail -- typed states, never a crash
  * (mirrors `nmp-ffi`'s own `FfiError`; see that type's doc for the Rust
- * side of each case). */
+ * side of each case).
+ *
+ * NOTE: there is deliberately no `InvalidSignedEvent` case anymore -- a
+ * `WriteIntent.Signed` event that fails `nostr::Event::verify` is no longer
+ * rejected synchronously here (#52 Unit B: the guarantee moved to
+ * `nmp-engine`'s acceptance boundary so it holds for every entry point, not
+ * only this one). It surfaces on the `publish` `Flow<WriteStatus>` instead,
+ * as `WriteStatus.Failed`, the first and only status delivered. */
 sealed class NMPError(message: String) : Exception(message) {
     data class NonIndexableFilterTag(val got: String) :
         NMPError("not indexable as a filter key: $got")
@@ -24,7 +31,7 @@ sealed class NMPError(message: String) : Exception(message) {
     object SignerHasNoPublicKey : NMPError("signer has no public key")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
-    data class InvalidSignedEvent(val reason: String) : NMPError("invalid signed event: $reason")
+    object EngineClosed : NMPError("engine already shut down")
 
     companion object {
         fun from(ffi: FfiException): NMPError =
@@ -38,7 +45,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.SignerHasNoPublicKey -> SignerHasNoPublicKey
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
-                is FfiException.InvalidSignedEvent -> InvalidSignedEvent(ffi.reason)
+                is FfiException.EngineClosed -> EngineClosed
             }
     }
 }

@@ -97,7 +97,7 @@ final class LiveRelayTests: XCTestCase {
             )
         }
 
-        let diagnostics = engine.observeDiagnostics()
+        let diagnostics = try engine.observeDiagnostics()
         let snapshot = await Self.firstSnapshotWithReceivedKind1(from: diagnostics, timeoutSeconds: 10)
         diagnostics.cancel()
         query.cancel()

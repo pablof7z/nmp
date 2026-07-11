@@ -96,9 +96,10 @@ public final class NMPEngine: Sendable {
     // Read-only, off the data path -- never influences routing/delivery.
 
     /// Open a live diagnostics stream. The returned `NMPDiagnostics` is
-    /// iterated the same way as `NMPQuery` -- teardown is deinit-tied.
-    public func observeDiagnostics() -> NMPDiagnostics {
-        NMPDiagnostics(engine: ffi)
+    /// iterated the same way as `NMPQuery` -- teardown is deinit-tied. Throws
+    /// `NMPError.engineClosed` if called after `shutdown()`.
+    public func observeDiagnostics() throws -> NMPDiagnostics {
+        try NMPDiagnostics(engine: ffi)
     }
 
     // MARK: - Lifecycle

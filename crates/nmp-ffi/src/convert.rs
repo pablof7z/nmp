@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use nmp::Lane;
 use nmp_engine::core::{
     DiagnosticsSnapshot, FilterCoverageEntry, QueryCoverage, RelayDiagnosticsSnapshot, RowDelta,
 };
@@ -17,7 +18,6 @@ use nmp_grammar::{
     Binding as GBinding, Derived as GDerived, Filter as GFilter, IdentityField as GIdentityField,
     IndexedTagName, Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
 };
-use nmp_router::Lane;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
@@ -78,13 +78,27 @@ pub enum FfiError {
     InvalidSignature {
         got: String,
     },
-    /// A `FfiWritePayload::Signed` whose fields parsed but did not pass
-    /// `nostr::Event::verify` -- the id does not hash to these fields, or
-    /// the signature does not verify against `pubkey`. Rejected HERE (#32):
-    /// the engine never sees, and never publishes, this event.
-    InvalidSignedEvent {
-        reason: String,
-    },
+    /// [`nmp::Engine::shutdown`] has already run -- every other verb fails
+    /// closed with this variant instead of racing the engine thread's own
+    /// teardown. NOTE: there is deliberately no `InvalidSignedEvent` variant
+    /// here anymore -- a `FfiWritePayload::Signed` that fails
+    /// `nostr::Event::verify` is no longer rejected synchronously at this
+    /// boundary (#52 Unit B). That guarantee moved to
+    /// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary
+    /// (Unit A0/#56) so it holds for every entry point, not only this one;
+    /// it surfaces on the `WriteStatus` receipt stream as `Failed` instead.
+    EngineClosed,
+}
+
+impl From<nmp::EngineError> for FfiError {
+    fn from(err: nmp::EngineError) -> Self {
+        match err {
+            nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
+            nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
+            nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
+            nmp::EngineError::EngineClosed => Self::EngineClosed,
+        }
+    }
 }
 
 impl std::fmt::Display for FfiError {
@@ -101,7 +115,7 @@ impl std::fmt::Display for FfiError {
             Self::SignerHasNoPublicKey => write!(f, "signer reported no public key"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
-            Self::InvalidSignedEvent { reason } => write!(f, "invalid signed event: {reason}"),
+            Self::EngineClosed => write!(f, "engine already shut down"),
         }
     }
 }
@@ -451,13 +465,16 @@ fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
         .collect()
 }
 
-/// A `FfiWritePayload::Signed`'s fields -> a verified `nostr::Event`. Every
-/// field is parsed with the same typed-error discipline as the rest of this
-/// module, then the reconstructed event is run through `Event::verify`
-/// (id + schnorr signature, the same capability `nmp-transport`'s ingest
-/// gate reuses) -- a malformed or non-verifying event never reaches
-/// `write_intent_from_ffi`'s caller as anything but a typed [`FfiError`],
-/// so `nmp-engine` can never be handed garbage to publish verbatim (#32).
+/// A `FfiWritePayload::Signed`'s fields -> a `nostr::Event`, PARSE ONLY --
+/// every field is parsed with the same typed-error discipline as the rest
+/// of this module (malformed hex/signature-shape input is still a typed
+/// [`FfiError`], never a panic), but the reconstructed event is no longer
+/// run through `Event::verify` here (#52 Unit B). That verify moved to
+/// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit
+/// A0/#56) so the guarantee holds for every entry point, not only the one
+/// that happens to verify locally -- a non-verifying (e.g. tampered) event
+/// still parses fine at THIS boundary and is rejected downstream instead,
+/// surfacing as `WriteStatus::Failed` on the receipt stream.
 fn signed_event_from_ffi(
     id: String,
     pubkey: String,
@@ -474,7 +491,7 @@ fn signed_event_from_ffi(
         .parse::<Signature>()
         .map_err(|_| FfiError::InvalidSignature { got: sig })?;
 
-    let event = SignedEvent::new(
+    Ok(SignedEvent::new(
         event_id,
         public_key,
         Timestamp::from(created_at),
@@ -482,17 +499,14 @@ fn signed_event_from_ffi(
         parsed_tags,
         content,
         signature,
-    );
-    event.verify().map_err(|e| FfiError::InvalidSignedEvent {
-        reason: e.to_string(),
-    })?;
-    Ok(event)
+    ))
 }
 
 /// `FfiWriteIntent -> nmp_engine::outbox::WriteIntent`. `Unsigned` builds an
 /// `UnsignedEvent` template the engine signs internally; `Signed` (#32)
-/// verifies the caller-supplied event and passes it through verbatim -- see
-/// `signed_event_from_ffi`.
+/// parses the caller-supplied event's fields and passes it through
+/// verbatim -- see `signed_event_from_ffi`'s doc for where the verify now
+/// happens.
 pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, FfiError> {
     let payload = match intent.payload {
         FfiWritePayload::Unsigned {
@@ -958,24 +972,28 @@ mod tests {
         assert_eq!(event.sig, original.sig);
     }
 
-    /// #32: a signature that does not verify against the claimed id/pubkey
-    /// must fail closed with a typed error, never reach the engine.
+    /// #52 Unit B: a signature that does not verify against the claimed
+    /// id/pubkey NO LONGER fails at this boundary -- every field still
+    /// parses (well-formed hex/signature shape), so `write_intent_from_ffi`
+    /// succeeds. The verify that used to reject this here moved to
+    /// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary
+    /// (Unit A0/#56); `NmpEngine::publish`'s own test
+    /// (`facade::tests::ffi_tampered_signed_publish_fails_closed_on_receipt_stream`)
+    /// proves the rejection still happens, just downstream and
+    /// asynchronously (`WriteStatus::Failed` on the receipt stream) rather
+    /// than as a synchronous `FfiError` here.
     #[test]
-    fn ffi_rejects_malformed_signed_event() {
+    fn tampered_signed_event_still_parses_verify_moved_downstream() {
         let (_original, mut intent) = signed_write_intent();
         let FfiWritePayload::Signed { content, .. } = &mut intent.payload else {
             unreachable!("signed_write_intent always builds Signed")
         };
-        // Tamper with the content after signing: id/sig no longer match it.
+        // Tamper with the content after signing: id/sig no longer match it,
+        // but every field is still well-formed hex/signature shape.
         *content = "tampered".to_string();
 
-        match write_intent_from_ffi(intent) {
-            Err(FfiError::InvalidSignedEvent { .. }) => {}
-            Err(other) => {
-                panic!("expected InvalidSignedEvent, got a different FfiError: {other:?}")
-            }
-            Ok(_) => panic!("a tampered signed event must fail closed, not parse"),
-        }
+        write_intent_from_ffi(intent)
+            .expect("marshaling never re-derives verify; that guarantee moved downstream");
     }
 
     /// A `sig` that isn't even valid hex is a distinct, earlier failure mode

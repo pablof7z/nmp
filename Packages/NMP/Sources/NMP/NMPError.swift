@@ -9,6 +9,13 @@ import NMPFFI
 /// Every way a call into the engine can fail -- typed states, never a crash
 /// (mirrors `nmp-ffi`'s own `FfiError`; see that type's doc for the Rust
 /// side of each case).
+///
+/// NOTE: there is deliberately no `.invalidSignedEvent` case anymore -- a
+/// `WritePayload.signed` event that fails `nostr::Event::verify` is no
+/// longer rejected synchronously here (#52 Unit B: the guarantee moved to
+/// `nmp-engine`'s acceptance boundary so it holds for every entry point, not
+/// only this one). It surfaces on `Receipt.status` instead, as
+/// `WriteStatus.failed`, the first and only status delivered.
 public enum NMPError: Error, Sendable, Equatable {
     case nonIndexableFilterTag(String)
     case invalidPublicKey(String)
@@ -19,7 +26,7 @@ public enum NMPError: Error, Sendable, Equatable {
     case signerHasNoPublicKey
     case storeOpenFailed(String)
     case invalidSignature(String)
-    case invalidSignedEvent(String)
+    case engineClosed
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -32,7 +39,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .SignerHasNoPublicKey: self = .signerHasNoPublicKey
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .InvalidSignature(let got): self = .invalidSignature(got)
-        case .InvalidSignedEvent(let reason): self = .invalidSignedEvent(reason)
+        case .EngineClosed: self = .engineClosed
         }
     }
 }
