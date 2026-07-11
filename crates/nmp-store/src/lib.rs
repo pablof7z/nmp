@@ -384,14 +384,25 @@ pub struct AcceptWrite {
 /// [`InsertOutcome`]'s shape (Fable checkpoint: "reuses the widened
 /// `Superseded` shape so the resolver sorts it exactly like a relay
 /// insert"), including `Kind5Processed`: a locally-composed kind:5 draft
-/// runs the SAME author-verified tombstone-write processing `insert` runs
-/// for a relay-observed kind:5, immediately, in this same transaction
-/// (architecture review correction — issue #2's "no app optimistic
-/// mirror" promise extends to local deletions too). Its tombstone claims
-/// are PROVISIONAL while the intent is still pending — reversible by
-/// `compensate_write`, committed to permanent by `promote_signed` — see
-/// `Kind5StashRecord`'s doc (redb backend) / `Kind5Stash`'s doc (memory
-/// backend).
+/// immediately, in the SAME transaction, stages a REVERSIBLE suppression
+/// claim over every target it names — hiding whatever row currently lives
+/// there from `query` WITHOUT moving or removing it (architecture review
+/// correction — issue #2's "no app optimistic mirror" promise extends to
+/// local deletions too). This replaced an earlier, withdrawn design that
+/// physically moved a target row into a per-intent stash: codex-nova found
+/// that made the target's OWN `promote_signed`/`compensate_write` blind to
+/// it (a stashed row is invisible to anyone searching `EVENTS`/
+/// `OUTBOX_DISPLACED`), and made an exact-`Duplicate` kind:5 intent's
+/// promotion unsound (promoting it committed a real, permanent deletion
+/// with no stash of its own to drop). The suppression-claim model fixes
+/// both: rows never move, so every other door keeps working on exactly
+/// the row it always did — a claim is pure, reversible metadata.
+/// `compensate_write` drops a still-pending intent's claims outright (the
+/// target reappears immediately — nothing to re-insert, it never left);
+/// `promote_signed` drops them AND commits the deletion for real (the same
+/// author-verified tombstone-write processing `insert` runs for a
+/// relay-observed kind:5) — permanent from that point on
+/// (retraction-and-negative-deltas.md §7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
     /// Brand-new pending row, no address competition. `intent_id`/
@@ -430,23 +441,24 @@ pub enum AcceptOutcome {
         receipt_id: u64,
     },
     /// A locally-composed kind:5 (NIP-09) deletion, stored like any other
-    /// pending row through this door AND, in the SAME transaction, running
-    /// the identical author-verified tombstone-write processing `insert`
-    /// runs for a relay-observed kind:5 (architecture review correction:
-    /// issue #2's "no app optimistic mirror" promise extends to
-    /// locally-composed deletions too — the targets disappear from the
-    /// LOCAL replica immediately, before any relay round-trip, not only
-    /// once the relay echoes this deletion back through `insert`'s
-    /// dedup-by-id branch). `deleted` holds every currently-held target
-    /// this deletion actually removed, mirroring `InsertOutcome::
-    /// Kind5Processed`. Returned in place of `Inserted` only for this one
-    /// case — kind:5 has no replaceable/addressable address, so it can
-    /// never reach `Superseded`/`Stale` by construction.
+    /// pending row through this door AND, in the SAME transaction, staging
+    /// a provisional suppression claim over every target it names — the
+    /// targets disappear from `query` immediately, before any relay
+    /// round-trip (architecture review correction: issue #2's "no app
+    /// optimistic mirror" promise extends to locally-composed deletions
+    /// too), without being moved or removed. `hidden` holds every
+    /// currently-visible row this claim just hid — both e-tag id targets
+    /// and, unlike the deferred-to-promotion treatment an earlier
+    /// revision gave them, a-tag address targets' current winners too
+    /// (suppression is cheap and reversible either way, so there is no
+    /// reason left to defer). Returned in place of `Inserted` only for
+    /// this one case — kind:5 has no replaceable/addressable address, so
+    /// it can never reach `Superseded`/`Stale` by construction.
     Kind5Processed {
         intent_id: IntentId,
         receipt_id: u64,
         row: StoredEvent,
-        deleted: Vec<StoredEvent>,
+        hidden: Vec<StoredEvent>,
     },
     /// Refused at the door — the same tombstone/expiry refusal `insert`
     /// runs. Terminal typed failure to the caller (R3): NOTHING is
@@ -531,17 +543,23 @@ pub enum PromoteOutcome {
 /// THIS intent's own displaced predecessor (if any) is restored through
 /// the same one door and returned here (`None` if it displaced nothing, or
 /// the re-offered predecessor came back `Stale` — retraction doc §3.4).
-/// If this was a pending kind:5 draft, its provisional tombstone claims and
-/// every target it removed are atomically reversed (see
-/// `Kind5StashRecord`'s doc) — cancelling a delete brings the content back,
-/// not merely closes the journal. The intent's `OUTBOX_INTENTS`/
-/// `OUTBOX_DISPLACED`/kind:5-stash rows were all deleted in the same
+/// If this was a pending kind:5 draft, this intent's OWN suppression
+/// claims are dropped outright — every target it named reappears in
+/// `query` immediately, with `revealed` listing the ones that ACTUALLY
+/// became newly visible (a target still hidden by some OTHER intent's
+/// overlapping claim, or already permanently removed by an intent that
+/// promoted its own deletion of the same target, is correctly excluded).
+/// Nothing is ever re-inserted for `revealed`: a suppressed row never left
+/// `EVENTS` in the first place — cancelling a delete brings the content
+/// back, not merely closes the journal. The intent's `OUTBOX_INTENTS`/
+/// `OUTBOX_DISPLACED`/suppression-claim rows were all deleted in the same
 /// transaction. Boxed for the same reason `InsertOutcome::Superseded` is:
 /// keeps the common `NotFound` variant small.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompensateOutcome {
     Compensated {
         restored: Option<Box<StoredEvent>>,
+        revealed: Vec<StoredEvent>,
     },
     /// This `IntentId` names no still-open intent: already promoted
     /// (compensation is pre-signature only, retraction doc §4.2's
