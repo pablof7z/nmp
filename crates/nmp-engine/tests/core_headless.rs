@@ -18,7 +18,9 @@ use nmp_engine::outbox::{
     Durability, NarrowOnly, PrivateRoute, ReceiptSink, WriteIntent, WritePayload, WriteRouting,
     WriteStatus,
 };
-use nmp_grammar::{Binding, ConcreteFilter, Filter};
+use nmp_grammar::{
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, SourceAuthority,
+};
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{
@@ -70,6 +72,22 @@ fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
         kinds: Some(kinds.iter().copied().collect()),
         authors: Some(authors.iter().map(|s| s.to_string()).collect()),
         ..ConcreteFilter::default()
+    }
+}
+
+/// An `AuthorOutboxes`-sourced atom (#118): every `cf(...)` fixture in this
+/// file is author-bearing, so this is the exact true context each one was
+/// actually acquired under -- `EngineCore::get_coverage` now takes the
+/// atom's real `ContextualAtom`, never a reconstruction.
+fn ctx_atom(filter: ConcreteFilter) -> ContextualAtom {
+    ctx_atom_with(filter, SourceAuthority::AuthorOutboxes)
+}
+
+fn ctx_atom_with(filter: ConcreteFilter, source: SourceAuthority) -> ContextualAtom {
+    ContextualAtom {
+        filter,
+        source,
+        access: AccessContext::Public,
     }
 }
 
@@ -779,7 +797,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
         event_frame(&wire, e),
     ));
     assert_eq!(
-        core.get_coverage(&atom, &relay0),
+        core.get_coverage(&ctx_atom(atom.clone()), &relay0),
         None,
         "presence != coverage"
     );
@@ -795,10 +813,75 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     ));
 
     let interval = core
-        .get_coverage(&atom, &relay0)
+        .get_coverage(&ctx_atom(atom.clone()), &relay0)
         .expect("EOSE must record a coverage row");
     assert_eq!(interval.from, Timestamp::from(0u64));
     assert_eq!(interval.through, Timestamp::from(500u64));
+}
+
+/// #118's headline falsifier (fixed ahead of #107): a `Demand` explicitly
+/// declared `Public` over an author-bearing selection (#106's "new
+/// expressible behavior" -- "these authors, generic facts only, no outbox
+/// chase") is a genuinely DIFFERENT coverage identity than the SAME
+/// selection under the static-default `AuthorOutboxes` guess. Proves
+/// `get_coverage` now reads the atom's TRUE declared context: querying
+/// under the correct (`Public`) context finds the recorded coverage;
+/// querying under the static default's WRONG guess (`AuthorOutboxes`,
+/// since the filter IS author-bearing) does not -- exactly the silent
+/// re-alias #118 describes, now provably closed.
+#[test]
+fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let filter = cf(&[1], &[&a.public_key().to_hex()]);
+    // A directory fact so the Public-sourced atom (classify() sends
+    // `Public` straight to the pinned/directory lookup, never the outbox
+    // solver) actually routes somewhere.
+    let dir = FixtureDirectory::new().with_group_host(filter.clone(), relay0.clone());
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let demand = nmp_grammar::Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+            ..Filter::default()
+        },
+        SourceAuthority::Public,
+        AccessContext::Public,
+    )
+    .expect("Public over an author-bearing selection is legal (#106)");
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        LiveQuery(demand),
+        Box::new(CapturingSink::default()),
+    ));
+    let (sub_id, _f) = req_for(&effects, &relay0);
+    let wire = wire_sub_string(sub_id);
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire),
+    ));
+
+    assert!(
+        core.get_coverage(
+            &ctx_atom_with(filter.clone(), SourceAuthority::Public),
+            &relay0
+        )
+        .is_some(),
+        "the TRUE declared context (Public) must find the recorded coverage"
+    );
+    assert!(
+        core.get_coverage(&ctx_atom(filter), &relay0).is_none(),
+        "the static-default's WRONG guess (AuthorOutboxes, since the filter is \
+         author-bearing) must NOT find coverage recorded under a genuinely \
+         different declared context"
+    );
 }
 
 // ---- the EOSE-overwrite-race rule (ruling §2) ---------------------------
@@ -855,11 +938,13 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     let atom_a = cf(&[1], &[&a.public_key().to_hex()]);
     let atom_e = cf(&[1], &[&e_key.public_key().to_hex()]);
     assert!(
-        core.get_coverage(&atom_a, &relay0).is_some(),
+        core.get_coverage(&ctx_atom(atom_a.clone()), &relay0)
+            .is_some(),
         "a is in BOTH outstanding snapshots -- must be credited"
     );
     assert!(
-        core.get_coverage(&atom_e, &relay0).is_none(),
+        core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
+            .is_none(),
         "e is only in the newer snapshot -- the straggler EOSE must NOT credit it"
     );
 
@@ -873,7 +958,8 @@ fn eose_overwrite_race_credits_only_the_intersection() {
         eose_frame(&wire),
     ));
     assert!(
-        core.get_coverage(&atom_e, &relay0).is_some(),
+        core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
+            .is_some(),
         "the second EOSE must credit the still-outstanding snapshot's atoms"
     );
 }
@@ -913,7 +999,7 @@ fn limited_fetch_never_records_coverage() {
 
     let atom = cf(&[1], &[&a.public_key().to_hex()]);
     assert_eq!(
-        core.get_coverage(&atom, &relay0),
+        core.get_coverage(&ctx_atom(atom.clone()), &relay0),
         None,
         "a limited REQ's EOSE must poison -- never record a watermark"
     );

@@ -76,29 +76,6 @@ const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
 /// eligibility check that already applies to kind:3/kind:0/kind:10050.
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
-/// Reconstruct a bare `ConcreteFilter`'s `ContextualAtom` identity via the
-/// SAME static default `nmp_grammar::Demand::from_filter` applies
-/// (`authors.is_some() -> AuthorOutboxes`, else `Public`; `access` is
-/// always `Public` today, #106) -- used ONLY at the `get_coverage` test/
-/// diagnostic-convenience boundary, where a caller hands in a bare filter
-/// with no context of its own. Every REAL production coverage read/write
-/// carries its atom's actual `ContextualAtom` through directly; this
-/// reconstruction is exact precisely because it's the identical rule the
-/// atom's own `Demand` would have applied had it gone through the default
-/// path, which every existing caller's atoms do.
-fn default_context_atom(filter: &ConcreteFilter) -> ContextualAtom {
-    let source = if filter.authors.is_some() {
-        SourceAuthority::AuthorOutboxes
-    } else {
-        SourceAuthority::Public
-    };
-    ContextualAtom {
-        filter: filter.clone(),
-        source,
-        access: AccessContext::Public,
-    }
-}
-
 use attribution::AttributionState;
 pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
@@ -925,37 +902,41 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Read-only access to the resolver's current demand (test/diagnostic
     /// convenience — the whole point of a headlessly-testable reducer is
-    /// that its state can be inspected directly). Selection-only
-    /// (`ConcreteFilter`, not `ContextualAtom`, #106): this is a plain
-    /// introspection surface existing callers already index by filter
-    /// shape (e.g. `atom.kinds == ...`), so it stays exactly as before —
-    /// the resolver's OWN internal demand tracking is fully context-aware
-    /// underneath regardless of what this convenience view exposes.
-    pub fn active_demand(&self) -> BTreeSet<ConcreteFilter> {
-        self.resolver
-            .active_demand()
-            .into_iter()
-            .map(|atom| atom.filter)
-            .collect()
+    /// that its state can be inspected directly). Returns the TRUE
+    /// `ContextualAtom` set (#118, fixed ahead of #107): #106 kept this
+    /// surface `ConcreteFilter`-only, reconstructing context via a static
+    /// default -- exact ONLY as long as nothing in production constructs a
+    /// non-default `Demand`. #107's `SourceAuthority::Pinned` is the first
+    /// production path that does, so a reconstruction would silently
+    /// collapse two genuinely-distinct atoms (same selection, different
+    /// context) that the resolver correctly tracks as two independent
+    /// entries into one. Widened rather than patched with an assertion,
+    /// per the repo's no-compat-alias convention -- this mirrors
+    /// `nmp_resolver::Engine::active_demand()` exactly.
+    pub fn active_demand(&self) -> BTreeSet<ContextualAtom> {
+        self.resolver.active_demand()
     }
 
     /// Read-only coverage introspection (test/diagnostic convenience,
     /// mirroring `active_demand`): the proven interval for `atom`'s
     /// window-erased shape at `relay`, if any coverage has been recorded.
-    /// `atom` stays a bare `ConcreteFilter` (unchanged surface, #106): its
-    /// `source`/`access` are reconstructed via the SAME static default
-    /// `Demand::from_filter` applies (`authors.is_some() ->
-    /// AuthorOutboxes`, else `Public`) — exact for any atom whose `Demand`
-    /// took the default path, which every existing caller's atoms do (the
-    /// regression floor this reconstruction leans on).
+    /// `atom` is the atom's TRUE `ContextualAtom` (#118, fixed ahead of
+    /// #107) -- the caller supplies the actual context an atom was
+    /// acquired under, never a reconstruction. Before this fix, a
+    /// `ConcreteFilter`-only signature reconstructed `source`/`access` via
+    /// `Demand::from_filter`'s static default, which was exact only as
+    /// long as every production atom took that default path; #107's
+    /// `SourceAuthority::Pinned` breaks that assumption; the reconstruction
+    /// would then compute the WRONG `CoverageKey` and silently report
+    /// "not covered" for coverage that IS actually proven.
     pub fn get_coverage(
         &self,
-        atom: &ConcreteFilter,
+        atom: &ContextualAtom,
         relay: &RelayUrl,
     ) -> Option<nmp_store::CoverageInterval> {
         self.resolver
             .store()
-            .get_coverage(nmp_store::coverage_key(&default_context_atom(atom)), relay)
+            .get_coverage(nmp_store::coverage_key(atom), relay)
     }
 
     /// The engine-global diagnostics projection (M5 plan §1.2 step 2) — "the
