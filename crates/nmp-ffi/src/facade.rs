@@ -236,6 +236,35 @@ impl NmpEngine {
         Ok(receipt_id)
     }
 
+    /// Publish a `nmp_nip29::compose_group_send`-composed intent (#115).
+    /// Take-once: `intent` is consumed by this call (`FfiComposedWriteIntent
+    /// ::take`) -- a second call on the SAME handle fails closed with
+    /// `FfiError::IntentAlreadyConsumed` rather than silently re-publishing
+    /// a stale template. Otherwise identical to [`Self::publish`]'s body
+    /// (same receipt-stream drain-thread bridge); `write_intent_from_ffi`
+    /// never runs for this path -- the intent was already composed
+    /// directly, never round-tripped through the raw `FfiWriteRouting`
+    /// conversion (which withholds `PinnedHost` entirely).
+    pub fn publish_composed(
+        &self,
+        intent: Arc<crate::nip29::FfiComposedWriteIntent>,
+        observer: Box<dyn ReceiptObserver>,
+    ) -> Result<u64, FfiError> {
+        let write_intent = intent.take()?;
+        let receipt = self.engine.publish_tracked(write_intent)?;
+        let receipt_id = receipt.id.0;
+        let receipt_rx = receipt.statuses;
+
+        thread::spawn(move || {
+            while let Ok(status) = receipt_rx.recv() {
+                observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
+            }
+            observer.on_closed();
+        });
+
+        Ok(receipt_id)
+    }
+
     /// Attach to a retained receipt without collapsing corrupt durable
     /// evidence into the same result as an unknown id.
     pub fn reattach_receipt(
@@ -777,6 +806,62 @@ mod tests {
             closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "on_closed must fire EXACTLY once when the receipt stream terminates"
         );
+
+        engine.shutdown();
+    }
+
+    /// #115 falsifier 10: `publish_composed` takes its `FfiComposedWriteIntent`
+    /// exactly once. No signer is ever attached (`set_active_account` without
+    /// `add_account`), so the first call settles into the SAME retained
+    /// `Accepted`+`AwaitingCapability` steady state
+    /// `ffi_reattach_replays_real_receipt_facts_through_a_fresh_observer`
+    /// relies on -- no live relay needed to prove take-once. A second call on
+    /// the identical `Arc<FfiComposedWriteIntent>` must fail closed with
+    /// `FfiError::IntentAlreadyConsumed`, never silently re-publish the same
+    /// template or hand back a fresh receipt.
+    #[test]
+    fn ffi_publish_composed_takes_the_intent_exactly_once() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let keys = nostr::Keys::generate();
+        engine
+            .set_active_account(Some(keys.public_key().to_hex()))
+            .expect("account must activate");
+
+        let intent = crate::nip29::group_send_intent(
+            "wss://group-host.example.com".to_string(),
+            "group-a".to_string(),
+            keys.public_key().to_hex(),
+            nostr::Timestamp::now().as_secs(),
+            9,
+            "hi".to_string(),
+            vec![],
+            vec![],
+        )
+        .expect("a well-formed group send must compose");
+
+        let (tx_a, rx_a) = mpsc::channel();
+        let observer_a = Box::new(ChannelReceiptObserver {
+            tx: Mutex::new(tx_a),
+        });
+        let receipt_id = engine
+            .publish_composed(intent.clone(), observer_a)
+            .expect("the first publish_composed call must consume the intent and succeed");
+        assert!(receipt_id > 0, "publish_composed must expose a receipt id");
+        assert!(matches!(
+            rx_a.recv_timeout(Duration::from_secs(5)),
+            Ok(FfiWriteStatus::Accepted)
+        ));
+
+        let (tx_b, _rx_b) = mpsc::channel();
+        let observer_b = Box::new(ChannelReceiptObserver {
+            tx: Mutex::new(tx_b),
+        });
+        match engine.publish_composed(intent, observer_b) {
+            Err(FfiError::IntentAlreadyConsumed) => {}
+            other => panic!(
+                "expected FfiError::IntentAlreadyConsumed on the second call, got {other:?}"
+            ),
+        }
 
         engine.shutdown();
     }
