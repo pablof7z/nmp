@@ -20,6 +20,7 @@ final class NMPUIGalleryUITests: XCTestCase {
 
         app.tabBars.buttons["Live proof"].tap()
         XCTAssertTrue(app.staticTexts["Only two relay facts enter the app"].waitForExistence(timeout: 5))
+        keepScreenshot("live-proof")
     }
 
     func testConformanceStatesExposeDeterministicFallbacks() {
@@ -32,6 +33,7 @@ final class NMPUIGalleryUITests: XCTestCase {
 
         for _ in 0..<5 { scroll.swipeUp() }
         XCTAssertTrue(element("gallery.states.long-content").waitForExistence(timeout: 5))
+        keepScreenshot("conformance-long-content")
     }
 
     func testRapidScrollReachesEndWithoutLosingTheContentView() {
@@ -44,9 +46,32 @@ final class NMPUIGalleryUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["gallery.stress.end"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["End of 72-row stress list"].exists)
+
+        for _ in 0..<18 { scroll.swipeDown(velocity: .fast) }
+        let activeCount = app.staticTexts.matching(identifier: "gallery.stress.active-count").firstMatch
+        XCTAssertTrue(activeCount.waitForExistence(timeout: 5))
+        let bounded = NSPredicate { object, _ in
+            guard let element = object as? XCUIElement,
+                  let count = Int(element.label.split(separator: " ").first ?? "")
+            else { return false }
+            return count <= 24
+        }
+        let result = XCTWaiter.wait(
+            for: [XCTNSPredicateExpectation(predicate: bounded, object: activeCount)],
+            timeout: 8
+        )
+        XCTAssertEqual(result, .completed, "visible reference claims did not return to a bounded window")
+        keepScreenshot("stress-returned-to-top")
     }
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any)[identifier]
+    }
+
+    private func keepScreenshot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 }

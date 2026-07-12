@@ -756,10 +756,11 @@ Implementation should be split into issue-backed vertical proofs:
 6. **Kind-diverse renderer proof:** ship a note plus at least two materially
    different schemas such as an article and a product/photo, including an
    app-defined fallback/override.
-7. **Gallery and performance gate — first live iOS Gallery built (#154):**
-   native galleries, screenshot/accessibility proof, and a rapid-scroll
-   nested-embed stress case. Compose Gallery and deeper performance automation
-   remain open.
+7. **Gallery and performance gate — iOS proof built (#154):** the live Gallery,
+   deterministic conformance states, screenshot-bearing UI tests, and a 72-row
+   rapid-scroll nested-reference case now exercise the production SwiftUI path
+   and assert visible claims return to a bounded window. Compose Gallery and
+   deeper allocation/frame-time automation remain open.
 
 No broad catalog should be built before steps 1-5 prove the architecture. Once
 the foundation is proven, renderer breadth is an ongoing product program rather
