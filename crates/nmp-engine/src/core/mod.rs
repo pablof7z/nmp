@@ -3242,11 +3242,14 @@ mod relay_admission_tests {
     //! test pins that absence at the directory, the choke point where a
     //! discovered relay would otherwise become a routable lane.
 
-    use nmp_router::{LiveDirectory, RelayDirectory};
+    use nmp_router::LiveDirectory;
     use nmp_store::MemoryStore;
     use nmp_transport::RelayFrame;
     use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage, SubscriptionId, Tag, Tags};
 
+    // `RelayDirectory` (the trait whose `write_relays`/`read_relays` these
+    // tests call) is already in scope via `use super::*` — importing it again
+    // here is a redundant-import warning under `-D warnings`.
     use super::*;
 
     const SLOT: u32 = 0;
