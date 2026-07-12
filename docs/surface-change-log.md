@@ -84,3 +84,14 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Updated falsifiers:** unknown, live, terminal, multiple-observer, genuine-restart, corrupt-receipt, corrupt-attempt, and corrupt-route/lane tests plus exhaustive Rust/FFI/Swift/Kotlin three-variant mapping tests.
 - **Superseded path removed:** optional/bare-false reattachment and the infallible Redb receipt decoder are replaced rather than retained as compatibility paths; corruption can no longer collapse into absence or panic during boot reconciliation.
 - **Human signoff:** the repository owner's delegated orchestrator approves this surface contract for review in draft PR #97 on 2026-07-12; exact-head adversarial review and required CI remain merge gates.
+
+## 2026-07-12 — Make pre-receipt correlation exhaustion fallible ([PR #100](https://github.com/pablof7z/nmp/pull/100))
+
+- **Failure evidence:** issue #86 showed that the upper-half allocator panicked while issuing its final valid correlation id, so a public publish boundary could crash instead of truthfully reporting that no receipt identity remained.
+- **Changed projections:** ffi,kotlin,rust,swift
+- **Rust / FFI / Swift / Kotlin impact:** Rust adds `EngineError::ReceiptCorrelationIdExhausted`; UniFFI mirrors the fieldless typed error, and Swift/Kotlin map it to native `NMPError` cases. Publish method signatures remain fallible as before, but this capacity boundary is now explicit instead of a panic.
+- **Persistence impact:** none; durable store-issued receipt ids remain confined below `2^63`, while the volatile pre-acceptance allocator issues the final upper-half id `2^63` exactly once and then remains exhausted without wrap, reuse, collision, or stored state.
+- **Diagnostics impact:** none; no receipt or status stream exists on exhaustion, and query/relay diagnostics are unchanged.
+- **Updated falsifiers:** a test-only boundary seed proves the last valid and first/repeated exhausted allocations without `2^63` iterations; runtime, Rust facade, FFI, Swift, and Kotlin mapping tests preserve the typed failure, while existing store boundary tests retain the lower-half proof.
+- **Superseded path removed:** the decrement-and-`expect` allocator is replaced by an exhaustion-encoding state and typed publish failure; no sentinel id, compatibility alias, fabricated status, wrap, or reuse path remains.
+- **Human signoff:** the repository owner's delegated orchestrator approves this surface contract for review in draft PR #100 on 2026-07-12; exact-head adversarial review and required CI remain merge gates.
