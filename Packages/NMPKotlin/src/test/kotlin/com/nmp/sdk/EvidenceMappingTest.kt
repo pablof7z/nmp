@@ -9,6 +9,7 @@ import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
 import uniffi.nmp_ffi.FfiCoverageInterval
 import uniffi.nmp_ffi.FfiFilterCoverage
+import uniffi.nmp_ffi.FfiException
 import uniffi.nmp_ffi.FfiShortfallFact
 import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
@@ -16,6 +17,14 @@ import uniffi.nmp_ffi.FfiWriteStatus
 import uniffi.nmp_ffi.FfiReceiptReattachment
 
 class EvidenceMappingTest {
+    @Test
+    fun receiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
+        assertTrue(
+            NMPError.from(FfiException.ReceiptCorrelationIdExhausted()) ===
+                NMPError.ReceiptCorrelationIdExhausted,
+        )
+    }
+
     @Test
     fun everyReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
         val attached = mapReceiptReattachment(FfiReceiptReattachment.ATTACHED, 42uL, emptyFlow())
