@@ -43,8 +43,7 @@ public struct NMPUserCard: View {
             case .compact: compact
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { action?() }
+        .modifier(NMPCardInteraction(accessibilityName: "Open profile", action: action))
         .accessibilityElement(children: .contain)
     }
 
@@ -65,7 +64,7 @@ public struct NMPUserCard: View {
                         NMPName(pubkey: pubkey, profile: profile)
                             .font(.title3.weight(.bold))
                         if let nip05 = profile?.nip05, !nip05.isEmpty {
-                            Text(nip05).font(.caption).foregroundStyle(theme.secondary)
+                            NMPNIP05(nip05)
                         }
                     }
                     Spacer(minLength: 10)

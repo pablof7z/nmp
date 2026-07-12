@@ -145,6 +145,64 @@ final class ContentSessionTests: XCTestCase {
         XCTAssertFalse(resource.event.sources.isEmpty)
     }
 
+    func testScriptedSessionRendersResolvedStateWithoutAnEngine() throws {
+        let target = NostrReferenceTarget.event(
+            id: String(repeating: "ab", count: 32),
+            authorHint: nil,
+            kindHint: 55_555,
+            relayHints: []
+        )
+        let occurrence = NostrReferenceOccurrence(
+            id: 7,
+            original: "preview:event",
+            target: target,
+            source: NostrContentSourceRange(start: 0, end: 13),
+            placement: .standalone
+        )
+        let document = NostrContentDocument(
+            syntax: .plainText,
+            blocks: [
+                NostrContentBlock(
+                    id: 1,
+                    context: .paragraph,
+                    source: NostrContentSourceRange(start: 0, end: 13),
+                    inlines: [.reference(occurrence: occurrence, styles: [])]
+                )
+            ]
+        )
+        let row = Row(
+            id: String(repeating: "ab", count: 32),
+            pubkey: String(repeating: "cd", count: 32),
+            createdAt: 1,
+            kind: 55_555,
+            tags: [],
+            content: "app-only preview",
+            sig: String(repeating: "ef", count: 64),
+            sources: []
+        )
+        let session = NostrContentSession.scripted(
+            document: document,
+            resources: [
+                target: .resolved(resource: .event(row), evidence: NostrContentEvidence())
+            ]
+        )
+
+        XCTAssertFalse(session.isLive)
+        XCTAssertEqual(session.snapshot.state(for: occurrence).resource?.event, row)
+        let claim = try XCTUnwrap(session.claim(referenceID: occurrence.id))
+        XCTAssertEqual(session.snapshot.activeReferenceCount, 0)
+        claim.cancel()
+        XCTAssertEqual(session.snapshot.activeReferenceCount, 0)
+
+        let nested = session.nestedSession(
+            content: "nested plaintext",
+            syntax: .plainText,
+            context: .root
+        )
+        XCTAssertFalse(nested.isLive)
+        XCTAssertEqual(nested.snapshot.document.blocks.count, 1)
+    }
+
     private func eventually(
         timeoutSeconds: UInt64 = 2,
         condition: @escaping @MainActor () -> Bool

@@ -210,11 +210,16 @@ public final class NostrContentClaim: @unchecked Sendable {
 
 @MainActor
 public final class NostrContentSession: ObservableObject {
-    public let client: NMPContentClient
     public let policy: NostrContentPolicy
     public let context: NostrContentRenderContext
 
+    /// `true` when claims lower into ordinary NMP live queries. Scripted
+    /// sessions used by previews and deterministic state labs return `false`.
+    public var isLive: Bool { liveClient != nil }
+
     @Published public private(set) var snapshot: NostrContentSnapshot
+
+    private let liveClient: NMPContentClient?
 
     private struct TargetPlan {
         var target: NostrReferenceTarget
@@ -236,13 +241,67 @@ public final class NostrContentSession: ObservableObject {
     private var releaseTasks: [String: Task<Void, Never>] = [:]
     private var revision: UInt64 = 0
 
-    public init(
+    public convenience init(
         client: NMPContentClient,
         document: NostrContentDocument,
         policy: NostrContentPolicy = NostrContentPolicy(),
         context: NostrContentRenderContext = .root
     ) {
-        self.client = client
+        self.init(
+            liveClient: client,
+            document: document,
+            scriptedResources: [:],
+            policy: policy,
+            context: context
+        )
+    }
+
+    /// Build a deterministic content session without constructing an engine.
+    /// Supplied states render synchronously, claims are inert, and no query or
+    /// socket can be opened accidentally.
+    public static func scripted(
+        content: String,
+        syntax: NostrContentSyntax = .plainText,
+        resources: [NostrReferenceTarget: NostrReferenceState] = [:],
+        policy: NostrContentPolicy = NostrContentPolicy(),
+        context: NostrContentRenderContext = .root
+    ) -> NostrContentSession {
+        scripted(
+            document: parseNostrContent(content, syntax: syntax),
+            resources: resources,
+            policy: policy,
+            context: context
+        )
+    }
+
+    /// Script an already-built semantic document. Custom Djot, AsciiDoc, or
+    /// app-owned syntaxes can use the renderer without passing through NMP's
+    /// plaintext/Markdown parser.
+    public static func scripted(
+        document: NostrContentDocument,
+        resources: [NostrReferenceTarget: NostrReferenceState] = [:],
+        policy: NostrContentPolicy = NostrContentPolicy(),
+        context: NostrContentRenderContext = .root
+    ) -> NostrContentSession {
+        NostrContentSession(
+            liveClient: nil,
+            document: document,
+            scriptedResources: Dictionary(
+                uniqueKeysWithValues: resources.map { ($0.key.key, $0.value) }
+            ),
+            policy: policy,
+            context: context
+        )
+    }
+
+    private init(
+        liveClient: NMPContentClient?,
+        document: NostrContentDocument,
+        scriptedResources: [String: NostrReferenceState],
+        policy: NostrContentPolicy,
+        context: NostrContentRenderContext
+    ) {
+        self.liveClient = liveClient
         self.policy = policy
         self.context = context
         self.snapshot = NostrContentSnapshot(
@@ -256,7 +315,33 @@ public final class NostrContentSession: ObservableObject {
         for occurrence in document.references {
             add(occurrence: occurrence)
         }
+        for (targetKey, state) in scriptedResources {
+            states[targetKey] = state
+        }
         publishSnapshot(document: document)
+    }
+
+    /// Descend using the same acquisition mode as the parent. Live sessions
+    /// reuse their client; scripted sessions stay network-free.
+    public func nestedSession(
+        content: String,
+        syntax: NostrContentSyntax,
+        context: NostrContentRenderContext
+    ) -> NostrContentSession {
+        if let liveClient {
+            return liveClient.session(
+                content: content,
+                syntax: syntax,
+                policy: policy,
+                context: context
+            )
+        }
+        return .scripted(
+            content: content,
+            syntax: syntax,
+            policy: policy,
+            context: context
+        )
     }
 
     /// Claim one authored reference occurrence.
@@ -286,6 +371,7 @@ public final class NostrContentSession: ObservableObject {
 
     /// Deterministically withdraw every content-derived demand now.
     public func stop() {
+        guard liveClient != nil else { return }
         releaseTasks.values.forEach { $0.cancel() }
         releaseTasks.removeAll()
         observationTasks.values.flatMap { $0 }.forEach { $0.cancel() }
@@ -343,6 +429,9 @@ public final class NostrContentSession: ObservableObject {
     }
 
     private func claim(targetKey: String) -> NostrContentClaim {
+        guard liveClient != nil else {
+            return NostrContentClaim(release: {})
+        }
         releaseTasks.removeValue(forKey: targetKey)?.cancel()
         claimCounts[targetKey, default: 0] += 1
         if claimCounts[targetKey] == 1 {
@@ -419,7 +508,10 @@ public final class NostrContentSession: ObservableObject {
     }
 
     private func startObserving(_ targetKey: String) {
-        guard !activeTargets.contains(targetKey), let plan = plans[targetKey] else { return }
+        guard let liveClient,
+              !activeTargets.contains(targetKey),
+              let plan = plans[targetKey]
+        else { return }
         activeTargets.insert(targetKey)
         if let cached = states[targetKey]?.resource {
             states[targetKey] = .refreshing(cached: cached, evidence: evidence(for: targetKey))
@@ -430,7 +522,7 @@ public final class NostrContentSession: ObservableObject {
 
         var tasks: [Task<Void, Never>] = []
         do {
-            let canonical = try client.engine.observe(plan.canonical)
+            let canonical = try liveClient.engine.observe(plan.canonical)
             tasks.append(Task { [weak self] in
                 defer { canonical.cancel() }
                 for await batch in canonical {
@@ -442,7 +534,7 @@ public final class NostrContentSession: ObservableObject {
             })
 
             for (index, demand) in plan.helpers.enumerated() {
-                let helper = try client.engine.observe(demand)
+                let helper = try liveClient.engine.observe(demand)
                 tasks.append(Task { [weak self] in
                     defer { helper.cancel() }
                     for await batch in helper {

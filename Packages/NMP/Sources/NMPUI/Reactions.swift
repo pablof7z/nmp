@@ -8,6 +8,19 @@ public enum NMPReactionButtonVariant: Sendable, Hashable {
     case minimal
 }
 
+public enum NMPMotionPreference: Sendable, Hashable {
+    case system
+    case reduced
+    case full
+}
+
+public enum NMPCompactCount {
+    public static func string(for count: Int) -> String {
+        if count >= 1_000 { return String(format: "%.1fk", Double(count) / 1_000) }
+        return "\(count)"
+    }
+}
+
 /// Controlled reaction button. The animation is local presentation state;
 /// whether the user reacted and what gets published remain app-owned values.
 public struct NMPReactionButton: View {
@@ -18,34 +31,38 @@ public struct NMPReactionButton: View {
     public let isReacted: Bool
     public let count: Int
     public let variant: NMPReactionButtonVariant
+    public let motion: NMPMotionPreference
     public let action: () -> Void
 
     public init(
         isReacted: Bool,
         count: Int = 0,
         variant: NMPReactionButtonVariant = .heart,
+        motion: NMPMotionPreference = .system,
         action: @escaping () -> Void
     ) {
         self.isReacted = isReacted
         self.count = count
         self.variant = variant
+        self.motion = motion
         self.action = action
     }
 
     public var body: some View {
         Button {
-            if reduceMotion {
+            if usesReducedMotion {
                 pulse = false
+                action()
             } else {
+                action()
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.48)) {
                     pulse = true
                 }
-            }
-            action()
-            guard !reduceMotion else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
-                    pulse = false
+                Task { @MainActor in
+                    await Task.yield()
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+                        pulse = false
+                    }
                 }
             }
         } label: {
@@ -98,8 +115,15 @@ public struct NMPReactionButton: View {
     }
 
     private var compactCount: String {
-        if count >= 1_000 { return String(format: "%.1fk", Double(count) / 1_000) }
-        return "\(count)"
+        NMPCompactCount.string(for: count)
+    }
+
+    private var usesReducedMotion: Bool {
+        switch motion {
+        case .system: reduceMotion
+        case .reduced: true
+        case .full: false
+        }
     }
 }
 
@@ -140,17 +164,16 @@ public struct NMPAvatarReactionButton: View {
     public var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                HStack(spacing: -8) {
-                    ForEach(Array(people.prefix(4).enumerated()), id: \.element.id) { index, person in
-                        NMPAvatar(pubkey: person.pubkey, profile: person.profile, size: 28)
-                            .overlay(Circle().stroke(theme.surface, lineWidth: 2))
-                            .zIndex(Double(4 - index))
-                    }
-                    if people.isEmpty {
-                        Image(systemName: "person.crop.circle.badge.plus")
-                            .font(.title3)
-                            .foregroundStyle(theme.secondary)
-                    }
+                if people.isEmpty {
+                    Image(systemName: "person.crop.circle.badge.plus")
+                        .font(.title3)
+                        .foregroundStyle(theme.secondary)
+                } else {
+                    NMPAvatarGroup(
+                        people: people.map { NMPAvatarItem(pubkey: $0.pubkey, profile: $0.profile) },
+                        maximumVisible: 4,
+                        size: 28
+                    )
                 }
 
                 Text(totalCount == 0 ? "Be the first" : "\(totalCount) reacted")
@@ -166,6 +189,8 @@ public struct NMPAvatarReactionButton: View {
             .overlay(Capsule().strokeBorder(theme.border, lineWidth: 0.5))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(isReacted ? "Remove reaction" : "React")
+        .accessibilityValue("\(totalCount) reactions")
     }
 }
 
@@ -226,6 +251,12 @@ public struct NMPEmojiReactionBar: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(
+                        reaction.isSelected
+                            ? "Remove \(reaction.emoji) reaction"
+                            : "React with \(reaction.emoji)"
+                    )
+                    .accessibilityValue("\(reaction.count) reactions")
                 }
                 if let add {
                     Button(action: add) {
