@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Single-owner durable retry policy and deadline consumption</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>Single-owner durable retry policy and deadline consumption</h1>
+        <p class="summary">Make the outbox the sole owner of durable EVENT retry, persist a bounded current-lane cursor, and expose retry deadlines only when one engine scheduler can consume and advance them.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">94 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Boundaries</h2>
+            <pre class="mermaid">flowchart LR
+  App[Write intent] --&gt; Outbox[Outbox lane FSM]
+  Outbox --&gt; Store[(Lane cursor + eligibility + attempts)]
+  Store --&gt; Scheduler[Single engine scheduler]
+  Scheduler --&gt;|generation-scoped PublishAttempt| Transport[Transport socket worker]
+  Transport --&gt;|typed handoff result| Scheduler
+  Scheduler --&gt; Receipts[Receipt truth]
+  Receipts --&gt; SDKs[Rust / Swift / Kotlin]</pre>
+          </section>
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>Issue #79 closes the remaining crash-safe write gap without creating a second publication queue or a zero-timeout scheduler loop. The work is split into four issue-first units.
+
+1. **#93 — transport handoff ownership.** Durable EVENT commands become correlated and connection-generation-scoped. Transport reports `NotHandedOff`, `Written`, or `Ambiguous`; it never carries EVENT work across reconnect, and only a persisted `Written` result becomes `Sent`.
+2. **#94 — durable lane cursor/index.** Add versioned per-`(intent, relay)` current state, an ordered eligibility index, and additive attempt-detail evidence beside immutable v1 attempt rows. Store transitions are atomic and policy-free, v1 evidence deterministically seeds missing cursors, terminal open-work rows close, and receipt/attempt history remains retained.
+3. **#95 — one engine scheduler.** Implement waiting, eligible, in-flight, transient, and terminal transitions; stable fairness; exact attempt ordinals; NIP-20 classification; offline/AUTH zero-consumption; and the only deadline consumer. Ratified defaults are exponential 3–300 seconds, deterministic jitter below 5 seconds, 30-second ACK timeout, 32 global in-flight, and 1 per relay. `AtMostOnce` ambiguity becomes `OutcomeUnknown` with no blind resend.
+4. **#96 — governed observation.** Expose `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, and durable handoff ambiguity across Rust, UniFFI, Swift, and Kotlin. Mere transport queue acceptance is never called `Sent`.
+
+Sequence: #93 and #94 establish the two boundaries; #95 consumes them and ships deadline folding with its advancing transition; #96 completes public parity. #87 is already merged, so every new read must be bounded/indexed from inception. #88 lands first where possible so corrupt retained evidence stays typed. #81 is admin-only and does not block implementation. This repository publishes Pages from `master/docs`, so the committed HTML player becomes live at the linked Pages URL when this planning PR merges; the direct narration link is already live.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>Complies with AGENTS.md issue-first discipline through parent #79 and children #93–#96; each implementation unit maps to one cohesive PR.</li><li>Complies with VISION section 3.3 and bug-class ledger #16: transport owns sockets, outbox owns durable attempts, and one engine scheduler owns retry time and caps.</li><li>Complies with the crash-safe Accepted plan correction: retry deadlines enter next_deadline only in the same unit as the transition that consumes and advances them.</li><li>Complies with current store boundaries: persistence enforces atomic facts while the engine owns classification and policy.</li><li>Complies with surface governance: #96 updates every platform, snapshots, parity tests, and the append-only change log together.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>No existing rule should be loosened. In particular, transport must not regain an implicit durable EVENT queue, and failed persistence must not produce wire or terminal facts.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>Consider adding a durable rule that every deadline source must name the state transition that consumes and advances it.</li><li>Consider requiring every durable transport handoff to be correlated, generation-scoped, and classified as proven-not-handed-off or ambiguous.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Reuse transport reconnect backoff as publication retry policy: rejected because it creates duplicate ownership and cannot preserve attempt ordinals or AtMostOnce ambiguity.</li><li>Reconstruct current retry state by scanning attempt history: rejected because it is unbounded, complicates crash truth, and conflicts with #87&#x27;s indexed-range discipline.</li><li>Add retry timestamps to next_deadline before the reducer exists: rejected because a past-due value would wake repeatedly without advancing state.</li><li>Expose waits only in diagnostics: rejected by owner decision; receipts now carry AwaitingRelay, AwaitingAuth, and RetryEligible truth across all SDKs.</li><li>Prune terminal history in the retry implementation: rejected; open working rows close, but retained evidence waits for an explicit GC policy.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/91606d34f8898ecf574b2006a95c6bb05a1a9e2897f0d81ae4cf6eec455dce09.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">94%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/91606d34f8898ecf574b2006a95c6bb05a1a9e2897f0d81ae4cf6eec455dce09.mp3">Open narration</a>
+            <a href="../../docs/plans/durable-retry-policy-79/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>

@@ -96,6 +96,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/durable-retry-policy-79/
 
 - TTS audio: https://blossom.primal.net/91606d34f8898ecf574b2006a95c6bb05a1a9e2897f0d81ae4cf6eec455dce09.mp3
