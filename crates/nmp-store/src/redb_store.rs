@@ -1,11 +1,10 @@
 //! [`RedbStore`] — the persistent, `redb`-backed `EventStore` (M3 step A1).
 //!
-//! Canonical event/outbox/coverage rows remain string-keyed JSON. Query
-//! indexes are derived data maintained in the same transaction: author/kind
-//! indexes use string keys, while the single-letter tag index uses compact
-//! binary keys carrying raw tag bytes, big-endian `created_at`, and event-id
-//! bytes. That nostrdb-inspired exception avoids hex parsing and permits a
-//! newest-first reverse range scan; it never replaces canonical event JSON.
+//! Canonical event and displaced-row values use a portable binary envelope:
+//! raw fixed-width identity/signature/time/kind fields plus length-delimited
+//! content, tags, and provenance. Queries borrow those fields directly from
+//! redb value guards and materialize an owned `nostr::Event` only for rows
+//! actually returned. Other outbox/coverage metadata remains typed JSON.
 //!
 //! `redb`'s own errors (`TableError`/`StorageError`/…) are all invariant
 //! violations for this crate's purposes — a healthy embedded DB file does
@@ -22,7 +21,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
-use nostr::filter::MatchEventOptions;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{
     Event, EventId, Filter, JsonUtil, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
@@ -31,6 +29,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 use serde::{Deserialize, Serialize};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
+use crate::binary_event::{self, StoredEventView};
 use crate::coverage::{
     coverage_key as compute_coverage_key, merge_interval, shape_matches, shrink_after_eviction,
     window_erase, ShapeRecord,
@@ -58,8 +57,11 @@ fn persist_err(e: impl std::fmt::Display) -> PersistenceError {
     PersistenceError(e.to_string())
 }
 
-const EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
+const LEGACY_EVENTS: TableDefinition<&str, &str> = TableDefinition::new("events");
+const EVENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("events_v2");
 const STORE_META: TableDefinition<&str, &str> = TableDefinition::new("store_meta");
+const EVENT_RECORD_VERSION_KEY: &str = "event_record_version";
+const EVENT_RECORD_VERSION: &str = "1";
 const TAG_INDEX_VERSION_KEY: &str = "tag_index_version";
 const TAG_INDEX_VERSION: &str = "1";
 const ADDR_INDEX: TableDefinition<&str, &str> = TableDefinition::new("addr_index");
@@ -123,12 +125,14 @@ const BY_TAG: TableDefinition<&[u8], ()> = TableDefinition::new("by_tag_v1");
 const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_intents");
 /// The predecessor each open intent displaced, if any (retraction doc
 /// §4.2's durable stash). Key: the SAME [`intent_key`] as its
-/// `OUTBOX_INTENTS` row. Value: a `StoredEventRecord`-encoded JSON blob
-/// (reuses the exact `EVENTS` table encoding — see [`encode_stored_event`]/
-/// [`decode_stored_event`]), so the stash round-trips through the same
+/// `OUTBOX_INTENTS` row. Value reuses the exact portable binary `EVENTS`
+/// encoding — see [`encode_stored_event`]/[`decode_stored_event`] — so the
+/// stash round-trips through the same
 /// decode path as any other row. Deleted durably by `promote_signed` (R6)
 /// or `compensate_write`; never by `recover_outbox` (read-only).
-const OUTBOX_DISPLACED: TableDefinition<&str, &str> = TableDefinition::new("outbox_displaced");
+const LEGACY_OUTBOX_DISPLACED: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_displaced");
+const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> = TableDefinition::new("outbox_displaced_v2");
 /// Per-`(intent, relay, ordinal)` durable attempt evidence
 /// (crashsafe-accepted-2-3-plan.md §5) — schema created here so the table
 /// exists for the dispatch-time attempt writer to come (U3/U4: "Persist
@@ -525,21 +529,34 @@ const OUTBOX_SUPPRESS_BY_ID: TableDefinition<&str, &str> =
 const OUTBOX_SUPPRESS_BY_ADDR: TableDefinition<&str, &str> =
     TableDefinition::new("outbox_suppress_by_addr");
 
-/// The `events` table's JSON value: the event's canonical NIP-01 JSON plus
-/// its merged provenance and, iff the row is locally authored, its
-/// [`LocalOrigin`] (issue #2's `Provenance::local` widening — `LocalOrigin`
-/// already derives `Serialize`/`Deserialize`, so no separate mirror type is
-/// needed here).
-#[derive(Debug, Serialize, Deserialize)]
+/// Owned mutation form of one portable binary event row. Query filtering
+/// uses [`StoredEventView`] directly and never constructs this form for a
+/// rejected candidate.
+#[derive(Debug)]
 struct StoredEventRecord {
+    event: Event,
+    provenance: BTreeMap<RelayUrl, Timestamp>,
+    local: Option<LocalOrigin>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyStoredEventRecord {
     event_json: String,
     provenance: BTreeMap<RelayUrl, Timestamp>,
-    /// `#[serde(default)]`: only a relay-observed row (never locally
-    /// authored) omits `local` entirely; defaulting it to `None` on decode
-    /// keeps that the ordinary case instead of a required field every
-    /// caller has to thread through.
     #[serde(default)]
     local: Option<LocalOrigin>,
+}
+
+fn decode_legacy_stored_event(json: &str) -> StoredEvent {
+    let record: LegacyStoredEventRecord =
+        serde_json::from_str(json).expect("redb: decode legacy stored event");
+    StoredEvent {
+        event: Event::from_json(record.event_json).expect("redb: decode legacy event json"),
+        provenance: Provenance {
+            seen: record.provenance,
+            local: record.local,
+        },
+    }
 }
 
 /// One `OUTBOX_INTENTS` row's JSON value — the full acceptance journal
@@ -902,7 +919,7 @@ fn is_suppressed_in_txn(
 /// on field mapping.
 fn stored_event_to_record(se: &StoredEvent) -> StoredEventRecord {
     StoredEventRecord {
-        event_json: se.event.as_json(),
+        event: se.event.clone(),
         provenance: se.provenance.seen.clone(),
         local: se.provenance.local.clone(),
     }
@@ -910,9 +927,8 @@ fn stored_event_to_record(se: &StoredEvent) -> StoredEventRecord {
 
 /// The read-side counterpart of [`stored_event_to_record`].
 fn record_to_stored_event(record: &StoredEventRecord) -> StoredEvent {
-    let event = Event::from_json(&record.event_json).expect("redb: decode event json");
     StoredEvent {
-        event,
+        event: record.event.clone(),
         provenance: Provenance {
             seen: record.provenance.clone(),
             local: record.local.clone(),
@@ -923,15 +939,25 @@ fn record_to_stored_event(record: &StoredEventRecord) -> StoredEvent {
 /// Encode `se` exactly as the `EVENTS` table stores a row — shared by every
 /// door that writes a full [`StoredEvent`] back out (the durable
 /// `OUTBOX_DISPLACED` stash, `compensate_write`'s restore path).
-fn encode_stored_event(se: &StoredEvent) -> String {
-    serde_json::to_string(&stored_event_to_record(se)).expect("redb: encode stored event")
+fn encode_stored_event(se: &StoredEvent) -> Vec<u8> {
+    binary_event::encode(se).expect("redb: encode portable stored event")
 }
 
-/// Decode one `EVENTS`/`OUTBOX_DISPLACED` JSON value into a [`StoredEvent`]
-/// — the read-side counterpart of [`encode_stored_event`].
-fn decode_stored_event(json: &str) -> StoredEvent {
-    let record: StoredEventRecord = serde_json::from_str(json).expect("redb: decode stored event");
-    record_to_stored_event(&record)
+/// Materialize one portable `EVENTS`/`OUTBOX_DISPLACED` value — the
+/// read-side counterpart of [`encode_stored_event`].
+fn decode_stored_event(bytes: &[u8]) -> StoredEvent {
+    StoredEventView::parse(bytes)
+        .expect("redb: decode portable stored event")
+        .materialize()
+        .expect("redb: materialize portable stored event")
+}
+
+fn decode_stored_event_record(bytes: &[u8]) -> StoredEventRecord {
+    stored_event_to_record(&decode_stored_event(bytes))
+}
+
+fn encode_stored_event_record(record: &StoredEventRecord) -> Vec<u8> {
+    encode_stored_event(&record_to_stored_event(record))
 }
 
 /// True iff `record` is a locally-authored row still awaiting a signature
@@ -1123,7 +1149,7 @@ fn tombstone_refuses(
 /// check).
 #[allow(clippy::too_many_arguments)]
 fn remove_row_in_txn(
-    events: &mut redb::Table<'_, &str, &str>,
+    events: &mut redb::Table<'_, &str, &[u8]>,
     addr_index: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
     by_author: &mut redb::Table<'_, &str, &str>,
@@ -1139,13 +1165,13 @@ fn remove_row_in_txn(
     // temporary otherwise extends it (a known rustc temporary-lifetime-
     // extension quirk that a plain sequence of `let` statements does not
     // reliably avoid here).
-    let json = {
+    let bytes = {
         let Some(guard) = events.get(id_hex.as_str()).map_err(persist_err)? else {
             return Ok(None);
         };
-        guard.value().to_string()
+        guard.value().to_vec()
     };
-    let se = decode_stored_event(&json);
+    let se = decode_stored_event(&bytes);
     if !predicate(&se) {
         return Ok(None);
     }
@@ -1192,7 +1218,7 @@ fn remove_row_in_txn(
 /// every row actually dropped.
 #[allow(clippy::too_many_arguments)]
 fn process_kind5_deletions(
-    events: &mut redb::Table<'_, &str, &str>,
+    events: &mut redb::Table<'_, &str, &[u8]>,
     addr_index: &mut redb::Table<'_, &str, &str>,
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
@@ -1307,7 +1333,7 @@ fn process_kind5_deletions(
 /// excluded).
 #[allow(clippy::too_many_arguments)]
 fn fan_out_signed_in_txn(
-    events: &mut redb::Table<'_, &str, &str>,
+    events: &mut redb::Table<'_, &str, &[u8]>,
     addr_index: &mut redb::Table<'_, &str, &str>,
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
@@ -1317,7 +1343,7 @@ fn fan_out_signed_in_txn(
     by_tag: &mut redb::Table<'_, &[u8], ()>,
     outbox_intents: &mut redb::Table<'_, &str, &str>,
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
-    outbox_displaced: &mut redb::Table<'_, &str, &str>,
+    outbox_displaced: &mut redb::Table<'_, &str, &[u8]>,
     outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
     outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
     outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
@@ -1413,7 +1439,7 @@ fn fan_out_signed_in_txn(
 /// — and the exact claims staged (for `OUTBOX_KIND5_CLAIMS`). Mirrors
 /// `MemoryStore::process_kind5_deletions_provisional` exactly.
 fn process_kind5_deletions_provisional_in_txn(
-    events: &redb::Table<'_, &str, &str>,
+    events: &redb::Table<'_, &str, &[u8]>,
     addr_index: &redb::Table<'_, &str, &str>,
     outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
     outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
@@ -1531,14 +1557,13 @@ fn process_kind5_deletions_provisional_in_txn(
 /// construction (a `StoredEvent` is only ever the CURRENT displaced stash
 /// of the one intent that most recently superseded it).
 fn find_displaced_key_by_event_id_in_txn(
-    outbox_displaced: &redb::Table<'_, &str, &str>,
+    outbox_displaced: &redb::Table<'_, &str, &[u8]>,
     frozen_id: EventId,
     intent_id: IntentId,
 ) -> Result<Option<String>, PersistenceError> {
     for entry in outbox_displaced.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
-        let record: StoredEventRecord =
-            serde_json::from_str(value.value()).expect("redb: decode stored event");
+        let record = decode_stored_event_record(value.value());
         let owned_by_this_intent = record
             .local
             .as_ref()
@@ -1546,10 +1571,8 @@ fn find_displaced_key_by_event_id_in_txn(
         if !owned_by_this_intent {
             continue;
         }
-        if let Ok(event) = Event::from_json(&record.event_json) {
-            if event.id == frozen_id {
-                return Ok(Some(key.value().to_string()));
-            }
+        if record.event.id == frozen_id {
+            return Ok(Some(key.value().to_string()));
         }
     }
     Ok(None)
@@ -1568,17 +1591,14 @@ fn find_displaced_key_by_event_id_in_txn(
 /// SPECIFIC intent already owns), this is used for a BRAND NEW intent that
 /// owns nothing yet, so it must match on event id alone.
 fn find_any_displaced_key_by_event_id_in_txn(
-    outbox_displaced: &redb::Table<'_, &str, &str>,
+    outbox_displaced: &redb::Table<'_, &str, &[u8]>,
     frozen_id: EventId,
 ) -> Result<Option<String>, PersistenceError> {
     for entry in outbox_displaced.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
-        let record: StoredEventRecord =
-            serde_json::from_str(value.value()).expect("redb: decode stored event");
-        if let Ok(event) = Event::from_json(&record.event_json) {
-            if event.id == frozen_id {
-                return Ok(Some(key.value().to_string()));
-            }
+        let record = decode_stored_event_record(value.value());
+        if record.event.id == frozen_id {
+            return Ok(Some(key.value().to_string()));
         }
     }
     Ok(None)
@@ -1597,7 +1617,7 @@ fn find_any_displaced_key_by_event_id_in_txn(
 /// §3.4 outcome for a re-offered grand-predecessor: nothing churns).
 #[allow(clippy::too_many_arguments)]
 fn reinsert_stashed_in_txn(
-    events: &mut redb::Table<'_, &str, &str>,
+    events: &mut redb::Table<'_, &str, &[u8]>,
     addr_index: &mut redb::Table<'_, &str, &str>,
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
@@ -1607,7 +1627,7 @@ fn reinsert_stashed_in_txn(
     by_tag: &mut redb::Table<'_, &[u8], ()>,
     outbox_intents: &mut redb::Table<'_, &str, &str>,
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
-    outbox_displaced: &mut redb::Table<'_, &str, &str>,
+    outbox_displaced: &mut redb::Table<'_, &str, &[u8]>,
     outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
     outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
     outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
@@ -1615,11 +1635,11 @@ fn reinsert_stashed_in_txn(
 ) -> Result<Option<StoredEvent>, PersistenceError> {
     let id_hex = se.event.id.to_hex();
 
-    let existing_json = events
+    let existing_bytes = events
         .get(id_hex.as_str())
         .map_err(persist_err)?
-        .map(|guard| guard.value().to_string());
-    if let Some(existing_json) = existing_json {
+        .map(|guard| guard.value().to_vec());
+    if let Some(existing_bytes) = existing_bytes {
         // Architecture review requirement (issue #2 P0 correction,
         // codex-nova ruling): union the owner sets and apply Signed
         // dominance — never silently drop the stashed entry's OWN
@@ -1629,8 +1649,7 @@ fn reinsert_stashed_in_txn(
         // SAME invariant `promote_signed` enforces explicitly, since a
         // dedup collision here is functionally no different from a relay
         // independently confirming the signature.
-        let mut record: StoredEventRecord =
-            serde_json::from_str(&existing_json).expect("redb: decode stored event");
+        let mut record = decode_stored_event_record(&existing_bytes);
         let mut provenance = Provenance {
             seen: record.provenance,
             local: record.local,
@@ -1642,7 +1661,7 @@ fn reinsert_stashed_in_txn(
         if let Some(stashed_local) = &se.provenance.local {
             // codex-nova ruling (cross-door reachability finding): a row
             // with NO local provenance at all is purely relay-observed --
-            // its `event_json`'s signature is by construction already
+            // its event signature is by construction already
             // real, never a sentinel -- so it counts as "already signed"
             // exactly like a locally-owned row whose own `sig_state` is
             // `Signed` (the SAME rule `accept_write`'s `already_signed`
@@ -1661,10 +1680,7 @@ fn reinsert_stashed_in_txn(
                 // Adopt the stash's real signature onto the record's OWN
                 // event bytes (NIP-01 id never depends on `sig`, so this
                 // is a pure value update, no id churn).
-                let mut adopted =
-                    Event::from_json(&record.event_json).expect("redb: decode event json");
-                adopted.sig = se.event.sig;
-                record.event_json = adopted.as_json();
+                record.event.sig = se.event.sig;
             }
             let mut owners = provenance
                 .local
@@ -1694,13 +1710,11 @@ fn reinsert_stashed_in_txn(
         }
         record.provenance = provenance.seen.clone();
         record.local = provenance.local.clone();
-        let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
+        let encoded = encode_stored_event_record(&record);
         events
-            .insert(id_hex.as_str(), encoded.as_str())
+            .insert(id_hex.as_str(), encoded.as_slice())
             .map_err(persist_err)?;
         if let Some(owners) = &fan_out_owners {
-            let canonical_event =
-                Event::from_json(&record.event_json).expect("redb: decode event json");
             fan_out_signed_in_txn(
                 events,
                 addr_index,
@@ -1717,11 +1731,13 @@ fn reinsert_stashed_in_txn(
                 outbox_suppress_by_id,
                 outbox_suppress_by_addr,
                 owners,
-                &canonical_event,
+                &record.event,
             )?;
         }
-        let event = Event::from_json(&record.event_json).expect("redb: decode event json");
-        return Ok(Some(StoredEvent { event, provenance }));
+        return Ok(Some(StoredEvent {
+            event: record.event,
+            provenance,
+        }));
     }
     if tombstone_refuses(tombstones, addr_tombstones, &se.event)? {
         return Ok(None);
@@ -1732,7 +1748,7 @@ fn reinsert_stashed_in_txn(
     let result = match address_key_for(&se.event) {
         None => {
             events
-                .insert(id_hex.as_str(), encoded.as_str())
+                .insert(id_hex.as_str(), encoded.as_slice())
                 .map_err(persist_err)?;
             by_author
                 .insert(
@@ -1765,7 +1781,7 @@ fn reinsert_stashed_in_txn(
             match current_id_hex {
                 None => {
                     events
-                        .insert(id_hex.as_str(), encoded.as_str())
+                        .insert(id_hex.as_str(), encoded.as_slice())
                         .map_err(persist_err)?;
                     addr_index
                         .insert(addr_key_str.as_str(), id_hex.as_str())
@@ -1792,13 +1808,13 @@ fn reinsert_stashed_in_txn(
                     Some(se)
                 }
                 Some(current_id_hex) => {
-                    let current_json = events
+                    let current_bytes = events
                         .get(current_id_hex.as_str())
                         .map_err(persist_err)?
                         .expect("addr_index must always point at a stored event")
                         .value()
-                        .to_string();
-                    let current_event = decode_stored_event(&current_json).event;
+                        .to_vec();
+                    let current_event = decode_stored_event(&current_bytes).event;
 
                     if candidate_wins(&se.event, &current_event) {
                         let current_id =
@@ -1816,7 +1832,7 @@ fn reinsert_stashed_in_txn(
                         .expect("addr_index must always point at a stored event");
 
                         events
-                            .insert(id_hex.as_str(), encoded.as_str())
+                            .insert(id_hex.as_str(), encoded.as_slice())
                             .map_err(persist_err)?;
                         addr_index
                             .insert(addr_key_str.as_str(), id_hex.as_str())
@@ -1942,7 +1958,8 @@ impl RedbStore {
         let db = Database::create(path)?;
         let write_txn = db.begin_write()?;
         {
-            let events = write_txn.open_table(EVENTS)?;
+            let mut legacy_events = write_txn.open_table(LEGACY_EVENTS)?;
+            let mut events = write_txn.open_table(EVENTS)?;
             let mut store_meta = write_txn.open_table(STORE_META)?;
             write_txn.open_table(ADDR_INDEX)?;
             write_txn.open_table(COVERAGE)?;
@@ -1953,7 +1970,8 @@ impl RedbStore {
             write_txn.open_table(BY_KIND)?;
             let mut by_tag = write_txn.open_table(BY_TAG)?;
             write_txn.open_table(OUTBOX_INTENTS)?;
-            write_txn.open_table(OUTBOX_DISPLACED)?;
+            let mut legacy_outbox_displaced = write_txn.open_table(LEGACY_OUTBOX_DISPLACED)?;
+            let mut outbox_displaced = write_txn.open_table(OUTBOX_DISPLACED)?;
             write_txn.open_table(OUTBOX_ATTEMPTS)?;
             write_txn.open_table(OUTBOX_ROUTE_REVISIONS)?;
             write_txn.open_table(OUTBOX_LANES)?;
@@ -1972,6 +1990,29 @@ impl RedbStore {
             // `ReceiptState::Abandoned`'s doc. A no-op on a fresh store
             // (the table is empty) or a store with no ephemeral receipts.
             reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts);
+
+            let event_record_version = store_meta
+                .get(EVENT_RECORD_VERSION_KEY)?
+                .map(|guard| guard.value().to_owned());
+            if event_record_version.as_deref() != Some(EVENT_RECORD_VERSION) {
+                events.retain(|_, _| false)?;
+                for entry in legacy_events.iter()? {
+                    let (id, value) = entry?;
+                    let stored = decode_legacy_stored_event(value.value());
+                    let encoded = encode_stored_event(&stored);
+                    events.insert(id.value(), encoded.as_slice())?;
+                }
+                legacy_events.retain(|_, _| false)?;
+                outbox_displaced.retain(|_, _| false)?;
+                for entry in legacy_outbox_displaced.iter()? {
+                    let (intent, value) = entry?;
+                    let stored = decode_legacy_stored_event(value.value());
+                    let encoded = encode_stored_event(&stored);
+                    outbox_displaced.insert(intent.value(), encoded.as_slice())?;
+                }
+                legacy_outbox_displaced.retain(|_, _| false)?;
+                store_meta.insert(EVENT_RECORD_VERSION_KEY, EVENT_RECORD_VERSION)?;
+            }
 
             let tag_index_version = store_meta
                 .get(TAG_INDEX_VERSION_KEY)?
@@ -2070,15 +2111,16 @@ impl RedbStore {
         format!("{}{hex}:{}", Self::COVERAGE_ROW_KEY_PREFIX, relay.as_str())
     }
 
-    /// Decode one `EVENTS` row's JSON value into a [`StoredEvent`] —
+    /// Materialize one portable `EVENTS` value into a [`StoredEvent`] —
     /// `query`'s one decode point, so [`Self::examined_rows`] (test-only)
-    /// counts every row `query` actually pays the JSON-decode cost for,
+    /// counts every row `query` actually pays the owned-event cost for,
     /// regardless of which of `query`'s three paths (id/indexed/full-scan)
     /// reached it.
-    fn decode_row(&self, json: &str) -> StoredEvent {
+    fn decode_row(&self, view: StoredEventView<'_>) -> StoredEvent {
         #[cfg(test)]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
-        decode_stored_event(json)
+        view.materialize()
+            .expect("redb: materialize validated portable event")
     }
 
     /// `query`'s index-narrowing step (issue #17): `Some(ids)` -- the
@@ -2218,18 +2260,17 @@ impl EventStore for RedbStore {
                 .map_err(persist_err)?;
             let id_hex = event.id.to_hex();
 
-            let existing_json = events
+            let existing_bytes = events
                 .get(id_hex.as_str())
                 .map_err(persist_err)?
-                .map(|guard| guard.value().to_string());
+                .map(|guard| guard.value().to_vec());
 
-            if let Some(existing_json) = existing_json {
+            if let Some(existing_bytes) = existing_bytes {
                 // Dedup-by-id FIRST: merge provenance, no index churn. Goes
                 // through `Provenance::merge_observation` (not a re-derived
                 // copy) so the persisted backend can never diverge from
                 // `MemoryStore`'s merge semantics.
-                let mut record: StoredEventRecord =
-                    serde_json::from_str(&existing_json).expect("redb: decode stored event");
+                let mut record = decode_stored_event_record(&existing_bytes);
                 let mut provenance = Provenance {
                     seen: record.provenance,
                     local: record.local,
@@ -2265,11 +2306,11 @@ impl EventStore for RedbStore {
                 record.provenance = provenance.seen;
                 record.local = provenance.local;
                 if fan_out_owners.is_some() {
-                    record.event_json = event.as_json();
+                    record.event = event.clone();
                 }
-                let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
+                let encoded = encode_stored_event_record(&record);
                 events
-                    .insert(id_hex.as_str(), encoded.as_str())
+                    .insert(id_hex.as_str(), encoded.as_slice())
                     .map_err(persist_err)?;
                 let satisfied_intents = if let Some(owners) = &fan_out_owners {
                     fan_out_signed_in_txn(
@@ -2304,7 +2345,7 @@ impl EventStore for RedbStore {
             } else {
                 let is_deletion = event.kind == Kind::EventDeletion;
                 let record = StoredEventRecord {
-                    event_json: event.as_json(),
+                    event: event.clone(),
                     provenance: {
                         let mut m = BTreeMap::new();
                         m.insert(from.relay.clone(), from.at);
@@ -2312,12 +2353,12 @@ impl EventStore for RedbStore {
                     },
                     local: None,
                 };
-                let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
+                let encoded = encode_stored_event_record(&record);
 
                 let outcome = match address_key_for(&event) {
                     None => {
                         events
-                            .insert(id_hex.as_str(), encoded.as_str())
+                            .insert(id_hex.as_str(), encoded.as_slice())
                             .map_err(persist_err)?;
                         by_author
                             .insert(
@@ -2347,7 +2388,7 @@ impl EventStore for RedbStore {
                         match current_id_hex {
                             None => {
                                 events
-                                    .insert(id_hex.as_str(), encoded.as_str())
+                                    .insert(id_hex.as_str(), encoded.as_slice())
                                     .map_err(persist_err)?;
                                 addr_index
                                     .insert(addr_key_str.as_str(), id_hex.as_str())
@@ -2374,17 +2415,14 @@ impl EventStore for RedbStore {
                                 InsertOutcome::Inserted
                             }
                             Some(current_id_hex) => {
-                                let current_json = events
+                                let current_bytes = events
                                     .get(current_id_hex.as_str())
                                     .map_err(persist_err)?
                                     .expect("addr_index must always point at a stored event")
                                     .value()
-                                    .to_string();
-                                let current_record: StoredEventRecord =
-                                    serde_json::from_str(&current_json)
-                                        .expect("redb: decode current winner");
-                                let current_event = Event::from_json(&current_record.event_json)
-                                    .expect("redb: decode current winner event json");
+                                    .to_vec();
+                                let current_record = decode_stored_event_record(&current_bytes);
+                                let current_event = current_record.event.clone();
 
                                 if candidate_wins(&event, &current_event) {
                                     let replaced = StoredEvent {
@@ -2421,7 +2459,7 @@ impl EventStore for RedbStore {
                                             .map_err(persist_err)?;
                                     }
                                     events
-                                        .insert(id_hex.as_str(), encoded.as_str())
+                                        .insert(id_hex.as_str(), encoded.as_slice())
                                         .map_err(persist_err)?;
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
@@ -2519,8 +2557,13 @@ impl EventStore for RedbStore {
                 let Some(value) = events.get(id_hex.as_str()).map_err(persist_err)? else {
                     continue;
                 };
-                let se = self.decode_row(value.value());
-                if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event)? {
+                let view = StoredEventView::from_trusted(value.value())
+                    .expect("redb: decode portable stored event view");
+                if !view.matches_filter(filter) {
+                    continue;
+                }
+                let se = self.decode_row(view);
+                if visible(&se.event)? {
                     out.push(se);
                 }
             }
@@ -2542,10 +2585,13 @@ impl EventStore for RedbStore {
                         // touched by that path) — harmless, just skip.
                         continue;
                     };
-                    let se = self.decode_row(value.value());
-                    if filter.match_event(&se.event, MatchEventOptions::new())
-                        && visible(&se.event)?
-                    {
+                    let view = StoredEventView::from_trusted(value.value())
+                        .expect("redb: decode portable stored event view");
+                    if !view.matches_filter(filter) {
+                        continue;
+                    }
+                    let se = self.decode_row(view);
+                    if visible(&se.event)? {
                         out.push(se);
                     }
                 }
@@ -2555,10 +2601,13 @@ impl EventStore for RedbStore {
                 let mut out = Vec::new();
                 for entry in events.iter().map_err(persist_err)? {
                     let (_key, value) = entry.map_err(persist_err)?;
-                    let se = self.decode_row(value.value());
-                    if filter.match_event(&se.event, MatchEventOptions::new())
-                        && visible(&se.event)?
-                    {
+                    let view = StoredEventView::from_trusted(value.value())
+                        .expect("redb: decode portable stored event view");
+                    if !view.matches_filter(filter) {
+                        continue;
+                    }
+                    let se = self.decode_row(view);
+                    if visible(&se.event)? {
                         out.push(se);
                     }
                 }
@@ -2616,10 +2665,12 @@ impl EventStore for RedbStore {
                 let Some(value) = events.get(id_hex.as_str()).map_err(persist_err)? else {
                     continue;
                 };
-                let stored = self.decode_row(value.value());
-                if !filter.match_event(&stored.event, MatchEventOptions::new()) {
+                let view = StoredEventView::from_trusted(value.value())
+                    .expect("redb: decode portable stored event view");
+                if !view.matches_filter(filter) {
                     continue;
                 }
+                let stored = self.decode_row(view);
                 if is_suppressed_in_txn(
                     &outbox_suppress_by_id,
                     &outbox_suppress_by_addr,
@@ -2816,9 +2867,8 @@ impl EventStore for RedbStore {
             let mut victims: Vec<(String, Event)> = Vec::new();
             for entry in events.iter().map_err(persist_err)? {
                 let (key, value) = entry.map_err(persist_err)?;
-                let record: StoredEventRecord =
-                    serde_json::from_str(value.value()).expect("redb: decode stored event");
-                let event = Event::from_json(&record.event_json).expect("redb: decode event json");
+                let record = decode_stored_event_record(value.value());
+                let event = record.event.clone();
                 if address_key_for(&event).is_none()
                     && !is_open_local_intent(&record)
                     && !is_suppressed_in_txn(
@@ -2993,7 +3043,7 @@ impl EventStore for RedbStore {
 
             let id_hex = frozen.id.to_hex();
             let existing = events.get(id_hex.as_str()).map_err(persist_err)?;
-            let existing_json = existing.map(|guard| guard.value().to_string());
+            let existing_bytes = existing.map(|guard| guard.value().to_vec());
             let is_deletion = frozen.kind == Kind::EventDeletion;
 
             // Dedup detection: checked against BOTH the live `EVENTS` row
@@ -3010,7 +3060,7 @@ impl EventStore for RedbStore {
                 Live,
                 Stash(String),
             }
-            let dup_loc = if existing_json.is_some() {
+            let dup_loc = if existing_bytes.is_some() {
                 Some(DupLoc::Live)
             } else {
                 find_any_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen.id)?
@@ -3027,20 +3077,18 @@ impl EventStore for RedbStore {
             {
                 let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
                 let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
-                let existing_json_for_dup = match &dup_loc {
-                    DupLoc::Live => existing_json.clone().expect("checked DupLoc::Live above"),
+                let existing_bytes_for_dup = match &dup_loc {
+                    DupLoc::Live => existing_bytes.clone().expect("checked DupLoc::Live above"),
                     DupLoc::Stash(key) => outbox_displaced
                         .get(key.as_str())
                         .map_err(persist_err)?
                         .expect("just found this key")
                         .value()
-                        .to_string(),
+                        .to_vec(),
                 };
-                let mut existing_record: StoredEventRecord =
-                    serde_json::from_str(&existing_json_for_dup)
-                        .expect("redb: decode stored event");
+                let mut existing_record = decode_stored_event_record(&existing_bytes_for_dup);
                 // codex-nova ruling: a row with NO local provenance at
-                // all is purely relay-observed — its `event_json`'s
+                // all is purely relay-observed — its event signature
                 // signature is by construction already real (never a
                 // sentinel, since `insert` only ever stores what a
                 // relay actually delivered), so it counts as "already
@@ -3077,17 +3125,16 @@ impl EventStore for RedbStore {
                     owners,
                     sig_state: row_sig_state,
                 });
-                let encoded =
-                    serde_json::to_string(&existing_record).expect("redb: encode stored event");
+                let encoded = encode_stored_event_record(&existing_record);
                 match &dup_loc {
                     DupLoc::Live => {
                         events
-                            .insert(id_hex.as_str(), encoded.as_str())
+                            .insert(id_hex.as_str(), encoded.as_slice())
                             .map_err(persist_err)?;
                     }
                     DupLoc::Stash(key) => {
                         outbox_displaced
-                            .insert(key.as_str(), encoded.as_str())
+                            .insert(key.as_str(), encoded.as_slice())
                             .map_err(persist_err)?;
                     }
                 }
@@ -3162,7 +3209,7 @@ impl EventStore for RedbStore {
                 match address_key_for(&frozen) {
                     None => {
                         events
-                            .insert(id_hex.as_str(), encoded.as_str())
+                            .insert(id_hex.as_str(), encoded.as_slice())
                             .map_err(persist_err)?;
                         by_author
                             .insert(
@@ -3242,7 +3289,7 @@ impl EventStore for RedbStore {
                         match current_id_hex {
                             None => {
                                 events
-                                    .insert(id_hex.as_str(), encoded.as_str())
+                                    .insert(id_hex.as_str(), encoded.as_slice())
                                     .map_err(persist_err)?;
                                 addr_index
                                     .insert(addr_key_str.as_str(), id_hex.as_str())
@@ -3280,9 +3327,9 @@ impl EventStore for RedbStore {
                                     .get(current_id_hex.as_str())
                                     .map_err(persist_err)?
                                     .expect("addr_index must always point at a stored event");
-                                let current_json = current_guard.value().to_string();
+                                let current_bytes = current_guard.value().to_vec();
                                 drop(current_guard);
-                                let current_event = decode_stored_event(&current_json).event;
+                                let current_event = decode_stored_event(&current_bytes).event;
 
                                 if candidate_wins(&frozen, &current_event) {
                                     let current_id = EventId::from_hex(&current_id_hex)
@@ -3300,7 +3347,7 @@ impl EventStore for RedbStore {
                                     .expect("addr_index must always point at a stored event");
 
                                     events
-                                        .insert(id_hex.as_str(), encoded.as_str())
+                                        .insert(id_hex.as_str(), encoded.as_slice())
                                         .map_err(persist_err)?;
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
@@ -3381,7 +3428,7 @@ impl EventStore for RedbStore {
                 if let Some(displaced) = &displaced {
                     let encoded_displaced = encode_stored_event(displaced);
                     outbox_displaced
-                        .insert(key.as_str(), encoded_displaced.as_str())
+                        .insert(key.as_str(), encoded_displaced.as_slice())
                         .map_err(persist_err)?;
                 }
 
@@ -3478,13 +3525,13 @@ impl EventStore for RedbStore {
                     // (issue #2, team-lead decision): an exact `Duplicate`
                     // is a CO-OWNER of the SAME canonical row, not a
                     // second row of its own — see `LocalOrigin`'s doc.
-                    let live_json = events
+                    let live_bytes = events
                         .get(frozen_id_hex.as_str())
                         .map_err(persist_err)?
-                        .map(|guard| guard.value().to_string());
-                    let live_record: Option<StoredEventRecord> = live_json
+                        .map(|guard| guard.value().to_vec());
+                    let live_record: Option<StoredEventRecord> = live_bytes
                         .as_ref()
-                        .map(|j| serde_json::from_str(j).expect("redb: decode stored event"));
+                        .map(|bytes| decode_stored_event_record(bytes));
                     let is_live = live_record.as_ref().is_some_and(|r| {
                         r.local
                             .as_ref()
@@ -3510,14 +3557,13 @@ impl EventStore for RedbStore {
                         frozen_id,
                         intent_id,
                     )? {
-                        let other_json = outbox_displaced
+                        let other_bytes = outbox_displaced
                             .get(other_key.as_str())
                             .map_err(persist_err)?
                             .expect("just found this key")
                             .value()
-                            .to_string();
-                        let other_record: StoredEventRecord =
-                            serde_json::from_str(&other_json).expect("redb: decode stored event");
+                            .to_vec();
+                        let other_record = decode_stored_event_record(&other_bytes);
                         other_record
                             .local
                             .as_ref()
@@ -3528,8 +3574,6 @@ impl EventStore for RedbStore {
 
                     let mut signed_frozen_event = frozen_event.clone();
                     signed_frozen_event.sig = sig;
-                    let new_frozen_json = signed_frozen_event.as_json();
-
                     let (row, owners) = if is_live {
                         // Swap the sentinel for the real signature — same
                         // id (a NIP-01 id never depends on `sig`), so this
@@ -3543,11 +3587,10 @@ impl EventStore for RedbStore {
                             let mut local = record.local.expect("checked is_live above");
                             local.sig_state = SigState::Signed;
                             record.local = Some(local);
-                            record.event_json = new_frozen_json.clone();
-                            let encoded =
-                                serde_json::to_string(&record).expect("redb: encode stored event");
+                            record.event = signed_frozen_event.clone();
+                            let encoded = encode_stored_event_record(&record);
                             events
-                                .insert(frozen_id_hex.as_str(), encoded.as_str())
+                                .insert(frozen_id_hex.as_str(), encoded.as_slice())
                                 .map_err(persist_err)?;
                         }
                         let owners = record
@@ -3556,11 +3599,9 @@ impl EventStore for RedbStore {
                             .expect("checked is_live above")
                             .owners
                             .clone();
-                        let event =
-                            Event::from_json(&record.event_json).expect("redb: decode event json");
                         (
                             StoredEvent {
-                                event,
+                                event: record.event,
                                 provenance: Provenance {
                                     seen: record.provenance,
                                     local: record.local,
@@ -3581,23 +3622,21 @@ impl EventStore for RedbStore {
                         // restore of it would resurrect a stale sentinel
                         // copy of an intent that actually did sign. Same
                         // `already_signed` skip as the live case above.
-                        let other_json = outbox_displaced
+                        let other_bytes = outbox_displaced
                             .get(other_key.as_str())
                             .map_err(persist_err)?
                             .expect("just found this key")
                             .value()
-                            .to_string();
-                        let mut other_record: StoredEventRecord =
-                            serde_json::from_str(&other_json).expect("redb: decode stored event");
+                            .to_vec();
+                        let mut other_record = decode_stored_event_record(&other_bytes);
                         if !already_signed {
-                            other_record.event_json = new_frozen_json.clone();
+                            other_record.event = signed_frozen_event.clone();
                             if let Some(local) = other_record.local.as_mut() {
                                 local.sig_state = SigState::Signed;
                             }
-                            let encoded_other = serde_json::to_string(&other_record)
-                                .expect("redb: encode stored event");
+                            let encoded_other = encode_stored_event_record(&other_record);
                             outbox_displaced
-                                .insert(other_key.as_str(), encoded_other.as_str())
+                                .insert(other_key.as_str(), encoded_other.as_slice())
                                 .map_err(persist_err)?;
                         }
                         let owners = other_record
@@ -3606,11 +3645,9 @@ impl EventStore for RedbStore {
                             .expect("just matched an owned stash entry")
                             .owners
                             .clone();
-                        let event = Event::from_json(&other_record.event_json)
-                            .expect("redb: decode event json");
                         (
                             StoredEvent {
-                                event,
+                                event: other_record.event,
                                 provenance: Provenance {
                                     seen: other_record.provenance,
                                     local: other_record.local,
@@ -3740,13 +3777,12 @@ impl EventStore for RedbStore {
                         let frozen_id = frozen_event.id;
                         let frozen_id_hex = frozen_id.to_hex();
 
-                        let live_json = events
+                        let live_bytes = events
                             .get(frozen_id_hex.as_str())
                             .map_err(persist_err)?
-                            .map(|guard| guard.value().to_string());
-                        let is_live = live_json.as_ref().is_some_and(|j| {
-                            let r: StoredEventRecord =
-                                serde_json::from_str(j).expect("redb: decode stored event");
+                            .map(|guard| guard.value().to_vec());
+                        let is_live = live_bytes.as_ref().is_some_and(|bytes| {
+                            let r = decode_stored_event_record(bytes);
                             r.local
                                 .as_ref()
                                 .is_some_and(|l| l.owners.contains(&intent_id))
@@ -3767,10 +3803,9 @@ impl EventStore for RedbStore {
                             // §4.2: `remove(id, Rejected)` writes no
                             // tombstone (only kind:5 processing ever
                             // does).
-                            let mut record: StoredEventRecord = serde_json::from_str(
-                                live_json.as_deref().expect("checked is_live above"),
-                            )
-                            .expect("redb: decode stored event");
+                            let mut record = decode_stored_event_record(
+                                live_bytes.as_deref().expect("checked is_live above"),
+                            );
                             let mut local = record.local.clone().expect("checked is_live above");
                             local.owners.remove(&intent_id);
                             let should_retract = local.owners.is_empty()
@@ -3789,10 +3824,9 @@ impl EventStore for RedbStore {
                                 )?;
                             } else {
                                 record.local = Some(local);
-                                let encoded = serde_json::to_string(&record)
-                                    .expect("redb: encode stored event");
+                                let encoded = encode_stored_event_record(&record);
                                 events
-                                    .insert(frozen_id_hex.as_str(), encoded.as_str())
+                                    .insert(frozen_id_hex.as_str(), encoded.as_slice())
                                     .map_err(persist_err)?;
                             }
                         } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
@@ -3809,15 +3843,13 @@ impl EventStore for RedbStore {
                             // co-owner (or a signed/relay-confirmed state)
                             // sitting in the SAME stash slot must survive
                             // this intent's cancellation too.
-                            let other_json = outbox_displaced
+                            let other_bytes = outbox_displaced
                                 .get(other_key.as_str())
                                 .map_err(persist_err)?
                                 .expect("just found this key")
                                 .value()
-                                .to_string();
-                            let mut other_record: StoredEventRecord =
-                                serde_json::from_str(&other_json)
-                                    .expect("redb: decode stored event");
+                                .to_vec();
+                            let mut other_record = decode_stored_event_record(&other_bytes);
                             let mut local = other_record.local.clone().expect(
                                 "find_displaced_key_by_event_id_in_txn only matches owned entries",
                             );
@@ -3831,10 +3863,9 @@ impl EventStore for RedbStore {
                                     .map_err(persist_err)?;
                             } else {
                                 other_record.local = Some(local);
-                                let encoded_other = serde_json::to_string(&other_record)
-                                    .expect("redb: encode stored event");
+                                let encoded_other = encode_stored_event_record(&other_record);
                                 outbox_displaced
-                                    .insert(other_key.as_str(), encoded_other.as_str())
+                                    .insert(other_key.as_str(), encoded_other.as_slice())
                                     .map_err(persist_err)?;
                             }
                         }
@@ -3847,12 +3878,12 @@ impl EventStore for RedbStore {
                         // supersession) — `reinsert_stashed_in_txn`'s own
                         // tombstone check makes this safe even if the
                         // predecessor was itself since deleted or expired.
-                        let displaced_json = outbox_displaced
+                        let displaced_bytes = outbox_displaced
                             .remove(key.as_str())
                             .map_err(persist_err)?
-                            .map(|guard| guard.value().to_string());
-                        let restored = match displaced_json {
-                            Some(json) => reinsert_stashed_in_txn(
+                            .map(|guard| guard.value().to_vec());
+                        let restored = match displaced_bytes {
+                            Some(bytes) => reinsert_stashed_in_txn(
                                 &mut events,
                                 &mut addr_index,
                                 &mut tombstones,
@@ -3867,7 +3898,7 @@ impl EventStore for RedbStore {
                                 &mut outbox_kind5_claims,
                                 &mut outbox_suppress_by_id,
                                 &mut outbox_suppress_by_addr,
-                                decode_stored_event(&json),
+                                decode_stored_event(&bytes),
                             )?
                             .map(Box::new),
                             None => None,
@@ -5746,6 +5777,45 @@ mod tests {
     }
 
     #[test]
+    fn query_newest_postfilters_binary_views_before_event_materialization() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("binary-postfilter.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let wanted = nostr::Keys::generate();
+        let noise = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://groups.example").unwrap();
+
+        store
+            .insert(
+                room_event(&wanted, "target", 1_000, "wanted"),
+                RelayObserved::new(relay.clone(), Timestamp::from(2_000u64)),
+            )
+            .unwrap();
+        for i in 0..200u64 {
+            store
+                .insert(
+                    room_event(&noise, "target", 2_000 + i, &format!("noise-{i}")),
+                    RelayObserved::new(relay.clone(), Timestamp::from(3_000 + i)),
+                )
+                .unwrap();
+        }
+
+        let filter = Filter::new()
+            .author(wanted.public_key())
+            .custom_tag(SingleLetterTag::lowercase(nostr::Alphabet::H), "target");
+        let before = store.examined_rows();
+        let rows = store.query_newest(&filter, 1).unwrap();
+        let materialized = store.examined_rows() - before;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.pubkey, wanted.public_key());
+        assert_eq!(
+            materialized, 1,
+            "200 newer rejected candidates must stay borrowed binary views; only the returned row becomes an owned Event"
+        );
+    }
+
+    #[test]
     fn query_newest_tag_scan_uses_id_ascending_tie_break() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("tag-tie-break.redb");
@@ -5793,12 +5863,15 @@ mod tests {
             let db = Database::create(&path).unwrap();
             let write_txn = db.begin_write().unwrap();
             {
-                let mut events = write_txn.open_table(EVENTS).unwrap();
+                let mut events = write_txn.open_table(LEGACY_EVENTS).unwrap();
+                let legacy = LegacyStoredEventRecord {
+                    event_json: stored.event.as_json(),
+                    provenance: stored.provenance.seen.clone(),
+                    local: stored.provenance.local.clone(),
+                };
+                let encoded = serde_json::to_string(&legacy).unwrap();
                 events
-                    .insert(
-                        event.id.to_hex().as_str(),
-                        encode_stored_event(&stored).as_str(),
-                    )
+                    .insert(event.id.to_hex().as_str(), encoded.as_str())
                     .unwrap();
             }
             write_txn.commit().unwrap();
@@ -5820,5 +5893,21 @@ mod tests {
             meta.get(TAG_INDEX_VERSION_KEY).unwrap().unwrap().value(),
             TAG_INDEX_VERSION
         );
+        assert_eq!(
+            meta.get(EVENT_RECORD_VERSION_KEY).unwrap().unwrap().value(),
+            EVENT_RECORD_VERSION
+        );
+        let legacy = read_txn.open_table(LEGACY_EVENTS).unwrap();
+        assert_eq!(
+            legacy.len().unwrap(),
+            0,
+            "JSON rows are removed after migration"
+        );
+        let events = read_txn.open_table(EVENTS).unwrap();
+        let encoded = events
+            .get(event.id.to_hex().as_str())
+            .unwrap()
+            .expect("migrated binary row");
+        assert_eq!(&encoded.value()[..4], b"NMPE");
     }
 }
