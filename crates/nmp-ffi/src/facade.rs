@@ -372,6 +372,204 @@ mod tests {
         engine.shutdown();
     }
 
+    /// #99: PR #97's FFI reattach coverage stopped at `reattachment_to_ffi`,
+    /// a pure enum-mapping unit test -- it never drove the real
+    /// `NmpEngine::reattach_receipt` method, so a broken observer-forwarding
+    /// `thread::spawn` (facade.rs's `Attached` arm) could leave direct Rust
+    /// correct while every FFI caller silently received nothing. This test
+    /// publishes a real durable intent (no signer ever attaches, so it
+    /// settles into a genuinely RETAINED `Accepted`+`AwaitingCapability`
+    /// steady state -- see `EngineCore::reattach_receipt`'s replay match),
+    /// reattaches with a SECOND, independent observer, and proves that
+    /// fresh observer receives the identical replayed fact sequence the
+    /// original one saw -- through the real forwarding thread, not a mock.
+    #[test]
+    fn ffi_reattach_replays_real_receipt_facts_through_a_fresh_observer() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let keys = nostr::Keys::generate();
+        // Active WITHOUT `add_account`: satisfies publish's "there must be
+        // an active account" gate while registering no signer capability at
+        // all, so the accepted intent has no way to ever leave
+        // `AwaitingCapability` -- exactly the retained steady state this
+        // test needs to reattach against.
+        engine
+            .set_active_account(Some(keys.public_key().to_hex()))
+            .expect("account must activate");
+
+        let intent = FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey: keys.public_key().to_hex(),
+                created_at: nostr::Timestamp::now().as_secs(),
+                kind: 9999,
+                tags: vec![],
+                content: "reattach e2e".to_string(),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
+        let receipt_id = engine
+            .publish(intent, observer)
+            .expect("a well-formed unsigned intent must enqueue");
+        assert!(receipt_id > 0, "publish must expose its stable receipt id");
+
+        // Real synchronization on the ORIGINAL observer first: block for
+        // the exact retained steady state (Accepted, then AwaitingCapability
+        // because no signer is ever attached) before reattaching at all --
+        // proves the obligation is genuinely retained, not a guessed delay.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("must observe Accepted"),
+            FfiWriteStatus::Accepted
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("must observe AwaitingCapability"),
+            FfiWriteStatus::AwaitingCapability
+        );
+
+        // Reattach through a FRESH observer/channel -- exercises the real
+        // `thread::spawn` forwarding path in `NmpEngine::reattach_receipt`,
+        // not just the enum mapping.
+        let (tx2, rx2) = mpsc::channel();
+        let replay_observer = Box::new(ChannelReceiptObserver {
+            tx: Mutex::new(tx2),
+        });
+        let outcome = engine
+            .reattach_receipt(receipt_id, replay_observer)
+            .expect("reattach call must succeed while the engine is open");
+        assert_eq!(outcome, FfiReceiptReattachment::Attached);
+
+        assert_eq!(
+            rx2.recv_timeout(Duration::from_secs(10))
+                .expect("replay must deliver Accepted"),
+            FfiWriteStatus::Accepted
+        );
+        assert_eq!(
+            rx2.recv_timeout(Duration::from_secs(10))
+                .expect("replay must deliver AwaitingCapability"),
+            FfiWriteStatus::AwaitingCapability
+        );
+
+        engine.shutdown();
+    }
+
+    /// #99: a `NotFound`/`RetainedButUnreadable` reattach must spawn NO
+    /// forwarding thread and deliver NO facts -- `NmpEngine::reattach_receipt`
+    /// simply never moves `observer` out of its own stack frame on those
+    /// arms, so it is dropped, synchronously, before this call even returns.
+    /// That makes the proof fully deterministic (no bounded wait needed at
+    /// all, let alone a sleep): if a forwarding thread had wrongly captured
+    /// `observer` (or a clone of its sender), the channel would still be
+    /// open and `try_recv` would block forever/return `Empty`, not
+    /// `Disconnected`.
+    #[test]
+    fn ffi_reattach_of_unknown_id_spawns_no_forwarding_thread_and_delivers_no_facts() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let (tx, rx) = mpsc::channel();
+        let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
+
+        let outcome = engine
+            .reattach_receipt(999_999, observer)
+            .expect("reattach call must succeed while the engine is open");
+        assert_eq!(outcome, FfiReceiptReattachment::NotFound);
+
+        assert_eq!(
+            rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected),
+            "no forwarding thread must have been spawned -- the dropped observer's sender must \
+             already be gone by the time reattach_receipt returns, not merely quiet"
+        );
+
+        engine.shutdown();
+    }
+
+    /// #99's other `RetainedButUnreadable` half: a GENUINELY corrupt
+    /// retained receipt (real undecodable bytes in a real `RedbStore` file,
+    /// the same technique `nmp-engine`'s own restart/corruption tests use)
+    /// must report `RetainedButUnreadable` through the FFI boundary too,
+    /// and -- like `NotFound` above -- spawn no forwarding thread and
+    /// deliver no facts (same code path: `NotFound | RetainedButUnreadable
+    /// => {}`).
+    #[test]
+    fn ffi_reattach_of_corrupt_retained_receipt_is_unreadable_and_spawns_no_thread() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("corrupt-receipt.redb");
+
+        let receipt_id = {
+            let engine = NmpEngine::new(NmpEngineConfig {
+                store_path: Some(path.to_string_lossy().into_owned()),
+                ..NmpEngineConfig::default()
+            })
+            .expect("engine must build");
+            let keys = nostr::Keys::generate();
+            engine
+                .set_active_account(Some(keys.public_key().to_hex()))
+                .expect("account must activate");
+            let intent = FfiWriteIntent {
+                payload: FfiWritePayload::Unsigned {
+                    pubkey: keys.public_key().to_hex(),
+                    created_at: nostr::Timestamp::now().as_secs(),
+                    kind: 9999,
+                    tags: vec![],
+                    content: "corrupt-receipt".to_string(),
+                },
+                durability: FfiDurability::Durable,
+                routing: FfiWriteRouting::AuthorOutbox,
+            };
+            let (tx, rx) = mpsc::channel();
+            let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
+            let receipt_id = engine
+                .publish(intent, observer)
+                .expect("a well-formed unsigned intent must enqueue");
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(10))
+                    .expect("must observe Accepted"),
+                FfiWriteStatus::Accepted
+            );
+            engine.shutdown();
+            receipt_id
+        };
+
+        // Overwrite the receipt's own durable row with undecodable bytes --
+        // the store must have already released the file after `shutdown()`.
+        const RECEIPTS: redb::TableDefinition<&str, &str> =
+            redb::TableDefinition::new("outbox_receipts");
+        let db = redb::Database::open(&path).expect("redb: reopen for corruption");
+        let tx = db.begin_write().expect("redb: begin_write");
+        {
+            let mut table = tx.open_table(RECEIPTS).expect("redb: open outbox_receipts");
+            table
+                .insert(format!("{receipt_id:020}").as_str(), "{")
+                .expect("redb: write corrupt receipt bytes");
+        }
+        tx.commit().expect("redb: commit corruption");
+        drop(db);
+
+        let engine = NmpEngine::new(NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must reopen over the corrupted store");
+        let (tx2, rx2) = mpsc::channel();
+        let observer = Box::new(ChannelReceiptObserver {
+            tx: Mutex::new(tx2),
+        });
+        let outcome = engine
+            .reattach_receipt(receipt_id, observer)
+            .expect("reattach call must succeed while the engine is open");
+        assert_eq!(outcome, FfiReceiptReattachment::RetainedButUnreadable);
+        assert_eq!(
+            rx2.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected),
+            "an unreadable retained receipt must spawn no forwarding thread either"
+        );
+
+        engine.shutdown();
+    }
+
     struct ClosedCountingRowObserver {
         closed_tx: Mutex<mpsc::Sender<()>>,
     }
