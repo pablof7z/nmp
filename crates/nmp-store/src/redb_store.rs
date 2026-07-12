@@ -16,6 +16,7 @@
 //! could usefully branch on today.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::Bound::{Excluded, Included};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -87,18 +88,17 @@ const ADDR_TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("addr_
 /// byte-lexicographic order matches numeric deadline order); value: the
 /// event id hex (redundant with the key suffix, kept for a cheap decode).
 const EXPIRATION_INDEX: TableDefinition<&str, &str> = TableDefinition::new("expiration_index");
-/// Secondary index for `query` (issue #17): `"{author_hex}:{id_hex}" -> id_hex`,
-/// one row per currently-held event keyed by its author. Mirrors the index
-/// discipline `EXPIRATION_INDEX` established (issue #31) — a persistent
-/// index kept in lockstep on every insert/removal, not derived on read.
-/// Lets an author-filtered `query` narrow to a bounded candidate set (that
-/// author's rows) via `range`, instead of decoding every row in `EVENTS`.
-const BY_AUTHOR: TableDefinition<&str, &str> = TableDefinition::new("by_author");
-/// Secondary index for `query` (issue #17): `"{kind:05}:{id_hex}" -> id_hex`
-/// (zero-padded so byte-lexicographic order groups one kind's rows
-/// contiguously), one row per currently-held event keyed by its kind. Same
-/// narrowing purpose as [`BY_AUTHOR`], for kind-filtered queries.
-const BY_KIND: TableDefinition<&str, &str> = TableDefinition::new("by_kind");
+const LEGACY_BY_AUTHOR: TableDefinition<&str, &str> = TableDefinition::new("by_author");
+const LEGACY_BY_KIND: TableDefinition<&str, &str> = TableDefinition::new("by_kind");
+/// Binary ordered indexes all end in the same sortable suffix:
+/// `created_at:u64-be | !event_id:[u8;32]`. Reverse scans therefore yield
+/// `created_at DESC, event_id ASC` and can stop exactly at the visible limit.
+const BY_CREATED_AT: TableDefinition<&[u8], ()> = TableDefinition::new("by_created_at_v1");
+const BY_AUTHOR: TableDefinition<&[u8], ()> = TableDefinition::new("by_author_time_v1");
+const BY_KIND: TableDefinition<&[u8], ()> = TableDefinition::new("by_kind_time_v1");
+const BY_AUTHOR_KIND: TableDefinition<&[u8], ()> = TableDefinition::new("by_author_kind_time_v1");
+const ORDERED_INDEX_VERSION_KEY: &str = "ordered_index_version";
+const ORDERED_INDEX_VERSION: &str = "1";
 /// NIP-01 single-letter tag index, borrowing nostrdb's clustered
 /// `(tag,value,created_at)` layout. The binary key is:
 ///
@@ -1003,31 +1003,62 @@ fn id_tombstone_key(id: &EventId, author: &PublicKey) -> String {
     format!("{}:{}", id.to_hex(), author.to_hex())
 }
 
-/// [`BY_AUTHOR`]'s key for one stored row.
-fn by_author_key(author: &PublicKey, id: &EventId) -> String {
-    format!("{}:{}", author.to_hex(), id.to_hex())
+fn ordered_key(prefix: &[u8], created_at: Timestamp, id: &EventId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(prefix.len() + 8 + 32);
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(&created_at.as_secs().to_be_bytes());
+    key.extend(id.as_bytes().iter().map(|byte| !byte));
+    key
 }
 
-/// The inclusive bounds of every [`by_author_key`] for `author`: the bare
-/// `"{author_hex}:"` prefix sorts before any id suffixed onto it (a shorter
-/// string is always `<` a longer string it prefixes), and 64 `'f'`s is the
-/// greatest possible id hex — mirrors [`expiration_key_upper_bound`]'s
-/// pattern.
-fn by_author_range(author: &PublicKey) -> (String, String) {
-    let hex = author.to_hex();
-    (format!("{hex}:"), format!("{hex}:{}", "f".repeat(64)))
+fn ordered_range(prefix: &[u8], since: u64, until: u64) -> (Vec<u8>, Vec<u8>) {
+    let mut lower = Vec::with_capacity(prefix.len() + 8 + 32);
+    lower.extend_from_slice(prefix);
+    lower.extend_from_slice(&since.to_be_bytes());
+    lower.extend_from_slice(&[0u8; 32]);
+    let mut upper = Vec::with_capacity(prefix.len() + 8 + 32);
+    upper.extend_from_slice(prefix);
+    upper.extend_from_slice(&until.to_be_bytes());
+    upper.extend_from_slice(&[u8::MAX; 32]);
+    (lower, upper)
 }
 
-/// [`BY_KIND`]'s key for one stored row.
-fn by_kind_key(kind: Kind, id: &EventId) -> String {
-    format!("{:05}:{}", kind.as_u16(), id.to_hex())
+fn created_at_key(event: &Event) -> Vec<u8> {
+    ordered_key(&[], event.created_at, &event.id)
 }
 
-/// The inclusive bounds of every [`by_kind_key`] for `kind` — same shape as
-/// [`by_author_range`].
-fn by_kind_range(kind: Kind) -> (String, String) {
-    let prefix = format!("{:05}", kind.as_u16());
-    (format!("{prefix}:"), format!("{prefix}:{}", "f".repeat(64)))
+fn by_author_key(event: &Event) -> Vec<u8> {
+    ordered_key(event.pubkey.as_bytes(), event.created_at, &event.id)
+}
+
+fn by_author_prefix(author: &PublicKey) -> Vec<u8> {
+    author.as_bytes().to_vec()
+}
+
+fn by_kind_key(event: &Event) -> Vec<u8> {
+    ordered_key(
+        &event.kind.as_u16().to_be_bytes(),
+        event.created_at,
+        &event.id,
+    )
+}
+
+fn by_kind_prefix(kind: Kind) -> Vec<u8> {
+    kind.as_u16().to_be_bytes().to_vec()
+}
+
+fn by_author_kind_key(event: &Event) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(34);
+    prefix.extend_from_slice(event.pubkey.as_bytes());
+    prefix.extend_from_slice(&event.kind.as_u16().to_be_bytes());
+    ordered_key(&prefix, event.created_at, &event.id)
+}
+
+fn by_author_kind_prefix(author: &PublicKey, kind: Kind) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(34);
+    prefix.extend_from_slice(author.as_bytes());
+    prefix.extend_from_slice(&kind.as_u16().to_be_bytes());
+    prefix
 }
 
 fn tag_index_prefix(tag: SingleLetterTag, value: &str) -> Vec<u8> {
@@ -1046,10 +1077,7 @@ fn tag_index_key(
     created_at: Timestamp,
     id: &EventId,
 ) -> Vec<u8> {
-    let mut key = tag_index_prefix(tag, value);
-    key.extend_from_slice(&created_at.as_secs().to_be_bytes());
-    key.extend(id.as_bytes().iter().map(|byte| !byte));
-    key
+    ordered_key(&tag_index_prefix(tag, value), created_at, id)
 }
 
 fn tag_index_range(
@@ -1058,20 +1086,10 @@ fn tag_index_range(
     since: u64,
     until: u64,
 ) -> (Vec<u8>, Vec<u8>) {
-    let prefix = tag_index_prefix(tag, value);
-    let mut lower = Vec::with_capacity(prefix.len() + 8 + 32);
-    lower.extend_from_slice(&prefix);
-    lower.extend_from_slice(&since.to_be_bytes());
-    lower.extend_from_slice(&[0u8; 32]);
-
-    let mut upper = Vec::with_capacity(prefix.len() + 8 + 32);
-    upper.extend_from_slice(&prefix);
-    upper.extend_from_slice(&until.to_be_bytes());
-    upper.extend_from_slice(&[u8::MAX; 32]);
-    (lower, upper)
+    ordered_range(&tag_index_prefix(tag, value), since, until)
 }
 
-fn tag_index_event_id(key: &[u8]) -> EventId {
+fn ordered_index_event_id(key: &[u8]) -> EventId {
     let id_start = key
         .len()
         .checked_sub(32)
@@ -1081,6 +1099,66 @@ fn tag_index_event_id(key: &[u8]) -> EventId {
         *dst = !encoded;
     }
     EventId::from_byte_array(id)
+}
+
+fn ordered_index_created_at(key: &[u8]) -> u64 {
+    let timestamp_start = key
+        .len()
+        .checked_sub(40)
+        .expect("redb: ordered index key is at least 40 bytes");
+    u64::from_be_bytes(
+        key[timestamp_start..timestamp_start + 8]
+            .try_into()
+            .expect("timestamp slice is eight bytes"),
+    )
+}
+
+#[derive(Debug)]
+struct OrderedCursor {
+    lower: Vec<u8>,
+    upper: Vec<u8>,
+    upper_inclusive: bool,
+    head: Option<(u64, EventId)>,
+}
+
+impl OrderedCursor {
+    fn new(prefix: &[u8], since: u64, until: u64) -> Self {
+        let (lower, upper) = ordered_range(prefix, since, until);
+        Self {
+            lower,
+            upper,
+            upper_inclusive: true,
+            head: None,
+        }
+    }
+
+    fn advance(&mut self, table: &redb::ReadOnlyTable<&[u8], ()>) -> Result<(), PersistenceError> {
+        let next = if self.upper_inclusive {
+            table
+                .range(self.lower.as_slice()..=self.upper.as_slice())
+                .map_err(persist_err)?
+                .next_back()
+        } else {
+            table
+                .range::<&[u8]>((
+                    Included(self.lower.as_slice()),
+                    Excluded(self.upper.as_slice()),
+                ))
+                .map_err(persist_err)?
+                .next_back()
+        };
+        self.head = match next {
+            Some(entry) => {
+                let (key, _value) = entry.map_err(persist_err)?;
+                let key = key.value();
+                self.upper = key.to_vec();
+                self.upper_inclusive = false;
+                Some((ordered_index_created_at(key), ordered_index_event_id(key)))
+            }
+            None => None,
+        };
+        Ok(())
+    }
 }
 
 fn insert_tag_index_rows(
@@ -1109,6 +1187,44 @@ fn remove_tag_index_rows(
         by_tag.remove(key.as_slice())?;
     }
     Ok(())
+}
+
+fn insert_query_index_rows(
+    by_created_at: &mut redb::Table<'_, &[u8], ()>,
+    by_author: &mut redb::Table<'_, &[u8], ()>,
+    by_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_author_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_tag: &mut redb::Table<'_, &[u8], ()>,
+    event: &Event,
+) -> Result<(), redb::StorageError> {
+    let created = created_at_key(event);
+    let author = by_author_key(event);
+    let kind = by_kind_key(event);
+    let author_kind = by_author_kind_key(event);
+    by_created_at.insert(created.as_slice(), ())?;
+    by_author.insert(author.as_slice(), ())?;
+    by_kind.insert(kind.as_slice(), ())?;
+    by_author_kind.insert(author_kind.as_slice(), ())?;
+    insert_tag_index_rows(by_tag, event)
+}
+
+fn remove_query_index_rows(
+    by_created_at: &mut redb::Table<'_, &[u8], ()>,
+    by_author: &mut redb::Table<'_, &[u8], ()>,
+    by_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_author_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_tag: &mut redb::Table<'_, &[u8], ()>,
+    event: &Event,
+) -> Result<(), redb::StorageError> {
+    let created = created_at_key(event);
+    let author = by_author_key(event);
+    let kind = by_kind_key(event);
+    let author_kind = by_author_kind_key(event);
+    by_created_at.remove(created.as_slice())?;
+    by_author.remove(author.as_slice())?;
+    by_kind.remove(kind.as_slice())?;
+    by_author_kind.remove(author_kind.as_slice())?;
+    remove_tag_index_rows(by_tag, event)
 }
 
 /// Read-side tombstone check shared by `insert`
@@ -1152,8 +1268,10 @@ fn remove_row_in_txn(
     events: &mut redb::Table<'_, &str, &[u8]>,
     addr_index: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
-    by_author: &mut redb::Table<'_, &str, &str>,
-    by_kind: &mut redb::Table<'_, &str, &str>,
+    by_created_at: &mut redb::Table<'_, &[u8], ()>,
+    by_author: &mut redb::Table<'_, &[u8], ()>,
+    by_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_author_kind: &mut redb::Table<'_, &[u8], ()>,
     by_tag: &mut redb::Table<'_, &[u8], ()>,
     id: EventId,
     predicate: impl FnOnce(&StoredEvent) -> bool,
@@ -1177,13 +1295,15 @@ fn remove_row_in_txn(
     }
 
     events.remove(id_hex.as_str()).map_err(persist_err)?;
-    by_author
-        .remove(by_author_key(&se.event.pubkey, &id).as_str())
-        .map_err(persist_err)?;
-    by_kind
-        .remove(by_kind_key(se.event.kind, &id).as_str())
-        .map_err(persist_err)?;
-    remove_tag_index_rows(by_tag, &se.event).map_err(persist_err)?;
+    remove_query_index_rows(
+        by_created_at,
+        by_author,
+        by_kind,
+        by_author_kind,
+        by_tag,
+        &se.event,
+    )
+    .map_err(persist_err)?;
 
     if let Some(addr_key) = address_key_for(&se.event) {
         let addr_key_str = addr_key.to_redb_key();
@@ -1223,8 +1343,10 @@ fn process_kind5_deletions(
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
-    by_author: &mut redb::Table<'_, &str, &str>,
-    by_kind: &mut redb::Table<'_, &str, &str>,
+    by_created_at: &mut redb::Table<'_, &[u8], ()>,
+    by_author: &mut redb::Table<'_, &[u8], ()>,
+    by_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_author_kind: &mut redb::Table<'_, &[u8], ()>,
     by_tag: &mut redb::Table<'_, &[u8], ()>,
     deleting: &Event,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
@@ -1238,8 +1360,10 @@ fn process_kind5_deletions(
             events,
             addr_index,
             expiration_index,
+            by_created_at,
             by_author,
             by_kind,
+            by_author_kind,
             by_tag,
             target_id,
             |se| se.event.pubkey == deleting.pubkey,
@@ -1302,8 +1426,10 @@ fn process_kind5_deletions(
                 events,
                 addr_index,
                 expiration_index,
+                by_created_at,
                 by_author,
                 by_kind,
+                by_author_kind,
                 by_tag,
                 current_id,
                 |se| se.event.created_at <= deleting.created_at,
@@ -1338,8 +1464,10 @@ fn fan_out_signed_in_txn(
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
-    by_author: &mut redb::Table<'_, &str, &str>,
-    by_kind: &mut redb::Table<'_, &str, &str>,
+    by_created_at: &mut redb::Table<'_, &[u8], ()>,
+    by_author: &mut redb::Table<'_, &[u8], ()>,
+    by_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_author_kind: &mut redb::Table<'_, &[u8], ()>,
     by_tag: &mut redb::Table<'_, &[u8], ()>,
     outbox_intents: &mut redb::Table<'_, &str, &str>,
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
@@ -1413,8 +1541,10 @@ fn fan_out_signed_in_txn(
             tombstones,
             addr_tombstones,
             expiration_index,
+            by_created_at,
             by_author,
             by_kind,
+            by_author_kind,
             by_tag,
             canonical_event,
         )?;
@@ -1622,8 +1752,10 @@ fn reinsert_stashed_in_txn(
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
     expiration_index: &mut redb::Table<'_, &str, &str>,
-    by_author: &mut redb::Table<'_, &str, &str>,
-    by_kind: &mut redb::Table<'_, &str, &str>,
+    by_created_at: &mut redb::Table<'_, &[u8], ()>,
+    by_author: &mut redb::Table<'_, &[u8], ()>,
+    by_kind: &mut redb::Table<'_, &[u8], ()>,
+    by_author_kind: &mut redb::Table<'_, &[u8], ()>,
     by_tag: &mut redb::Table<'_, &[u8], ()>,
     outbox_intents: &mut redb::Table<'_, &str, &str>,
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
@@ -1721,8 +1853,10 @@ fn reinsert_stashed_in_txn(
                 tombstones,
                 addr_tombstones,
                 expiration_index,
+                by_created_at,
                 by_author,
                 by_kind,
+                by_author_kind,
                 by_tag,
                 outbox_intents,
                 outbox_receipts,
@@ -1750,19 +1884,15 @@ fn reinsert_stashed_in_txn(
             events
                 .insert(id_hex.as_str(), encoded.as_slice())
                 .map_err(persist_err)?;
-            by_author
-                .insert(
-                    by_author_key(&se.event.pubkey, &se.event.id).as_str(),
-                    id_hex.as_str(),
-                )
-                .map_err(persist_err)?;
-            by_kind
-                .insert(
-                    by_kind_key(se.event.kind, &se.event.id).as_str(),
-                    id_hex.as_str(),
-                )
-                .map_err(persist_err)?;
-            insert_tag_index_rows(by_tag, &se.event).map_err(persist_err)?;
+            insert_query_index_rows(
+                by_created_at,
+                by_author,
+                by_kind,
+                by_author_kind,
+                by_tag,
+                &se.event,
+            )
+            .map_err(persist_err)?;
             if let Some(ts) = se.event.tags.expiration().copied() {
                 let exp_key = expiration_key(ts, &se.event.id);
                 expiration_index
@@ -1786,19 +1916,15 @@ fn reinsert_stashed_in_txn(
                     addr_index
                         .insert(addr_key_str.as_str(), id_hex.as_str())
                         .map_err(persist_err)?;
-                    by_author
-                        .insert(
-                            by_author_key(&se.event.pubkey, &se.event.id).as_str(),
-                            id_hex.as_str(),
-                        )
-                        .map_err(persist_err)?;
-                    by_kind
-                        .insert(
-                            by_kind_key(se.event.kind, &se.event.id).as_str(),
-                            id_hex.as_str(),
-                        )
-                        .map_err(persist_err)?;
-                    insert_tag_index_rows(by_tag, &se.event).map_err(persist_err)?;
+                    insert_query_index_rows(
+                        by_created_at,
+                        by_author,
+                        by_kind,
+                        by_author_kind,
+                        by_tag,
+                        &se.event,
+                    )
+                    .map_err(persist_err)?;
                     if let Some(ts) = se.event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &se.event.id);
                         expiration_index
@@ -1823,8 +1949,10 @@ fn reinsert_stashed_in_txn(
                             events,
                             addr_index,
                             expiration_index,
+                            by_created_at,
                             by_author,
                             by_kind,
+                            by_author_kind,
                             by_tag,
                             current_id,
                             |_| true,
@@ -1837,19 +1965,15 @@ fn reinsert_stashed_in_txn(
                         addr_index
                             .insert(addr_key_str.as_str(), id_hex.as_str())
                             .map_err(persist_err)?;
-                        by_author
-                            .insert(
-                                by_author_key(&se.event.pubkey, &se.event.id).as_str(),
-                                id_hex.as_str(),
-                            )
-                            .map_err(persist_err)?;
-                        by_kind
-                            .insert(
-                                by_kind_key(se.event.kind, &se.event.id).as_str(),
-                                id_hex.as_str(),
-                            )
-                            .map_err(persist_err)?;
-                        insert_tag_index_rows(by_tag, &se.event).map_err(persist_err)?;
+                        insert_query_index_rows(
+                            by_created_at,
+                            by_author,
+                            by_kind,
+                            by_author_kind,
+                            by_tag,
+                            &se.event,
+                        )
+                        .map_err(persist_err)?;
                         if let Some(ts) = se.event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &se.event.id);
                             expiration_index
@@ -1966,8 +2090,12 @@ impl RedbStore {
             write_txn.open_table(TOMBSTONES)?;
             write_txn.open_table(ADDR_TOMBSTONES)?;
             write_txn.open_table(EXPIRATION_INDEX)?;
-            write_txn.open_table(BY_AUTHOR)?;
-            write_txn.open_table(BY_KIND)?;
+            let mut legacy_by_author = write_txn.open_table(LEGACY_BY_AUTHOR)?;
+            let mut legacy_by_kind = write_txn.open_table(LEGACY_BY_KIND)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR)?;
+            let mut by_kind = write_txn.open_table(BY_KIND)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND)?;
             let mut by_tag = write_txn.open_table(BY_TAG)?;
             write_txn.open_table(OUTBOX_INTENTS)?;
             let mut legacy_outbox_displaced = write_txn.open_table(LEGACY_OUTBOX_DISPLACED)?;
@@ -2012,6 +2140,37 @@ impl RedbStore {
                 }
                 legacy_outbox_displaced.retain(|_, _| false)?;
                 store_meta.insert(EVENT_RECORD_VERSION_KEY, EVENT_RECORD_VERSION)?;
+            }
+
+            let ordered_index_version = store_meta
+                .get(ORDERED_INDEX_VERSION_KEY)?
+                .map(|guard| guard.value().to_owned());
+            if ordered_index_version.as_deref() != Some(ORDERED_INDEX_VERSION) {
+                // Rebuild every ordered field index from canonical binary
+                // rows, then publish the version in this same transaction.
+                // A crash leaves the old marker in place, so the next open
+                // repeats the whole rebuild rather than exposing a partial
+                // planner view.
+                by_created_at.retain(|_, _| false)?;
+                by_author.retain(|_, _| false)?;
+                by_kind.retain(|_, _| false)?;
+                by_author_kind.retain(|_, _| false)?;
+                for entry in events.iter()? {
+                    let (_id, value) = entry?;
+                    let stored = decode_stored_event(value.value());
+                    let event = &stored.event;
+                    let created = created_at_key(event);
+                    let author = by_author_key(event);
+                    let kind = by_kind_key(event);
+                    let author_kind = by_author_kind_key(event);
+                    by_created_at.insert(created.as_slice(), ())?;
+                    by_author.insert(author.as_slice(), ())?;
+                    by_kind.insert(kind.as_slice(), ())?;
+                    by_author_kind.insert(author_kind.as_slice(), ())?;
+                }
+                legacy_by_author.retain(|_, _| false)?;
+                legacy_by_kind.retain(|_, _| false)?;
+                store_meta.insert(ORDERED_INDEX_VERSION_KEY, ORDERED_INDEX_VERSION)?;
             }
 
             let tag_index_version = store_meta
@@ -2123,6 +2282,104 @@ impl RedbStore {
             .expect("redb: materialize validated portable event")
     }
 
+    /// Reverse-merge one or more ranges from the planner's chosen index.
+    /// Each cursor asks redb for exactly its next key; once `limit` visible
+    /// rows have survived the borrowed binary post-filter, no older key or
+    /// event value is touched.
+    fn query_newest_ordered(
+        &self,
+        read_txn: &redb::ReadTransaction,
+        index: TableDefinition<&[u8], ()>,
+        prefixes: Vec<Vec<u8>>,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
+        let index = read_txn.open_table(index).map_err(persist_err)?;
+        let outbox_suppress_by_id = read_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ID)
+            .map_err(persist_err)?;
+        let outbox_suppress_by_addr = read_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+            .map_err(persist_err)?;
+        let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
+        let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
+        let materialize_if_visible =
+            |id: EventId| -> Result<Option<StoredEvent>, PersistenceError> {
+                let id_hex = id.to_hex();
+                let Some(value) = events.get(id_hex.as_str()).map_err(persist_err)? else {
+                    return Ok(None);
+                };
+                let view = StoredEventView::from_trusted(value.value())
+                    .expect("redb: decode portable stored event view");
+                if !view.matches_filter(filter) {
+                    return Ok(None);
+                }
+                let stored = self.decode_row(view);
+                if is_suppressed_in_txn(
+                    &outbox_suppress_by_id,
+                    &outbox_suppress_by_addr,
+                    &stored.event,
+                )? {
+                    return Ok(None);
+                }
+                Ok(Some(stored))
+            };
+
+        // The dominant room/author/kind case is one contiguous range. Keep
+        // redb's iterator alive and walk it once; the cursor-based k-way
+        // merge below is reserved for genuine OR sets.
+        if let [prefix] = prefixes.as_slice() {
+            let (lower, upper) = ordered_range(prefix, since, until);
+            let mut out = Vec::with_capacity(limit);
+            for entry in index
+                .range(lower.as_slice()..=upper.as_slice())
+                .map_err(persist_err)?
+                .rev()
+            {
+                let (key, _value) = entry.map_err(persist_err)?;
+                if let Some(stored) = materialize_if_visible(ordered_index_event_id(key.value()))? {
+                    out.push(stored);
+                    if out.len() == limit {
+                        break;
+                    }
+                }
+            }
+            return Ok(out);
+        }
+
+        let mut cursors: Vec<_> = prefixes
+            .iter()
+            .map(|prefix| OrderedCursor::new(prefix, since, until))
+            .collect();
+        for cursor in &mut cursors {
+            cursor.advance(&index)?;
+        }
+
+        let mut out = Vec::with_capacity(limit);
+        let mut seen = HashSet::new();
+        while out.len() < limit {
+            let Some((cursor_index, (_created_at, id))) = cursors
+                .iter()
+                .enumerate()
+                .filter_map(|(index, cursor)| cursor.head.map(|head| (index, head)))
+                .max_by(|(_, (left_ts, left_id)), (_, (right_ts, right_id))| {
+                    left_ts.cmp(right_ts).then_with(|| right_id.cmp(left_id))
+                })
+            else {
+                break;
+            };
+            cursors[cursor_index].advance(&index)?;
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(stored) = materialize_if_visible(id)? {
+                out.push(stored);
+            }
+        }
+        Ok(out)
+    }
+
     /// `query`'s index-narrowing step (issue #17): `Some(ids)` -- the
     /// bounded candidate set gathered from `BY_AUTHOR`/`BY_KIND`/`BY_TAG`
     /// for whichever indexed constraints are present. Values within one
@@ -2146,15 +2403,14 @@ impl RedbStore {
                 let by_author = read_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
                 let mut ids = HashSet::new();
                 for author in authors {
-                    let (lower, upper) = by_author_range(author);
+                    let prefix = by_author_prefix(author);
+                    let (lower, upper) = ordered_range(&prefix, 0, u64::MAX);
                     for entry in by_author
-                        .range::<&str>(lower.as_str()..=upper.as_str())
+                        .range(lower.as_slice()..=upper.as_slice())
                         .map_err(persist_err)?
                     {
-                        let (_key, value) = entry.map_err(persist_err)?;
-                        ids.insert(
-                            EventId::from_hex(value.value()).expect("redb: decode by_author id"),
-                        );
+                        let (key, _value) = entry.map_err(persist_err)?;
+                        ids.insert(ordered_index_event_id(key.value()));
                     }
                 }
                 Some(ids)
@@ -2167,15 +2423,14 @@ impl RedbStore {
                 let by_kind = read_txn.open_table(BY_KIND).map_err(persist_err)?;
                 let mut ids = HashSet::new();
                 for kind in kinds {
-                    let (lower, upper) = by_kind_range(*kind);
+                    let prefix = by_kind_prefix(*kind);
+                    let (lower, upper) = ordered_range(&prefix, 0, u64::MAX);
                     for entry in by_kind
-                        .range::<&str>(lower.as_str()..=upper.as_str())
+                        .range(lower.as_slice()..=upper.as_slice())
                         .map_err(persist_err)?
                     {
-                        let (_key, value) = entry.map_err(persist_err)?;
-                        ids.insert(
-                            EventId::from_hex(value.value()).expect("redb: decode by_kind id"),
-                        );
+                        let (key, _value) = entry.map_err(persist_err)?;
+                        ids.insert(ordered_index_event_id(key.value()));
                     }
                 }
                 Some(ids)
@@ -2198,7 +2453,7 @@ impl RedbStore {
                         .map_err(persist_err)?
                     {
                         let (key, _value) = entry.map_err(persist_err)?;
-                        field_ids.insert(tag_index_event_id(key.value()));
+                        field_ids.insert(ordered_index_event_id(key.value()));
                     }
                 }
                 all_fields = Some(match all_fields {
@@ -2241,8 +2496,10 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
             let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
             let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
             let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
@@ -2319,8 +2576,10 @@ impl EventStore for RedbStore {
                         &mut tombstones,
                         &mut addr_tombstones,
                         &mut expiration_index,
+                        &mut by_created_at,
                         &mut by_author,
                         &mut by_kind,
+                        &mut by_author_kind,
                         &mut by_tag,
                         &mut outbox_intents,
                         &mut outbox_receipts,
@@ -2360,16 +2619,15 @@ impl EventStore for RedbStore {
                         events
                             .insert(id_hex.as_str(), encoded.as_slice())
                             .map_err(persist_err)?;
-                        by_author
-                            .insert(
-                                by_author_key(&event.pubkey, &event.id).as_str(),
-                                id_hex.as_str(),
-                            )
-                            .map_err(persist_err)?;
-                        by_kind
-                            .insert(by_kind_key(event.kind, &event.id).as_str(), id_hex.as_str())
-                            .map_err(persist_err)?;
-                        insert_tag_index_rows(&mut by_tag, &event).map_err(persist_err)?;
+                        insert_query_index_rows(
+                            &mut by_created_at,
+                            &mut by_author,
+                            &mut by_kind,
+                            &mut by_author_kind,
+                            &mut by_tag,
+                            &event,
+                        )
+                        .map_err(persist_err)?;
                         if let Some(ts) = event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &event.id);
                             expiration_index
@@ -2393,19 +2651,15 @@ impl EventStore for RedbStore {
                                 addr_index
                                     .insert(addr_key_str.as_str(), id_hex.as_str())
                                     .map_err(persist_err)?;
-                                by_author
-                                    .insert(
-                                        by_author_key(&event.pubkey, &event.id).as_str(),
-                                        id_hex.as_str(),
-                                    )
-                                    .map_err(persist_err)?;
-                                by_kind
-                                    .insert(
-                                        by_kind_key(event.kind, &event.id).as_str(),
-                                        id_hex.as_str(),
-                                    )
-                                    .map_err(persist_err)?;
-                                insert_tag_index_rows(&mut by_tag, &event).map_err(persist_err)?;
+                                insert_query_index_rows(
+                                    &mut by_created_at,
+                                    &mut by_author,
+                                    &mut by_kind,
+                                    &mut by_author_kind,
+                                    &mut by_tag,
+                                    &event,
+                                )
+                                .map_err(persist_err)?;
                                 if let Some(ts) = event.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &event.id);
                                     expiration_index
@@ -2435,23 +2689,15 @@ impl EventStore for RedbStore {
                                     events
                                         .remove(current_id_hex.as_str())
                                         .map_err(persist_err)?;
-                                    by_author
-                                        .remove(
-                                            by_author_key(
-                                                &replaced.event.pubkey,
-                                                &replaced.event.id,
-                                            )
-                                            .as_str(),
-                                        )
-                                        .map_err(persist_err)?;
-                                    by_kind
-                                        .remove(
-                                            by_kind_key(replaced.event.kind, &replaced.event.id)
-                                                .as_str(),
-                                        )
-                                        .map_err(persist_err)?;
-                                    remove_tag_index_rows(&mut by_tag, &replaced.event)
-                                        .map_err(persist_err)?;
+                                    remove_query_index_rows(
+                                        &mut by_created_at,
+                                        &mut by_author,
+                                        &mut by_kind,
+                                        &mut by_author_kind,
+                                        &mut by_tag,
+                                        &replaced.event,
+                                    )
+                                    .map_err(persist_err)?;
                                     if let Some(ts) = replaced.event.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &replaced.event.id);
                                         expiration_index
@@ -2464,20 +2710,15 @@ impl EventStore for RedbStore {
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
                                         .map_err(persist_err)?;
-                                    by_author
-                                        .insert(
-                                            by_author_key(&event.pubkey, &event.id).as_str(),
-                                            id_hex.as_str(),
-                                        )
-                                        .map_err(persist_err)?;
-                                    by_kind
-                                        .insert(
-                                            by_kind_key(event.kind, &event.id).as_str(),
-                                            id_hex.as_str(),
-                                        )
-                                        .map_err(persist_err)?;
-                                    insert_tag_index_rows(&mut by_tag, &event)
-                                        .map_err(persist_err)?;
+                                    insert_query_index_rows(
+                                        &mut by_created_at,
+                                        &mut by_author,
+                                        &mut by_kind,
+                                        &mut by_author_kind,
+                                        &mut by_tag,
+                                        &event,
+                                    )
+                                    .map_err(persist_err)?;
                                     if let Some(ts) = event.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &event.id);
                                         expiration_index
@@ -2507,8 +2748,10 @@ impl EventStore for RedbStore {
                             &mut tombstones,
                             &mut addr_tombstones,
                             &mut expiration_index,
+                            &mut by_created_at,
                             &mut by_author,
                             &mut by_kind,
+                            &mut by_author_kind,
                             &mut by_tag,
                             &event,
                         )?;
@@ -2624,77 +2867,60 @@ impl EventStore for RedbStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-
-        // nostrdb's high-value planner case: choose one ordered tag index,
-        // reverse-scan newest first, and use the packed event as the cheap
-        // post-filter. NMP's event values are not packed yet, but stopping at
-        // `limit` still ensures candidates beyond the visible window are
-        // never JSON/secp decoded at all. Multiple tag fields/values require
-        // a k-way merge to preserve global ordering, so they use the exact
-        // full-query fallback below for now.
-        let one_tag_value = if filter.ids.is_none() && filter.generic_tags.len() == 1 {
-            filter.generic_tags.iter().next().and_then(|(tag, values)| {
-                (values.len() == 1).then(|| (*tag, values.iter().next().expect("length checked")))
-            })
-        } else {
-            None
-        };
-
-        if let Some((tag, value)) = one_tag_value {
-            let read_txn = self.db.begin_read().map_err(persist_err)?;
-            let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
-            let by_tag = read_txn.open_table(BY_TAG).map_err(persist_err)?;
-            let outbox_suppress_by_id = read_txn
-                .open_table(OUTBOX_SUPPRESS_BY_ID)
-                .map_err(persist_err)?;
-            let outbox_suppress_by_addr = read_txn
-                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-                .map_err(persist_err)?;
-            let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
-            let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
-            let (lower, upper) = tag_index_range(tag, value, since, until);
-            let mut out = Vec::with_capacity(limit);
-            for entry in by_tag
-                .range(lower.as_slice()..=upper.as_slice())
-                .map_err(persist_err)?
-                .rev()
-            {
-                let (key, _value) = entry.map_err(persist_err)?;
-                let id = tag_index_event_id(key.value());
-                let id_hex = id.to_hex();
-                let Some(value) = events.get(id_hex.as_str()).map_err(persist_err)? else {
-                    continue;
-                };
-                let view = StoredEventView::from_trusted(value.value())
-                    .expect("redb: decode portable stored event view");
-                if !view.matches_filter(filter) {
-                    continue;
-                }
-                let stored = self.decode_row(view);
-                if is_suppressed_in_txn(
-                    &outbox_suppress_by_id,
-                    &outbox_suppress_by_addr,
-                    &stored.event,
-                )? {
-                    continue;
-                }
-                out.push(stored);
-                if out.len() == limit {
-                    break;
-                }
-            }
-            return Ok(out);
+        // Exact ids are already the narrowest possible lookup. They do not
+        // form a time-ordered range, so preserve correctness by sorting this
+        // caller-bounded set only; no unrelated row is touched.
+        if filter.ids.is_some() {
+            let mut rows = self.query(filter)?;
+            rows.sort_by(|a, b| {
+                b.event
+                    .created_at
+                    .cmp(&a.event.created_at)
+                    .then_with(|| a.event.id.cmp(&b.event.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
         }
 
-        let mut rows = self.query(filter)?;
-        rows.sort_by(|a, b| {
-            b.event
-                .created_at
-                .cmp(&a.event.created_at)
-                .then_with(|| a.event.id.cmp(&b.event.id))
-        });
-        rows.truncate(limit);
-        Ok(rows)
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+
+        // nostrdb's one-best-index planner, adapted to redb. OR values in
+        // the chosen field become independently ordered ranges and are
+        // k-way merged; every remaining constraint is a cheap borrowed
+        // binary post-filter. Prefer the composite index when both fields
+        // exist, then authors, one selective tag field, kinds, and finally
+        // the global time index.
+        if let (Some(authors), Some(kinds)) = (&filter.authors, &filter.kinds) {
+            let prefixes = authors
+                .iter()
+                .flat_map(|author| {
+                    kinds
+                        .iter()
+                        .map(move |kind| by_author_kind_prefix(author, *kind))
+                })
+                .collect();
+            return self.query_newest_ordered(&read_txn, BY_AUTHOR_KIND, prefixes, filter, limit);
+        }
+        if let Some(authors) = &filter.authors {
+            let prefixes = authors.iter().map(by_author_prefix).collect();
+            return self.query_newest_ordered(&read_txn, BY_AUTHOR, prefixes, filter, limit);
+        }
+        if let Some((tag, values)) = filter
+            .generic_tags
+            .iter()
+            .min_by_key(|(_tag, values)| values.len())
+        {
+            let prefixes = values
+                .iter()
+                .map(|value| tag_index_prefix(*tag, value))
+                .collect();
+            return self.query_newest_ordered(&read_txn, BY_TAG, prefixes, filter, limit);
+        }
+        if let Some(kinds) = &filter.kinds {
+            let prefixes = kinds.iter().map(|kind| by_kind_prefix(*kind)).collect();
+            return self.query_newest_ordered(&read_txn, BY_KIND, prefixes, filter, limit);
+        }
+        self.query_newest_ordered(&read_txn, BY_CREATED_AT, vec![Vec::new()], filter, limit)
     }
 
     fn remove(
@@ -2709,15 +2935,19 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
             let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
             remove_row_in_txn(
                 &mut events,
                 &mut addr_index,
                 &mut expiration_index,
+                &mut by_created_at,
                 &mut by_author,
                 &mut by_kind,
+                &mut by_author_kind,
                 &mut by_tag,
                 id,
                 |_| true,
@@ -2735,8 +2965,10 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
             let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
 
             let upper = expiration_key_upper_bound(now);
@@ -2760,8 +2992,10 @@ impl EventStore for RedbStore {
                     &mut events,
                     &mut addr_index,
                     &mut expiration_index,
+                    &mut by_created_at,
                     &mut by_author,
                     &mut by_kind,
+                    &mut by_author_kind,
                     &mut by_tag,
                     id,
                     |_| true,
@@ -2845,8 +3079,10 @@ impl EventStore for RedbStore {
         {
             let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
             let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
             let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
             let outbox_suppress_by_id = write_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ID)
@@ -2889,13 +3125,15 @@ impl EventStore for RedbStore {
                 // `query` a wasted `events.get` miss on every future hit
                 // (harmless, see `query`'s `None` skip, but unbounded
                 // growth otherwise).
-                by_author
-                    .remove(by_author_key(&event.pubkey, &event.id).as_str())
-                    .map_err(persist_err)?;
-                by_kind
-                    .remove(by_kind_key(event.kind, &event.id).as_str())
-                    .map_err(persist_err)?;
-                remove_tag_index_rows(&mut by_tag, event).map_err(persist_err)?;
+                remove_query_index_rows(
+                    &mut by_created_at,
+                    &mut by_author,
+                    &mut by_kind,
+                    &mut by_author_kind,
+                    &mut by_tag,
+                    event,
+                )
+                .map_err(persist_err)?;
                 report.events_evicted += 1;
             }
 
@@ -3022,8 +3260,10 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
             let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
             let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
             let mut outbox_displaced = write_txn
@@ -3211,19 +3451,15 @@ impl EventStore for RedbStore {
                         events
                             .insert(id_hex.as_str(), encoded.as_slice())
                             .map_err(persist_err)?;
-                        by_author
-                            .insert(
-                                by_author_key(&frozen.pubkey, &frozen.id).as_str(),
-                                id_hex.as_str(),
-                            )
-                            .map_err(persist_err)?;
-                        by_kind
-                            .insert(
-                                by_kind_key(frozen.kind, &frozen.id).as_str(),
-                                id_hex.as_str(),
-                            )
-                            .map_err(persist_err)?;
-                        insert_tag_index_rows(&mut by_tag, &frozen).map_err(persist_err)?;
+                        insert_query_index_rows(
+                            &mut by_created_at,
+                            &mut by_author,
+                            &mut by_kind,
+                            &mut by_author_kind,
+                            &mut by_tag,
+                            &frozen,
+                        )
+                        .map_err(persist_err)?;
                         if let Some(ts) = frozen.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &frozen.id);
                             expiration_index
@@ -3294,19 +3530,15 @@ impl EventStore for RedbStore {
                                 addr_index
                                     .insert(addr_key_str.as_str(), id_hex.as_str())
                                     .map_err(persist_err)?;
-                                by_author
-                                    .insert(
-                                        by_author_key(&frozen.pubkey, &frozen.id).as_str(),
-                                        id_hex.as_str(),
-                                    )
-                                    .map_err(persist_err)?;
-                                by_kind
-                                    .insert(
-                                        by_kind_key(frozen.kind, &frozen.id).as_str(),
-                                        id_hex.as_str(),
-                                    )
-                                    .map_err(persist_err)?;
-                                insert_tag_index_rows(&mut by_tag, &frozen).map_err(persist_err)?;
+                                insert_query_index_rows(
+                                    &mut by_created_at,
+                                    &mut by_author,
+                                    &mut by_kind,
+                                    &mut by_author_kind,
+                                    &mut by_tag,
+                                    &frozen,
+                                )
+                                .map_err(persist_err)?;
                                 if let Some(ts) = frozen.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &frozen.id);
                                     expiration_index
@@ -3338,8 +3570,10 @@ impl EventStore for RedbStore {
                                         &mut events,
                                         &mut addr_index,
                                         &mut expiration_index,
+                                        &mut by_created_at,
                                         &mut by_author,
                                         &mut by_kind,
+                                        &mut by_author_kind,
                                         &mut by_tag,
                                         current_id,
                                         |_| true,
@@ -3352,20 +3586,15 @@ impl EventStore for RedbStore {
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
                                         .map_err(persist_err)?;
-                                    by_author
-                                        .insert(
-                                            by_author_key(&frozen.pubkey, &frozen.id).as_str(),
-                                            id_hex.as_str(),
-                                        )
-                                        .map_err(persist_err)?;
-                                    by_kind
-                                        .insert(
-                                            by_kind_key(frozen.kind, &frozen.id).as_str(),
-                                            id_hex.as_str(),
-                                        )
-                                        .map_err(persist_err)?;
-                                    insert_tag_index_rows(&mut by_tag, &frozen)
-                                        .map_err(persist_err)?;
+                                    insert_query_index_rows(
+                                        &mut by_created_at,
+                                        &mut by_author,
+                                        &mut by_kind,
+                                        &mut by_author_kind,
+                                        &mut by_tag,
+                                        &frozen,
+                                    )
+                                    .map_err(persist_err)?;
                                     if let Some(ts) = frozen.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &frozen.id);
                                         expiration_index
@@ -3486,8 +3715,10 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
             let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
 
             let key = intent_key(intent_id);
@@ -3695,8 +3926,10 @@ impl EventStore for RedbStore {
                         &mut tombstones,
                         &mut addr_tombstones,
                         &mut expiration_index,
+                        &mut by_created_at,
                         &mut by_author,
                         &mut by_kind,
+                        &mut by_author_kind,
                         &mut by_tag,
                         &mut outbox_intents,
                         &mut outbox_receipts,
@@ -3738,8 +3971,10 @@ impl EventStore for RedbStore {
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?;
+            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
             let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
             let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
             let mut outbox_displaced = write_txn
@@ -3816,8 +4051,10 @@ impl EventStore for RedbStore {
                                     &mut events,
                                     &mut addr_index,
                                     &mut expiration_index,
+                                    &mut by_created_at,
                                     &mut by_author,
                                     &mut by_kind,
+                                    &mut by_author_kind,
                                     &mut by_tag,
                                     frozen_id,
                                     |_| true,
@@ -3889,8 +4126,10 @@ impl EventStore for RedbStore {
                                 &mut tombstones,
                                 &mut addr_tombstones,
                                 &mut expiration_index,
+                                &mut by_created_at,
                                 &mut by_author,
                                 &mut by_kind,
+                                &mut by_author_kind,
                                 &mut by_tag,
                                 &mut outbox_intents,
                                 &mut outbox_receipts,
@@ -5800,9 +6039,7 @@ mod tests {
                 .unwrap();
         }
 
-        let filter = Filter::new()
-            .author(wanted.public_key())
-            .custom_tag(SingleLetterTag::lowercase(nostr::Alphabet::H), "target");
+        let filter = Filter::new().kind(Kind::from(9u16)).search("wanted");
         let before = store.examined_rows();
         let rows = store.query_newest(&filter, 1).unwrap();
         let materialized = store.examined_rows() - before;
@@ -5811,7 +6048,67 @@ mod tests {
         assert_eq!(rows[0].event.pubkey, wanted.public_key());
         assert_eq!(
             materialized, 1,
-            "200 newer rejected candidates must stay borrowed binary views; only the returned row becomes an owned Event"
+            "200 newer kind-index candidates rejected by search must stay borrowed binary views; only the returned row becomes an owned Event"
+        );
+    }
+
+    #[test]
+    fn query_newest_kind_and_global_scans_stop_at_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ordered-limit.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://groups.example").unwrap();
+
+        for i in 0..240u64 {
+            store
+                .insert(
+                    room_event(&keys, "target", 1_000 + i, &format!("event-{i}")),
+                    RelayObserved::new(relay.clone(), Timestamp::from(2_000 + i)),
+                )
+                .unwrap();
+        }
+
+        let before = store.examined_rows();
+        let kind_rows = store
+            .query_newest(&Filter::new().kind(Kind::from(9u16)), 25)
+            .unwrap();
+        assert_eq!(kind_rows.len(), 25);
+        assert_eq!(store.examined_rows() - before, 25);
+        assert_eq!(kind_rows[0].event.created_at, Timestamp::from(1_239u64));
+
+        let before = store.examined_rows();
+        let global_rows = store.query_newest(&Filter::new(), 17).unwrap();
+        assert_eq!(global_rows.len(), 17);
+        assert_eq!(store.examined_rows() - before, 17);
+        assert_eq!(global_rows[0].event.created_at, Timestamp::from(1_239u64));
+    }
+
+    #[test]
+    fn query_newest_merges_multiple_tag_values_in_global_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tag-merge.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://groups.example").unwrap();
+
+        for (room, created_at) in [("a", 100), ("b", 104), ("a", 103), ("b", 101)] {
+            store
+                .insert(
+                    room_event(&keys, room, created_at, room),
+                    RelayObserved::new(relay.clone(), Timestamp::from(created_at + 1)),
+                )
+                .unwrap();
+        }
+
+        let filter =
+            Filter::new().custom_tags(SingleLetterTag::lowercase(nostr::Alphabet::H), ["a", "b"]);
+        let rows = store.query_newest(&filter, 3).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![104, 103, 101]
         );
     }
 
@@ -5886,12 +6183,28 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event.id, event.id);
+        assert_eq!(
+            store
+                .query_newest(&Filter::new().author(event.pubkey), 1)
+                .unwrap()[0]
+                .event
+                .id,
+            event.id,
+            "open must atomically backfill the ordered author index too"
+        );
 
         let read_txn = store.db.begin_read().unwrap();
         let meta = read_txn.open_table(STORE_META).unwrap();
         assert_eq!(
             meta.get(TAG_INDEX_VERSION_KEY).unwrap().unwrap().value(),
             TAG_INDEX_VERSION
+        );
+        assert_eq!(
+            meta.get(ORDERED_INDEX_VERSION_KEY)
+                .unwrap()
+                .unwrap()
+                .value(),
+            ORDERED_INDEX_VERSION
         );
         assert_eq!(
             meta.get(EVENT_RECORD_VERSION_KEY).unwrap().unwrap().value(),
