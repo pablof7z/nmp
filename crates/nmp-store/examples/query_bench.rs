@@ -61,15 +61,44 @@ fn main() {
         assert_eq!(rows.len(), expected);
     }
 
+    let kind_filter = Filter::new().kind(kind).limit(200);
+    let mut kind_elapsed = Duration::ZERO;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let rows = store
+            .query_newest(&kind_filter, 200)
+            .expect("timed kind query");
+        kind_elapsed += started.elapsed();
+        assert_eq!(rows.len(), all_kind9.len().min(200));
+    }
+
+    let mut global_elapsed = Duration::ZERO;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let rows = store
+            .query_newest(&Filter::new().limit(200), 200)
+            .expect("timed global query");
+        global_elapsed += started.elapsed();
+        assert_eq!(rows.len(), all_kind9.len().min(200));
+    }
+
     println!("store={}", path.display());
     println!("kind9_rows={}", all_kind9.len());
     println!("room={room}");
     println!("room_rows={corpus_matches}");
     println!("returned_rows={expected}");
     println!("iterations={iterations}");
-    println!("total_ms={:.3}", elapsed.as_secs_f64() * 1_000.0);
+    println!("room_total_ms={:.3}", elapsed.as_secs_f64() * 1_000.0);
     println!(
-        "mean_ms={:.3}",
+        "room_mean_ms={:.3}",
         elapsed.as_secs_f64() * 1_000.0 / f64::from(iterations)
+    );
+    println!(
+        "kind_mean_ms={:.3}",
+        kind_elapsed.as_secs_f64() * 1_000.0 / f64::from(iterations)
+    );
+    println!(
+        "global_mean_ms={:.3}",
+        global_elapsed.as_secs_f64() * 1_000.0 / f64::from(iterations)
     );
 }
