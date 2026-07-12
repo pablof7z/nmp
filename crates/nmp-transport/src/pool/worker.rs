@@ -562,7 +562,14 @@ fn run_connected_inner(
         match keepalive.step(Instant::now()) {
             KeepaliveAction::Idle => {}
             KeepaliveAction::EmitPing => {
-                match flush_message(socket, Message::Ping(Vec::new().into())) {
+                match flush_message(
+                    socket,
+                    Message::Ping(Vec::new().into()),
+                    write_accepted,
+                    event_tx,
+                    slot,
+                    generation,
+                ) {
                     FlushResult::Flushed => keepalive.on_ping_flushed(Instant::now()),
                     FlushResult::Blocked => wants_write = true,
                     FlushResult::Broken(message) => {
@@ -670,9 +677,9 @@ enum FlushResult {
 /// Write every pending REQ frame, then every queued durable EVENT frame,
 /// then flush the socket ONCE for the whole batch — durable frames whose
 /// OWN `write()` succeeds move to `write_accepted` (awaiting THIS shared
-/// flush to confirm them); only once `flush_socket` itself reports
-/// `Flushed` do they resolve `Written` (fired here, the only place that
-/// ever fires `Written`). A `Blocked`/`Broken` flush leaves them in
+/// flush to confirm them); once ANY socket flush reports `Flushed` they
+/// resolve `Written` through [`flush_socket_and_settle`] (including a later
+/// keepalive/control flush). A `Blocked`/`Broken` flush leaves them in
 /// `write_accepted` for the caller to resolve later (a subsequent flush
 /// attempt, or — on `Broken` — [`resolve_generation_end`] once the
 /// connection actually ends): never resolved twice, never resolved early.
@@ -715,6 +722,37 @@ fn flush_writes(
             }
         }
     }
+    flush_socket_and_settle(socket, write_accepted, event_tx, slot, generation)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_message(
+    socket: &mut RelaySocket,
+    message: Message,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) -> FlushResult {
+    match socket.write(message) {
+        Ok(()) => flush_socket_and_settle(socket, write_accepted, event_tx, slot, generation),
+        Err(error) if is_nonblocking_io(&error) => FlushResult::Blocked,
+        Err(error) => FlushResult::Broken(error.to_string()),
+    }
+}
+
+/// The single successful-flush boundary for a connected generation. A
+/// flush confirms every prior socket-accepted durable frame, regardless of
+/// which message caused the flush (EVENT batch, keepalive ping, or future
+/// control traffic). Keeping settlement here prevents a later successful
+/// control flush from being forgotten and mislabeled `Ambiguous` at teardown.
+fn flush_socket_and_settle(
+    socket: &mut RelaySocket,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) -> FlushResult {
     let result = flush_socket(socket);
     if matches!(result, FlushResult::Flushed) {
         for correlation in write_accepted.drain(..) {
@@ -728,14 +766,6 @@ fn flush_writes(
         }
     }
     result
-}
-
-fn flush_message(socket: &mut RelaySocket, message: Message) -> FlushResult {
-    match socket.write(message) {
-        Ok(()) => flush_socket(socket),
-        Err(error) if is_nonblocking_io(&error) => FlushResult::Blocked,
-        Err(error) => FlushResult::Broken(error.to_string()),
-    }
 }
 
 fn flush_socket(socket: &mut RelaySocket) -> FlushResult {
@@ -881,6 +911,63 @@ fn socket_tcp(socket: &mut RelaySocket) -> io::Result<&mut TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use tungstenite::protocol::{Role, WebSocketConfig};
+
+    const LARGE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+    fn real_buffered_socket() -> (RelaySocket, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        client.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let config = WebSocketConfig::default().write_buffer_size(LARGE_FRAME_BYTES * 2);
+        let socket = tungstenite::WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(client),
+            Role::Client,
+            Some(config),
+        );
+        (socket, peer)
+    }
+
+    fn begin_real_unconfirmed_write(
+        socket: &mut RelaySocket,
+        correlation: AttemptCorrelation,
+        event_tx: &Sender<WorkerEvent>,
+        write_accepted: &mut Vec<AttemptCorrelation>,
+    ) {
+        let mut pending = VecDeque::new();
+        let mut durable = VecDeque::from([(correlation, "x".repeat(LARGE_FRAME_BYTES))]);
+        assert!(matches!(
+            flush_writes(
+                &mut pending,
+                &mut durable,
+                write_accepted,
+                socket,
+                event_tx,
+                1,
+                1,
+            ),
+            FlushResult::Blocked
+        ));
+        assert!(durable.is_empty(), "the frame's write() was accepted");
+        assert_eq!(write_accepted, &[correlation]);
+    }
+
+    fn drain_peer(peer: &mut TcpStream) {
+        let mut bytes = [0u8; 64 * 1024];
+        loop {
+            match peer.read(&mut bytes) {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                Err(error) => panic!("peer read failed: {error}"),
+            }
+        }
+    }
 
     fn handoff_results(rx: &Receiver<WorkerEvent>) -> Vec<(AttemptCorrelation, HandoffResult)> {
         rx.try_iter()
@@ -930,6 +1017,69 @@ mod tests {
         );
         assert!(durable.is_empty());
         assert!(write_accepted.is_empty());
+    }
+
+    #[test]
+    fn real_socket_write_ok_unconfirmed_flush_then_generation_end_is_ambiguous() {
+        let (mut socket, peer) = real_buffered_socket();
+        let (event_tx, event_rx) = mpsc::channel();
+        let correlation = AttemptCorrelation(31);
+        let mut write_accepted = Vec::new();
+        begin_real_unconfirmed_write(&mut socket, correlation, &event_tx, &mut write_accepted);
+
+        drop(peer);
+        let mut durable = VecDeque::new();
+        resolve_generation_end(&event_tx, 1, 1, &mut durable, &mut write_accepted);
+
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![(correlation, HandoffResult::Ambiguous)]
+        );
+    }
+
+    #[test]
+    fn successful_control_flush_settles_prior_durable_write_as_written() {
+        let (mut socket, mut peer) = real_buffered_socket();
+        let (event_tx, event_rx) = mpsc::channel();
+        let correlation = AttemptCorrelation(32);
+        let mut write_accepted = Vec::new();
+        begin_real_unconfirmed_write(&mut socket, correlation, &event_tx, &mut write_accepted);
+
+        let mut flushed = false;
+        for _ in 0..512 {
+            drain_peer(&mut peer);
+            match flush_message(
+                &mut socket,
+                Message::Ping(Vec::new().into()),
+                &mut write_accepted,
+                &event_tx,
+                1,
+                1,
+            ) {
+                FlushResult::Flushed => {
+                    flushed = true;
+                    break;
+                }
+                FlushResult::Blocked => std::thread::yield_now(),
+                FlushResult::Broken(message) => panic!("control flush broke: {message}"),
+            }
+        }
+        assert!(
+            flushed,
+            "peer draining must eventually allow a control flush"
+        );
+        assert!(write_accepted.is_empty());
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![(correlation, HandoffResult::Written)]
+        );
+
+        let mut durable = VecDeque::new();
+        resolve_generation_end(&event_tx, 1, 1, &mut durable, &mut write_accepted);
+        assert!(
+            handoff_results(&event_rx).is_empty(),
+            "generation end cannot resolve the already-Written correlation twice"
+        );
     }
 
     #[test]
