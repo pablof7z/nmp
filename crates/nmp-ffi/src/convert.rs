@@ -92,6 +92,16 @@ pub enum FfiError {
     /// (Unit A0/#56) so it holds for every entry point, not only this one;
     /// it surfaces on the `WriteStatus` receipt stream as `Failed` instead.
     EngineClosed,
+    /// `decode_nostr_entity`'s input was not valid bech32, had an
+    /// unrecognized HRP prefix, or (for `nprofile`/`nevent`/`naddr`) had a
+    /// malformed inner TLV payload (#116).
+    InvalidNostrEntity {
+        reason: String,
+    },
+    /// `decode_nostr_entity`'s input decoded to `nsec`/`ncryptsec` -- refused
+    /// rather than decoded, since a secret-key entity is never a valid
+    /// target for a display/mention codec (#116).
+    NostrEntitySecretKeyRejected,
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -123,6 +133,10 @@ impl std::fmt::Display for FfiError {
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
+            Self::InvalidNostrEntity { reason } => write!(f, "invalid nostr entity: {reason}"),
+            Self::NostrEntitySecretKeyRejected => {
+                write!(f, "refusing to decode a secret-key entity")
+            }
         }
     }
 }

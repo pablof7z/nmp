@@ -414,3 +414,38 @@ pub enum FfiReceiptReattachment {
     NotFound,
     RetainedButUnreadable,
 }
+
+/// A decoded public NIP-19 nostr entity (#116, `nmp::NostrEntity` mirror).
+/// Each variant carries EXACTLY the fields NIP-19 defines for that entity --
+/// never force-fit into one shared shape: `npub`/`note` carry no relay
+/// hints at all (the format has none to carry); `nevent`'s `author`/`kind`
+/// are independently optional metadata; `naddr`'s `kind`/`author`/
+/// `identifier` are ALL required by the format, unlike `nevent`'s. There is
+/// deliberately no `nsec`/`ncryptsec` variant here -- see
+/// `convert::decode_nostr_entity`'s doc for why a secret-key entity is
+/// refused rather than decoded.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiNostrEntity {
+    Pubkey {
+        pubkey: String,
+    },
+    Profile {
+        pubkey: String,
+        relays: Vec<String>,
+    },
+    EventId {
+        id: String,
+    },
+    Event {
+        id: String,
+        author: Option<String>,
+        kind: Option<u16>,
+        relays: Vec<String>,
+    },
+    Coordinate {
+        kind: u16,
+        author: String,
+        identifier: String,
+        relays: Vec<String>,
+    },
+}
