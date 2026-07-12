@@ -549,7 +549,7 @@ impl AcceptOutcome {
 /// a MEMBER of a live row's owner set (issue #2, team-lead decision —
 /// ownership is a SET, so an exact `Duplicate` sharing an already-locally-
 /// owned row is a CO-OWNER of it, not a row of its own) — sentinel swapped
-/// for `sig` in place, same id, same EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND
+/// for `sig` in place, same id, same EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND/BY_TAG
 /// entries, zero churn; `intent_id` is a member of some OTHER intent's
 /// `OUTBOX_DISPLACED` stash entry's owner set (chained local supersession
 /// before this intent could sign — the real signature is synced into that
@@ -1001,13 +1001,39 @@ pub trait EventStore {
     /// The app never sees this uncapped answer directly, though: the handle
     /// PROJECTION (`EngineCore::rows_and_evidence_for`, #124 via #139) caps the
     /// app-facing row set to the `limit` most recent by `created_at`
-    /// (`EventId`-tiebroken). That is NIP-01 limit-recency SELECTION — WHICH
+    /// (`EventId`-tiebroken). Persistent stores may use the separate
+    /// [`EventStore::query_newest`] door to pre-bound each root atom before
+    /// that final merged cap. That is NIP-01 limit-recency SELECTION — WHICH
     /// rows survive — not a display ordering: the app receives an unordered,
     /// `EventId`-keyed `RowDelta` stream and sorts it itself, so #9's
     /// display-sort fork stays open and the two compose. This store door
     /// deliberately stays uncapped so reactive recompute and negentropy still
     /// see every match.
     fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError>;
+
+    /// Return at most `limit` current matches in NIP-01 newest-first
+    /// selection order: `created_at` descending, then event id ascending.
+    ///
+    /// This is a distinct door from [`EventStore::query`], whose deliberately
+    /// complete result is required by reactive recompute and negentropy. The
+    /// default implementation preserves backend correctness by sorting the
+    /// complete answer; persistent backends may override it with an ordered
+    /// index scan that stops as soon as `limit` accepted rows have been found.
+    fn query_newest(
+        &self,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        let mut rows = self.query(filter)?;
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
 
     /// Remove `id` from the store — clearing both the id index and, if `id`
     /// is the current replaceable/addressable winner for its address, the

@@ -875,6 +875,60 @@ fn limited_handle_projects_only_the_n_newest_of_m_matches() {
     );
 }
 
+/// Pre-bounding each fanned root atom to N remains exact only if the engine
+/// still applies the authoritative N cap after merging the atoms. Two
+/// authors fan into two root atoms here; the global top-2 must contain one
+/// event from each author, not either atom's local top-2 wholesale.
+#[test]
+fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay0.clone()])
+        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let sink = CapturingSink::default();
+    let _ = core.handle(EngineMsg::Subscribe(
+        LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([
+                a.public_key().to_hex(),
+                b.public_key().to_hex(),
+            ]))),
+            limit: Some(2),
+            ..Filter::default()
+        }),
+        Box::new(sink.clone()),
+    ));
+
+    let a_100 = nmp_resolver::testkit::kind1(&a, "a-100", 100);
+    let a_90 = nmp_resolver::testkit::kind1(&a, "a-90", 90);
+    let b_95 = nmp_resolver::testkit::kind1(&b, "b-95", 95);
+    let b_85 = nmp_resolver::testkit::kind1(&b, "b-85", 85);
+    for event in [a_90, b_85, a_100.clone(), b_95.clone()] {
+        let _ = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            event_frame("s", event),
+        ));
+    }
+
+    let mut current = BTreeSet::new();
+    for batch in sink.0.lock().unwrap().iter() {
+        apply_deltas(&mut current, batch);
+    }
+    assert_eq!(
+        current,
+        BTreeSet::from([a_100.id, b_95.id]),
+        "the final per-subscription cap must select the global top-2 after merging both atoms"
+    );
+}
+
 /// (b) A newer matching event entering the top-N evicts the oldest of the N:
 /// the ingest emits Added(new) + Removed(oldest) and the set stays at N,
 /// proving the reactive DELTA path (not just a fresh snapshot) maintains the
