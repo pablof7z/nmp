@@ -77,29 +77,6 @@ const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
 /// eligibility check that already applies to kind:3/kind:0/kind:10050.
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
-/// Reconstruct a bare `ConcreteFilter`'s `ContextualAtom` identity via the
-/// SAME static default `nmp_grammar::Demand::from_filter` applies
-/// (`authors.is_some() -> AuthorOutboxes`, else `Public`; `access` is
-/// always `Public` today, #106) -- used ONLY at the `get_coverage` test/
-/// diagnostic-convenience boundary, where a caller hands in a bare filter
-/// with no context of its own. Every REAL production coverage read/write
-/// carries its atom's actual `ContextualAtom` through directly; this
-/// reconstruction is exact precisely because it's the identical rule the
-/// atom's own `Demand` would have applied had it gone through the default
-/// path, which every existing caller's atoms do.
-fn default_context_atom(filter: &ConcreteFilter) -> ContextualAtom {
-    let source = if filter.authors.is_some() {
-        SourceAuthority::AuthorOutboxes
-    } else {
-        SourceAuthority::Public
-    };
-    ContextualAtom {
-        filter: filter.clone(),
-        source,
-        access: AccessContext::Public,
-    }
-}
-
 pub use admission::RelayAdmissionPolicy;
 use attribution::AttributionState;
 pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
