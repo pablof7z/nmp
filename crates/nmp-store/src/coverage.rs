@@ -28,23 +28,31 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash, IndexedTagName};
+use nmp_grammar::{fold_byte, ConcreteFilter, ContextualAtom, DescriptorHash, IndexedTagName};
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, Timestamp};
 use serde::{Deserialize, Serialize};
 
-/// The coverage identity of a narrow demand atom: its [`ConcreteFilter`] with
-/// `since`/`until`/`limit` ERASED, canonically hashed via
-/// [`ConcreteFilter::hash`] (ruling §1). Two atoms that differ only in their
-/// time window or result cap hash identically — a floored refetch
-/// (`since = T+1`) must find the SAME row, never a fresh one.
-///
-/// This would belong on `ConcreteFilter` itself (ruling's sketch spells it
-/// `ConcreteFilter::coverage_key()`), but `nmp-grammar` is out of scope for
-/// this build step (A1 touches only `nmp-store`); [`coverage_key`] below is
-/// the free-function equivalent, built entirely from `nmp-grammar`'s already
-///-public surface (`ConcreteFilter`'s fields are public; `.hash()` is
-/// public).
+/// The `CoverageKey` schema version (#106, Fable's refinement of atlas's C
+/// recommendation): folded into every key's HASH (below) and PREFIXED onto
+/// its durable row key (`RedbStore::coverage_row_key`) — two independent
+/// signals, so a legacy row is detectable both by string prefix (cheap,
+/// what `gc`'s legacy-purge pass actually greps for) and would fail to
+/// collide even if a caller somehow bypassed the prefix. v1 was the
+/// pre-#106 scheme: bare `ConcreteFilter`, no context. v2 widens the
+/// identity to a full [`ContextualAtom`] (`source`/`access` folded in) so
+/// two Demands differing only in intended authority never share a coverage
+/// row (bug-class ledger #18's store-side twin of the atom-refcount fix).
+pub const COVERAGE_KEY_VERSION: u8 = 2;
+
+/// The coverage identity of a narrow demand atom: its [`ContextualAtom`]
+/// (selection + source + access, #106) with `since`/`until`/`limit` ERASED
+/// from the selection, canonically hashed and version-tagged (ruling §1,
+/// refined by Fable's C). Two atoms that differ only in their time window
+/// or result cap hash identically — a floored refetch (`since = T+1`) must
+/// find the SAME row, never a fresh one. Two atoms that differ in
+/// `SourceAuthority`/`AccessContext` must NEVER share a row, even with an
+/// otherwise-identical selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoverageKey(DescriptorHash);
 
@@ -72,9 +80,16 @@ pub(crate) fn window_erase(filter: &ConcreteFilter) -> ConcreteFilter {
     }
 }
 
-/// The coverage key for `filter`'s window-erased shape (ruling §1).
-pub fn coverage_key(filter: &ConcreteFilter) -> CoverageKey {
-    CoverageKey(window_erase(filter).hash())
+/// The coverage key for `atom`'s window-erased shape UNDER its declared
+/// `source`/`access` (ruling §1, #106-widened): version-tagged via
+/// [`COVERAGE_KEY_VERSION`].
+pub fn coverage_key(atom: &ContextualAtom) -> CoverageKey {
+    let windowed = ContextualAtom {
+        filter: window_erase(&atom.filter),
+        source: atom.source,
+        access: atom.access,
+    };
+    CoverageKey(fold_byte(windowed.hash(), COVERAGE_KEY_VERSION))
 }
 
 /// A proven, retained interval `[from, through]` (ruling §1's `CoverageRow`,
@@ -199,6 +214,16 @@ pub struct GcReport {
     pub coverage_rows_shrunk: usize,
     /// Coverage rows deleted because the shrink emptied their interval.
     pub coverage_rows_deleted: usize,
+    /// Legacy-schema coverage rows purged outright (#106, Fable's C
+    /// refinement): a row whose durable key predates the current
+    /// `CoverageKey` schema version is permanently orphaned (nothing will
+    /// ever compute a matching key for it again), so `gc` deletes it
+    /// unconditionally rather than let it linger. Disjoint from
+    /// `coverage_rows_deleted` (which is specifically shrink-emptied
+    /// current-schema rows) so a test/operator can distinguish "ordinary
+    /// GC deleted this" from "this was a leftover from before a schema
+    /// migration".
+    pub legacy_coverage_rows_purged: usize,
 }
 
 /// A window-erased `ConcreteFilter` shape, JSON-encodable for durable
@@ -291,18 +316,30 @@ mod tests {
         }
     }
 
+    /// Wrap a filter into a fixed-context (`AuthorOutboxes`/`Public`) demand
+    /// atom -- these tests exercise the SELECTION axis of `coverage_key`;
+    /// the context-anti-alias property has its own dedicated falsifier
+    /// below.
+    fn atom(filter: ConcreteFilter) -> ContextualAtom {
+        ContextualAtom {
+            filter,
+            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            access: nmp_grammar::AccessContext::Public,
+        }
+    }
+
     #[test]
     fn coverage_key_ignores_since_until_limit() {
         let a = cf(&[1], &["aa"], Some(100), Some(50));
         let b = cf(&[1], &["aa"], Some(999), None);
-        assert_eq!(coverage_key(&a), coverage_key(&b));
+        assert_eq!(coverage_key(&atom(a)), coverage_key(&atom(b)));
     }
 
     #[test]
     fn coverage_key_differs_for_different_shapes() {
         let a = cf(&[1], &["aa"], None, None);
         let b = cf(&[1], &["bb"], None, None);
-        assert_ne!(coverage_key(&a), coverage_key(&b));
+        assert_ne!(coverage_key(&atom(a)), coverage_key(&atom(b)));
     }
 
     /// `CoverageKey` is the DURABLE redb watermark key (ledger #7): a forged
@@ -312,7 +349,7 @@ mod tests {
     #[test]
     fn coverage_key_is_a_256_bit_digest_not_64() {
         let a = cf(&[1], &["aa"], None, None);
-        assert_eq!(coverage_key(&a).as_bytes().len(), 32);
+        assert_eq!(coverage_key(&atom(a)).as_bytes().len(), 32);
     }
 
     /// Same filter hashed twice (simulating a re-derive across two separate
@@ -321,8 +358,28 @@ mod tests {
     /// `record_coverage` to ever find the SAME durable row twice.
     #[test]
     fn coverage_key_is_stable_across_repeated_calls() {
-        let a = cf(&[1], &["aa", "bb"], Some(10), Some(5));
+        let a = atom(cf(&[1], &["aa", "bb"], Some(10), Some(5)));
         assert_eq!(coverage_key(&a).as_bytes(), coverage_key(&a).as_bytes());
+    }
+
+    /// #106's store-side anti-alias (Fable's C refinement, ledger #18's
+    /// twin of the resolver-side `ContextualAtom` fix): the IDENTICAL
+    /// selection under different `SourceAuthority` must never share a
+    /// coverage row.
+    #[test]
+    fn coverage_key_differs_for_different_source_authority() {
+        let filter = cf(&[1], &["aa"], None, None);
+        let outbox = ContextualAtom {
+            filter: filter.clone(),
+            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            access: nmp_grammar::AccessContext::Public,
+        };
+        let public = ContextualAtom {
+            filter,
+            source: nmp_grammar::SourceAuthority::Public,
+            access: nmp_grammar::AccessContext::Public,
+        };
+        assert_ne!(coverage_key(&outbox), coverage_key(&public));
     }
 
     #[test]

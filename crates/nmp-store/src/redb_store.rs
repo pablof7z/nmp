@@ -22,7 +22,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::filter::MatchEventOptions;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, JsonUtil, Kind, PublicKey, RelayUrl, Timestamp};
@@ -1919,6 +1919,14 @@ impl RedbStore {
         self.examined_rows.load(Ordering::Relaxed)
     }
 
+    /// The current schema-version row-key PREFIX (#106, Fable's C
+    /// refinement): distinguishes a v2 (context-aware `ContextualAtom`)
+    /// row from a legacy v1 (bare `ConcreteFilter`, pre-#106) row by a
+    /// cheap string check, independent of `CoverageKey`'s own hash-level
+    /// version tag (`nmp-store::coverage::COVERAGE_KEY_VERSION`) -- `gc`'s
+    /// legacy-purge pass greps for the ABSENCE of this exact prefix.
+    const COVERAGE_ROW_KEY_PREFIX: &'static str = "v2:";
+
     fn coverage_row_key(key: CoverageKey, relay: &RelayUrl) -> String {
         use std::fmt::Write as _;
 
@@ -1930,7 +1938,7 @@ impl RedbStore {
         for byte in key.as_bytes() {
             let _ = write!(hex, "{byte:02x}");
         }
-        format!("{hex}:{}", relay.as_str())
+        format!("{}{hex}:{}", Self::COVERAGE_ROW_KEY_PREFIX, relay.as_str())
     }
 
     /// Decode one `EVENTS` row's JSON value into a [`StoredEvent`] —
@@ -2484,14 +2492,9 @@ impl EventStore for RedbStore {
         ))
     }
 
-    fn record_coverage(
-        &mut self,
-        filter: &ConcreteFilter,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
-    ) {
-        let key = compute_coverage_key(filter);
-        let shape = window_erase(filter);
+    fn record_coverage(&mut self, atom: &ContextualAtom, relay: &RelayUrl, proven: CoverageInterval) {
+        let key = compute_coverage_key(atom);
+        let shape = window_erase(&atom.filter);
         let row_key = Self::coverage_row_key(key, relay);
 
         let write_txn = self.db.begin_write().expect("redb: begin_write");
@@ -2597,8 +2600,25 @@ impl EventStore for RedbStore {
             // and the event delete commit atomically together (ruling §5:
             // never leave a watermark claiming coverage of evicted data).
             let mut row_updates: Vec<(String, Option<CoverageRowRecord>)> = Vec::new();
+            let mut legacy_row_keys: Vec<String> = Vec::new();
             for entry in coverage.iter().expect("redb: iter coverage") {
                 let (row_key, value) = entry.expect("redb: read coverage entry");
+
+                // Legacy-row purge (#106, Fable's C refinement): a row
+                // whose key predates the current schema version (no
+                // `COVERAGE_ROW_KEY_PREFIX`) is permanently orphaned --
+                // nothing will ever compute a matching key for it again
+                // (v2 keys fold context + a version tag into the hash
+                // itself, so no v1 key can ever collide forward into v2).
+                // Delete it outright rather than let it linger forever,
+                // tracked separately from `report.coverage_rows_deleted`
+                // (which is specifically shrink-emptied current-schema
+                // rows).
+                if !row_key.value().starts_with(Self::COVERAGE_ROW_KEY_PREFIX) {
+                    legacy_row_keys.push(row_key.value().to_string());
+                    continue;
+                }
+
                 let mut record: CoverageRowRecord =
                     serde_json::from_str(value.value()).expect("redb: decode coverage row");
                 let shape: ConcreteFilter = (&record.shape).into();
@@ -2654,6 +2674,13 @@ impl EventStore for RedbStore {
                         report.coverage_rows_shrunk += 1;
                     }
                 }
+            }
+
+            for row_key in legacy_row_keys {
+                coverage
+                    .remove(row_key.as_str())
+                    .expect("redb: remove legacy coverage row");
+                report.legacy_coverage_rows_purged += 1;
             }
         }
         write_txn.commit().expect("redb: commit gc");
@@ -5228,11 +5255,21 @@ mod tests {
             authors: Some(std::collections::BTreeSet::from(["aa".to_string()])),
             ..ConcreteFilter::default()
         };
-        let key = compute_coverage_key(&filter);
+        let atom = ContextualAtom {
+            filter,
+            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            access: nmp_grammar::AccessContext::Public,
+        };
+        let key = compute_coverage_key(&atom);
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let row_key = RedbStore::coverage_row_key(key, &relay);
 
-        let hex_part = row_key
+        // Row key shape is now `<version-prefix><hex>:<relay>` (#106) --
+        // skip the version prefix before taking the hex segment.
+        let without_prefix = row_key
+            .strip_prefix(RedbStore::COVERAGE_ROW_KEY_PREFIX)
+            .expect("row key must carry the current schema-version prefix");
+        let hex_part = without_prefix
             .split(':')
             .next()
             .expect("row key always has a hex-prefix:relay-url shape");
@@ -5241,6 +5278,73 @@ mod tests {
             64,
             "expected 64 hex chars (32 bytes) in the durable key, got {} in {row_key:?}",
             hex_part.len()
+        );
+    }
+
+    /// #106's legacy-purge falsifier: a coverage row written under the OLD
+    /// (pre-#106, unversioned) key format is silently unreachable via
+    /// `get_coverage` (its key never matches anything `record_coverage`
+    /// computes anymore) and `gc` deletes it outright, tracked via
+    /// `GcReport::legacy_coverage_rows_purged` (disjoint from the ordinary
+    /// shrink/delete counters).
+    #[test]
+    fn gc_purges_legacy_unversioned_coverage_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.redb");
+        let mut store = RedbStore::open(&db_path).unwrap();
+        let relay = RelayUrl::parse("wss://relay.example").unwrap();
+
+        // Write a legacy-shaped row directly (bypassing `record_coverage`,
+        // which always writes under the CURRENT version prefix) -- the
+        // exact shape a pre-#106 row would have on disk.
+        let legacy_shape = ConcreteFilter {
+            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            authors: Some(std::collections::BTreeSet::from(["aa".to_string()])),
+            ..ConcreteFilter::default()
+        };
+        let legacy_key = compute_coverage_key(&ContextualAtom {
+            filter: legacy_shape.clone(),
+            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            access: nmp_grammar::AccessContext::Public,
+        });
+        let mut legacy_hex = String::new();
+        {
+            use std::fmt::Write as _;
+            for byte in legacy_key.as_bytes() {
+                let _ = write!(legacy_hex, "{byte:02x}");
+            }
+        }
+        let legacy_row_key = format!("{legacy_hex}:{}", relay.as_str());
+        let legacy_record = CoverageRowRecord {
+            shape: ShapeRecord::from(&legacy_shape),
+            from: 0,
+            through: 100,
+        };
+        {
+            let write_txn = store.db.begin_write().unwrap();
+            {
+                let mut coverage = write_txn.open_table(COVERAGE).unwrap();
+                coverage
+                    .insert(
+                        legacy_row_key.as_str(),
+                        serde_json::to_string(&legacy_record).unwrap().as_str(),
+                    )
+                    .unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+
+        let report = store.gc(&ClaimSet::new(Vec::new()));
+        assert_eq!(
+            report.legacy_coverage_rows_purged, 1,
+            "the unversioned legacy row must be purged"
+        );
+
+        let read_txn = store.db.begin_read().unwrap();
+        let coverage = read_txn.open_table(COVERAGE).unwrap();
+        assert!(
+            coverage.get(legacy_row_key.as_str()).unwrap().is_none(),
+            "the legacy row must be gone after gc"
         );
     }
 

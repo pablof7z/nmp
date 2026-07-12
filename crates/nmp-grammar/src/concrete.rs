@@ -214,15 +214,34 @@ pub fn fold_context(
     source: SourceAuthority,
     access: AccessContext,
 ) -> DescriptorHash {
-    let mut bytes = Vec::with_capacity(34);
+    let tagged = fold_byte(
+        base,
+        match source {
+            SourceAuthority::AuthorOutboxes => 0,
+            SourceAuthority::Public => 1,
+        },
+    );
+    fold_byte(
+        tagged,
+        match access {
+            AccessContext::Public => 0,
+        },
+    )
+}
+
+/// Fold one arbitrary tag byte onto an existing hash, producing a NEW,
+/// still framing-unambiguous digest (fixed-width, no delimiter needed).
+/// [`fold_context`] is built from two calls to this; exposed publicly so a
+/// caller needing a differently-shaped tag -- e.g. `nmp-store`'s durable
+/// `CoverageKey` schema VERSION tag (Fable's #106 refinement of atlas's C
+/// recommendation: a version tag inside the hashed encoding, on top of the
+/// context fold, so a future schema change is distinguishable at the hash
+/// level too, not just via an outer key prefix) -- can derive one without
+/// depending on `blake3` directly itself.
+pub fn fold_byte(base: DescriptorHash, tag: u8) -> DescriptorHash {
+    let mut bytes = Vec::with_capacity(33);
     bytes.extend_from_slice(base.as_bytes());
-    bytes.push(match source {
-        SourceAuthority::AuthorOutboxes => 0,
-        SourceAuthority::Public => 1,
-    });
-    bytes.push(match access {
-        AccessContext::Public => 0,
-    });
+    bytes.push(tag);
     DescriptorHash(*blake3::hash(&bytes).as_bytes())
 }
 
