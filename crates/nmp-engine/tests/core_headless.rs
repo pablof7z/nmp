@@ -793,6 +793,287 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
     );
 }
 
+// ---- #124: a demand's NIP-01 `limit:N` projects only the N newest rows ---
+
+/// A literal-author query carrying an explicit NIP-01 `limit:N`.
+fn limited_literal_query(kinds: &[u16], author_hex: &str, limit: usize) -> LiveQuery {
+    LiveQuery::from_filter(Filter {
+        kinds: Some(kinds.iter().copied().collect()),
+        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+        limit: Some(limit),
+        ..Filter::default()
+    })
+}
+
+/// Fold one delivered `RowDelta` batch into a running "current row set" of
+/// event ids, exactly as an app consuming the reactive stream would.
+fn apply_deltas(current: &mut BTreeSet<nostr::EventId>, batch: &[RowDelta]) {
+    for delta in batch {
+        match delta {
+            RowDelta::Added(row) => {
+                current.insert(row.event.id);
+            }
+            RowDelta::Removed(id) => {
+                current.remove(id);
+            }
+            RowDelta::SourcesGrew { .. } => {}
+        }
+    }
+}
+
+/// (a) With M > N matching cached events, the handle projects EXACTLY the N
+/// newest by `created_at` DESC (id ASC tie-break) -- never every cached
+/// match. Feeds five kind:1 events (created_at 10..50) one at a time into a
+/// `limit:3` handle and asserts the folded current set is precisely the three
+/// newest, and that it never grew past N at any point along the way.
+#[test]
+fn limited_handle_projects_only_the_n_newest_of_m_matches() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let sink = CapturingSink::default();
+    let _ = core.handle(EngineMsg::Subscribe(
+        limited_literal_query(&[1], &a.public_key().to_hex(), 3),
+        Box::new(sink.clone()),
+    ));
+
+    let mut ids_by_time: Vec<(u64, nostr::EventId)> = Vec::new();
+    for created_at in [10u64, 20, 30, 40, 50] {
+        let event = nmp_resolver::testkit::kind1(&a, &format!("note @{created_at}"), created_at);
+        ids_by_time.push((created_at, event.id));
+        let _ = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            event_frame("s", event),
+        ));
+    }
+
+    // Replay the delivered stream; assert it never exceeds N mid-flight.
+    let mut current = BTreeSet::new();
+    let mut high_water = 0usize;
+    for batch in sink.0.lock().unwrap().iter() {
+        apply_deltas(&mut current, batch);
+        high_water = high_water.max(current.len());
+    }
+    assert!(
+        high_water <= 3,
+        "a limit:3 handle must never accumulate more than 3 rows (peak was {high_water})"
+    );
+
+    let expected: BTreeSet<nostr::EventId> = ids_by_time
+        .iter()
+        .rev()
+        .take(3)
+        .map(|(_, id)| *id)
+        .collect();
+    assert_eq!(
+        current, expected,
+        "the projected set must be exactly the 3 newest (created_at 30/40/50), not all 5"
+    );
+}
+
+/// (b) A newer matching event entering the top-N evicts the oldest of the N:
+/// the ingest emits Added(new) + Removed(oldest) and the set stays at N,
+/// proving the reactive DELTA path (not just a fresh snapshot) maintains the
+/// window.
+#[test]
+fn newer_event_evicts_oldest_of_top_n_via_delta() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let sink = CapturingSink::default();
+    let _ = core.handle(EngineMsg::Subscribe(
+        limited_literal_query(&[1], &a.public_key().to_hex(), 2),
+        Box::new(sink.clone()),
+    ));
+
+    let oldest = nmp_resolver::testkit::kind1(&a, "oldest", 100);
+    let middle = nmp_resolver::testkit::kind1(&a, "middle", 200);
+    for event in [oldest.clone(), middle.clone()] {
+        let _ = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            event_frame("s", event),
+        ));
+    }
+
+    // The top-2 is now {oldest, middle}. A strictly newer event arrives.
+    let newest = nmp_resolver::testkit::kind1(&a, "newest", 300);
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame("s", newest.clone()),
+    ));
+    let batch = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(_, rows, _) => Some(rows.clone()),
+            _ => None,
+        })
+        .expect("the newer event must emit a row delta");
+
+    assert!(
+        batch
+            .iter()
+            .any(|d| matches!(d, RowDelta::Added(row) if row.event.id == newest.id)),
+        "the newer event must be Added: {batch:?}"
+    );
+    assert!(
+        batch
+            .iter()
+            .any(|d| matches!(d, RowDelta::Removed(id) if *id == oldest.id)),
+        "the evicted oldest of the top-N must be Removed: {batch:?}"
+    );
+    assert!(
+        !batch.iter().any(|d| d.id() == middle.id),
+        "the surviving middle row must not churn (no delta for it): {batch:?}"
+    );
+
+    let mut current = BTreeSet::new();
+    for b in sink.0.lock().unwrap().iter() {
+        apply_deltas(&mut current, b);
+    }
+    assert_eq!(
+        current,
+        BTreeSet::from([middle.id, newest.id]),
+        "the window must hold exactly the 2 newest after the churn"
+    );
+}
+
+/// (c) Retracting a member of the current top-N pulls the next-newest
+/// (previously excluded) match IN: the retraction emits Removed(retracted) +
+/// Added(next-newest), and the set stays at N.
+#[test]
+fn retracting_top_n_member_pulls_in_next_newest() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let sink = CapturingSink::default();
+    let _ = core.handle(EngineMsg::Subscribe(
+        limited_literal_query(&[1], &a.public_key().to_hex(), 2),
+        Box::new(sink.clone()),
+    ));
+
+    // Three matches; the top-2 is {second, third}, `first` is excluded.
+    let first = nmp_resolver::testkit::kind1(&a, "first", 100);
+    let second = nmp_resolver::testkit::kind1(&a, "second", 200);
+    let third = nmp_resolver::testkit::kind1(&a, "third", 300);
+    for event in [first.clone(), second.clone(), third.clone()] {
+        let _ = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            event_frame("s", event),
+        ));
+    }
+    {
+        let mut current = BTreeSet::new();
+        for b in sink.0.lock().unwrap().iter() {
+            apply_deltas(&mut current, b);
+        }
+        assert_eq!(
+            current,
+            BTreeSet::from([second.id, third.id]),
+            "precondition: the window holds the 2 newest, excluding `first`"
+        );
+    }
+
+    // Retract `third` (a current top-N member) via a NIP-09 kind:5 delete.
+    let deletion = nmp_resolver::testkit::deletion(&a, &[third.id], 400);
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame("s", deletion),
+    ));
+    let batch = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(_, rows, _) => Some(rows.clone()),
+            _ => None,
+        })
+        .expect("retracting a held row must emit a row delta");
+    assert!(
+        batch
+            .iter()
+            .any(|d| matches!(d, RowDelta::Removed(id) if *id == third.id)),
+        "the retracted top-N member must be Removed: {batch:?}"
+    );
+    assert!(
+        batch
+            .iter()
+            .any(|d| matches!(d, RowDelta::Added(row) if row.event.id == first.id)),
+        "the next-newest previously-excluded match must be pulled IN as Added: {batch:?}"
+    );
+
+    let mut current = BTreeSet::new();
+    for b in sink.0.lock().unwrap().iter() {
+        apply_deltas(&mut current, b);
+    }
+    assert_eq!(
+        current,
+        BTreeSet::from([first.id, second.id]),
+        "after retraction the window refills to the next 2 newest"
+    );
+}
+
+/// (d) `limit: None` is unchanged -- every matching row is projected, with no
+/// truncation.
+#[test]
+fn unlimited_handle_projects_every_match() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let sink = CapturingSink::default();
+    // `literal_query` carries no limit (limit: None).
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(sink.clone()),
+    ));
+
+    let mut all_ids = BTreeSet::new();
+    for created_at in [10u64, 20, 30, 40, 50] {
+        let event = nmp_resolver::testkit::kind1(&a, &format!("note @{created_at}"), created_at);
+        all_ids.insert(event.id);
+        let _ = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            event_frame("s", event),
+        ));
+    }
+
+    let mut current = BTreeSet::new();
+    for b in sink.0.lock().unwrap().iter() {
+        apply_deltas(&mut current, b);
+    }
+    assert_eq!(
+        current, all_ids,
+        "with no limit, every one of the 5 matching rows must be projected"
+    );
+}
+
 // ---- test 2 analog: EOSE records a watermark; a bare EVENT never does ---
 
 #[test]
