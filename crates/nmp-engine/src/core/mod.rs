@@ -833,7 +833,11 @@ impl<S: EventStore> EngineCore<S> {
         if receipt.intent_id.is_some() {
             for attempt in attempts {
                 let status = match attempt.outcome {
-                    AttemptOutcome::Started => WriteStatus::Sent(attempt.relay),
+                    // Started is only the crash-safe pre-wire fact. #93
+                    // deliberately moved Sent to the later transport
+                    // Written result, so replaying Started as Sent would
+                    // recreate the exact false claim this seam removes.
+                    AttemptOutcome::Started => continue,
                     AttemptOutcome::Acked => WriteStatus::Acked(attempt.relay),
                     AttemptOutcome::Rejected(reason) => {
                         WriteStatus::Rejected(attempt.relay, reason)

@@ -2384,6 +2384,20 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
         })
         .expect("a PublishEvent effect must have been emitted for this relay");
 
+    let reattached = CapturingReceiptSink::default();
+    assert!(core
+        .reattach_receipt(id, Box::new(reattached.clone()))
+        .is_attached());
+    assert!(
+        !reattached
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|status| matches!(status, WriteStatus::Sent(_))),
+        "a persisted Started row is pre-wire and must not replay as Sent"
+    );
+
     let handoff_effects = core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
     assert!(
         handoff_effects.iter().any(|e| matches!(
@@ -2393,6 +2407,12 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
         "a Written handoff must emit exactly one Sent, got {handoff_effects:?}"
     );
     assert!(sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+    assert!(reattached
         .0
         .lock()
         .unwrap()

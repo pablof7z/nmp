@@ -151,12 +151,15 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         first.0.lock().unwrap().len(),
         second.0.lock().unwrap().len()
     );
-    assert!(first
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+    assert!(
+        !first
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)),
+        "a recovered Started attempt predates transport Written and cannot replay as Sent"
+    );
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
