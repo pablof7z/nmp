@@ -23,6 +23,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
@@ -199,6 +200,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
 
     handle.add_signer(LocalKeySigner::new(a.clone()));
@@ -351,6 +353,7 @@ fn no_deadlines_blocks_indefinitely() {
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
+        RelayAdmissionPolicy::default(),
     );
 
     // Let the engine thread settle onto its idle `recv()` before sampling.
@@ -570,6 +573,7 @@ fn neg_liveness_deadline_does_not_busy_spin() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
 
     let (_qh_a, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
@@ -676,6 +680,7 @@ async fn expiring_event_retracts_with_no_further_input() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
 
     let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
@@ -740,6 +745,7 @@ async fn earlier_expiration_from_ingest_rearms() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
 
     let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
@@ -853,6 +859,7 @@ fn boot_catches_up_past_due_expiry() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
 
     let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
@@ -947,6 +954,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
+        RelayAdmissionPolicy::default(),
     );
     handle.set_active_account(Some(keys.public_key()));
     let tracked = handle
@@ -1053,6 +1061,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
+        RelayAdmissionPolicy::default(),
     );
     // This is literally the first command sent to the new engine thread.
     let statuses = expect_attached(handle.reattach_receipt(receipt));

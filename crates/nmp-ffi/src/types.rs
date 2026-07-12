@@ -447,6 +447,17 @@ pub struct FfiDiagnosticsSnapshot {
     pub relays: Vec<FfiRelayDiagnostics>,
     pub uncovered_author_count: u32,
     pub dropped_merge_rules: Vec<String>,
+    /// DISCOVERED relays rejected by the SSRF admission policy before they
+    /// could become routable lanes (issue #121): a network-sourced kind:10002
+    /// naming a loopback/RFC-1918/link-local/`.onion` host the operator never
+    /// opted in. Counted PER LANE (write + read parse of one event), so a
+    /// single hostile event naming `N` rejected hosts bumps this by up to
+    /// `2N` — a rejection-event tally, not a distinct-host count.
+    pub discovered_private_relays_rejected: u64,
+    /// Relay dials the transport pool refused because the configured
+    /// `max_relays` ceiling was already reached (issue #121, worker-exhaustion
+    /// defense). Always `0` when no cap is configured.
+    pub relays_rejected_over_cap: u64,
 }
 
 /// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is

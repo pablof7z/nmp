@@ -341,6 +341,21 @@ impl Pool {
         self.inner.lock().ok().and_then(|g| g.health_for(h))
     }
 
+    /// Monotonic count of [`Self::ensure_open`] calls this pool refused
+    /// because opening the relay would have exceeded [`PoolConfig::max_relays`]
+    /// live workers (issue #121). Always `0` unless an operator configured a
+    /// non-zero cap. The engine folds this into its diagnostics rejection
+    /// counter — see `nmp-engine`'s relay admission. A poisoned lock reports
+    /// `0` (nothing to report through a broken pool), matching every other
+    /// read on this facade.
+    #[must_use]
+    pub fn admission_rejections(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|g| g.relays_rejected_over_cap())
+            .unwrap_or(0)
+    }
+
     /// Tear down every worker. Subsequent [`Self::ensure_open`] calls
     /// return a sentinel dead handle; subsequent `send` calls are
     /// structural no-ops. Joins the translator thread before returning.

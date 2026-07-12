@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, RowsMsg};
@@ -136,7 +137,13 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     // observed, which is all this test needs (see the module doc).
     let dir = FixtureDirectory::new();
 
-    let (engine_thread, handle) = EngineThread::spawn(store, dir, 10, Default::default());
+    let (engine_thread, handle) = EngineThread::spawn(
+        store,
+        dir,
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    );
 
     let pk_a = handle
         .add_signer(LocalKeySigner::new(a.clone()))
@@ -251,7 +258,13 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
     let a = Keys::generate();
     let store = MemoryStore::new();
     let dir = FixtureDirectory::new();
-    let (engine_thread, handle) = EngineThread::spawn(store, dir, 10, Default::default());
+    let (engine_thread, handle) = EngineThread::spawn(
+        store,
+        dir,
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    );
 
     // Register a signer but NEVER activate it.
     handle.add_signer(LocalKeySigner::new(a.clone()));
@@ -288,6 +301,7 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
         FixtureDirectory::new(),
         10,
         Default::default(),
+        RelayAdmissionPolicy::default(),
     );
     handle.add_signer(LocalKeySigner::new(a.clone()));
     handle.add_signer(LocalKeySigner::new(b.clone()));
@@ -324,6 +338,7 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
         FixtureDirectory::new(),
         10,
         Default::default(),
+        RelayAdmissionPolicy::default(),
     );
 
     // Pin the active identity before its capability exists.
@@ -368,6 +383,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         FixtureDirectory::new(),
         10,
         Default::default(),
+        RelayAdmissionPolicy::default(),
     );
     handle.add_signer(LocalKeySigner::new(a.clone()));
     handle.set_active_account(Some(b.public_key()));

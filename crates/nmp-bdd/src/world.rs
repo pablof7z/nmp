@@ -527,6 +527,18 @@ impl NmpWorld {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),
                 ..PoolConfig::default()
             },
+            // The BDD harness injects its (local, in-process) relays straight
+            // into the directory via `ingest_write_relays`, so they never pass
+            // through the engine's discovered-relay admission gate (issue
+            // #121). Opt those local hosts in anyway, so any scenario that DOES
+            // exercise kind:10002 discovery of a scripted local relay is
+            // admitted rather than silently dropped.
+            nmp_engine::core::RelayAdmissionPolicy::new([
+                "127.0.0.1".to_string(),
+                "localhost".to_string(),
+                "[::1]".to_string(),
+                "::1".to_string(),
+            ]),
         );
 
         if let Some(active) = self.active_person.clone() {

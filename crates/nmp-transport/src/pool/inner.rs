@@ -74,6 +74,14 @@ pub(super) struct PoolInner {
     /// relay must reuse this cache, not re-run the schnorr check. See
     /// `verify::gate`'s doc for the accept/reject/pass-through rules.
     verified_events: HashMap<EventId, Signature>,
+    /// Count of [`Self::ensure_open`] calls refused because opening the relay
+    /// would have taken the pool past `config.max_relays` LIVE workers (issue
+    /// #121, the worker-exhaustion half). Monotonic; read (never reset) by
+    /// [`super::Pool::admission_rejections`] so the engine can fold it into
+    /// its diagnostics rejection counter. `config.max_relays == 0` disables
+    /// the cap entirely, so this only ever moves when an operator configured
+    /// a real ceiling.
+    relays_rejected_over_cap: u64,
 }
 
 impl PoolInner {
@@ -89,6 +97,7 @@ impl PoolInner {
             translator: None,
             shutdown: false,
             verified_events: HashMap::new(),
+            relays_rejected_over_cap: 0,
         }));
         let translator = spawn_translator(Arc::clone(&inner), worker_event_rx);
         if let Ok(mut guard) = inner.lock() {
@@ -107,15 +116,57 @@ impl PoolInner {
         if let Some(&slot_id) = self.url_to_slot.get(url) {
             let state = &self.slots[slot_id as usize];
             if state.worker.is_some() {
-                // Idempotent: a live slot for this URL already exists.
+                // Idempotent: a live slot for this URL already exists — never
+                // counted against the cap (it is already one of the live
+                // relays the cap bounds).
                 return RelayHandle {
                     slot: slot_id,
                     generation: state.generation,
                 };
             }
+            // Reopening a previously-closed slot makes a worker LIVE again,
+            // so it is subject to the same live-relay ceiling as a brand-new
+            // relay.
+            if self.would_exceed_relay_cap() {
+                self.relays_rejected_over_cap += 1;
+                return RelayHandle {
+                    slot: u32::MAX,
+                    generation: 0,
+                };
+            }
             return self.reopen(slot_id, url.clone());
         }
+        if self.would_exceed_relay_cap() {
+            self.relays_rejected_over_cap += 1;
+            return RelayHandle {
+                slot: u32::MAX,
+                generation: 0,
+            };
+        }
         self.open_new(url.clone())
+    }
+
+    /// The relay-count admission cap (issue #121): with a configured
+    /// `max_relays > 0`, refuse to bring a NEW live worker up once
+    /// `max_relays` workers are already live. `max_relays == 0` (the
+    /// [`PoolConfig::default`] value every existing call site uses) disables
+    /// the cap, so this is a pure no-op unless an operator sets a real
+    /// ceiling — the worker-exhaustion backstop stays dormant by default.
+    fn would_exceed_relay_cap(&self) -> bool {
+        let cap = self.config.max_relays;
+        cap != 0 && self.live_worker_count() >= cap
+    }
+
+    /// Distinct relays currently backed by a live worker (a slot whose
+    /// `worker` has not been taken by `close`/`shutdown`).
+    fn live_worker_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.worker.is_some()).count()
+    }
+
+    /// Read the monotonic count of relay-cap rejections (issue #121). See
+    /// [`Self::relays_rejected_over_cap`].
+    pub(super) fn relays_rejected_over_cap(&self) -> u64 {
+        self.relays_rejected_over_cap
     }
 
     fn open_new(&mut self, url: RelayUrl) -> RelayHandle {
@@ -514,6 +565,90 @@ mod tests {
         let h1 = guard.ensure_open(&url);
         let h2 = guard.ensure_open(&url);
         assert_eq!(h1, h2, "a live slot's ensure_open must be idempotent");
+    }
+
+    /// The relay-count admission cap (issue #121, worker-exhaustion half):
+    /// with `max_relays: 2`, the pool opens two distinct relays but REFUSES
+    /// the third — returning the stale/dead sentinel (never a live slot) and
+    /// bumping the observable rejection counter — while an already-open relay
+    /// stays idempotently openable. A hostile (validly-signed) kind:10002
+    /// listing thousands of relays can never spawn thousands of workers.
+    #[test]
+    fn relay_count_cap_refuses_relays_beyond_max_and_counts_the_rejection() {
+        let (tx, _rx) = mpsc::channel();
+        let inner = PoolInner::new(
+            PoolConfig {
+                max_relays: 2,
+                ..PoolConfig::default()
+            },
+            Arc::new(Collector(tx)),
+        );
+        let mut guard = inner.lock().unwrap();
+
+        let a = RelayUrl::parse("wss://relay-a.example").unwrap();
+        let b = RelayUrl::parse("wss://relay-b.example").unwrap();
+        let c = RelayUrl::parse("wss://relay-c.example").unwrap();
+
+        let ha = guard.ensure_open(&a);
+        let hb = guard.ensure_open(&b);
+        assert_ne!(ha.slot, u32::MAX, "first relay must open");
+        assert_ne!(hb.slot, u32::MAX, "second relay must open");
+        assert_eq!(guard.relays_rejected_over_cap(), 0, "no rejection yet");
+
+        // The third DISTINCT relay is over the cap: refused with the dead
+        // sentinel, no slot created, counter bumped.
+        let hc = guard.ensure_open(&c);
+        assert_eq!(
+            hc.slot,
+            u32::MAX,
+            "third relay must be refused past the cap"
+        );
+        assert_eq!(guard.relays_rejected_over_cap(), 1);
+        assert!(
+            guard.command_tx_for(hc).is_none(),
+            "a cap-refused handle must be a structural no-op, exactly like a stale handle"
+        );
+
+        // Re-opening an ALREADY-live relay is idempotent, never a rejection.
+        let ha_again = guard.ensure_open(&a);
+        assert_eq!(
+            ha, ha_again,
+            "an already-open relay stays idempotently open"
+        );
+        assert_eq!(
+            guard.relays_rejected_over_cap(),
+            1,
+            "idempotent reopen is not a rejection"
+        );
+
+        // Closing one relay frees a slot in the live budget; the next new
+        // relay is admitted again.
+        assert!(guard.close(hb));
+        let hc2 = guard.ensure_open(&c);
+        assert_ne!(hc2.slot, u32::MAX, "a freed slot lets a new relay in again");
+        assert_eq!(
+            guard.relays_rejected_over_cap(),
+            1,
+            "the successful open is not a rejection"
+        );
+    }
+
+    /// The default (`max_relays: 0`) must impose NO ceiling — every existing
+    /// call site constructs the pool with `PoolConfig::default()`, so the
+    /// cap must stay dormant until an operator opts in.
+    #[test]
+    fn zero_max_relays_imposes_no_cap() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        for i in 0..8 {
+            let url = RelayUrl::parse(&format!("wss://relay{i}.example")).unwrap();
+            assert_ne!(
+                guard.ensure_open(&url).slot,
+                u32::MAX,
+                "max_relays: 0 must never refuse a relay"
+            );
+        }
+        assert_eq!(guard.relays_rejected_over_cap(), 0);
     }
 
     #[test]

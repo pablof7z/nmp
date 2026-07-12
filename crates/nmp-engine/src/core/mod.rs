@@ -25,6 +25,7 @@
 //! in [`evidence`]. Both are engine-owned — the store (`nmp-store`) only
 //! stores whatever interval it is handed.
 
+mod admission;
 mod attribution;
 mod diagnostics;
 mod evidence;
@@ -76,6 +77,7 @@ const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
 /// eligibility check that already applies to kind:3/kind:0/kind:10050.
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
+pub use admission::RelayAdmissionPolicy;
 use attribution::AttributionState;
 pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
@@ -478,6 +480,23 @@ pub struct EngineCore<S: EventStore> {
     /// removed the instant its one-and-only `HandoffResult` arrives — see
     /// `Self::on_event_handoff`.
     attempt_correlations: HashMap<AttemptCorrelation, AttemptCorrelationTarget>,
+    /// The provenance-aware relay admission policy for DISCOVERED relays
+    /// (issue #121). Applied in [`Self::ingest_relay_list_winner`], the one
+    /// choke point where a kind:10002 winner's relays become routable lanes.
+    /// Defaults to the secure policy (reject every discovered private/
+    /// loopback/onion host); production threads the operator's opt-in local
+    /// allowlist via [`Self::with_relay_admission`].
+    admission: RelayAdmissionPolicy,
+    /// Monotonic count of DISCOVERED relay-lane rejections by `admission`
+    /// before they could become directory lanes (issue #121). Counted PER
+    /// LANE: `ingest_relay_list_winner` filters the write set and the read
+    /// set of one kind:10002 separately (§2.4), so one hostile event naming
+    /// `N` rejected hosts bumps this by up to `2N`. Surfaced in
+    /// [`DiagnosticsSnapshot::discovered_private_relays_rejected`]; the
+    /// separate worker-exhaustion cap count lives in the pool
+    /// (`nmp_transport::Pool::admission_rejections`) and is folded in by the
+    /// runtime.
+    discovered_private_relays_rejected: u64,
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
@@ -525,7 +544,20 @@ impl<S: EventStore> EngineCore<S> {
             events_by_relay_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
+            admission: RelayAdmissionPolicy::default(),
+            discovered_private_relays_rejected: 0,
         }
+    }
+
+    /// Thread the operator's discovered-relay admission policy through
+    /// construction (issue #121). Chained onto [`Self::new`] by the runtime
+    /// (`engine_loop`); left at the secure default (reject every discovered
+    /// private/loopback/onion host) everywhere else, so every test and every
+    /// caller that does not opt local hosts in is fail-closed by default.
+    #[must_use]
+    pub fn with_relay_admission(mut self, admission: RelayAdmissionPolicy) -> Self {
+        self.admission = admission;
+        self
     }
 
     /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
@@ -952,6 +984,7 @@ impl<S: EventStore> EngineCore<S> {
             self.router.diagnostics(),
             self.router.plan(),
             &self.events_by_relay_kind,
+            self.discovered_private_relays_rejected,
             |relay, key| self.resolver.store().get_coverage(key, relay),
         )
     }
@@ -2434,10 +2467,35 @@ impl<S: EventStore> EngineCore<S> {
         else {
             return;
         };
-        let write_relays = parse_nip65_write_relays(&winner.event);
+        // Relay admission (issue #121): these relays are DISCOVERED — parsed
+        // straight off a network-sourced (validly-signed, but untrusted-
+        // content) kind:10002. Gate them on host classification + the
+        // operator's opt-in local allowlist BEFORE they become routable
+        // `Nip65Write`/`Nip65Read` lanes. A rejected relay never enters the
+        // directory, so it never becomes a router candidate and never reaches
+        // `pool.ensure_open` — the SSRF / forced-Tor path is closed
+        // structurally, not filtered downstream.
+        //
+        // FORWARD GUARD: this is currently the SOLE network-discovery path
+        // into the relay directory. ANY future network-sourced relay ingest —
+        // a kind:10050 DM-inbox list, nprofile/nevent relay hints, a
+        // provenance "seen here" lane, etc. — MUST route its parsed relays
+        // through `self.admission.filter_discovered(..)` before calling
+        // `directory.ingest_*`, or the structural exclusion proven here is
+        // silently lost for that new source. Discovery is untrusted;
+        // operator config (the `LiveDirectory` builder lanes) is not and is
+        // deliberately NOT gated here.
+        let (write_relays, write_rejected) = self
+            .admission
+            .filter_discovered(parse_nip65_write_relays(&winner.event));
+        let (read_relays, read_rejected) = self
+            .admission
+            .filter_discovered(parse_nip65_read_relays(&winner.event));
+        self.discovered_private_relays_rejected = self
+            .discovered_private_relays_rejected
+            .saturating_add(write_rejected + read_rejected);
         self.directory
             .ingest_write_relays(author.to_hex(), write_relays);
-        let read_relays = parse_nip65_read_relays(&winner.event);
         self.directory
             .ingest_read_relays(author.to_hex(), read_relays);
     }
@@ -3143,5 +3201,178 @@ mod nip65_read_write_split_tests {
             BTreeSet::from([both, read_only]),
             "read set must be {{unmarked, read-marked}}, excluding write-marked"
         );
+    }
+}
+
+#[cfg(test)]
+mod relay_admission_tests {
+    //! Issue #121 falsifiers for the provenance-aware discovered-relay
+    //! admission gate. All exercise the REAL `EngineCore::on_relay_frame`
+    //! ingest path (a validly-signed kind:10002 delivered over the wire),
+    //! never a bypassed direct directory poke -- the whole point is that a
+    //! *validly signed but hostile* relay list is what we must reject.
+    //!
+    //! "Never reaches `ensure_open`" is proven structurally: a rejected relay
+    //! is absent from `directory.write_relays`/`read_relays`, so the router
+    //! never builds a candidate for it, so no `Effect` ever names it, so
+    //! `runtime::dispatch_effect` never calls `pool.ensure_open` on it. Each
+    //! test pins that absence at the directory, the choke point where a
+    //! discovered relay would otherwise become a routable lane.
+
+    use nmp_router::LiveDirectory;
+    use nmp_store::MemoryStore;
+    use nmp_transport::RelayFrame;
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage, SubscriptionId, Tag, Tags};
+
+    // `RelayDirectory` (the trait whose `write_relays`/`read_relays` these
+    // tests call) is already in scope via `use super::*` — importing it again
+    // here is a redundant-import warning under `-D warnings`.
+    use super::*;
+
+    const SLOT: u32 = 0;
+    const GEN: u64 = 1;
+
+    fn relay(url: &str) -> RelayUrl {
+        RelayUrl::parse(url).expect("valid test relay url")
+    }
+
+    /// Drive a signed kind:10002 (declaring every `url` as an unmarked
+    /// read+write relay) through the engine's real ingest path.
+    fn ingest_relay_list(core: &mut EngineCore<MemoryStore>, author: &Keys, urls: &[&RelayUrl]) {
+        // A connected relay is the one the discovery frame arrives on.
+        core.handle(EngineMsg::RelayConnected(
+            TransportRelayHandle {
+                slot: SLOT,
+                generation: GEN,
+            },
+            relay("wss://indexer.example.com"),
+        ));
+        let tags: Vec<Tag> = urls
+            .iter()
+            .map(|u| Tag::relay_metadata((*u).clone(), None))
+            .collect();
+        let event = EventBuilder::new(Kind::RelayList, "")
+            .tags(Tags::from_list(tags))
+            .sign_with_keys(author)
+            .expect("test fixture event must sign cleanly");
+        core.handle(EngineMsg::RelayFrame(
+            TransportRelayHandle {
+                slot: SLOT,
+                generation: GEN,
+            },
+            RelayFrame::Text(RelayMessage::event(SubscriptionId::new("s"), event).as_json()),
+        ));
+    }
+
+    fn admitted_writes(core: &EngineCore<MemoryStore>, author: &Keys) -> BTreeSet<RelayUrl> {
+        core.directory
+            .write_relays(&author.public_key().to_hex())
+            .into_iter()
+            .map(|lr| lr.url)
+            .collect()
+    }
+
+    /// The headline falsifier: a validly-signed, network-DISCOVERED kind:10002
+    /// listing a loopback, an RFC-1918, and a `.onion` relay alongside one
+    /// public relay must admit ONLY the public relay. The three hostile
+    /// relays never become lanes (so never reach `ensure_open`), and the
+    /// diagnostic rejection counter records exactly them -- for BOTH the read
+    /// and write parse of the one event (2.4's dual parse), i.e. 3 hosts ×
+    /// 2 lanes = 6 rejections.
+    #[test]
+    fn discovered_private_and_onion_relays_are_rejected_and_counted() {
+        let author = Keys::generate();
+        let public = relay("wss://relay.example.com");
+        let loopback = relay("ws://127.0.0.1:7777");
+        let rfc1918 = relay("ws://10.0.0.5");
+        let onion = relay("ws://expyuzz4wqqyqhjn.onion");
+
+        // Secure default: empty allowlist.
+        let mut core = EngineCore::new(
+            MemoryStore::new(),
+            Box::new(LiveDirectory::builder().build()),
+            10,
+        );
+        ingest_relay_list(&mut core, &author, &[&public, &loopback, &rfc1918, &onion]);
+
+        assert_eq!(
+            admitted_writes(&core, &author),
+            BTreeSet::from([public.clone()]),
+            "only the public relay may become a discovered write lane"
+        );
+        let author_hex = author.public_key().to_hex();
+        let admitted_reads: BTreeSet<RelayUrl> = core
+            .directory
+            .read_relays(&author_hex)
+            .into_iter()
+            .map(|lr| lr.url)
+            .collect();
+        assert_eq!(
+            admitted_reads,
+            BTreeSet::from([public]),
+            "the read lane is gated identically -- no hostile host leaks in via read"
+        );
+        assert_eq!(
+            core.discovered_private_relays_rejected, 6,
+            "3 hostile hosts rejected on each of the write AND read parse of the one event"
+        );
+        assert_eq!(
+            core.diagnostics_snapshot()
+                .discovered_private_relays_rejected,
+            6,
+            "the rejection count must be visible in diagnostics (issue #121)"
+        );
+    }
+
+    /// A user who EXPLICITLY opts a local host in re-admits a DISCOVERED relay
+    /// on exactly that host -- provenance the transport layer lacks, which is
+    /// why this decision lives in the engine. A different local host stays
+    /// rejected.
+    #[test]
+    fn user_configured_local_host_admits_that_discovered_relay() {
+        let author = Keys::generate();
+        let opted_in = relay("ws://127.0.0.1:7777");
+        let other_local = relay("ws://10.0.0.5");
+
+        let mut core = EngineCore::new(
+            MemoryStore::new(),
+            Box::new(LiveDirectory::builder().build()),
+            10,
+        )
+        .with_relay_admission(RelayAdmissionPolicy::new(["127.0.0.1".to_string()]));
+        ingest_relay_list(&mut core, &author, &[&opted_in, &other_local]);
+
+        assert_eq!(
+            admitted_writes(&core, &author),
+            BTreeSet::from([opted_in]),
+            "the opted-in local host is admitted; a different local host is not"
+        );
+        assert_eq!(
+            core.discovered_private_relays_rejected, 2,
+            "only the non-opted-in local host is rejected -- once per lane parse"
+        );
+    }
+
+    /// The "HOST, never path" falsifier at the engine layer: a real per-user
+    /// relay served at a URL PATH is public and must be admitted from
+    /// discovery, untouched by the SSRF gate.
+    #[test]
+    fn discovered_public_host_at_a_path_is_admitted() {
+        let author = Keys::generate();
+        let per_user = relay("wss://nostr.wine/npub1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+
+        let mut core = EngineCore::new(
+            MemoryStore::new(),
+            Box::new(LiveDirectory::builder().build()),
+            10,
+        );
+        ingest_relay_list(&mut core, &author, &[&per_user]);
+
+        assert_eq!(
+            admitted_writes(&core, &author),
+            BTreeSet::from([per_user]),
+            "a public host with a per-user path must pass admission -- the path is not a host"
+        );
+        assert_eq!(core.discovered_private_relays_rejected, 0);
     }
 }

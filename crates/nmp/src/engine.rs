@@ -33,7 +33,7 @@ use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
 use nostr::{Keys, PublicKey};
 
-use crate::config::{build_directory, EngineConfig};
+use crate::config::{build_admission_policy, build_directory, EngineConfig};
 use crate::error::EngineError;
 use crate::subscription::{DiagnosticsSubscription, Subscription};
 
@@ -66,17 +66,24 @@ impl Engine {
     /// `nmp-demo`'s hand-rolled assembly used to duplicate independently.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         let directory = build_directory(&config)?;
+        let admission = build_admission_policy(&config);
+        // Issue #121: the operator's relay-count ceiling rides the transport
+        // pool (the worker-exhaustion backstop); `0` leaves it uncapped.
+        let pool_config = PoolConfig {
+            max_relays: config.max_relays,
+            ..PoolConfig::default()
+        };
 
         let (engine_thread, handle) = match &config.store_path {
             Some(path) => {
                 let store = RedbStore::open(path).map_err(|e| EngineError::StoreOpenFailed {
                     reason: e.to_string(),
                 })?;
-                EngineThread::spawn(store, directory, ROUTER_CAP, PoolConfig::default())
+                EngineThread::spawn(store, directory, ROUTER_CAP, pool_config, admission)
             }
             None => {
                 let store = MemoryStore::new();
-                EngineThread::spawn(store, directory, ROUTER_CAP, PoolConfig::default())
+                EngineThread::spawn(store, directory, ROUTER_CAP, pool_config, admission)
             }
         };
 
@@ -102,12 +109,19 @@ impl Engine {
     /// (Unit A0), same as every other entry point.
     #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn from_parts<S, D>(store: S, directory: D, cap: usize, pool_config: PoolConfig) -> Self
+    pub fn from_parts<S, D>(
+        store: S,
+        directory: D,
+        cap: usize,
+        pool_config: PoolConfig,
+        admission: nmp_engine::core::RelayAdmissionPolicy,
+    ) -> Self
     where
         S: nmp_store::EventStore + Send + 'static,
         D: nmp_router::RelayDirectory + Send + 'static,
     {
-        let (engine_thread, handle) = EngineThread::spawn(store, directory, cap, pool_config);
+        let (engine_thread, handle) =
+            EngineThread::spawn(store, directory, cap, pool_config, admission);
         Self {
             inner: Mutex::new(Some(Inner {
                 handle,

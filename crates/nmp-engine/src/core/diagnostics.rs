@@ -71,6 +71,27 @@ pub struct DiagnosticsSnapshot {
     pub relays: Vec<RelayDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,
     pub dropped_merge_rules: Vec<&'static str>,
+    /// DISCOVERED relays rejected by the engine's relay admission policy
+    /// (issue #121) before they could become routable lanes: a network-
+    /// sourced kind:10002 naming a loopback/RFC-1918/link-local/`.onion` host
+    /// the operator never opted in. The provenance-aware half of admission —
+    /// owned by `EngineCore` (`discovered_private_relays_rejected`).
+    ///
+    /// Counted PER LANE, not per host: one kind:10002 is parsed twice (its
+    /// write lane and its read lane, `routing-and-ownership.md` §2.4), so a
+    /// single hostile event naming `N` rejected hosts increments this by up
+    /// to `2N` (exactly `2N` when every rejected host is an unmarked r-tag,
+    /// which is both read and write). This is a rejection-EVENT tally for a
+    /// diagnostics screen, not a distinct-host count.
+    pub discovered_private_relays_rejected: u64,
+    /// Relay dials the transport pool refused because the configured
+    /// `max_relays` live-worker ceiling was already reached (issue #121, the
+    /// worker-exhaustion half). Owned by the pool
+    /// (`nmp_transport::Pool::admission_rejections`) and folded into this
+    /// snapshot by the runtime when it fans a `DiagnosticsSnapshot` out —
+    /// `EngineCore` itself cannot see the pool's slot table, so this stays
+    /// `0` in the core-built snapshot and is set at the runtime edge.
+    pub relays_rejected_over_cap: u64,
 }
 
 /// Combine `diag` (subs/filters/lanes/authors_served — `nmp-router`-owned)
@@ -82,6 +103,7 @@ pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_relay_kind: &HashMap<RelayUrl, BTreeMap<u16, u64>>,
+    discovered_private_relays_rejected: u64,
     get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
 ) -> DiagnosticsSnapshot {
     let mut relays = Vec::new();
@@ -129,6 +151,10 @@ pub(crate) fn build(
         relays,
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
+        discovered_private_relays_rejected,
+        // Set at the runtime edge from the pool's own count — the core-built
+        // snapshot has no view of the pool's slot table (see the field doc).
+        relays_rejected_over_cap: 0,
     }
 }
 
