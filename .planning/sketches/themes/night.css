@@ -1,0 +1,42 @@
+:root {
+  color-scheme: dark;
+  --color-bg: #111310;
+  --color-surface: #1a1d19;
+  --color-surface-muted: #222620;
+  --color-surface-raised: #272b25;
+  --color-border: #30352e;
+  --color-border-strong: #444a41;
+  --color-text: #f1f3ed;
+  --color-text-muted: #a7ada2;
+  --color-primary: #ff7055;
+  --color-primary-hover: #ff866f;
+  --color-primary-soft: #44251f;
+  --color-accent: #c6d8cf;
+  --color-danger: #ff7777;
+  --color-success: #72d49a;
+  --color-warning: #e5aa5c;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+  --font-mono: "SFMono-Regular", ui-monospace, Menlo, Monaco, monospace;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.625rem;
+  --text-3xl: 2.15rem;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 3px rgb(0 0 0 / 0.22);
+  --shadow-md: 0 12px 35px rgb(0 0 0 / 0.28);
+  --shadow-lg: 0 32px 80px rgb(0 0 0 / 0.48);
+}
+
