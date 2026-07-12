@@ -64,6 +64,13 @@ Diagnostics expose the source plan, wire filters, connections, relay evidence, l
 
 This boundary is the product. NMP can sit inside a small existing app or a full Nostr client without becoming either app's container, reducer, navigation system, or UI policy layer.
 
+Ownership does not require every app to reimplement Nostr content rendering.
+The optional [content and UI building-block architecture](docs/design/ui-components-strategy.md)
+places reusable parsing, reference sessions, native primitives, and styled
+open-code components above the public NMP facade. Apps may adopt, edit, replace,
+or omit those layers; NMP Core remains blind to them. This architecture is
+designed but not yet implemented.
+
 ## What this unlocks
 
 - A view can follow a changing set of authors without app-owned subscription repair.

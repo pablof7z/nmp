@@ -42,6 +42,15 @@ about current code:
   only exact NIP-defined schemas while typed contextual operations may add their
   own tags and route facts to immutable foreign-owned drafts. No kind:1-first
   core catalog is part of the target.
+- **The optional content/UI ecosystem is designed but unbuilt (#75).** Apps
+  should not independently rebuild mixed-content parsing, Nostr reference
+  acquisition, recursive embed lifecycle, kind/schema dispatch, and polished
+  native renderers. The selected architecture keeps semantics, scoped content
+  sessions, and native primitives linked/versioned while distributing styled
+  SwiftUI/Compose compositions as selectively installed, app-owned source. No
+  parser, content client, primitive package, source registry, or kind-diverse
+  renderer proof exists in this repo yet. See
+  `docs/design/ui-components-strategy.md`.
 - **Boundedness is only partial.** Swift newest-frame buffering, indexed queries,
   and router caps exist, but graph, derived-set, wire, relay, result, receipt,
   ingestion, and scheduler bounds do not yet share an explicit shortfall
