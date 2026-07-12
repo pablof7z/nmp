@@ -79,6 +79,7 @@ impl Skeleton {
 }
 
 /// The classification of a demand atom before routing.
+#[derive(Debug)]
 pub(crate) enum AtomClass {
     /// Author-bearing: coverage-solve the author set.
     Outbox {
@@ -386,6 +387,20 @@ mod tests {
             classify(&author_bearing, &SourceAuthority::Public),
             AtomClass::Pinned
         ));
+    }
+
+    /// #107: `SourceAuthority::Pinned(relays)` classifies as `ExplicitPinned`
+    /// regardless of filter shape too -- even an author-bearing selection
+    /// (e.g. "these authors, but ONLY via this relay set") never routes
+    /// through the outbox solve.
+    #[test]
+    fn classify_maps_explicit_pinned_source_to_explicit_pinned_class() {
+        let relays = BTreeSet::from([test_relay(0)]);
+        let author_bearing = cf_kind1(Some(BTreeSet::from([pk('a')])));
+        match classify(&author_bearing, &SourceAuthority::Pinned(relays.clone())) {
+            AtomClass::ExplicitPinned(got) => assert_eq!(got, relays),
+            other => panic!("expected AtomClass::ExplicitPinned, got a different class: {other:?}"),
+        }
     }
 
     /// `build_candidates` no longer folds indexers into the per-author

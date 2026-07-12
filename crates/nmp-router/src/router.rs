@@ -740,4 +740,55 @@ mod tests {
             "the two WireReqs must carry distinct SubIds (the wire-side anti-alias fix)"
         );
     }
+
+    /// #107's Contract, the core guarantee: "Pinned author filters never
+    /// contact directory, author-outbox, app, fallback, or indexer relays."
+    /// Rigs a directory where EVERY other lane would happily route this
+    /// exact (author-bearing) filter -- own write relay, a directory-fact
+    /// group-host pinned route for the SAME filter, an app relay, a
+    /// fallback relay, and an indexer -- so a route to any of them would
+    /// prove a lane leaked through. Only the atom's OWN declared
+    /// `SourceAuthority::Pinned` relay is ever touched.
+    #[test]
+    fn explicit_pinned_never_contacts_directory_outbox_app_fallback_or_indexer_relays() {
+        let a = pk('a');
+        let filter = cf(1, &[a.as_str()]);
+        let own_write = test_relay(0);
+        let group_host = test_relay(1);
+        let app_relay = test_relay(50);
+        let fallback_relay = test_relay(60);
+        let indexer = test_relay(99);
+        let explicit_relay = test_relay(200);
+
+        let dir = FixtureDirectory::new()
+            .with_write(a.clone(), [own_write.clone()])
+            .with_group_host(filter.clone(), group_host.clone())
+            .with_app([app_relay.clone()])
+            .with_fallback([fallback_relay.clone()])
+            .with_indexer(indexer.clone());
+        let mut router = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        let demand = BTreeSet::from([as_atom(
+            filter,
+            SourceAuthority::Pinned(BTreeSet::from([explicit_relay.clone()])),
+        )]);
+        let _ = router.compile(&demand, &dir, 10);
+
+        let plan = router.plan();
+        assert_eq!(
+            plan.reqs.keys().collect::<Vec<_>>(),
+            vec![&explicit_relay],
+            "an ExplicitPinned atom must touch exactly its own declared relay set, \
+             never own-write/group-host/app/fallback/indexer relays: {:?}",
+            plan.reqs.keys().collect::<Vec<_>>()
+        );
+        assert!(plan.reqs[&explicit_relay]
+            .iter()
+            .flat_map(|r| r.provenance.iter())
+            .all(|p| p.lane == Lane::ExplicitPinned));
+    }
 }
