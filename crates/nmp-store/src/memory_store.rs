@@ -14,11 +14,14 @@ use crate::coverage::{
     coverage_key, merge_interval, shape_matches, shrink_after_eviction, window_erase,
 };
 use crate::{
-    AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
-    CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, IntentId,
-    IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState,
-    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RefuseReason,
-    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
+    AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
+    ClaimSet, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
+    EventStore, FinishAttemptOutcome, GcReport, InFlightPhase, InsertOutcome, IntentId,
+    IntentSigState, LaneDeadline, LaneKey, LaneState, LocalOrigin, PersistenceError,
+    PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
+    RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
+    RecoveredRouteRevision, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
+    TransientCause, WriteDurability,
 };
 
 /// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
@@ -156,6 +159,10 @@ pub struct MemoryStore {
     outbox_receipts: HashMap<u64, RecoveredReceipt>,
     /// Typed mirror of `OUTBOX_ATTEMPTS`, keyed by its complete stable key.
     outbox_attempts: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttempt>,
+    outbox_attempt_details: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttemptDetails>,
+    outbox_lanes: BTreeMap<IntentId, BTreeMap<RelayUrl, RecoveredLane>>,
+    outbox_deadlines: BTreeMap<(Timestamp, IntentId, RelayUrl), LaneDeadline>,
+    outbox_deadlines_by_intent: BTreeMap<IntentId, BTreeSet<(Timestamp, RelayUrl)>>,
     /// Append-only resolved route revisions, keyed by `(intent, ordinal)`.
     outbox_route_revisions: BTreeMap<(IntentId, u64), RecoveredRouteRevision>,
     /// Every still-open kind:5 intent's OWN suppression claims (see
@@ -183,6 +190,82 @@ impl MemoryStore {
     /// A new, empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn get_lane(&self, key: &LaneKey) -> Option<&RecoveredLane> {
+        self.outbox_lanes
+            .get(&key.intent_id)
+            .and_then(|lanes| lanes.get(&key.relay))
+    }
+
+    fn insert_lane(&mut self, lane: RecoveredLane) {
+        self.outbox_lanes
+            .entry(lane.key.intent_id)
+            .or_default()
+            .insert(lane.key.relay.clone(), lane);
+    }
+
+    fn lane_deadline(lane: &RecoveredLane) -> Option<LaneDeadline> {
+        let (at, kind) = match lane.state {
+            LaneState::Transient { eligible_at, .. } => (eligible_at, DeadlineKind::RetryEligible),
+            LaneState::InFlight {
+                phase: InFlightPhase::AwaitingAck { deadline },
+                ..
+            } => (deadline, DeadlineKind::AckTimeout),
+            _ => return None,
+        };
+        Some(LaneDeadline {
+            at,
+            key: lane.key.clone(),
+            lane_revision: lane.revision,
+            kind,
+        })
+    }
+
+    fn replace_lane(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        state: LaneState,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        let current = self
+            .get_lane(key)
+            .cloned()
+            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+        if current.revision != expected_revision {
+            return Err(PersistenceError("stale outbox lane revision".into()));
+        }
+        let revision = current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+        if let Some(old) = Self::lane_deadline(&current) {
+            self.outbox_deadlines
+                .remove(&(old.at, key.intent_id, key.relay.clone()));
+            if let Some(rows) = self.outbox_deadlines_by_intent.get_mut(&key.intent_id) {
+                rows.remove(&(old.at, key.relay.clone()));
+                if rows.is_empty() {
+                    self.outbox_deadlines_by_intent.remove(&key.intent_id);
+                }
+            }
+        }
+        let lane = RecoveredLane {
+            version: 1,
+            key: key.clone(),
+            revision,
+            last_ordinal: current.last_ordinal,
+            state,
+        };
+        if let Some(deadline) = Self::lane_deadline(&lane) {
+            self.outbox_deadlines_by_intent
+                .entry(key.intent_id)
+                .or_default()
+                .insert((deadline.at, key.relay.clone()));
+            self.outbox_deadlines
+                .insert((deadline.at, key.intent_id, key.relay.clone()), deadline);
+        }
+        self.insert_lane(lane.clone());
+        Ok(lane)
     }
 
     /// Allocate the next `IntentId` from the store's own durable
@@ -1714,15 +1797,39 @@ impl EventStore for MemoryStore {
         event
             .verify()
             .map_err(|err| PersistenceError(format!("attempt event is invalid: {err}")))?;
-        let ordinal = self
-            .outbox_attempts
-            .keys()
-            .filter(|(candidate, candidate_relay, _)| {
-                *candidate == intent_id && candidate_relay == &relay
-            })
-            .map(|(_, _, ordinal)| *ordinal)
-            .max()
-            .unwrap_or(0)
+        let lane_key = LaneKey {
+            intent_id,
+            relay: relay.clone(),
+        };
+        let current = self.get_lane(&lane_key).cloned().unwrap_or_else(|| {
+            let lane = RecoveredLane {
+                version: 1,
+                key: lane_key.clone(),
+                revision: 1,
+                last_ordinal: 0,
+                state: LaneState::WaitingConnection,
+            };
+            self.insert_lane(lane.clone());
+            lane
+        });
+        if current.last_ordinal > 0 {
+            let previous_key = (intent_id, relay.clone(), current.last_ordinal);
+            let previous = self
+                .outbox_attempts
+                .get(&previous_key)
+                .ok_or_else(|| PersistenceError("lane cursor attempt row not found".into()))?;
+            if crate::attempt_is_live(previous, self.outbox_attempt_details.get(&previous_key)) {
+                return Err(PersistenceError(
+                    "cannot start a new ordinal while the current attempt is live".into(),
+                ));
+            }
+        }
+        current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+        let ordinal = current
+            .last_ordinal
             .checked_add(1)
             .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
         let attempt = RecoveredAttempt {
@@ -1734,7 +1841,31 @@ impl EventStore for MemoryStore {
             outcome: AttemptOutcome::Started,
         };
         self.outbox_attempts
-            .insert((intent_id, relay, ordinal), attempt.clone());
+            .insert((intent_id, relay.clone(), ordinal), attempt.clone());
+        self.outbox_attempt_details.insert(
+            (intent_id, relay.clone(), ordinal),
+            RecoveredAttemptDetails {
+                version: 1,
+                intent_id,
+                relay: relay.clone(),
+                ordinal,
+                started_at: None,
+                handoff: None,
+                transient: None,
+                finished_at: None,
+                terminal: None,
+            },
+        );
+        let mut lane = self.replace_lane(
+            &lane_key,
+            current.revision,
+            LaneState::InFlight {
+                ordinal,
+                phase: InFlightPhase::AwaitingHandoff,
+            },
+        )?;
+        lane.last_ordinal = ordinal;
+        self.insert_lane(lane);
         Ok(attempt)
     }
 
@@ -1750,20 +1881,51 @@ impl EventStore for MemoryStore {
         }
         let Some(attempt) = self
             .outbox_attempts
-            .get_mut(&(intent_id, relay.clone(), ordinal))
+            .get(&(intent_id, relay.clone(), ordinal))
         else {
             return Err(PersistenceError("attempt row not found".into()));
         };
-        if attempt.outcome == AttemptOutcome::Started {
-            attempt.outcome = outcome;
-            Ok(FinishAttemptOutcome::Committed)
-        } else if attempt.outcome == outcome {
-            Ok(FinishAttemptOutcome::AlreadySame)
-        } else {
-            Err(PersistenceError(
-                "attempt already has a conflicting terminal outcome".into(),
-            ))
+        if attempt.outcome != AttemptOutcome::Started {
+            if attempt.outcome == outcome {
+                return Ok(FinishAttemptOutcome::AlreadySame);
+            }
+            return Err(PersistenceError(
+                "legacy attempt row has a conflicting terminal outcome".into(),
+            ));
         }
+        let key = LaneKey {
+            intent_id,
+            relay: relay.clone(),
+        };
+        let lane = self
+            .get_lane(&key)
+            .cloned()
+            .ok_or_else(|| PersistenceError("attempt lane not found".into()))?;
+        if lane.last_ordinal != ordinal {
+            return Err(PersistenceError("stale attempt ordinal".into()));
+        }
+        lane.revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+        let details = self
+            .outbox_attempt_details
+            .get_mut(&(intent_id, relay.clone(), ordinal))
+            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+        if details.terminal.as_ref() == Some(&outcome) {
+            return Ok(FinishAttemptOutcome::AlreadySame);
+        }
+        if details.terminal.is_some() {
+            return Err(PersistenceError(
+                "attempt already has a conflicting terminal outcome".into(),
+            ));
+        }
+        details.terminal = Some(outcome.clone());
+        self.replace_lane(
+            &key,
+            lane.revision,
+            LaneState::Terminal { ordinal, outcome },
+        )?;
+        Ok(FinishAttemptOutcome::Committed)
     }
 
     fn recover_attempts(
@@ -1774,7 +1936,17 @@ impl EventStore for MemoryStore {
             .outbox_attempts
             .values()
             .filter(|attempt| attempt.intent_id == intent_id)
-            .cloned()
+            .map(|attempt| {
+                let mut effective = attempt.clone();
+                if let Some(terminal) = self
+                    .outbox_attempt_details
+                    .get(&(attempt.intent_id, attempt.relay.clone(), attempt.ordinal))
+                    .and_then(|details| details.terminal.clone())
+                {
+                    effective.outcome = terminal;
+                }
+                effective
+            })
             .collect();
         recovered.sort_by(|left, right| {
             left.relay
@@ -1782,6 +1954,498 @@ impl EventStore for MemoryStore {
                 .then(left.ordinal.cmp(&right.ordinal))
         });
         Ok(recovered)
+    }
+
+    fn bootstrap_outbox_lanes(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+        if !self.outbox_intents.contains_key(&intent_id) {
+            return Err(PersistenceError("lane bootstrap intent is not open".into()));
+        }
+        let mut relays = BTreeSet::new();
+        for revision in self.outbox_route_revisions.values() {
+            if revision.intent_id == intent_id {
+                relays.extend(revision.relays.iter().cloned());
+            }
+        }
+        for (candidate, relay, _) in self.outbox_attempts.keys() {
+            if *candidate == intent_id {
+                relays.insert(relay.clone());
+            }
+        }
+        let all_attempts = self.recover_attempts(intent_id)?;
+        for relay in relays {
+            let key = LaneKey { intent_id, relay };
+            let attempts: Vec<_> = all_attempts
+                .iter()
+                .filter(|attempt| attempt.relay == key.relay)
+                .cloned()
+                .collect();
+            let live_count = attempts
+                .iter()
+                .filter(|attempt| {
+                    crate::attempt_is_live(
+                        attempt,
+                        self.outbox_attempt_details.get(&(
+                            attempt.intent_id,
+                            attempt.relay.clone(),
+                            attempt.ordinal,
+                        )),
+                    )
+                })
+                .count();
+            if live_count > 1
+                || (live_count == 1
+                    && attempts.last().is_some_and(|attempt| {
+                        !crate::attempt_is_live(
+                            attempt,
+                            self.outbox_attempt_details.get(&(
+                                attempt.intent_id,
+                                attempt.relay.clone(),
+                                attempt.ordinal,
+                            )),
+                        )
+                    }))
+            {
+                return Err(PersistenceError(
+                    "contradictory live v1 Started attempt history".into(),
+                ));
+            }
+            if let Some(existing) = self.get_lane(&key) {
+                let max = attempts.last().map_or(0, |attempt| attempt.ordinal);
+                if existing.last_ordinal != max {
+                    return Err(PersistenceError(
+                        "outbox lane cursor disagrees with retained attempt history".into(),
+                    ));
+                }
+                match attempts.last() {
+                    Some(attempt) if attempt.outcome != AttemptOutcome::Started => {
+                        if existing.state
+                            != (LaneState::Terminal {
+                                ordinal: attempt.ordinal,
+                                outcome: attempt.outcome.clone(),
+                            })
+                        {
+                            return Err(PersistenceError(
+                                "terminal attempt and lane state disagree".into(),
+                            ));
+                        }
+                    }
+                    _ if matches!(existing.state, LaneState::Terminal { .. }) => {
+                        return Err(PersistenceError(
+                            "terminal lane lacks matching terminal attempt".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            let last_ordinal = attempts.last().map_or(0, |attempt| attempt.ordinal);
+            let state = match attempts.last() {
+                None => LaneState::WaitingConnection,
+                Some(attempt) if attempt.outcome == AttemptOutcome::Started => {
+                    LaneState::LegacyInFlight {
+                        ordinal: attempt.ordinal,
+                    }
+                }
+                Some(attempt) => LaneState::Terminal {
+                    ordinal: attempt.ordinal,
+                    outcome: attempt.outcome.clone(),
+                },
+            };
+            self.insert_lane(RecoveredLane {
+                version: 1,
+                key,
+                revision: 1,
+                last_ordinal,
+                state,
+            });
+        }
+        self.recover_outbox_lanes(intent_id)
+    }
+
+    fn recover_outbox_lanes(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+        Ok(self
+            .outbox_lanes
+            .get(&intent_id)
+            .into_iter()
+            .flat_map(|lanes| lanes.values().cloned())
+            .collect())
+    }
+
+    fn due_outbox_deadlines(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<LaneDeadline>, PersistenceError> {
+        if limit > 1_024 {
+            return Err(PersistenceError("deadline read limit exceeds 1024".into()));
+        }
+        let mut due = Vec::new();
+        for (_, deadline) in self.outbox_deadlines.range(
+            ..=(
+                now,
+                IntentId(u64::MAX),
+                RelayUrl::parse("wss://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+                    .expect("static relay"),
+            ),
+        ) {
+            if due.len() == limit {
+                break;
+            }
+            let lane = self
+                .get_lane(&deadline.key)
+                .ok_or_else(|| PersistenceError("deadline references missing lane".into()))?;
+            if Self::lane_deadline(lane).as_ref() != Some(deadline) {
+                return Err(PersistenceError("deadline and lane disagree".into()));
+            }
+            due.push(deadline.clone());
+        }
+        Ok(due)
+    }
+
+    fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        Ok(self
+            .outbox_deadlines
+            .first_key_value()
+            .map(|((at, _, _), _)| *at))
+    }
+
+    fn set_lane_waiting(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        auth: bool,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        self.replace_lane(
+            key,
+            expected_revision,
+            if auth {
+                LaneState::WaitingAuth
+            } else {
+                LaneState::WaitingConnection
+            },
+        )
+    }
+
+    fn set_lane_eligible(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        since: Timestamp,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        self.replace_lane(key, expected_revision, LaneState::Eligible { since })
+    }
+
+    fn set_lane_transient(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        eligible_at: Timestamp,
+        cause: TransientCause,
+        raw_reason: Option<String>,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if raw_reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > 4_096)
+        {
+            return Err(PersistenceError(
+                "transient raw reason exceeds 4096 bytes".into(),
+            ));
+        }
+        let lane = self
+            .get_lane(key)
+            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+        if ordinal != lane.last_ordinal {
+            return Err(PersistenceError("stale attempt ordinal".into()));
+        }
+        if ordinal > 0
+            && !self.outbox_attempt_details.contains_key(&(
+                key.intent_id,
+                key.relay.clone(),
+                ordinal,
+            ))
+        {
+            return Err(PersistenceError("attempt detail row not found".into()));
+        }
+        let recovered = self.replace_lane(
+            key,
+            expected_revision,
+            LaneState::Transient {
+                ordinal,
+                eligible_at,
+                cause,
+                raw_reason: raw_reason.clone(),
+            },
+        )?;
+        if ordinal > 0 {
+            self.outbox_attempt_details
+                .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
+                .expect("validated detail")
+                .transient = Some(AttemptTransientDetail {
+                eligible_at,
+                cause,
+                raw_reason,
+            });
+        }
+        Ok(recovered)
+    }
+
+    fn start_lane_attempt(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        event: Event,
+        started_at: Timestamp,
+    ) -> Result<(RecoveredAttempt, RecoveredLane), PersistenceError> {
+        let lane = self
+            .get_lane(key)
+            .cloned()
+            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+        if lane.revision != expected_revision || !matches!(lane.state, LaneState::Eligible { .. }) {
+            return Err(PersistenceError(
+                "lane is not expected eligible cursor".into(),
+            ));
+        }
+        lane.revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+        let intent = self
+            .outbox_intents
+            .get(&key.intent_id)
+            .ok_or_else(|| PersistenceError("attempt intent is not open".into()))?;
+        if intent.sig_state != IntentSigState::Signed || intent.frozen != event {
+            return Err(PersistenceError(
+                "attempt bytes are not the intent's promoted signed bytes".into(),
+            ));
+        }
+        event
+            .verify()
+            .map_err(|err| PersistenceError(format!("attempt event is invalid: {err}")))?;
+        let ordinal = lane
+            .last_ordinal
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
+        let attempt = RecoveredAttempt {
+            version: 1,
+            intent_id: key.intent_id,
+            relay: key.relay.clone(),
+            ordinal,
+            event,
+            outcome: AttemptOutcome::Started,
+        };
+        self.outbox_attempts
+            .insert((key.intent_id, key.relay.clone(), ordinal), attempt.clone());
+        self.outbox_attempt_details.insert(
+            (key.intent_id, key.relay.clone(), ordinal),
+            RecoveredAttemptDetails {
+                version: 1,
+                intent_id: key.intent_id,
+                relay: key.relay.clone(),
+                ordinal,
+                started_at: Some(started_at),
+                handoff: None,
+                transient: None,
+                finished_at: None,
+                terminal: None,
+            },
+        );
+        let mut advanced = self.replace_lane(
+            key,
+            expected_revision,
+            LaneState::InFlight {
+                ordinal,
+                phase: InFlightPhase::AwaitingHandoff,
+            },
+        )?;
+        advanced.last_ordinal = ordinal;
+        self.insert_lane(advanced.clone());
+        Ok((attempt, advanced))
+    }
+
+    fn record_lane_handoff(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        detail: AttemptHandoffDetail,
+        next: PostHandoffState,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if matches!(
+            &next,
+            PostHandoffState::Terminal {
+                outcome: AttemptOutcome::Started,
+                ..
+            }
+        ) {
+            return Err(PersistenceError("Started is not terminal".into()));
+        }
+        if matches!(
+            &next,
+            PostHandoffState::Transient {
+                raw_reason: Some(reason),
+                ..
+            } if reason.len() > 4_096
+        ) {
+            return Err(PersistenceError(
+                "transient raw reason exceeds 4096 bytes".into(),
+            ));
+        }
+        let lane = self
+            .get_lane(key)
+            .cloned()
+            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+        if lane.revision != expected_revision || lane.last_ordinal != ordinal {
+            return Err(PersistenceError("stale lane handoff".into()));
+        }
+        if !matches!(
+            lane.state,
+            LaneState::InFlight {
+                ordinal: current,
+                phase: InFlightPhase::AwaitingHandoff,
+            } if current == ordinal
+        ) {
+            return Err(PersistenceError("lane is not awaiting handoff".into()));
+        }
+        lane.revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+        let details = self
+            .outbox_attempt_details
+            .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
+            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+        if let Some(existing) = &details.handoff {
+            if existing != &detail {
+                return Err(PersistenceError("conflicting handoff evidence".into()));
+            }
+        } else {
+            details.handoff = Some(detail);
+        }
+        let state = match next {
+            PostHandoffState::WaitingConnection => LaneState::WaitingConnection,
+            PostHandoffState::WaitingAuth => LaneState::WaitingAuth,
+            PostHandoffState::Eligible { since } => LaneState::Eligible { since },
+            PostHandoffState::AwaitingAck { deadline } => LaneState::InFlight {
+                ordinal,
+                phase: InFlightPhase::AwaitingAck { deadline },
+            },
+            PostHandoffState::Transient {
+                eligible_at,
+                cause,
+                raw_reason,
+            } => LaneState::Transient {
+                ordinal,
+                eligible_at,
+                cause,
+                raw_reason,
+            },
+            PostHandoffState::Terminal {
+                outcome,
+                finished_at,
+            } => {
+                if outcome == AttemptOutcome::Started {
+                    return Err(PersistenceError("Started is not terminal".into()));
+                }
+                details.finished_at = Some(finished_at);
+                details.terminal = Some(outcome.clone());
+                LaneState::Terminal { ordinal, outcome }
+            }
+        };
+        self.replace_lane(key, expected_revision, state)
+    }
+
+    fn finish_lane_attempt(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+        finished_at: Timestamp,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if outcome == AttemptOutcome::Started {
+            return Err(PersistenceError("Started is not terminal".into()));
+        }
+        let lane = self
+            .get_lane(key)
+            .cloned()
+            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+        if lane.revision != expected_revision || lane.last_ordinal != ordinal {
+            return Err(PersistenceError("stale terminal attempt".into()));
+        }
+        lane.revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+        let details = self
+            .outbox_attempt_details
+            .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
+            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+        if let Some(existing) = &details.terminal {
+            if existing == &outcome
+                && details.finished_at == Some(finished_at)
+                && matches!(
+                    lane.state,
+                    LaneState::Terminal {
+                        ordinal: current,
+                        outcome: ref current_outcome,
+                    } if current == ordinal && current_outcome == &outcome
+                )
+            {
+                return Ok(lane);
+            }
+            return Err(PersistenceError(
+                "attempt already has conflicting terminal evidence".into(),
+            ));
+        }
+        details.finished_at = Some(finished_at);
+        details.terminal = Some(outcome.clone());
+        self.replace_lane(
+            key,
+            expected_revision,
+            LaneState::Terminal { ordinal, outcome },
+        )
+    }
+
+    fn recover_attempt_details(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredAttemptDetails>, PersistenceError> {
+        Ok(self
+            .outbox_attempt_details
+            .values()
+            .filter(|detail| detail.intent_id == intent_id)
+            .cloned()
+            .collect())
+    }
+
+    fn close_terminal_intent(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CloseIntentOutcome, PersistenceError> {
+        if !self.outbox_intents.contains_key(&intent_id) {
+            return Ok(CloseIntentOutcome::AlreadyClosed);
+        }
+        let lanes = self.recover_outbox_lanes(intent_id)?;
+        if lanes.is_empty()
+            || lanes
+                .iter()
+                .any(|lane| !matches!(lane.state, LaneState::Terminal { .. }))
+        {
+            return Err(PersistenceError(
+                "intent lanes are not non-empty and terminal".into(),
+            ));
+        }
+        if let Some(rows) = self.outbox_deadlines_by_intent.remove(&intent_id) {
+            for (at, relay) in rows {
+                self.outbox_deadlines.remove(&(at, intent_id, relay));
+            }
+        }
+        self.outbox_intents.remove(&intent_id);
+        Ok(CloseIntentOutcome::Closed)
     }
 
     fn accept_ephemeral(
@@ -1807,5 +2471,169 @@ impl EventStore for MemoryStore {
             },
         );
         Ok(receipt_id)
+    }
+}
+
+#[cfg(test)]
+mod lane_atomicity_tests {
+    use super::*;
+    use crate::{sentinel_signature, AcceptWrite};
+    use nostr::{EventBuilder, Keys};
+
+    fn setup(content: &str) -> (MemoryStore, IntentId, RelayUrl, Event, RecoveredLane) {
+        let keys = Keys::generate();
+        let signed = EventBuilder::new(Kind::TextNote, content)
+            .custom_created_at(Timestamp::from(900u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let frozen = Event::new(
+            signed.id,
+            signed.pubkey,
+            signed.created_at,
+            signed.kind,
+            signed.tags.clone(),
+            signed.content.clone(),
+            sentinel_signature(),
+        );
+        let relay = RelayUrl::parse(&format!("wss://{content}.atomic.example")).unwrap();
+        let mut store = MemoryStore::new();
+        let accepted = store
+            .accept_write(AcceptWrite {
+                frozen,
+                expected_pubkey: keys.public_key(),
+                signing_identity_ref: "atomic".into(),
+                durability: WriteDurability::Durable,
+                routing: "atomic".into(),
+                sig_state: IntentSigState::Pending,
+                accepted_at: Timestamp::from(900u64),
+            })
+            .unwrap();
+        let intent = accepted.journaled_intent_id().unwrap();
+        store.promote_signed(intent, signed.sig).unwrap();
+        store
+            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+            .unwrap();
+        let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+        (store, intent, relay, signed, lane)
+    }
+
+    fn exhaust(store: &mut MemoryStore, intent: IntentId, relay: &RelayUrl) {
+        store
+            .outbox_lanes
+            .get_mut(&intent)
+            .unwrap()
+            .get_mut(relay)
+            .unwrap()
+            .revision = u64::MAX;
+    }
+
+    fn assert_lane_state_unchanged(
+        store: &MemoryStore,
+        lanes: &BTreeMap<IntentId, BTreeMap<RelayUrl, RecoveredLane>>,
+        deadlines: &BTreeMap<(Timestamp, IntentId, RelayUrl), LaneDeadline>,
+        deadlines_by_intent: &BTreeMap<IntentId, BTreeSet<(Timestamp, RelayUrl)>>,
+    ) {
+        assert_eq!(&store.outbox_lanes, lanes);
+        assert_eq!(&store.outbox_deadlines, deadlines);
+        assert_eq!(&store.outbox_deadlines_by_intent, deadlines_by_intent);
+    }
+
+    #[test]
+    fn revision_exhaustion_leaves_memory_transition_start_and_finish_atomic() {
+        let (mut transition, intent, relay, _, lane) = setup("transition");
+        let lane = transition
+            .set_lane_transient(
+                &lane.key,
+                lane.revision,
+                0,
+                Timestamp::from(950u64),
+                TransientCause::ConnectionLost,
+                None,
+            )
+            .unwrap();
+        exhaust(&mut transition, intent, &relay);
+        let lanes = transition.outbox_lanes.clone();
+        let deadlines = transition.outbox_deadlines.clone();
+        let deadlines_by_intent = transition.outbox_deadlines_by_intent.clone();
+        assert!(transition
+            .set_lane_waiting(&lane.key, u64::MAX, false)
+            .is_err());
+        assert_lane_state_unchanged(&transition, &lanes, &deadlines, &deadlines_by_intent);
+
+        let (mut legacy_start, intent, relay, signed, _) = setup("legacy-start");
+        exhaust(&mut legacy_start, intent, &relay);
+        let lanes = legacy_start.outbox_lanes.clone();
+        let attempts = legacy_start.outbox_attempts.clone();
+        let details = legacy_start.outbox_attempt_details.clone();
+        assert!(legacy_start.start_attempt(intent, relay, signed).is_err());
+        assert_eq!(legacy_start.outbox_lanes, lanes);
+        assert_eq!(legacy_start.outbox_attempts, attempts);
+        assert_eq!(legacy_start.outbox_attempt_details, details);
+
+        let (mut new_start, intent, relay, signed, lane) = setup("new-start");
+        let lane = new_start
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(901u64))
+            .unwrap();
+        exhaust(&mut new_start, intent, &relay);
+        let lanes = new_start.outbox_lanes.clone();
+        let attempts = new_start.outbox_attempts.clone();
+        let details = new_start.outbox_attempt_details.clone();
+        assert!(new_start
+            .start_lane_attempt(&lane.key, u64::MAX, signed, Timestamp::from(902u64))
+            .is_err());
+        assert_eq!(new_start.outbox_lanes, lanes);
+        assert_eq!(new_start.outbox_attempts, attempts);
+        assert_eq!(new_start.outbox_attempt_details, details);
+
+        let (mut finish, intent, relay, signed, _) = setup("finish");
+        finish.start_attempt(intent, relay.clone(), signed).unwrap();
+        exhaust(&mut finish, intent, &relay);
+        let lanes = finish.outbox_lanes.clone();
+        let details = finish.outbox_attempt_details.clone();
+        assert!(finish
+            .finish_attempt(intent, &relay, 1, AttemptOutcome::Acked)
+            .is_err());
+        assert_eq!(finish.outbox_lanes, lanes);
+        assert_eq!(finish.outbox_attempt_details, details);
+    }
+
+    #[test]
+    fn bootstrap_rejects_cross_table_terminal_state_contradictions_in_memory() {
+        let (mut terminal, intent, relay, signed, _) = setup("terminal-mismatch");
+        terminal
+            .start_attempt(intent, relay.clone(), signed)
+            .unwrap();
+        terminal
+            .finish_attempt(intent, &relay, 1, AttemptOutcome::Acked)
+            .unwrap();
+        terminal
+            .outbox_lanes
+            .get_mut(&intent)
+            .unwrap()
+            .get_mut(&relay)
+            .unwrap()
+            .state = LaneState::WaitingConnection;
+        assert!(terminal
+            .bootstrap_outbox_lanes(intent)
+            .unwrap_err()
+            .to_string()
+            .contains("terminal attempt and lane"));
+
+        let (mut live, intent, relay, signed, _) = setup("live-mismatch");
+        live.start_attempt(intent, relay.clone(), signed).unwrap();
+        live.outbox_lanes
+            .get_mut(&intent)
+            .unwrap()
+            .get_mut(&relay)
+            .unwrap()
+            .state = LaneState::Terminal {
+            ordinal: 1,
+            outcome: AttemptOutcome::Acked,
+        };
+        assert!(live
+            .bootstrap_outbox_lanes(intent)
+            .unwrap_err()
+            .to_string()
+            .contains("terminal lane lacks"));
     }
 }

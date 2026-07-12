@@ -13,7 +13,10 @@ use nmp_store::{
     sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState, RedbStore,
     SigState, WriteDurability,
 };
-use nostr::{EventBuilder, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
+use nmp_transport::{RelayFrame, RelayHandle};
+use nostr::{
+    EventBuilder, JsonUtil, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
+};
 use redb::{Database, ReadableTable, TableDefinition};
 
 #[derive(Clone, Default)]
@@ -46,6 +49,32 @@ fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureDirectory {
     FixtureDirectory::new().with_write(pk.to_hex(), [relay])
 }
 
+fn strip_additive_lane_rows(path: &std::path::Path, intent: nmp_store::IntentId, relay: &RelayUrl) {
+    let db = Database::open(path).unwrap();
+    let write = db.begin_write().unwrap();
+    {
+        let details: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempt_details");
+        let lanes: TableDefinition<&str, &str> = TableDefinition::new("outbox_lanes");
+        let mut details = write.open_table(details).unwrap();
+        let mut lanes = write.open_table(lanes).unwrap();
+        let attempt_prefix = format!(
+            "{:020}:{:020}:{}",
+            intent.0,
+            relay.as_str().len(),
+            relay.as_str()
+        );
+        let canonical: &nostr::Url = relay.into();
+        let canonical = canonical.as_str();
+        let lane_key = format!("{:020}:{:020}:{canonical}", intent.0, canonical.len());
+        assert!(details
+            .remove(format!("{attempt_prefix}:{:020}", 1).as_str())
+            .unwrap()
+            .is_some());
+        assert!(lanes.remove(lane_key.as_str()).unwrap().is_some());
+    }
+    write.commit().unwrap();
+}
+
 #[test]
 fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_accepting_again() {
     let tmp = tempfile::tempdir().unwrap();
@@ -75,6 +104,14 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         )));
         receipt_id(&effects)
     };
+    let intent = RedbStore::open(&path)
+        .unwrap()
+        .reattach_receipt(id.0)
+        .unwrap()
+        .unwrap()
+        .intent_id
+        .unwrap();
+    strip_additive_lane_rows(&path, intent, &relay);
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(
@@ -120,6 +157,47 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         .unwrap()
         .iter()
         .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+    core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        relay.clone(),
+    ));
+    let acked = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        RelayFrame::Text(RelayMessage::ok(event.id, true, "").as_json()),
+    ));
+    assert!(acked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(receipt, WriteStatus::Acked(acked_relay))
+            if *receipt == id && acked_relay == &relay
+    )));
+    drop(core);
+    let store = RedbStore::open(&path).unwrap();
+    let original_attempt = store
+        .recover_attempts(intent)
+        .unwrap()
+        .into_iter()
+        .find(|attempt| attempt.relay == relay)
+        .unwrap();
+    assert_eq!(original_attempt.outcome, AttemptOutcome::Acked);
+    let original_lane = store
+        .recover_outbox_lanes(intent)
+        .unwrap()
+        .into_iter()
+        .find(|lane| lane.key.relay == relay)
+        .unwrap();
+    assert_eq!(
+        original_lane.state,
+        nmp_store::LaneState::Terminal {
+            ordinal: 1,
+            outcome: AttemptOutcome::Acked,
+        }
+    );
 }
 
 #[test]
@@ -155,6 +233,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
             .intent_id
             .unwrap()
     };
+    strip_additive_lane_rows(&path, intent_id, &relay);
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(
