@@ -19,12 +19,16 @@
 //!   `nostr::Event`/`nmp` value mirrors, plus the shared [`FfiError`](convert::FfiError).
 //! - [`observer`] -- the `RowObserver`/`ReceiptObserver` foreign traits.
 //! - [`facade`] -- `NmpEngine`/`NmpQueryHandle`, the exported objects.
+//! - [`entity`] -- the bech32 nostr-entity DECODE codec (#116), the one
+//!   exported free function that needs no `NmpEngine` instance at all: no
+//!   engine, no network, no signing.
 //!
 //! This crate has NO dependency on `nmp-engine` (or any other mechanism
 //! crate) at all -- every engine-side value type it mirrors is sourced
 //! through `nmp`'s own re-exports (#52 Unit B).
 
 pub mod convert;
+pub mod entity;
 pub mod facade;
 pub mod observer;
 pub mod types;
