@@ -242,6 +242,14 @@ direct Rust consumers and by FFI. Swift and Kotlin SDKs project that facade into
 native reactive types. Mechanism crates are implementation units, not alternate
 ways for apps to assemble a partially-correct engine.
 
+This ownership table does not require each app to rebuild the open-ended Nostr
+content renderer. Optional content/UI packages may consume the same public
+facade to provide reusable parsing, scoped reference sessions, native
+primitives, and styled source-installable components. They remain replaceable
+consumers above the engine, never a third engine noun or a source of routing,
+store, navigation, or product-policy truth. See
+`docs/design/ui-components-strategy.md`.
+
 ## 8. Public-surface governance
 
 Behavioral invariants above are the frame. Public names, enum cases, FFI records,
