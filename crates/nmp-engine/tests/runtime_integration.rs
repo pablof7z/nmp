@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
-use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
+use nmp_engine::outbox::WriteStatus;
+use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;

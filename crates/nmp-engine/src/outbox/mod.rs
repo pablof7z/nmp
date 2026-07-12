@@ -12,88 +12,20 @@
 //! logic itself lives in `core::EngineCore` (`on_publish`/`on_signed`/
 //! `on_signer_completed`/write-ack handling) — this module is the typed
 //! vocabulary + the structural mechanisms (§3.4, VISION §7 ledger #6/#9).
+//!
+//! #115 Fable ruling (Fork 3): `Durability`/`WritePayload`/`WriteIntent`/
+//! `WriteRouting`/`NarrowOnly`/`PrivateRoute`/`HostAuthority` relocated to
+//! `nmp-grammar` — a protocol module composing a `WriteIntent` (e.g.
+//! `nmp-nip29::compose_group_send`) must not gain an engine dependency to
+//! do so. `WriteStatus`/`Receipt`/`ReceiptSink` stay here: they reference
+//! [`crate::core::ReceiptId`] and are runtime EVIDENCE an app only ever
+//! reads back, never intent vocab it constructs.
 
 use std::collections::BTreeSet;
 
-use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, UnsignedEvent};
+use nostr::{EventId, RelayUrl};
 
 use crate::core::ReceiptId;
-
-/// A typed property of a write (M0 amendment) — not a routing choice.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Durability {
-    Durable,
-    Ephemeral,
-    AtMostOnce,
-}
-
-/// The event payload of a write intent. VISION P states signing and
-/// publishing are ORTHOGONAL stages, not one linear lifecycle: a caller
-/// that already holds a validly-signed event (e.g. republishing a
-/// previously-signed private event to a recomputed narrow relay set,
-/// ledger #6) supplies `Signed` and skips `Effect::RequestSign` entirely,
-/// going straight to routing; a caller with a template supplies `Unsigned`
-/// and the reducer requests the signer capability.
-pub enum WritePayload {
-    Unsigned(UnsignedEvent),
-    Signed(SignedEvent),
-}
-
-/// A caller's publish request.
-pub struct WriteIntent {
-    pub payload: WritePayload,
-    pub durability: Durability,
-    pub routing: WriteRouting,
-}
-
-/// Where a `WriteIntent` is routed.
-#[derive(Clone)]
-pub enum WriteRouting {
-    /// The author's write relays (reuses the M2 router's lanes).
-    AuthorOutbox,
-    /// Recipients' inboxes (kind:10050 / NIP-65 read).
-    ToInboxes(Vec<PublicKey>),
-    /// Ledger #6: narrow-only, fail-closed.
-    PrivateNarrow(PrivateRoute),
-}
-
-/// Fail-closed narrow relay set (ledger #6). By construction this type
-/// exposes no widen/insert-arbitrary operation: `new` is the ONLY way to
-/// populate it (a one-shot, fixed set at construction time — the caller
-/// must already have resolved and narrowed this itself), and no
-/// insert/extend/union method exists afterward. A `PrivateNarrow` intent
-/// whose set is empty is exactly how an unroutable private recipient is
-/// expressed structurally — the reducer fails it CLOSED (`WriteStatus::
-/// Failed`), it never falls back to a public write relay, because there is
-/// no operation that could hand it one.
-#[derive(Debug, Clone, Default)]
-pub struct NarrowOnly<T> {
-    items: BTreeSet<T>,
-}
-
-impl<T: Ord> NarrowOnly<T> {
-    /// Construct a narrow, FIXED relay set. No widen operation exists on
-    /// this type — an empty set is legal and is how "unroutable" is
-    /// expressed.
-    pub fn new(items: impl IntoIterator<Item = T>) -> Self {
-        Self {
-            items: items.into_iter().collect(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    pub fn iter(&self) -> std::collections::btree_set::Iter<'_, T> {
-        self.items.iter()
-    }
-}
-
-#[derive(Clone)]
-pub struct PrivateRoute {
-    pub relays: NarrowOnly<RelayUrl>,
-}
 
 /// The receipt STREAM (never bool/void on the durable path, ledger #9:
 /// enqueue is not converged).

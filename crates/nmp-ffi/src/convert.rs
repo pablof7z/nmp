@@ -864,7 +864,12 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
     // here -- see that (deleted) variant's removal note in `types.rs`. A
     // `WriteRouting::PrivateNarrow` intent is still constructible from
     // direct Rust (`nmp::WriteRouting::PrivateNarrow`), just not from raw
-    // FFI-supplied relay-URL strings.
+    // FFI-supplied relay-URL strings. #115: `WriteRouting::PinnedHost`
+    // gets the identical treatment -- `FfiWriteRouting` has no matching
+    // variant at all, so this `match` staying exhaustive over exactly
+    // `{AuthorOutbox, ToInboxes}` IS the enforcement; an app can only reach
+    // a pinned-host write transitively through `nip29::group_send_intent`'s
+    // opaque `FfiComposedWriteIntent`, never through this conversion path.
     let routing = match intent.routing {
         FfiWriteRouting::AuthorOutbox => GWriteRouting::AuthorOutbox,
         FfiWriteRouting::ToInboxes { recipients } => {

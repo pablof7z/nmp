@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
-use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
+use nmp_engine::outbox::WriteStatus;
+use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_engine::runtime::{EngineThread, RowsMsg};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp};
 use nmp_resolver::LiveQuery;

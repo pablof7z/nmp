@@ -5,9 +5,8 @@
 use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId};
-use nmp_engine::outbox::{
-    Durability, ReceiptSink, WriteIntent, WritePayload, WriteRouting, WriteStatus,
-};
+use nmp_engine::outbox::{ReceiptSink, WriteStatus};
+use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_router::FixtureDirectory;
 use nmp_store::{
     sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState, RedbStore,
