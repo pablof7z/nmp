@@ -168,6 +168,50 @@ impl ConcreteFilter {
     }
 }
 
+/// A resolved demand atom paired with its full identity context (#106):
+/// the same [`ConcreteFilter`] requested under two different
+/// [`SourceAuthority`]/[`AccessContext`] pairs is TWO distinct atoms —
+/// distinct refcount entries, distinct [`DescriptorHash`]es, distinct
+/// coverage/attribution identity. This is the anti-alias fix bug-class
+/// ledger #18 names: `ConcreteFilter::hash()` alone can never distinguish
+/// them (identical bytes hash identically by design), so identity has to
+/// widen one level up, here, rather than by mutating `ConcreteFilter`
+/// itself (which stays pure selection — untouched by this type).
+///
+/// Deliberately does NOT carry [`crate::CacheMode`]: cache mode governs the
+/// LOCAL row-projection read (#107), never wire/coverage identity, so it is
+/// excluded from `hash()`'s input on purpose (atlas's #106/#107 seam
+/// ruling) — two `Demand`s differing ONLY in `cache` must still hash
+/// (and therefore coalesce) identically.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextualAtom {
+    pub filter: ConcreteFilter,
+    pub source: crate::descriptor::SourceAuthority,
+    pub access: crate::descriptor::AccessContext,
+}
+
+impl ContextualAtom {
+    /// Canonical, stable, collision-resistant hash — built from the
+    /// filter's OWN already-collision-resistant 32-byte digest plus one
+    /// discriminant byte per context axis. Framing-unambiguous by
+    /// construction (fixed-width fields, no delimiter needed): unlike
+    /// concatenating variable-length strings, there is no byte sequence
+    /// that could be reinterpreted as a different (filter-hash, source,
+    /// access) triple.
+    pub fn hash(&self) -> DescriptorHash {
+        let mut bytes = Vec::with_capacity(34);
+        bytes.extend_from_slice(self.filter.hash().as_bytes());
+        bytes.push(match self.source {
+            crate::descriptor::SourceAuthority::AuthorOutboxes => 0,
+            crate::descriptor::SourceAuthority::Public => 1,
+        });
+        bytes.push(match self.access {
+            crate::descriptor::AccessContext::Public => 0,
+        });
+        DescriptorHash(*blake3::hash(&bytes).as_bytes())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +292,31 @@ mod tests {
             "expected an avalanche (>20/32 bytes differing) for a one-character \
              change, got only {differing_bytes}/32 -- weak diffusion is exactly \
              the property that makes a hash offline-collidable"
+        );
+    }
+
+    /// #106's anti-alias core: the identical `ConcreteFilter` under two
+    /// distinct `SourceAuthority`s must hash to two distinct
+    /// `ContextualAtom` identities -- this is precisely the bug-class #18
+    /// collapse (same selection, different intended authority, same atom)
+    /// the whole `Demand`/`ContextualAtom` widening exists to close.
+    #[test]
+    fn contextual_atom_hash_distinguishes_identical_filters_under_different_source_authority() {
+        let filter = cf(vec!["aa"], vec![]);
+        let outbox = ContextualAtom {
+            filter: filter.clone(),
+            source: crate::descriptor::SourceAuthority::AuthorOutboxes,
+            access: crate::descriptor::AccessContext::Public,
+        };
+        let public = ContextualAtom {
+            filter,
+            source: crate::descriptor::SourceAuthority::Public,
+            access: crate::descriptor::AccessContext::Public,
+        };
+        assert_ne!(
+            outbox.hash(),
+            public.hash(),
+            "same selection under different SourceAuthority must never alias"
         );
     }
 
