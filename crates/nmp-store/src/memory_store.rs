@@ -17,8 +17,8 @@ use crate::{
     AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
     CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, IntentId,
     IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState,
-    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RefuseReason, RelayObserved,
-    RetractReason, SigState, StoredEvent, WriteDurability,
+    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RefuseReason,
+    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
 };
 
 /// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
@@ -156,6 +156,8 @@ pub struct MemoryStore {
     outbox_receipts: HashMap<u64, RecoveredReceipt>,
     /// Typed mirror of `OUTBOX_ATTEMPTS`, keyed by its complete stable key.
     outbox_attempts: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttempt>,
+    /// Append-only resolved route revisions, keyed by `(intent, ordinal)`.
+    outbox_route_revisions: BTreeMap<(IntentId, u64), RecoveredRouteRevision>,
     /// Every still-open kind:5 intent's OWN suppression claims (see
     /// [`SuppressClaim`]'s doc) — dropped wholesale by `promote_signed`
     /// (after committing the deletion for real) or `compensate_write`
@@ -1650,6 +1652,46 @@ impl EventStore for MemoryStore {
         // the contract here, and `MemoryStore` retains faithfully for the
         // life of the process — see `EventStore::reattach_receipt`'s doc.
         self.outbox_receipts.get(&receipt_id).cloned()
+    }
+
+    fn record_route_revision(
+        &mut self,
+        intent_id: IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+        if !self.outbox_intents.contains_key(&intent_id) {
+            return Err(PersistenceError("route revision intent is not open".into()));
+        }
+        let ordinal = self
+            .outbox_route_revisions
+            .keys()
+            .filter(|(candidate, _)| *candidate == intent_id)
+            .map(|(_, ordinal)| *ordinal)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("route revision ordinal exhausted".into()))?;
+        let revision = RecoveredRouteRevision {
+            version: 1,
+            intent_id,
+            ordinal,
+            relays,
+        };
+        self.outbox_route_revisions
+            .insert((intent_id, ordinal), revision.clone());
+        Ok(revision)
+    }
+
+    fn recover_route_revisions(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+        Ok(self
+            .outbox_route_revisions
+            .values()
+            .filter(|revision| revision.intent_id == intent_id)
+            .cloned()
+            .collect())
     }
 
     fn start_attempt(

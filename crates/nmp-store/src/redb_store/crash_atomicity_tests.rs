@@ -163,6 +163,13 @@ fn redb_crash_worker() {
             let recovered = store.recover_outbox().remove(0);
             let _ = store.start_attempt(recovered.intent_id, relay, recovered.frozen);
         }
+        "route-revision-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::RouteRevisionBeforeCommit)
+                    .expect("open worker store");
+            let intent = store.recover_outbox()[0].intent_id;
+            let _ = store.record_route_revision(intent, BTreeSet::from([relay]));
+        }
         "finish-before-commit" => {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::FinishAttemptBeforeCommit)
@@ -208,6 +215,29 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         assert_eq!(reopened.query(&Filter::new()).len(), 1);
         assert_eq!(reopened.recover_outbox().len(), 1);
     }
+}
+
+#[test]
+fn route_revision_is_absent_or_fully_recoverable_across_process_death() {
+    let (_dir, path) = fixture();
+    let relay = RelayUrl::parse(RELAY).expect("relay");
+    let intent = {
+        let mut store = RedbStore::open(&path).expect("open");
+        accepted(&mut store).0
+    };
+    crash(&path, "route-revision-before-commit");
+    let mut reopened = RedbStore::open(&path).expect("reopen route crash");
+    assert!(reopened.recover_route_revisions(intent).unwrap().is_empty());
+    let committed = reopened
+        .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+        .expect("commit route revision after rollback");
+    assert_eq!(committed.ordinal, 1, "aborted revision cannot burn ordinal");
+    drop(reopened);
+    let store = RedbStore::open(&path).expect("reopen committed route");
+    assert_eq!(
+        store.recover_route_revisions(intent).unwrap()[0].relays,
+        BTreeSet::from([relay])
+    );
 }
 
 #[test]

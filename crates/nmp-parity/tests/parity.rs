@@ -66,6 +66,8 @@ enum NormStatus {
     Acked(String),
     Rejected(String, String),
     GaveUp(String),
+    PersistenceBlocked(String),
+    RoutePersistenceBlocked(String),
     OutcomeUnknown(String),
     Failed(String),
 }
@@ -240,6 +242,12 @@ fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
             NormStatus::Rejected(normalize_url(url.as_str(), relay), reason)
         }
         WriteStatus::GaveUp(url) => NormStatus::GaveUp(normalize_url(url.as_str(), relay)),
+        WriteStatus::PersistenceBlocked(url) => {
+            NormStatus::PersistenceBlocked(normalize_url(url.as_str(), relay))
+        }
+        WriteStatus::RoutePersistenceBlocked(url) => {
+            NormStatus::RoutePersistenceBlocked(normalize_url(url.as_str(), relay))
+        }
         WriteStatus::OutcomeUnknown(url) => {
             NormStatus::OutcomeUnknown(normalize_url(url.as_str(), relay))
         }
@@ -265,6 +273,12 @@ fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
             NormStatus::Rejected(normalize_url(&url, relay), reason)
         }
         FfiWriteStatus::GaveUp { relay: url } => NormStatus::GaveUp(normalize_url(&url, relay)),
+        FfiWriteStatus::PersistenceBlocked { relay: url } => {
+            NormStatus::PersistenceBlocked(normalize_url(&url, relay))
+        }
+        FfiWriteStatus::RoutePersistenceBlocked { relay: url } => {
+            NormStatus::RoutePersistenceBlocked(normalize_url(&url, relay))
+        }
         FfiWriteStatus::OutcomeUnknown { relay: url } => {
             NormStatus::OutcomeUnknown(normalize_url(&url, relay))
         }

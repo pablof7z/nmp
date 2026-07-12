@@ -548,6 +548,60 @@ fn attempt_started_bytes_and_ordinals_survive_real_reopen_append_only() {
 }
 
 #[test]
+fn resolved_route_revisions_are_append_only_canonical_and_backend_identical() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, _) = compose(&k, Kind::TextNote, "route revisions", 102);
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 102));
+        let intent = outcome.journaled_intent_id().unwrap();
+        let a = RelayUrl::parse("wss://a-route.example").unwrap();
+        let z = RelayUrl::parse("wss://z-route.example").unwrap();
+        let first = store
+            .record_route_revision(intent, BTreeSet::from([z.clone(), a.clone()]))
+            .unwrap();
+        let second = store
+            .record_route_revision(intent, BTreeSet::from([z.clone()]))
+            .unwrap();
+        assert_eq!((first.ordinal, second.ordinal), (1, 2));
+        assert_eq!(first.relays, BTreeSet::from([a, z.clone()]));
+        assert_eq!(second.relays, BTreeSet::from([z]));
+        assert_eq!(
+            store
+                .recover_route_revisions(intent)
+                .unwrap()
+                .into_iter()
+                .map(|revision| revision.ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    });
+}
+
+#[test]
+fn resolved_route_revision_survives_real_redb_reopen_without_an_attempt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("route-revision.redb");
+    let k = keys();
+    let relay = RelayUrl::parse("wss://durable-route.example").unwrap();
+    let intent = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let (frozen, _) = compose(&k, Kind::TextNote, "durable route", 103);
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 103));
+        let intent = outcome.journaled_intent_id().unwrap();
+        store
+            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+            .unwrap();
+        intent
+    };
+    let store = RedbStore::open(&path).unwrap();
+    assert!(store.recover_attempts(intent).unwrap().is_empty());
+    assert_eq!(
+        store.recover_route_revisions(intent).unwrap()[0].relays,
+        BTreeSet::from([relay])
+    );
+}
+
+#[test]
 fn finish_attempt_missing_same_and_conflict_are_not_false_success() {
     for_each_backend(|store| {
         let k = keys();

@@ -275,6 +275,14 @@ struct PendingWrite {
     /// dropped pending relay always resolves to `GaveUp`, never a retry
     /// `PublishEvent` (no blind retry, ledger's `AtMostOnce` amendment).
     pending_relays: BTreeSet<RelayUrl>,
+    /// Routed lanes for which `start_attempt` failed. They remain explicitly
+    /// owned and nonterminal, but never enter `pending_relays` because no
+    /// Started fact exists and no wire EVENT was emitted.
+    unstarted_relays: BTreeSet<RelayUrl>,
+    /// Resolved URLs whose route revision did not persist. Owned only for
+    /// this process lifetime; crash recovery may re-resolve policy but cannot
+    /// claim these exact URLs durably.
+    route_blocked_relays: BTreeSet<RelayUrl>,
     /// The persisted started ordinal currently awaiting a terminal outcome
     /// for each relay.
     attempt_ordinals: BTreeMap<RelayUrl, u64>,
@@ -436,6 +444,8 @@ impl<S: EventStore> EngineCore<S> {
                     sign_generation: 0,
                     event_id: already_signed.then_some(intent.frozen.id),
                     pending_relays: BTreeSet::new(),
+                    unstarted_relays: BTreeSet::new(),
+                    route_blocked_relays: BTreeSet::new(),
                     attempt_ordinals: BTreeMap::new(),
                 },
             );
@@ -452,8 +462,22 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             };
 
+            let Ok(revisions) = self
+                .resolver
+                .store()
+                .recover_route_revisions(intent.intent_id)
+            else {
+                // As with corrupt attempt evidence, keep the parent intent
+                // owned but emit no wire fact from undecodable persistence.
+                continue;
+            };
+            let mut durable_relays = revisions
+                .into_iter()
+                .flat_map(|revision| revision.relays)
+                .collect::<BTreeSet<_>>();
             let mut existing_relays = BTreeSet::new();
             for attempt in attempts {
+                durable_relays.insert(attempt.relay.clone());
                 existing_relays.insert(attempt.relay.clone());
                 if attempt.outcome != AttemptOutcome::Started {
                     continue;
@@ -502,12 +526,13 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
 
-            // Re-resolve the acceptance snapshot and append only genuinely
-            // new relay lanes. Existing terminal lanes are never rewritten;
-            // existing Started lanes follow their durability rule above.
-            // This is also the signed-before-first-send case when the set is
-            // empty. Route evolution therefore survives restart losslessly
-            // without turning into retry-policy scheduling.
+            // Every persisted route remains owned even if the dynamic
+            // directory is now empty or removed it. Re-resolution may append
+            // new lanes, but can never subtract durable ones.
+            let mut lanes_to_start = durable_relays
+                .difference(&existing_relays)
+                .cloned()
+                .collect::<BTreeSet<_>>();
             if routing_valid {
                 let current_routes = self
                     .pending
@@ -517,26 +542,54 @@ impl<S: EventStore> EngineCore<S> {
                             .ok()
                     })
                     .unwrap_or_default();
-                for relay in current_routes.difference(&existing_relays) {
-                    let Ok(attempt) = self.resolver.store_mut().start_attempt(
-                        intent.intent_id,
-                        relay.clone(),
-                        intent.frozen.clone(),
-                    ) else {
-                        continue;
-                    };
-                    if let Some(pending) = self.pending.get_mut(&id) {
-                        pending.pending_relays.insert(relay.clone());
-                        pending
-                            .attempt_ordinals
-                            .insert(relay.clone(), attempt.ordinal);
+                let new_routes = current_routes
+                    .difference(&durable_relays)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if !new_routes.is_empty() {
+                    match self
+                        .resolver
+                        .store_mut()
+                        .record_route_revision(intent.intent_id, current_routes)
+                    {
+                        Ok(revision) => {
+                            debug_assert!(new_routes.is_subset(&revision.relays));
+                            lanes_to_start.extend(new_routes);
+                        }
+                        Err(_) => {
+                            if let Some(pending) = self.pending.get_mut(&id) {
+                                pending.route_blocked_relays.extend(new_routes);
+                            }
+                        }
                     }
-                    self.event_to_receipts
-                        .entry(intent.frozen.id)
-                        .or_default()
-                        .insert(id);
-                    effects.push(Effect::PublishEvent(relay.clone(), intent.frozen.clone()));
                 }
+            }
+
+            for relay in lanes_to_start {
+                let attempt = match self.resolver.store_mut().start_attempt(
+                    intent.intent_id,
+                    relay.clone(),
+                    intent.frozen.clone(),
+                ) {
+                    Ok(attempt) => attempt,
+                    Err(_) => {
+                        if let Some(pending) = self.pending.get_mut(&id) {
+                            pending.unstarted_relays.insert(relay);
+                        }
+                        continue;
+                    }
+                };
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    pending.pending_relays.insert(relay.clone());
+                    pending
+                        .attempt_ordinals
+                        .insert(relay.clone(), attempt.ordinal);
+                }
+                self.event_to_receipts
+                    .entry(intent.frozen.id)
+                    .or_default()
+                    .insert(id);
+                effects.push(Effect::PublishEvent(relay, intent.frozen.clone()));
             }
         }
         effects
@@ -584,6 +637,14 @@ impl<S: EventStore> EngineCore<S> {
                     AttemptOutcome::OutcomeUnknown => WriteStatus::OutcomeUnknown(attempt.relay),
                 };
                 sink.on_status(status);
+            }
+        }
+        if let Some(pending) = self.pending.get(&id) {
+            for relay in &pending.unstarted_relays {
+                sink.on_status(WriteStatus::PersistenceBlocked(relay.clone()));
+            }
+            for relay in &pending.route_blocked_relays {
+                sink.on_status(WriteStatus::RoutePersistenceBlocked(relay.clone()));
             }
         }
         if let Some(pending) = self.pending.get_mut(&id) {
@@ -934,6 +995,8 @@ impl<S: EventStore> EngineCore<S> {
                 sign_generation: 0,
                 event_id: None,
                 pending_relays: BTreeSet::new(),
+                unstarted_relays: BTreeSet::new(),
+                route_blocked_relays: BTreeSet::new(),
                 attempt_ordinals: BTreeMap::new(),
             },
         );
@@ -1152,9 +1215,35 @@ impl<S: EventStore> EngineCore<S> {
             effects.push(Effect::EmitReceipt(id, WriteStatus::Routed(relays.clone())));
         }
 
+        // Dynamic routing policy is not itself an exact relay obligation.
+        // Persist the resolved set before any corresponding attempt or wire
+        // effect, so a failed attempt start remains discoverable on restart
+        // even if the directory is then empty or changed.
+        if let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id) {
+            if self
+                .resolver
+                .store_mut()
+                .record_route_revision(intent_id, relays.clone())
+                .is_err()
+            {
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    pending.route_blocked_relays = relays.clone();
+                }
+                if let Some(pending) = self.pending.get(&id) {
+                    for relay in &relays {
+                        let status = WriteStatus::RoutePersistenceBlocked(relay.clone());
+                        Self::notify(pending, status.clone());
+                        effects.push(Effect::EmitReceipt(id, status));
+                    }
+                }
+                return;
+            }
+        }
+
         // The durable attempt fact is committed before the corresponding
         // wire effect can exist. Ephemeral has no obligation/attempt row.
         let mut sent_relays = BTreeSet::new();
+        let mut blocked_relays = BTreeSet::new();
         for relay in &relays {
             let ordinal = match self.pending.get(&id).and_then(|p| p.intent_id) {
                 Some(intent_id) => match self.resolver.store_mut().start_attempt(
@@ -1163,7 +1252,10 @@ impl<S: EventStore> EngineCore<S> {
                     event.clone(),
                 ) {
                     Ok(attempt) => Some(attempt.ordinal),
-                    Err(_) => None,
+                    Err(_) => {
+                        blocked_relays.insert(relay.clone());
+                        None
+                    }
                 },
                 None => Some(0),
             };
@@ -1183,6 +1275,11 @@ impl<S: EventStore> EngineCore<S> {
                 Self::notify(pending, WriteStatus::Sent(relay.clone()));
                 effects.push(Effect::EmitReceipt(id, WriteStatus::Sent(relay.clone())));
             }
+            for relay in &blocked_relays {
+                let status = WriteStatus::PersistenceBlocked(relay.clone());
+                Self::notify(pending, status.clone());
+                effects.push(Effect::EmitReceipt(id, status));
+            }
         }
 
         let ephemeral = matches!(
@@ -1196,6 +1293,7 @@ impl<S: EventStore> EngineCore<S> {
             self.pending.remove(&id);
         } else if let Some(pending) = self.pending.get_mut(&id) {
             pending.pending_relays = sent_relays;
+            pending.unstarted_relays = blocked_relays;
             self.event_to_receipts
                 .entry(event.id)
                 .or_default()
@@ -1507,7 +1605,10 @@ impl<S: EventStore> EngineCore<S> {
             };
             Self::notify(pending, new_status.clone());
             effects.push(Effect::EmitReceipt(id, new_status));
-            if pending.pending_relays.is_empty() {
+            if pending.pending_relays.is_empty()
+                && pending.unstarted_relays.is_empty()
+                && pending.route_blocked_relays.is_empty()
+            {
                 terminal.push(id);
             }
         }
@@ -1561,7 +1662,10 @@ impl<S: EventStore> EngineCore<S> {
                 let status = WriteStatus::GaveUp(relay.clone());
                 Self::notify(pending, status.clone());
                 effects.push(Effect::EmitReceipt(id, status));
-                if pending.pending_relays.is_empty() {
+                if pending.pending_relays.is_empty()
+                    && pending.unstarted_relays.is_empty()
+                    && pending.route_blocked_relays.is_empty()
+                {
                     pending.event_id
                 } else {
                     None
