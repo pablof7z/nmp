@@ -19388,6 +19388,72 @@ reexport nmp::ReceiptStream => nmp_engine::runtime::ReceiptStream
                                                 }
                                               }
                                             },
+                                            "name": "PersistenceBlocked",
+                                            "visibility": "default"
+                                          },
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "variant": {
+                                                "discriminant": null,
+                                                "kind": {
+                                                  "tuple": [
+                                                    {
+                                                      "attrs": [],
+                                                      "inner": {
+                                                        "struct_field": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "nostr::RelayUrl",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "previously_defined": "nostr::types::url::RelayUrl"
+                                                              },
+                                                              "path": "nostr::types::url::RelayUrl"
+                                                            }
+                                                          }
+                                                        }
+                                                      },
+                                                      "name": "0",
+                                                      "visibility": "default"
+                                                    }
+                                                  ]
+                                                }
+                                              }
+                                            },
+                                            "name": "RoutePersistenceBlocked",
+                                            "visibility": "default"
+                                          },
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "variant": {
+                                                "discriminant": null,
+                                                "kind": {
+                                                  "tuple": [
+                                                    {
+                                                      "attrs": [],
+                                                      "inner": {
+                                                        "struct_field": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "nostr::RelayUrl",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "previously_defined": "nostr::types::url::RelayUrl"
+                                                              },
+                                                              "path": "nostr::types::url::RelayUrl"
+                                                            }
+                                                          }
+                                                        }
+                                                      },
+                                                      "name": "0",
+                                                      "visibility": "default"
+                                                    }
+                                                  ]
+                                                }
+                                              }
+                                            },
                                             "name": "OutcomeUnknown",
                                             "visibility": "default"
                                           },
