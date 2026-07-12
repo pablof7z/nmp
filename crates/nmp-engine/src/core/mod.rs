@@ -2925,14 +2925,17 @@ impl<S: EventStore> EngineCore<S> {
     /// #124: when the demand carries a Nostr `limit:N` this projection is the
     /// N MOST RECENT matching rows -- `created_at` DESC, ties broken by event
     /// `id` ASC (bytewise), the NIP-01 canonical newest-first order -- NOT
-    /// every cached match. The truncation lives HERE, at the handle
+    /// every cached match. The authoritative cap lives HERE, at the handle
     /// projection, deliberately NOT in `EventStore::query` (which must keep
     /// returning every current match: the resolver's `wide_concrete` KEEPS
     /// `limit`, so Derived-node recompute / negentropy / ingest all push
     /// limit-bearing filters into `query()` and rely on getting the FULL
-    /// match set -- truncating there would corrupt reactive recompute). It is
-    /// applied ONCE to the final merged/deduped set the app sees, per NIP-01
-    /// per-subscription `limit`, never per-atom (see [`effective_row_limit`]).
+    /// match set -- truncating there would corrupt reactive recompute).
+    /// For this projection alone, each root atom may be pre-bounded through
+    /// `EventStore::query_newest`; taking N newest from each atom is exact
+    /// because a row outside one atom's top N already has N newer witnesses
+    /// in that same atom. The final merged/deduped set is still capped ONCE,
+    /// per NIP-01 per-subscription `limit` (see [`effective_row_limit`]).
     /// Because `refresh_handle` diffs THIS truncated snapshot against
     /// `last_rows`, the top-N is maintained reactively for free: a newer
     /// match entering the top-N evicts the oldest (Added(new)+Removed(oldest),
@@ -2986,9 +2989,15 @@ impl<S: EventStore> EngineCore<S> {
             });
 
         let root_atoms = self.resolver.root_atoms(id);
+        let row_limit = effective_row_limit(&root_atoms);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
-            for se in self.resolver.store().query(&atom.to_nostr())? {
+            let filter = atom.to_nostr();
+            let rows = match row_limit {
+                Some(limit) => self.resolver.store().query_newest(&filter, limit)?,
+                None => self.resolver.store().query(&filter)?,
+            };
+            for se in rows {
                 if let Some(relays) = pinned_relays {
                     if !se
                         .provenance
@@ -3006,11 +3015,12 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         // #124: a demand carrying `limit:N` projects only its N newest rows.
-        // Applied to the merged/deduped set (per-subscription, not per-atom)
-        // in NIP-01 canonical newest-first order; `refresh_handle`'s diff then
-        // maintains the top-N reactively. No-op when there is no limit or the
-        // set already fits.
-        if let Some(limit) = effective_row_limit(&root_atoms) {
+        // Applied authoritatively to the merged/deduped set in NIP-01
+        // canonical newest-first order. Each root atom was only pre-bounded
+        // above; this final pass preserves the per-subscription (not
+        // per-atom) contract. `refresh_handle`'s diff then maintains the
+        // top-N reactively. No-op when there is no limit or the set fits.
+        if let Some(limit) = row_limit {
             if by_id.len() > limit {
                 let mut ordered: Vec<(u64, EventId)> = by_id
                     .iter()
