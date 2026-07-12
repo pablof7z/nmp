@@ -124,15 +124,44 @@ async fn wait_for_port_released(port: u16) {
     .expect("port was not released by the previous relay instance");
 }
 
+/// Rust's test harness runs the test fns in this file concurrently by
+/// default, and each `#[tokio::test(flavor = "multi_thread", ...)]` below
+/// gets its OWN dedicated tokio runtime -- so left unguarded, this one file
+/// can put up to three separate `LocalRelay` ecosystems (the two reconnect
+/// tests' relay_a+relay_b pairs, plus test 3's single relay) on the CPU at
+/// the exact same moment. That is a purely SELF-inflicted source of the
+/// scheduling contention that turns "wait for a fresh reconnect" into a
+/// flake under CI load: `pool::connect::open_relay_socket`'s
+/// `CONNECT_TIMEOUT` (10s) bounds ONE dial attempt against a relay whose
+/// own accept/handshake task is starved of CPU, so a single stalled
+/// attempt during heavy contention can already eat most of a 15s budget --
+/// see the `Connected`-wait bounds below, sized around that mechanism, not
+/// guessed. Serializing this file's tests removes the self-inflicted half
+/// of that contention for free (each test normally finishes in well under
+/// a second, so serializing costs nothing observable); it does nothing
+/// about contention from OTHER crates' test binaries running concurrently
+/// in the same CI job, which the generous bounds below still have to
+/// absorb on their own.
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: this guard is held across
+/// `.await` points (every relay setup/teardown call below), which clippy's
+/// `await_holding_lock` correctly refuses to allow for a blocking mutex --
+/// an async-aware one is the sound way to hold a lock across awaits.
+static RECONNECT_TEST_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // Multi-thread flavor is load-bearing here, not a style choice: the test
 // body blocks synchronously (`recv_matching` calls `mpsc::Receiver::recv_timeout`,
 // never `.await`) while waiting for `nmp-transport`'s own OS threads to do
 // their work. `LocalRelay::run` spawns its accept/session loop onto the
 // AMBIENT tokio runtime; on the default current-thread flavor, blocking the
 // one runtime thread here would also freeze the relay's ability to accept
-// our connection or respond to REQ, deadlocking the test.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// our connection or respond to REQ, deadlocking the test. `worker_threads =
+// 3` (not the bare minimum 2) so the relay's own accept/session tasks keep
+// a genuinely free thread to run on even while `recv_matching` parks one
+// thread in a blocking wait -- this test drives TWO live relay instances
+// (relay_a, then relay_b) and needs headroom for whichever one is live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
+    let _serial_guard = RECONNECT_TEST_GUARD.lock().await;
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
@@ -180,14 +209,43 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
             // here removes the lottery rather than padding the timeout to
             // out-wait it.
             reconnect_jitter_max: Some(Duration::ZERO),
+            // The load-bearing fix for the RESIDUAL flake (recurred on
+            // #109/#112/#120 even after the jitter fix above):
+            // `LocalRelay::shutdown()` (read directly from
+            // `nostr-relay-builder`'s `local/inner.rs`) only notifies the
+            // ACCEPT loop to stop taking new connections -- it never
+            // touches an already-established per-connection session task.
+            // So `relay_a.shutdown()` below does NOT reliably sever our
+            // ALREADY-OPEN connection to relay_a; that usually happens
+            // quickly anyway (the socket gets a read error/EOF from the OS
+            // teardown), but confirmed-by-instrumentation on a rare run
+            // (~1 in 25-30, reproduced with ZERO added load) it does not,
+            // and the worker's ONLY remaining way to notice relay_a is gone
+            // is the keepalive idle-ping/pong-timeout fallback -- whose
+            // PRODUCTION defaults (`KEEPALIVE_IDLE_THRESHOLD` /
+            // `KEEPALIVE_PONG_TIMEOUT`, 30s each) sum to a ~60s worst case,
+            // dwarfing any timeout this test could reasonably afford and
+            // producing a hang that looks identical to "never reconnects"
+            // from the test's side (zero further `PoolEvent`s of any kind
+            // until the fallback finally fires). Overriding both to a small
+            // value makes that fallback path fast and bounded instead of
+            // production-scale slow, exactly mirroring why
+            // `reconnect_delay_initial` above is overridden the same way.
+            keepalive_idle: Some(Duration::from_millis(200)),
+            keepalive_pong_timeout: Some(Duration::from_millis(200)),
             ..PoolConfig::default()
         },
         tx,
     );
 
-    // Act: connect and observe the fresh (generation-1) handle.
+    // Act: connect and observe the fresh (generation-1) handle. 15s, not
+    // 5s: `open_relay_socket`'s `CONNECT_TIMEOUT` (10s) bounds a single dial
+    // attempt, so a fresh first connect that races a starved accept task
+    // under CI load can alone eat close to that whole budget before this
+    // bound would even be exercised -- 15s is the smallest round number
+    // that still comfortably clears one full stalled attempt plus margin.
     let h1 = pool.ensure_open(&url);
-    let connected1 = recv_matching(&rx, Duration::from_secs(5), is_connected);
+    let connected1 = recv_matching(&rx, Duration::from_secs(15), is_connected);
     let PoolEvent::Connected {
         handle: observed1, ..
     } = connected1
@@ -257,8 +315,13 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
 
     // Assert: a NEW Connected with a bumped generation (test 6/7's core
     // falsifier), then — with NO further `pool.send` from this test — the
-    // replayed REQ yields a fresh EVENT+EOSE from relay_b.
-    let connected2 = recv_matching(&rx, Duration::from_secs(15), is_connected);
+    // replayed REQ yields a fresh EVENT+EOSE from relay_b. 30s, not 15s:
+    // with `reconnect_jitter_max` zeroed above, the remaining exposure is
+    // `CONNECT_TIMEOUT` (10s) per stalled dial attempt, and a reconnect can
+    // plausibly need more than one attempt under heavy CI contention before
+    // relay_b's accept task actually gets scheduled -- 30s comfortably
+    // covers two full stalled attempts plus margin, not a guess.
+    let connected2 = recv_matching(&rx, Duration::from_secs(30), is_connected);
     let PoolEvent::Connected { handle: h2, .. } = connected2 else {
         unreachable!("is_connected guard")
     };
@@ -300,8 +363,14 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
 /// `AttemptCorrelation` (never silently as if nothing happened, and never
 /// `Written` once the generation has already ended) and is never written
 /// to the NEW connection.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// `worker_threads = 3` for the same reason as the test above: this test
+// also drives two live relay instances (relay_a, then relay_b) across a
+// real reconnect, and the extra thread keeps the relay's own accept/
+// session tasks from contending with `recv_matching`'s blocking wait for
+// CPU time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
+    let _serial_guard = RECONNECT_TEST_GUARD.lock().await;
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
@@ -338,13 +407,39 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
             // here removes the lottery rather than padding the timeout to
             // out-wait it.
             reconnect_jitter_max: Some(Duration::ZERO),
+            // The load-bearing fix for the RESIDUAL flake (recurred on
+            // #109/#112/#120 even after the jitter fix above):
+            // `LocalRelay::shutdown()` (read directly from
+            // `nostr-relay-builder`'s `local/inner.rs`) only notifies the
+            // ACCEPT loop to stop taking new connections -- it never
+            // touches an already-established per-connection session task.
+            // So `relay_a.shutdown()` below does NOT reliably sever our
+            // ALREADY-OPEN connection to relay_a; that usually happens
+            // quickly anyway (the socket gets a read error/EOF from the OS
+            // teardown), but confirmed-by-instrumentation on a rare run
+            // (~1 in 25-30, reproduced with ZERO added load) it does not,
+            // and the worker's ONLY remaining way to notice relay_a is gone
+            // is the keepalive idle-ping/pong-timeout fallback -- whose
+            // PRODUCTION defaults (`KEEPALIVE_IDLE_THRESHOLD` /
+            // `KEEPALIVE_PONG_TIMEOUT`, 30s each) sum to a ~60s worst case,
+            // dwarfing any timeout this test could reasonably afford and
+            // producing a hang that looks identical to "never reconnects"
+            // from the test's side (zero further `PoolEvent`s of any kind
+            // until the fallback finally fires). Overriding both to a small
+            // value makes that fallback path fast and bounded instead of
+            // production-scale slow, exactly mirroring why
+            // `reconnect_delay_initial` above is overridden the same way.
+            keepalive_idle: Some(Duration::from_millis(200)),
+            keepalive_pong_timeout: Some(Duration::from_millis(200)),
             ..PoolConfig::default()
         },
         tx,
     );
 
+    // 15s, not 5s -- see test 7's identical `connected1` wait above for why
+    // (CONNECT_TIMEOUT-bounded first-dial exposure).
     let h1 = pool.ensure_open(&url);
-    let connected1 = recv_matching(&rx, Duration::from_secs(5), is_connected);
+    let connected1 = recv_matching(&rx, Duration::from_secs(15), is_connected);
     let PoolEvent::Connected {
         handle: observed1, ..
     } = connected1
@@ -417,7 +512,9 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
     relay_b.run().await.expect("run relay_b");
     wait_for_listener(port).await;
 
-    let connected2 = recv_matching(&rx, Duration::from_secs(15), is_connected);
+    // 30s -- see test 7's identical `connected2` wait above for why (two
+    // CONNECT_TIMEOUT-bounded stalled attempts, not a guess).
+    let connected2 = recv_matching(&rx, Duration::from_secs(30), is_connected);
     let PoolEvent::Connected { handle: h2, .. } = connected2 else {
         unreachable!("is_connected guard")
     };
@@ -469,8 +566,13 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
 /// `Written` exactly once -- never a second `EventHandoff` for the same
 /// `AttemptCorrelation`, over a real socket round trip (issue #93's
 /// "duplicate result" falsifier).
+// No reconnect dance here (a single relay, never torn down), so this test
+// doesn't need the extra thread the two reconnect tests above do -- but it
+// still shares the serialization guard so this file never puts more than
+// one `LocalRelay` ecosystem on the CPU at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_event_resolves_written_exactly_once() {
+    let _serial_guard = RECONNECT_TEST_GUARD.lock().await;
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
@@ -488,7 +590,9 @@ async fn durable_event_resolves_written_exactly_once() {
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(PoolConfig::default(), tx);
     let h = pool.ensure_open(&url);
-    recv_matching(&rx, Duration::from_secs(5), is_connected);
+    // 15s, not 5s -- see test 7's identical `connected1` wait for why
+    // (CONNECT_TIMEOUT-bounded first-dial exposure).
+    recv_matching(&rx, Duration::from_secs(15), is_connected);
 
     let event: Event = EventBuilder::text_note("resolves exactly once")
         .finalize(&keys)
