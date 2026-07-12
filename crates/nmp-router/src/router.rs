@@ -34,7 +34,11 @@ fn push_routes(
     if routes.is_empty() {
         return;
     }
-    let key = coverage_key(filter);
+    let key = coverage_key(&ContextualAtom {
+        filter: filter.clone(),
+        source,
+        access,
+    });
     for (relay, prov) in routes {
         bag.entry(relay).or_default().push(CoalesceEntry {
             filter: filter.clone(),
@@ -128,7 +132,11 @@ impl Router {
 
             for (relay, prov) in route::provenance_for_outbox(&coverage, &candidates) {
                 let filter = skeleton.with_authors(prov.covers_authors.clone());
-                let key = coverage_key(&filter);
+                let key = coverage_key(&ContextualAtom {
+                    filter: filter.clone(),
+                    source,
+                    access,
+                });
                 bag.entry(relay).or_default().push(CoalesceEntry {
                     filter,
                     source,
@@ -175,7 +183,11 @@ impl Router {
             // one.
             let source = SourceAuthority::Public;
             let access = AccessContext::Public;
-            let key = coverage_key(atom);
+            let key = coverage_key(&ContextualAtom {
+                filter: atom.clone(),
+                source,
+                access,
+            });
             for (relay, prov) in route::provenance_for_pinned(atom, dir) {
                 bag.entry(relay).or_default().push(CoalesceEntry {
                     filter: atom.clone(),
