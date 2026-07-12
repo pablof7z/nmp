@@ -167,14 +167,18 @@ pub enum RowDelta {
     /// its current relay-provenance set) so the app never has to look
     /// either up separately.
     Added(Row),
-    /// The SAME row already matched (#105): its relay-provenance set grew
-    /// (a new relay delivered this exact event id, or an already-seen relay
-    /// redelivered it at a strictly later timestamp -- see
-    /// `nmp_store::Provenance::merge_observation`). The event body itself is
-    /// unchanged, so only the id and the row's FULL current source set are
-    /// carried (matching `Added`'s own "whole value, not a patch" shape) --
-    /// never fired for a no-op redelivery (the store-layer merge already
-    /// no-ops that), and never fired merely because SOME OTHER handle's
+    /// The SAME row already matched (#105): its relay-provenance SET grew --
+    /// a relay not already in it delivered this exact event id. This is a
+    /// `BTreeSet<RelayUrl>` compare, not a timestamp compare: an
+    /// already-seen relay redelivering at a strictly later timestamp DOES
+    /// advance `nmp_store::Provenance::merge_observation`'s internal
+    /// watermark, but the projected SET is unchanged, so it correctly does
+    /// NOT fire this variant (the "no spurious update for an identical
+    /// observation" bar applies to the set, which is all this surface ever
+    /// exposes). The event body itself is unchanged, so only the id and the
+    /// row's FULL current source set are carried (matching `Added`'s own
+    /// "whole value, not a patch" shape) -- never fired for a no-op
+    /// redelivery, and never fired merely because SOME OTHER handle's
     /// lifecycle event forced a `refresh_handle` recompute of this one.
     SourcesGrew {
         id: EventId,
