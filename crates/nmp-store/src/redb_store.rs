@@ -153,6 +153,21 @@ fn attempt_prefix(intent_id: IntentId, relay: &RelayUrl) -> String {
     )
 }
 
+fn intent_row_prefix(intent_id: IntentId) -> String {
+    format!("{:020}:", intent_id.0)
+}
+
+/// Every outbox prefix ends in the `:` delimiter. Replacing that final byte
+/// with its immediate ASCII successor yields the smallest exclusive upper
+/// bound containing every key beginning with the original prefix.
+fn prefix_range(prefix: String) -> (String, String) {
+    debug_assert!(prefix.ends_with(':'));
+    let mut upper = prefix.clone();
+    upper.pop();
+    upper.push(';');
+    (prefix, upper)
+}
+
 fn attempt_key(intent_id: IntentId, relay: &RelayUrl, ordinal: u64) -> String {
     format!("{}{:020}", attempt_prefix(intent_id, relay), ordinal)
 }
@@ -1521,6 +1536,13 @@ pub struct RedbStore {
     /// `cfg(test)` — zero cost in a normal build.
     #[cfg(test)]
     examined_rows: AtomicU64,
+    /// Number of rows yielded by bounded attempt-table ranges. Tests reset
+    /// this to prove work follows the target lane count, not total history.
+    #[cfg(test)]
+    attempt_range_rows: AtomicU64,
+    /// Equivalent instrumentation for resolved-route revision ranges.
+    #[cfg(test)]
+    route_revision_range_rows: AtomicU64,
 }
 
 impl RedbStore {
@@ -1562,6 +1584,10 @@ impl RedbStore {
             crash_point: AtomicU8::new(0),
             #[cfg(test)]
             examined_rows: AtomicU64::new(0),
+            #[cfg(test)]
+            attempt_range_rows: AtomicU64::new(0),
+            #[cfg(test)]
+            route_revision_range_rows: AtomicU64::new(0),
         })
     }
 
@@ -1586,6 +1612,20 @@ impl RedbStore {
         {
             std::process::abort();
         }
+    }
+
+    #[cfg(test)]
+    fn reset_outbox_range_rows(&self) {
+        self.attempt_range_rows.store(0, Ordering::Relaxed);
+        self.route_revision_range_rows.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn outbox_range_rows(&self) -> (u64, u64) {
+        (
+            self.attempt_range_rows.load(Ordering::Relaxed),
+            self.route_revision_range_rows.load(Ordering::Relaxed),
+        )
     }
 
     /// Current value of [`Self::examined_rows`] — the `query`-indexing
@@ -3478,13 +3518,23 @@ impl EventStore for RedbStore {
             let mut revisions = write_txn
                 .open_table(OUTBOX_ROUTE_REVISIONS)
                 .map_err(persist_err)?;
+            let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
             let mut last = 0;
-            for entry in revisions.iter().map_err(persist_err)? {
+            for entry in revisions
+                .range(lower.as_str()..upper.as_str())
+                .map_err(persist_err)?
+            {
+                #[cfg(test)]
+                self.route_revision_range_rows
+                    .fetch_add(1, Ordering::Relaxed);
                 let (key, value) = entry.map_err(persist_err)?;
                 let recovered = decode_route_revision(key.value(), value.value())?;
-                if recovered.intent_id == intent_id {
-                    last = last.max(recovered.ordinal);
+                if recovered.intent_id != intent_id {
+                    return Err(PersistenceError(
+                        "route revision range does not match its value intent".into(),
+                    ));
                 }
+                last = last.max(recovered.ordinal);
             }
             let ordinal = last
                 .checked_add(1)
@@ -3524,13 +3574,23 @@ impl EventStore for RedbStore {
         let revisions = read_txn
             .open_table(OUTBOX_ROUTE_REVISIONS)
             .map_err(persist_err)?;
+        let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
         let mut recovered = Vec::new();
-        for entry in revisions.iter().map_err(persist_err)? {
+        for entry in revisions
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+        {
+            #[cfg(test)]
+            self.route_revision_range_rows
+                .fetch_add(1, Ordering::Relaxed);
             let (key, value) = entry.map_err(persist_err)?;
             let revision = decode_route_revision(key.value(), value.value())?;
-            if revision.intent_id == intent_id {
-                recovered.push(revision);
+            if revision.intent_id != intent_id {
+                return Err(PersistenceError(
+                    "route revision range does not match its value intent".into(),
+                ));
             }
+            recovered.push(revision);
         }
         recovered.sort_by_key(|revision| revision.ordinal);
         Ok(recovered)
@@ -3566,23 +3626,30 @@ impl EventStore for RedbStore {
         let attempt = {
             let mut attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
             let prefix = attempt_prefix(intent_id, &relay);
+            let (lower, upper) = prefix_range(prefix.clone());
             let mut last = 0;
-            for entry in attempts.iter().map_err(persist_err)? {
+            for entry in attempts
+                .range(lower.as_str()..upper.as_str())
+                .map_err(persist_err)?
+            {
+                #[cfg(test)]
+                self.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
                 let (key, value) = entry.map_err(persist_err)?;
-                if let Some(suffix) = key.value().strip_prefix(&prefix) {
-                    let parsed = suffix.parse::<u64>().map_err(|err| {
-                        PersistenceError(format!("parse outbox attempt ordinal: {err}"))
-                    })?;
-                    if parsed != u64::MAX {
-                        let recovered = decode_attempt(key.value(), value.value())?;
-                        if recovered.intent_id != intent_id || recovered.relay != relay {
-                            return Err(PersistenceError(
-                                "outbox attempt prefix does not match its value tuple".into(),
-                            ));
-                        }
+                let suffix = key.value().strip_prefix(&prefix).ok_or_else(|| {
+                    PersistenceError("outbox attempt range escaped its prefix".into())
+                })?;
+                let parsed = suffix.parse::<u64>().map_err(|err| {
+                    PersistenceError(format!("parse outbox attempt ordinal: {err}"))
+                })?;
+                if parsed != u64::MAX {
+                    let recovered = decode_attempt(key.value(), value.value())?;
+                    if recovered.intent_id != intent_id || recovered.relay != relay {
+                        return Err(PersistenceError(
+                            "outbox attempt prefix does not match its value tuple".into(),
+                        ));
                     }
-                    last = last.max(parsed);
                 }
+                last = last.max(parsed);
             }
             let ordinal = last
                 .checked_add(1)
@@ -3672,13 +3739,22 @@ impl EventStore for RedbStore {
     ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
         let read_txn = self.db.begin_read().map_err(persist_err)?;
         let attempts = read_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
-        let prefix = format!("{:020}:", intent_id.0);
+        let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
         let mut recovered = Vec::new();
-        for entry in attempts.iter().map_err(persist_err)? {
+        for entry in attempts
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+        {
+            #[cfg(test)]
+            self.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
             let (key, value) = entry.map_err(persist_err)?;
-            if key.value().starts_with(&prefix) {
-                recovered.push(decode_attempt(key.value(), value.value())?);
+            let attempt = decode_attempt(key.value(), value.value())?;
+            if attempt.intent_id != intent_id {
+                return Err(PersistenceError(
+                    "outbox attempt range does not match its value intent".into(),
+                ));
             }
+            recovered.push(attempt);
         }
         // Table-key layout is a storage detail (currently length-prefixed
         // relay text), not public recovery order. Match MemoryStore and the
@@ -3735,6 +3811,105 @@ mod crash_atomicity_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn accepted_signed(
+        store: &mut RedbStore,
+        keys: &nostr::Keys,
+        content: &str,
+        created_at: u64,
+    ) -> (IntentId, Event) {
+        use nostr::EventBuilder;
+
+        let signed = EventBuilder::new(Kind::TextNote, content)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign fixture event");
+        let frozen = Event::new(
+            signed.id,
+            signed.pubkey,
+            signed.created_at,
+            signed.kind,
+            signed.tags.clone(),
+            signed.content.clone(),
+            crate::sentinel_signature(),
+        );
+        let outcome = store
+            .accept_write(AcceptWrite {
+                frozen,
+                expected_pubkey: keys.public_key(),
+                signing_identity_ref: "range-proof".into(),
+                durability: WriteDurability::Durable,
+                routing: "range-proof".into(),
+                sig_state: IntentSigState::Pending,
+                accepted_at: Timestamp::from(created_at),
+            })
+            .expect("accept fixture intent");
+        let intent = outcome.journaled_intent_id().expect("intent id");
+        store
+            .promote_signed(intent, signed.sig)
+            .expect("promote fixture intent");
+        (intent, signed)
+    }
+
+    /// Issue #87's measurable bound: 128 unrelated intents must add zero
+    /// visited rows to target-intent recovery, route revision allocation, or
+    /// exact-relay attempt allocation. Relay URLs deliberately share textual
+    /// prefixes, and intent 1 coexists with prefix-adversarial ids 10/100.
+    #[test]
+    fn outbox_ranges_visit_only_target_intent_and_exact_relay_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outbox-ranges.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let keys = nostr::Keys::generate();
+        let short = RelayUrl::parse("wss://prefix.example/x").unwrap();
+        let extended = RelayUrl::parse("wss://prefix.example/x:443").unwrap();
+
+        let (target, target_event) = accepted_signed(&mut store, &keys, "target", 1_000);
+        assert_eq!(target, IntentId(1));
+        store
+            .record_route_revision(target, BTreeSet::from([short.clone(), extended.clone()]))
+            .unwrap();
+        store
+            .record_route_revision(target, BTreeSet::from([short.clone()]))
+            .unwrap();
+        store
+            .start_attempt(target, short.clone(), target_event.clone())
+            .unwrap();
+        store
+            .start_attempt(target, extended.clone(), target_event.clone())
+            .unwrap();
+
+        for index in 0..128u64 {
+            let (intent, event) =
+                accepted_signed(&mut store, &keys, &format!("noise-{index}"), 2_000 + index);
+            let relay = RelayUrl::parse(&format!("wss://noise-{index}.example")).unwrap();
+            store
+                .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+                .unwrap();
+            store.start_attempt(intent, relay, event).unwrap();
+        }
+
+        store.reset_outbox_range_rows();
+        let attempts = store.recover_attempts(target).unwrap();
+        let revisions = store.recover_route_revisions(target).unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(store.outbox_range_rows(), (2, 2));
+
+        store.reset_outbox_range_rows();
+        let next = store
+            .start_attempt(target, short.clone(), target_event)
+            .unwrap();
+        assert_eq!(next.ordinal, 2);
+        store
+            .record_route_revision(target, BTreeSet::from([extended]))
+            .unwrap();
+        assert_eq!(
+            store.outbox_range_rows(),
+            (1, 2),
+            "allocation must inspect only the exact relay or target intent"
+        );
+    }
 
     /// The durable-key falsifier for this fix: `coverage_row_key` must
     /// carry the FULL 32-byte BLAKE3 digest (64 hex chars), not a
