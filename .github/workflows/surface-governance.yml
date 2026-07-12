@@ -29,7 +29,8 @@ jobs:
         run: |
           mkdir -p \
             "$TRUSTED_DIR/scripts" \
-            "$TRUSTED_DIR/tools/component-interface-snapshot/src"
+            "$TRUSTED_DIR/tools/component-interface-snapshot/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/src"
           for path in \
             scripts/check-surface-governance.sh \
             scripts/install-surface-tools.sh \
@@ -39,7 +40,10 @@ jobs:
             tools/surface-toolchain.env \
             tools/component-interface-snapshot/Cargo.toml \
             tools/component-interface-snapshot/Cargo.lock \
-            tools/component-interface-snapshot/src/main.rs; do
+            tools/component-interface-snapshot/src/main.rs \
+            tools/rust-facade-snapshot/Cargo.toml \
+            tools/rust-facade-snapshot/Cargo.lock \
+            tools/rust-facade-snapshot/src/main.rs; do
             git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
           done
           chmod +x "$TRUSTED_DIR/scripts/"*.sh

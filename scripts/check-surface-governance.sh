@@ -72,6 +72,10 @@ while IFS= read -r path; do
     tools/component-interface-snapshot/Cargo.lock|\
     tools/component-interface-snapshot/Cargo.toml|\
     tools/component-interface-snapshot/src/main.rs|\
+    tools/rust-facade-snapshot/Cargo.lock|\
+    tools/rust-facade-snapshot/Cargo.toml|\
+    tools/rust-facade-snapshot/src/main.rs|\
+    tools/rust-facade-snapshot/tests/fixtures/*|\
     tools/surface-toolchain.env)
       if [[ ${SURFACE_BOOTSTRAP:-0} == 1 && $bootstrap == 1 ]]; then
         continue

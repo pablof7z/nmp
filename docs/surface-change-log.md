@@ -51,3 +51,14 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Updated falsifiers:** cross-backend attempt ordering/prefix/terminal/corruption/overflow tests, genuine Redb close/reopen recovery tests, exact frozen-signer and boot-before-first-command tests, two-observer future-transition proof, Rust/FFI parity, and exhaustive Swift/Kotlin `OutcomeUnknown` mapping tests.
 - **Superseded path removed:** stream-local accepted-write identity, lossy boot reconstruction, blind at-most-once resend/`GaveUp` projection, panic-based attempt decoding, ambiguous relay-prefix keys, and false-success terminal persistence are replaced rather than retained as compatibility paths.
 - **Human signoff:** PR #83 is approved under the repository owner's delegated orchestration authority in this session, with independent exact-head review plus the required CI and merge record serving as the approval trail.
+
+## 2026-07-12 — Govern dependency-reexported Rust facade shapes ([PR #90](https://github.com/pablof7z/nmp/pull/90))
+
+- **Failure evidence:** issue #89 showed that the Rust facade snapshot recorded dependency-owned reexports opaquely, so changing a supported enum variant or record field could leave the Rust projection unchanged and produce a false governance verdict.
+- **Changed projections:** rust
+- **Rust / FFI / Swift / Kotlin impact:** the Rust snapshot now resolves the shapes and root inherent APIs of explicit `nmp` reexports; no UniFFI, Swift, or Kotlin product surface changes in this governance correction.
+- **Persistence impact:** none; this changes the generated public-surface evidence and its protected extractor, not stored events, receipts, attempts, or schema versions.
+- **Diagnostics impact:** none; diagnostics types are captured more accurately when reexported, but their runtime meaning and values are unchanged.
+- **Updated falsifiers:** compiler-backed fixtures cover renamed dependencies, nested structs/enums/aliases, cycles, root methods and associated items, mixed visibility, lock drift, unrelated dependency APIs, numeric-ID rejection, deterministic fresh-clone regeneration, and snapshot size bounds.
+- **Superseded path removed:** the opaque dependency-reexport evidence path is eliminated: pinned `cargo-public-api` remains the direct-facade prefix, while a locked, pinned rustdoc-JSON extractor now resolves every explicit dependency-owned reexport and fails closed on unresolved shapes.
+- **Human signoff:** PR #90 is approved under the repository owner's delegated orchestration authority in this session, with independent exact-head review, the adversarial governance suite, deterministic regeneration, and repository CI serving as the approval trail.

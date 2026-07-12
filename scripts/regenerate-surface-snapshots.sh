@@ -16,6 +16,7 @@ fi
 source "${SURFACE_TOOLCHAIN_ENV:-$ROOT/tools/surface-toolchain.env}"
 PUBLIC_API_VERSION=$CARGO_PUBLIC_API_VERSION
 COMPONENT_TOOL_DIR=${SURFACE_COMPONENT_TOOL_DIR:-$ROOT/tools/component-interface-snapshot}
+RUST_FACADE_TOOL_DIR=${SURFACE_RUST_FACADE_TOOL_DIR:-$ROOT/tools/rust-facade-snapshot}
 
 command -v cargo-public-api >/dev/null || {
   echo "cargo-public-api is required; install with:" >&2
@@ -39,10 +40,42 @@ cd "$ROOT"
   echo "# rust toolchain: $SURFACE_RUST_TOOLCHAIN"
   echo "# crate: nmp"
   cargo "+$SURFACE_RUST_TOOLCHAIN" public-api -p nmp --simplified
+  echo
+  (
+    cd "$RUST_FACADE_TOOL_DIR"
+    CARGO_TARGET_DIR="$TMP/rust-facade-tool-target" \
+      cargo "+$SURFACE_RUST_TOOLCHAIN" run --quiet --locked \
+        --manifest-path Cargo.toml -- \
+        "$ROOT" "$SURFACE_RUST_TOOLCHAIN" "$TMP/facade-rustdoc-target"
+  )
 } > "$TMP/nmp-facade.txt"
 
-cargo "+$SURFACE_RUST_TOOLCHAIN" build -p nmp-ffi --lib >/dev/null
-TARGET_DIR=$(cargo "+$SURFACE_RUST_TOOLCHAIN" metadata --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+# The supported facade has dozens of explicit roots, not arbitrary dependency
+# method inventories. These generous ceilings catch accidental recursive impl
+# expansion while leaving substantial room for intentional surface growth.
+RUST_FACADE_MAX_LINES=30000
+RUST_FACADE_MAX_BYTES=8000000
+RUST_FACADE_LINES=$(wc -l < "$TMP/nmp-facade.txt")
+RUST_FACADE_BYTES=$(wc -c < "$TMP/nmp-facade.txt")
+(( RUST_FACADE_LINES <= RUST_FACADE_MAX_LINES )) || {
+  echo "Rust facade snapshot exceeds $RUST_FACADE_MAX_LINES lines: $RUST_FACADE_LINES" >&2
+  exit 1
+}
+(( RUST_FACADE_BYTES <= RUST_FACADE_MAX_BYTES )) || {
+  echo "Rust facade snapshot exceeds $RUST_FACADE_MAX_BYTES bytes: $RUST_FACADE_BYTES" >&2
+  exit 1
+}
+if grep -Eq 'CfgTrace|CfgAttrTrace|#\[attr = Inline|/Users/|/home/|/private/var/|\.cargo/registry' "$TMP/nmp-facade.txt"; then
+  echo "Rust facade snapshot contains compiler trace noise or an absolute source path" >&2
+  exit 1
+fi
+if grep -Eq '"impls"|"blanket_impl"|"id": [0-9]|local-item:' "$TMP/nmp-facade.txt"; then
+  echo "Rust facade snapshot contains an impl inventory or unstable rustdoc id" >&2
+  exit 1
+fi
+
+cargo "+$SURFACE_RUST_TOOLCHAIN" build --locked -p nmp-ffi --lib >/dev/null
+TARGET_DIR=$(cargo "+$SURFACE_RUST_TOOLCHAIN" metadata --locked --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 case "$(uname -s)" in
   Darwin) LIB="$TARGET_DIR/debug/libnmp_ffi.dylib" ;;
   Linux) LIB="$TARGET_DIR/debug/libnmp_ffi.so" ;;

@@ -1,0 +1,8 @@
+[package]
+name = "nested-package"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "deep_actual_root"

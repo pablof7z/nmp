@@ -13,8 +13,11 @@ new_repo() {
     "$repo/scripts" \
     "$repo/tools" \
     "$repo/tools/component-interface-snapshot/src" \
+    "$repo/tools/rust-facade-snapshot/src" \
+    "$repo/tools/rust-facade-snapshot/tests/fixtures" \
     "$repo/actual" \
     "$repo/crates/nmp-ffi/src" \
+    "$repo/crates/nmp-engine/src/outbox" \
     "$repo/Packages/NMP/Sources/NMP" \
     "$repo/Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk"
   cp "$CHECK" "$repo/scripts/check-surface-governance.sh"
@@ -33,6 +36,15 @@ set -euo pipefail
 cat "$1/crates/nmp-ffi/src/types.rs" > "$2"
 EXTRACTOR
   printf 'ffi-v1\n' > "$repo/crates/nmp-ffi/src/types.rs"
+  printf 'WriteStatus::Accepted\n' > "$repo/crates/nmp-engine/src/outbox/mod.rs"
+  printf '[package]\nname="fixture-rust-extractor"\n' > "$repo/tools/rust-facade-snapshot/Cargo.toml"
+  printf 'fixture rust lock\n' > "$repo/tools/rust-facade-snapshot/Cargo.lock"
+  printf 'fixture compiler workspace\n' > "$repo/tools/rust-facade-snapshot/tests/fixtures/fixture.txt"
+  cat > "$repo/tools/rust-facade-snapshot/src/main.rs" <<'RUST_EXTRACTOR'
+#!/usr/bin/env bash
+set -euo pipefail
+cat "$1/crates/nmp-engine/src/outbox/mod.rs" > "$2"
+RUST_EXTRACTOR
   printf '// swift package v1\n' > "$repo/Packages/NMP/Package.swift"
   printf '// kotlin build v1\n' > "$repo/Packages/NMPKotlin/build.gradle.kts"
   printf '// kotlin settings v1\n' > "$repo/Packages/NMPKotlin/settings.gradle.kts"
@@ -118,6 +130,13 @@ repo="$TMP/rust-no-snapshot"; new_repo "$repo"; base=$(git -C "$repo" rev-parse 
 printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; commit_case "$repo" rust-only
 expect_fail "Rust surface change without snapshot" "$repo" "$base"
 
+# The concrete #89 regression: compiler-resolved WriteStatus gains a variant,
+# so the derived Rust surface moves and a stale committed snapshot fails.
+repo="$TMP/write-status-no-snapshot"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'WriteStatus::Accepted\nWriteStatus::PersistenceBlocked\n' > "$repo/actual/nmp-facade.txt"
+commit_case "$repo" write-status-variant-only
+expect_fail "WriteStatus dependency variant without Rust snapshot" "$repo" "$base"
+
 # Snapshot moved without its append-only evidence entry.
 repo="$TMP/snapshot-no-log"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
@@ -202,7 +221,9 @@ expect_fail "wrong or unrelated PR link" "$repo" "$base"
 
 # The trusted base checker rejects attempts to replace itself or its workflow.
 for protected in scripts/check-surface-governance.sh .github/workflows/ci.yml \
-  .github/workflows/surface-governance.yml; do
+  .github/workflows/surface-governance.yml \
+  tools/rust-facade-snapshot/src/main.rs \
+  tools/rust-facade-snapshot/tests/fixtures/fixture.txt; do
   repo="$TMP/tamper-$(basename "$protected")"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
   printf '\n# bypass attempt\n' >> "$repo/$protected"; commit_case "$repo" protected-tamper
   expect_fail "protected governance tamper: $protected" "$repo" "$base"
@@ -229,6 +250,22 @@ chmod +x "$TMP/trusted-extractor"
 "$TMP/trusted-extractor" "$repo" "$TMP/trusted-ffi-output"
 grep -Fxq 'ffi-v2' "$TMP/trusted-ffi-output"
 expect_fail "head extractor cannot hide public FFI delta" "$repo" "$base"
+
+# The same trust proof covers the new Rust resolver: a head-controlled tool
+# printing the old WriteStatus cannot hide the compiler-visible new variant.
+repo="$TMP/rust-extractor-bypass"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'WriteStatus::Accepted\nWriteStatus::PersistenceBlocked\n' > \
+  "$repo/crates/nmp-engine/src/outbox/mod.rs"
+cat > "$repo/tools/rust-facade-snapshot/src/main.rs" <<'RUST_BYPASS'
+#!/usr/bin/env bash
+printf 'WriteStatus::Accepted\n' > "$2"
+RUST_BYPASS
+commit_case "$repo" rust-extractor-bypass
+git -C "$repo" show "$base:tools/rust-facade-snapshot/src/main.rs" > "$TMP/trusted-rust-extractor"
+chmod +x "$TMP/trusted-rust-extractor"
+"$TMP/trusted-rust-extractor" "$repo" "$TMP/trusted-rust-output"
+grep -Fxq 'WriteStatus::PersistenceBlocked' "$TMP/trusted-rust-output"
+expect_fail "lying head Rust extractor cannot hide WriteStatus delta" "$repo" "$base"
 
 # Wrapper + log (without snapshot movement) is valid.
 repo="$TMP/wrapper-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
