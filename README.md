@@ -69,7 +69,9 @@ The optional [content and UI building-block architecture](docs/design/ui-compone
 places reusable parsing, reference sessions, native primitives, and styled
 open-code components above the public NMP facade. Apps may adopt, edit, replace,
 or omit those layers; NMP Core remains blind to them. This architecture is
-designed but not yet implemented.
+now implemented for the shared content engine and first native SwiftUI family;
+Compose parity, the `nmp-ui` source installer, and broader protocol components
+remain tracked work.
 
 ## What this unlocks
 

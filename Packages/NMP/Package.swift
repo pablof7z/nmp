@@ -11,6 +11,10 @@
 //                   ONLY target a consuming app imports. Holds zero engine
 //                   concepts of its own -- AsyncSequence conformances,
 //                   deinit-tied teardown, and @Observable sugar over NMPFFI.
+//   NMPContent   -- optional semantic parsing + bounded live references over
+//                   an existing NMP engine.
+//   NMPUI        -- optional native SwiftUI primitives, content renderer, and
+//                   ready-made compositions over NMPContent.
 //   NMPTests     -- XCTest target exercising NMP's public surface, including
 //                   one bounded live-relay test (§ below).
 //
@@ -30,6 +34,7 @@ let package = Package(
     products: [
         .library(name: "NMP", targets: ["NMP"]),
         .library(name: "NMPContent", targets: ["NMPContent"]),
+        .library(name: "NMPUI", targets: ["NMPUI"]),
     ],
     targets: [
         .binaryTarget(
@@ -48,6 +53,10 @@ let package = Package(
             name: "NMPContent",
             dependencies: ["NMP", "NMPFFI"]
         ),
+        .target(
+            name: "NMPUI",
+            dependencies: ["NMP", "NMPContent"]
+        ),
         .testTarget(
             name: "NMPTests",
             dependencies: ["NMP"]
@@ -55,6 +64,10 @@ let package = Package(
         .testTarget(
             name: "NMPContentTests",
             dependencies: ["NMPContent"]
+        ),
+        .testTarget(
+            name: "NMPUITests",
+            dependencies: ["NMPUI"]
         ),
     ]
 )
