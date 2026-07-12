@@ -977,6 +977,26 @@ pub trait EventStore {
     /// via `nostr::Filter::match_event`, each with its provenance attached.
     /// Fallible for the same reason as [`EventStore::insert`] (issue #122):
     /// a read-path I/O error surfaces as `Err` instead of panicking.
+    ///
+    /// `filter.limit` is NOT consulted by this LOCAL read path (#124): every
+    /// currently-matching row is returned, in no particular order (neither
+    /// backend orders its internal candidates by `created_at` — both are
+    /// effectively id-keyed), regardless of `limit`. This is DELIBERATE, not
+    /// an oversight — honoring `limit` locally requires a `created_at`-desc
+    /// ordering + truncation, and choosing that ordering is an owner-
+    /// reserved decision (issue #9's app-defined-sort-vs-closed-`OrderKey`
+    /// fork, deferred to the Collection Tier-A gate), not something to
+    /// settle as a side effect of this fix. Contrast with the WIRE path:
+    /// `nmp_grammar::ConcreteFilter::to_nostr` DOES lower `limit` into this
+    /// very `filter` before it ever reaches a relay, so a well-behaved
+    /// relay caps what it SENDS you — a genuine, honored guarantee. But
+    /// that guarantee governs the wire only; it says nothing about what a
+    /// LATER local-only call to THIS method returns once the cache holds
+    /// more than `limit` matching rows (reconnect replay, multiple relays
+    /// each independently capped, etc.) — this method's own answer is
+    /// uncapped regardless. Both backends are cross-checked for this exact
+    /// contract (`store_contract.rs`); when #9 resolves, whoever implements
+    /// ordered/truncated local reads updates that test, not just adds one.
     fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError>;
 
     /// Remove `id` from the store — clearing both the id index and, if `id`

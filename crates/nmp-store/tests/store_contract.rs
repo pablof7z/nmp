@@ -304,6 +304,42 @@ fn query_returns_only_current_winners_never_superseded() {
     });
 }
 
+/// #124: `EventStore::query`'s own doc states the current contract
+/// precisely -- `filter.limit` is NOT consulted locally, deliberately (see
+/// that doc for why: honoring it requires an ordering decision reserved
+/// for #9's Collection Tier-A gate). This pins that CURRENT contract
+/// across both backends so it can never silently regress un-noticed, and
+/// gives whoever resolves #9 an obvious test to flip once ordered/
+/// truncated local reads are actually implemented.
+#[test]
+fn query_ignores_limit_and_returns_every_matching_row_on_both_backends() {
+    for_each_backend(|store| {
+        let k = keys();
+        let matching_count = 5;
+        for i in 0..matching_count {
+            store
+                .insert(
+                    regular_event_at(&k, &format!("note {i}"), 100 + i),
+                    observed("wss://r1", 1),
+                )
+                .unwrap();
+        }
+
+        let limited = Filter::new()
+            .kind(Kind::TextNote)
+            .author(k.public_key())
+            .limit(2);
+        let results = store.query(&limited).unwrap();
+        assert_eq!(
+            results.len(),
+            matching_count as usize,
+            "query must return every currently-matching row regardless of \
+             filter.limit -- this is the CURRENT (deliberately undocumented-\
+             no-longer, #124) contract, not a bug to silently fix here"
+        );
+    });
+}
+
 // ---------------------------------------------------------------------
 // Provenance merge (ledger #5, plan §5 test 8)
 // ---------------------------------------------------------------------
