@@ -163,6 +163,23 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     let pool = Pool::new(
         PoolConfig {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
+            // `backoff::jittered`'s per-URL offset is a FIXED value (up to
+            // ~5s in production), re-paid on EVERY retry against this URL
+            // until one connects -- not re-rolled per attempt. relay_a and
+            // relay_b share the exact same URL (same host:port), and the
+            // pool's own worker thread starts redialing within milliseconds
+            // of `relay_a.shutdown()` -- well before this test's own
+            // `wait_for_port_released`/`wait_for_listener` dance can
+            // possibly finish bringing relay_b up, so at least one doomed
+            // connect attempt against this URL is effectively guaranteed
+            // every run. Whether that URL's hash happens to land near the
+            // ~5s ceiling is pure per-port luck (`free_port` picks a fresh
+            // ephemeral port each run) -- on an unlucky port, two such
+            // taxed retries alone can eat ~10s, which is what was blowing
+            // this test's `Connected` wait under CI load. Disabling jitter
+            // here removes the lottery rather than padding the timeout to
+            // out-wait it.
+            reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
         tx,
@@ -304,6 +321,23 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
     let pool = Pool::new(
         PoolConfig {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
+            // `backoff::jittered`'s per-URL offset is a FIXED value (up to
+            // ~5s in production), re-paid on EVERY retry against this URL
+            // until one connects -- not re-rolled per attempt. relay_a and
+            // relay_b share the exact same URL (same host:port), and the
+            // pool's own worker thread starts redialing within milliseconds
+            // of `relay_a.shutdown()` -- well before this test's own
+            // `wait_for_port_released`/`wait_for_listener` dance can
+            // possibly finish bringing relay_b up, so at least one doomed
+            // connect attempt against this URL is effectively guaranteed
+            // every run. Whether that URL's hash happens to land near the
+            // ~5s ceiling is pure per-port luck (`free_port` picks a fresh
+            // ephemeral port each run) -- on an unlucky port, two such
+            // taxed retries alone can eat ~10s, which is what was blowing
+            // this test's `Connected` wait under CI load. Disabling jitter
+            // here removes the lottery rather than padding the timeout to
+            // out-wait it.
+            reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
         tx,
