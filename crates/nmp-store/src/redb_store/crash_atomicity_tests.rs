@@ -80,13 +80,18 @@ fn table_len(path: &Path, table: TableDefinition<&str, &str>) -> u64 {
         .expect("count raw rows")
 }
 
-fn binary_table_len(path: &Path, table: TableDefinition<&str, &[u8]>) -> u64 {
+fn event_table_len(path: &Path) -> u64 {
     let db = Database::open(path).expect("open raw database after crash");
     let txn = db.begin_read().expect("begin raw read");
-    txn.open_table(table)
-        .expect("open raw binary table")
+    txn.open_table(EVENTS)
+        .expect("open raw event table")
         .len()
-        .expect("count raw binary rows")
+        .expect("count raw event rows")
+}
+
+fn assert_path_canonical_integrity(path: &Path) {
+    let db = Database::open(path).expect("open raw database for canonical integrity audit");
+    assert_canonical_integrity(&db);
 }
 
 fn crash(path: &Path, point: &str) {
@@ -120,6 +125,7 @@ fn crash(path: &Path, point: &str) {
         Some(libc::SIGABRT),
         "worker must abort at {point}; status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    assert_path_canonical_integrity(path);
 }
 
 #[test]
@@ -278,11 +284,7 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         RedbStore::open(&path).expect("initialize store");
         crash(&path, point);
 
-        assert_eq!(
-            binary_table_len(&path, EVENTS),
-            0,
-            "no orphan event at {point}"
-        );
+        assert_eq!(event_table_len(&path), 0, "no orphan event at {point}");
         assert_eq!(
             table_len(&path, OUTBOX_INTENTS),
             0,
@@ -310,6 +312,8 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         assert_eq!(outcome.journaled_receipt_id(), Some(1));
         assert_eq!(reopened.query(&Filter::new()).unwrap().len(), 1);
         assert_eq!(reopened.recover_outbox().len(), 1);
+        drop(reopened);
+        assert_path_canonical_integrity(&path);
     }
 }
 
