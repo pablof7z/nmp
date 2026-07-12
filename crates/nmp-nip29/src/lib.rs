@@ -1,18 +1,24 @@
-//! `nmp-nip29` -- read-only NIP-29 host browsing composed over
-//! `nmp-nip51`'s kind:10009 (#63/#108). Claims NEITHER kind:10009 (owned by
-//! `nmp-nip51`) NOR kinds 9/39000/30315 in this PR (deferred to whenever
-//! #45's fuller ownership/write-routing framework lands -- kind 30315 in
-//! particular is NIP-38 "user statuses", a DIFFERENT protocol this crate
-//! reads cross-NIP but must never claim exclusively).
+//! `nmp-nip29` -- NIP-29 host browsing (read, #63/#108) and send-into-group
+//! composition (write, #115), both routed through an explicitly selected
+//! host relay. Claims NEITHER kind:10009 (owned by `nmp-nip51`) NOR kinds
+//! 9/39000/30315 (deferred to whenever #45's fuller ownership framework
+//! lands -- kind 30315 in particular is NIP-38 "user statuses", a DIFFERENT
+//! protocol this crate reads cross-NIP but must never claim exclusively).
+//! `compose_group_send` (#115) contributes an `h` tag/host authority to a
+//! draft whose kind it does not own -- "contextual publication is not kind
+//! ownership" (`docs/design/routing-and-ownership.md` §3.2.1): this
+//! crate's writes need no claim, exactly as its reads need none.
 //!
 //! Non-goals (mirrors #108's issue text exactly): no kind:30002 semantics;
 //! no `rememberGroup`/`forgetGroup` mutation (gated on #50).
 
 mod demand;
 mod group_ref;
+mod send;
 
 pub use demand::{group_content_demand, group_discovery_demand};
 pub use group_ref::{remembered_groups, GroupRef, RememberedGroups};
+pub use send::{compose_group_send, GroupSendError, GroupTimelineEvidence, PREVIOUS_MAX};
 
 #[cfg(test)]
 mod ownership_audit {

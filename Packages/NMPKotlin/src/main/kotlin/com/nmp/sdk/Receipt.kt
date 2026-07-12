@@ -49,6 +49,18 @@ fun publishReceipt(engine: NmpEngineInterface, intent: WriteIntent): Receipt {
     return bridge.receipt(id)
 }
 
+/** Publish a [GroupSendIntent] from `groupSendIntent` (#115). Take-once:
+ * `intent` is consumed by this call -- a second `publishComposed` on the
+ * SAME [GroupSendIntent] throws `NMPError.IntentAlreadyConsumed` rather
+ * than silently re-publishing a stale template (recompose via
+ * `groupSendIntent` again for a retry). Otherwise identical to
+ * [publishReceipt]'s bridge. */
+fun publishComposedReceipt(engine: NmpEngineInterface, intent: GroupSendIntent): Receipt {
+    val bridge = ReceiptBridge()
+    val id = nmpRethrowing { engine.publishComposed(intent.ffi, bridge.observer) }
+    return bridge.receipt(id)
+}
+
 internal fun mapReceiptReattachment(
     result: FfiReceiptReattachment,
     id: ULong,

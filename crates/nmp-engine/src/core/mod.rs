@@ -39,7 +39,9 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Filter, SourceAuthority,
+    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Durability, Filter,
+    HostAuthority, NarrowOnly, PrivateRoute, SourceAuthority, WriteIntent, WritePayload,
+    WriteRouting,
 };
 use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
 use nmp_router::{
@@ -57,9 +59,7 @@ use nmp_transport::{
 };
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
-use crate::outbox::{
-    Durability, ReceiptSink, WriteIntent, WritePayload, WriteRouting, WriteStatus,
-};
+use crate::outbox::{ReceiptSink, WriteStatus};
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
 /// negentropy session with no reply is abandoned in favor of a plain REQ
@@ -659,8 +659,8 @@ impl<S: EventStore> EngineCore<S> {
             let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
             let routing_valid = parsed_routing.is_some();
             let routing = parsed_routing.unwrap_or_else(|| {
-                WriteRouting::PrivateNarrow(crate::outbox::PrivateRoute {
-                    relays: crate::outbox::NarrowOnly::new(Vec::<RelayUrl>::new()),
+                WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new(Vec::<RelayUrl>::new()),
                 })
             });
             let id = ReceiptId(intent.receipt_id);
@@ -1761,6 +1761,9 @@ impl<S: EventStore> EngineCore<S> {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            WriteRouting::PinnedHost(auth) => {
+                format!("pinned-host-hex:{}", hex::encode(auth.host().to_string()))
+            }
         }
     }
 
@@ -1792,9 +1795,17 @@ impl<S: EventStore> EngineCore<S> {
                     })
                     .collect::<Option<Vec<_>>>()?
             };
-            return Some(WriteRouting::PrivateNarrow(crate::outbox::PrivateRoute {
-                relays: crate::outbox::NarrowOnly::new(relays),
+            return Some(WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new(relays),
             }));
+        }
+        if let Some(encoded) = snapshot.strip_prefix("pinned-host-hex:") {
+            let bytes = hex::decode(encoded).ok()?;
+            let url = String::from_utf8(bytes).ok()?;
+            let host = RelayUrl::parse(&url).ok()?;
+            return Some(WriteRouting::PinnedHost(HostAuthority::from_selected_host(
+                host,
+            )));
         }
         None
     }
@@ -1883,6 +1894,14 @@ impl<S: EventStore> EngineCore<S> {
     /// `Failed` before any `PublishEvent`, rather than guessing a relay;
     /// recipient discovery rides the existing kind:10002 `sync_discovery`
     /// machinery, so a later winner simply makes the retry routable.
+    ///
+    /// `PinnedHost` (#115) also never consults the directory — like
+    /// `PrivateNarrow`, its one relay is exactly whatever the caller
+    /// asserted via `HostAuthority::from_selected_host`. Unlike
+    /// `PrivateNarrow`, an empty/unroutable state is structurally
+    /// unreachable (`HostAuthority` always carries exactly one well-formed
+    /// `RelayUrl`), so this arm is infallible where `PrivateNarrow`'s is
+    /// not.
     fn resolve_routes(
         &self,
         routing: &WriteRouting,
@@ -1941,6 +1960,7 @@ impl<S: EventStore> EngineCore<S> {
                     Ok(route.relays.iter().cloned().collect())
                 }
             }
+            WriteRouting::PinnedHost(auth) => Ok(BTreeSet::from([auth.host()])),
         }
     }
 
@@ -3034,7 +3054,12 @@ fn effective_row_limit(root_atoms: &BTreeSet<ConcreteFilter>) -> Option<usize> {
     // fewer) -- so pin it here: a mixed-limit root set trips in tests rather
     // than degrading semantics in release (debug-only, zero release cost).
     debug_assert!(
-        root_atoms.iter().map(|atom| atom.limit).collect::<BTreeSet<_>>().len() <= 1,
+        root_atoms
+            .iter()
+            .map(|atom| atom.limit)
+            .collect::<BTreeSet<_>>()
+            .len()
+            <= 1,
         "root_atoms must share a single limit (NIP-01 limit is per-subscription); \
          got a mixed-limit set: {root_atoms:?}",
     );
@@ -3047,7 +3072,8 @@ fn effective_row_limit(root_atoms: &BTreeSet<ConcreteFilter>) -> Option<usize> {
 /// relay applies when it answers a limited REQ with "the `limit` most recent
 /// events". Each argument is a `(created_at_secs, &id)` pair.
 fn nip01_newest_first(a: (u64, &EventId), b: (u64, &EventId)) -> std::cmp::Ordering {
-    b.0.cmp(&a.0).then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+    b.0.cmp(&a.0)
+        .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
 }
 
 /// Parse NIP-65 `r` tags off a kind:10002 event into its WRITE relay set

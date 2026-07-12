@@ -71,6 +71,22 @@ extension NMPEngine {
         return Receipt(id: id, status: stream)
     }
 
+    /// Publish a `GroupSendIntent` from `groupSendIntent` (#115). Take-once:
+    /// `intent` is consumed by this call -- a second `publishComposed` on
+    /// the SAME `GroupSendIntent` throws `NMPError.intentAlreadyConsumed`
+    /// rather than silently re-publishing a stale template (recompose via
+    /// `groupSendIntent` again for a retry). Otherwise identical to
+    /// `publish(_:)`'s receipt-stream bridge.
+    public func publishComposed(_ intent: GroupSendIntent) async throws -> Receipt {
+        var continuation: AsyncStream<WriteStatus>.Continuation!
+        let stream = AsyncStream<WriteStatus> { continuation = $0 }
+        let bridge = ReceiptBridge(continuation: continuation)
+        let id = try nmpRethrowing {
+            try ffi.publishComposed(intent: intent.ffi, observer: bridge)
+        }
+        return Receipt(id: id, status: stream)
+    }
+
     /// Attach a new observer to retained receipt facts. Corrupt durable
     /// evidence is reported distinctly and never treated as absence.
     public func reattachReceipt(id: UInt64) throws -> ReceiptReattachment {

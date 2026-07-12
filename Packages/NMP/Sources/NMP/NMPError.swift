@@ -48,6 +48,15 @@ public enum NMPError: Error, Sendable, Equatable {
     /// An `NMPDemand` declared `.pinned([])` -- an empty relay set (#107
     /// Contract: "the pinned relay set must be nonempty").
     case emptyPinnedRelaySet
+    /// #115: `groupSendIntent`'s `extraTags` named a tag
+    /// `groupSendIntent` owns itself (`"h"`/`"previous"`) -- surfaced,
+    /// never silently rewritten.
+    case reservedGroupTag(String)
+    /// #115: `publishComposed` was called a second time on the same
+    /// `GroupSendIntent` -- it is take-once by design (call
+    /// `groupSendIntent` again for a retry, since `createdAt`/couriered
+    /// evidence should refresh anyway).
+    case intentAlreadyConsumed
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -65,6 +74,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .NostrEntitySecretKeyRejected: self = .nostrEntitySecretKeyRejected
         case .AuthorOutboxesRequiresBoundAuthors: self = .authorOutboxesRequiresBoundAuthors
         case .EmptyPinnedRelaySet: self = .emptyPinnedRelaySet
+        case .ReservedGroupTag(let got): self = .reservedGroupTag(got)
+        case .IntentAlreadyConsumed: self = .intentAlreadyConsumed
         }
     }
 }

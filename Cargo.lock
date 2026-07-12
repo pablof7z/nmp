@@ -1389,6 +1389,7 @@ dependencies = [
  "libc",
  "negentropy",
  "nmp-grammar",
+ "nmp-nip29",
  "nmp-nip51",
  "nmp-resolver",
  "nmp-router",

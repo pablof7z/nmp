@@ -2,6 +2,13 @@
 // same shape as `decodeNostrEntity` (#116): no `NMPEngine` instance is
 // needed to call any of these. Pass the returned `NMPDemand` straight to
 // `NMPEngine.observe(_ demand:)`, exactly like any other `NMPDemand`.
+//
+// `groupSendIntent`/`GroupSendIntent` (#115) are this file's write-side
+// counterpart: an app couriers `Row`s it already has from a live
+// `groupContentDemand` read, and `nmp-nip29::compose_group_send` owns 100%
+// of the `h`/`previous` tag composition -- the app never sees either tag,
+// routing, or host authority directly, only the opaque, take-once
+// `GroupSendIntent` `NMPEngine.publishComposed(_:)` consumes.
 
 import NMPFFI
 
@@ -66,4 +73,48 @@ public func decodeRememberedGroups(_ row: Row) -> RememberedGroups {
         tags: row.tags, content: row.content, sig: row.sig, sources: row.sources
     )
     return RememberedGroups(NMPFFI.decodeRememberedGroups(row: ffiRow))
+}
+
+/// A composed NIP-29 group send (#115), returned by `groupSendIntent`.
+/// Opaque and take-once -- pass it to `NMPEngine.publishComposed(_:)`
+/// exactly once; a second attempt throws `NMPError.intentAlreadyConsumed`.
+/// Never exposes `h`, `previous`, routing, or host authority: this crate
+/// composed all of that internally from the couriered `recentRows`.
+public struct GroupSendIntent: Sendable {
+    let ffi: FfiComposedWriteIntent
+}
+
+/// Compose a NIP-29 group send (#115): `recentRows` are delivered kind:9/
+/// 30315 `Row`s the app is already rendering from its own live
+/// `groupContentDemand` read (#108) -- couriered, not hand-rolled (see
+/// `nmp_nip29::compose_group_send`'s own doc for that distinction). This
+/// function owns 100% of the `h`/`previous` tag
+/// selection/verification/truncation/encoding; the app supplies only the
+/// primitives it already has. `kind` is entirely the caller's choice --
+/// this call (and everything it reaches) is kind-blind. Publish the
+/// result via `NMPEngine.publishComposed(_:)`.
+public func groupSendIntent(
+    host: String,
+    groupId: String,
+    authorPubkey: String,
+    createdAt: UInt64,
+    kind: UInt16,
+    content: String,
+    extraTags: [[String]] = [],
+    recentRows: [Row] = []
+) throws -> GroupSendIntent {
+    let ffiRows = recentRows.map {
+        FfiRow(
+            id: $0.id, pubkey: $0.pubkey, createdAt: $0.createdAt, kind: $0.kind,
+            tags: $0.tags, content: $0.content, sig: $0.sig, sources: $0.sources
+        )
+    }
+    return try GroupSendIntent(
+        ffi: nmpRethrowing {
+            try NMPFFI.groupSendIntent(
+                host: host, groupId: groupId, authorPubkey: authorPubkey, createdAt: createdAt,
+                kind: kind, content: content, extraTags: extraTags, recentRows: ffiRows
+            )
+        }
+    )
 }

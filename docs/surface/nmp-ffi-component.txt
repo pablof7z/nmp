@@ -361,6 +361,29 @@ enum Enum {
                 "An `FfiDemand` declared `source: Pinned` with an empty relay set\n(`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,\n#107 Contract: \"the pinned relay set must be nonempty\").",
             ),
         },
+        Variant {
+            name: "ReservedGroupTag",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#115: `group_send_intent`'s `extra_tags` named a tag\n`nmp_nip29::compose_group_send` owns itself (`\"h\"`/`\"previous\"`) --\nmirrors `nmp_nip29::GroupSendError::ReservedTag`, surfaced rather\nthan silently rewritten.",
+            ),
+        },
+        Variant {
+            name: "IntentAlreadyConsumed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#115: `NmpEngine::publish_composed` was called a second time on the\nsame `FfiComposedWriteIntent` handle -- it is take-once by design\n(recompose via `group_send_intent` again is the correct retry path,\nsince `created_at`/`previous` should refresh anyway).",
+            ),
+        },
     ],
     shape: Error {
         flat: false,
@@ -985,7 +1008,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp::WriteRouting` mirror -- `PrivateNarrow` deliberately has NO wire\nform here (#22/#52). `nmp_engine::outbox::NarrowOnly::new`'s\nown doc requires \"the caller must already have resolved and narrowed\nthis itself\" -- i.e. a trusted protocol module's own logic, not a raw\nrelay-URL string handed across the FFI boundary by an app with no way to\nprove those URLs are actually private. Minting `PrivateRoute` from\nFFI-supplied strings would be exactly the \"raw app-provided expanded\nrelay set\"/\"route escape hatch\" #22's canonical design rules out; the\n`nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`\nfor the identical reason (see `crates/nmp/src/lib.rs`'s doc). A\nvalidated, opaque private-route mint belongs in a protocol module built\non direct Rust, not this FFI surface -- `AuthorOutbox`/`ToInboxes`\nremain the only FFI-constructible routing choices for now.",
+        "`nmp::WriteRouting` mirror -- `PrivateNarrow` deliberately has NO wire\nform here (#22/#52). `nmp_grammar::NarrowOnly::new`'s\nown doc requires \"the caller must already have resolved and narrowed\nthis itself\" -- i.e. a trusted protocol module's own logic, not a raw\nrelay-URL string handed across the FFI boundary by an app with no way to\nprove those URLs are actually private. Minting `PrivateRoute` from\nFFI-supplied strings would be exactly the \"raw app-provided expanded\nrelay set\"/\"route escape hatch\" #22's canonical design rules out; the\n`nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`\nfor the identical reason (see `crates/nmp/src/lib.rs`'s doc). A\nvalidated, opaque private-route mint belongs in a protocol module built\non direct Rust, not this FFI surface -- `AuthorOutbox`/`ToInboxes`\nremain the only FFI-constructible routing choices for now.\n\n#115: `PinnedHost(HostAuthority)` gets the IDENTICAL treatment, for the\nIDENTICAL reason -- this enum deliberately gains NO variant for it, and\nno `HostAuthority` constructor is exported anywhere in this crate. An\napp can only ever obtain a pinned-host write transitively, through a\nprotocol module's already-composed intent (`nip29::group_send_intent`\n-> the opaque `FfiComposedWriteIntent`) -- never by naming a host\nitself. This exhaustive two-variant match IS the enforcement: a new\n`WriteRouting` variant landing in `nmp-grammar` without a corresponding\nFfiWriteRouting decision is a compile error here, not a silent gap.",
     ),
 }
 
@@ -2133,6 +2156,205 @@ function Function {
     ),
 }
 
+function Function {
+    name: "group_send_intent",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "host",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "group_id",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "author_pubkey",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "created_at",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "kind",
+            type_: UInt16,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "content",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "extra_tags",
+            type_: Sequence {
+                inner_type: Sequence {
+                    inner_type: String,
+                },
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "recent_rows",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiRow",
+                },
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Object {
+            module_path: "nmp_ffi",
+            name: "FfiComposedWriteIntent",
+            imp: Struct,
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_group_send_intent",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "host",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "group_id",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "author_pubkey",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "created_at",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "kind",
+                type_: UInt16,
+            },
+            FfiArgument {
+                name: "content",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "extra_tags",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "recent_rows",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiComposedWriteIntent",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose a NIP-29 group send (#115): `recent_rows` are delivered\nkind:9/30315 rows the app is already rendering from its own live\n`group_content_demand` read (#108) -- couriered, not hand-rolled (see\n`nmp_nip29::compose_group_send`'s own doc for that distinction). This\nfunction owns 100% of the `h`/`previous` tag\nselection/verification/truncation/encoding; the app supplies only the\nprimitives it already has.\n\n`kind` is entirely the caller's choice -- this function (and everything\nit calls) is kind-blind. Publish the result via\n[`crate::facade::NmpEngine::publish_composed`].",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_group_send_intent",
+    checksum: Some(
+        28994,
+    ),
+}
+
+object Object {
+    name: "FfiComposedWriteIntent",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_fficomposedwriteintent",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiComposedWriteIntent",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiComposedWriteIntent",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_fficomposedwriteintent",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiComposedWriteIntent",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Take-once wrapper around a `nmp_nip29::compose_group_send`-composed\n`WriteIntent` (#115). Opaque and generically named -- a future protocol\nmodule's own composed intent could reuse this same wrapper shape,\nnothing here is NIP-29-specific except how it's constructed.\nTake-once, not `Clone`/re-readable: [`NmpEngine::publish_composed`]\n(`crate::facade`) takes the inner intent exactly once, and a second\ncall fails closed with [`FfiError::IntentAlreadyConsumed`] rather than\nsilently re-publishing a stale template or handing back nothing.",
+    ),
+}
+
 object Object {
     name: "FfiDerived",
     imp: Struct,
@@ -3071,6 +3293,80 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish",
             checksum: Some(
                 52186,
+            ),
+        },
+        Method {
+            name: "publish_composed",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "intent",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiComposedWriteIntent",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "ReceiptObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                UInt64,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_publish_composed",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "intent",
+                        type_: RustArcPtr(
+                            "FfiComposedWriteIntent",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    UInt64,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Publish a `nmp_nip29::compose_group_send`-composed intent (#115).\nTake-once: `intent` is consumed by this call (`FfiComposedWriteIntent\n::take`) -- a second call on the SAME handle fails closed with\n`FfiError::IntentAlreadyConsumed` rather than silently re-publishing\na stale template. Otherwise identical to [`Self::publish`]'s body\n(same receipt-stream drain-thread bridge); `write_intent_from_ffi`\nnever runs for this path -- the intent was already composed\ndirectly, never round-tripped through the raw `FfiWriteRouting`\nconversion (which withholds `PinnedHost` entirely).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish_composed",
+            checksum: Some(
+                4438,
             ),
         },
         Method {
