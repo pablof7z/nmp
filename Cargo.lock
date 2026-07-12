@@ -1411,6 +1411,8 @@ dependencies = [
  "nmp",
  "nmp-grammar",
  "nostr 0.44.4",
+ "redb",
+ "tempfile",
  "uniffi",
 ]
 
@@ -1435,6 +1437,7 @@ dependencies = [
  "nmp-bdd",
  "nmp-ffi",
  "nostr 0.44.4",
+ "tempfile",
  "tokio",
 ]
 

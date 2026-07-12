@@ -11,16 +11,16 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, DiagnosticsSnapshot, Durability, Engine, EngineConfig,
-    Filter, Lane, LiveQuery, RowDelta, ShortfallFact, SourceStatus, Timestamp, UnsignedEvent,
-    WriteIntent, WritePayload, WriteRouting, WriteStatus,
+    Filter, Lane, LiveQuery, ReceiptId, ReceiptReattachment, RowDelta, ShortfallFact, SourceStatus,
+    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
 use nmp_ffi::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiDiagnosticsSnapshot, FfiDurability,
-    FfiFilter, FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting, FfiWriteStatus,
+    FfiFilter, FfiReceiptReattachment, FfiRowDelta, FfiShortfallFact, FfiSourceStatus,
+    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 use nostr::{JsonUtil, Keys, Kind};
 
@@ -28,6 +28,8 @@ const WAIT: Duration = Duration::from_secs(10);
 const DISCOVERY_TRIGGER_KIND: u16 = 9_997;
 const QUERY_KIND: u16 = 9_998;
 const WRITE_KIND: u16 = 9_999;
+const REATTACH_LIVE_KIND: u16 = 9_996;
+const REATTACH_TERMINAL_KIND: u16 = 9_995;
 const QUERY_CREATED_AT: u64 = 1_700_000_100;
 const WRITE_CREATED_AT: u64 = 1_700_000_200;
 const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -1057,6 +1059,413 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         receipts,
         relay_contact_count,
     }
+}
+
+// #99: PR #97's FFI reattach coverage stopped at a pure enum-mapping unit
+// test -- structural code-sharing (`nmp-ffi` delegates to the same
+// `nmp::Engine`) is not itself proof, exactly the discipline this whole
+// harness exists to enforce (module doc). The two scenarios below drive
+// `reattach_receipt` through BOTH entry points and assert identical
+// outcomes AND identical replayed fact sequences: one for a LIVE retained
+// receipt (`Attached`, replaying `Accepted`+`AwaitingCapability`), one for
+// a genuinely TERMINAL retained receipt reached via a real ephemeral
+// abandon-on-restart (`Attached`, replaying the terminal `Failed` fact).
+// Neither needs a relay at all -- `Accepted`/`AwaitingCapability`/ephemeral
+// abandonment are purely local acceptance/persistence facts, independent
+// of wire delivery.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NormReattach {
+    Attached,
+    NotFound,
+    RetainedButUnreadable,
+}
+
+fn direct_reattach_outcome(value: &ReceiptReattachment) -> NormReattach {
+    match value {
+        ReceiptReattachment::Attached(_) => NormReattach::Attached,
+        ReceiptReattachment::NotFound => NormReattach::NotFound,
+        ReceiptReattachment::RetainedButUnreadable => NormReattach::RetainedButUnreadable,
+    }
+}
+
+fn ffi_reattach_outcome(value: FfiReceiptReattachment) -> NormReattach {
+    match value {
+        FfiReceiptReattachment::Attached => NormReattach::Attached,
+        FfiReceiptReattachment::NotFound => NormReattach::NotFound,
+        FfiReceiptReattachment::RetainedButUnreadable => NormReattach::RetainedButUnreadable,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReattachProof {
+    outcome: NormReattach,
+    replay: Vec<NormStatus>,
+    /// A bogus id's reattach on the SAME (still-open) engine, proven
+    /// alongside the real one so both surfaces exercise the shared
+    /// `NotFound` path from the same live engine instance.
+    unknown_id_outcome: NormReattach,
+}
+
+/// LIVE half: publish a durable Unsigned intent authored by an account that
+/// is ACTIVE but has no registered signer (so it settles into a genuinely
+/// retained `Accepted`+`AwaitingCapability` steady state, never resolving
+/// further), then reattach with a second, independent observer and prove it
+/// replays the identical fact sequence the original saw.
+async fn run_direct_reattach_live() -> ReattachProof {
+    let keys = Keys::generate();
+    let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
+    engine
+        .set_active_account(Some(keys.public_key()))
+        .expect("direct account must activate");
+
+    let unsigned = UnsignedEvent::new(
+        keys.public_key(),
+        Timestamp::from(WRITE_CREATED_AT),
+        Kind::Custom(REATTACH_LIVE_KIND),
+        vec![],
+        "reattach-live",
+    );
+    let tracked = engine
+        .publish_tracked(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("direct publish must enqueue");
+
+    let deadline = Instant::now() + WAIT;
+    assert_eq!(
+        recv_before(&tracked.statuses, deadline, "direct original Accepted"),
+        WriteStatus::Accepted
+    );
+    assert_eq!(
+        recv_before(
+            &tracked.statuses,
+            deadline,
+            "direct original AwaitingCapability"
+        ),
+        WriteStatus::AwaitingCapability
+    );
+
+    let outcome = engine
+        .reattach_receipt(tracked.id)
+        .expect("direct reattach call must succeed while the engine is open");
+    let norm_outcome = direct_reattach_outcome(&outcome);
+    let replay = match outcome {
+        ReceiptReattachment::Attached(rx) => {
+            let deadline = Instant::now() + WAIT;
+            vec![
+                normalize_direct_status(
+                    recv_before(&rx, deadline, "direct replay Accepted"),
+                    "n/a",
+                ),
+                normalize_direct_status(
+                    recv_before(&rx, deadline, "direct replay AwaitingCapability"),
+                    "n/a",
+                ),
+            ]
+        }
+        _ => panic!("expected Attached for a live retained receipt, got {norm_outcome:?}"),
+    };
+
+    let unknown_id_outcome = direct_reattach_outcome(
+        &engine
+            .reattach_receipt(ReceiptId(u64::MAX))
+            .expect("direct reattach call must succeed while the engine is open"),
+    );
+
+    engine.shutdown();
+    ReattachProof {
+        outcome: norm_outcome,
+        replay,
+        unknown_id_outcome,
+    }
+}
+
+async fn run_ffi_reattach_live() -> ReattachProof {
+    let keys = Keys::generate();
+    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
+    engine
+        .set_active_account(Some(keys.public_key().to_hex()))
+        .expect("FFI account must activate");
+
+    let (tx, rx) = mpsc::channel();
+    let observer = Box::new(FfiReceipts { tx: Mutex::new(tx) });
+    let receipt_id = engine
+        .publish(
+            FfiWriteIntent {
+                payload: FfiWritePayload::Unsigned {
+                    pubkey: keys.public_key().to_hex(),
+                    created_at: WRITE_CREATED_AT,
+                    kind: REATTACH_LIVE_KIND,
+                    tags: vec![],
+                    content: "reattach-live".to_string(),
+                },
+                durability: FfiDurability::Durable,
+                routing: FfiWriteRouting::AuthorOutbox,
+            },
+            observer,
+        )
+        .expect("FFI publish must enqueue");
+
+    let deadline = Instant::now() + WAIT;
+    assert_eq!(
+        normalize_ffi_status(recv_before(&rx, deadline, "FFI original Accepted"), "n/a"),
+        NormStatus::Accepted
+    );
+    assert_eq!(
+        normalize_ffi_status(
+            recv_before(&rx, deadline, "FFI original AwaitingCapability"),
+            "n/a"
+        ),
+        NormStatus::AwaitingCapability
+    );
+
+    let (replay_tx, replay_rx) = mpsc::channel();
+    let replay_observer = Box::new(FfiReceipts {
+        tx: Mutex::new(replay_tx),
+    });
+    let outcome = engine
+        .reattach_receipt(receipt_id, replay_observer)
+        .expect("FFI reattach call must succeed while the engine is open");
+    let norm_outcome = ffi_reattach_outcome(outcome);
+    let replay = match outcome {
+        FfiReceiptReattachment::Attached => {
+            let deadline = Instant::now() + WAIT;
+            vec![
+                normalize_ffi_status(
+                    recv_before(&replay_rx, deadline, "FFI replay Accepted"),
+                    "n/a",
+                ),
+                normalize_ffi_status(
+                    recv_before(&replay_rx, deadline, "FFI replay AwaitingCapability"),
+                    "n/a",
+                ),
+            ]
+        }
+        other => panic!("expected Attached for a live retained receipt, got {other:?}"),
+    };
+
+    let (unknown_tx, unknown_rx) = mpsc::channel();
+    let unknown_observer = Box::new(FfiReceipts {
+        tx: Mutex::new(unknown_tx),
+    });
+    let unknown_id_outcome = ffi_reattach_outcome(
+        engine
+            .reattach_receipt(u64::MAX, unknown_observer)
+            .expect("FFI reattach call must succeed while the engine is open"),
+    );
+    assert_eq!(
+        unknown_rx.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected),
+        "an unknown-id reattach must spawn no forwarding thread"
+    );
+
+    engine.shutdown();
+    ReattachProof {
+        outcome: norm_outcome,
+        replay,
+        unknown_id_outcome,
+    }
+}
+
+/// TERMINAL half: publish an EPHEMERAL intent authored by an active account
+/// with no registered signer, so it durably persists as a receipt-only
+/// (`intent_id: None`) row still `Accepted` at shutdown time. Reopening the
+/// SAME `store_path` runs `RedbStore::open`'s own boot-time reconciliation
+/// (`reconcile_ephemeral_receipts_in_txn`), which abandons any such row --
+/// a real, publicly-reachable "terminal retained receipt" with no internal
+/// `EngineMsg`/`CancelWrite` reach-in needed (that verb is not on the
+/// supported facade surface at all).
+async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
+    let keys = Keys::generate();
+    let receipt_id = {
+        let engine = Engine::new(EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .expect("direct engine must construct");
+        engine
+            .set_active_account(Some(keys.public_key()))
+            .expect("direct account must activate");
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(WRITE_CREATED_AT),
+            Kind::Custom(REATTACH_TERMINAL_KIND),
+            vec![],
+            "reattach-terminal",
+        );
+        let tracked = engine
+            .publish_tracked(WriteIntent {
+                payload: WritePayload::Unsigned(unsigned),
+                durability: Durability::Ephemeral,
+                routing: WriteRouting::AuthorOutbox,
+            })
+            .expect("direct ephemeral publish must enqueue");
+        let deadline = Instant::now() + WAIT;
+        assert_eq!(
+            recv_before(
+                &tracked.statuses,
+                deadline,
+                "direct terminal-setup Accepted"
+            ),
+            WriteStatus::Accepted
+        );
+        engine.shutdown();
+        tracked.id
+    };
+
+    let engine = Engine::new(EngineConfig {
+        store_path: Some(path.to_string_lossy().into_owned()),
+        ..EngineConfig::default()
+    })
+    .expect("direct engine must reopen over the same store");
+    let outcome = engine
+        .reattach_receipt(receipt_id)
+        .expect("direct reattach call must succeed while the engine is open");
+    let norm_outcome = direct_reattach_outcome(&outcome);
+    let replay = match outcome {
+        ReceiptReattachment::Attached(rx) => {
+            let deadline = Instant::now() + WAIT;
+            vec![normalize_direct_status(
+                recv_before(&rx, deadline, "direct terminal replay"),
+                "n/a",
+            )]
+        }
+        _ => panic!("expected Attached for an abandoned terminal receipt, got {norm_outcome:?}"),
+    };
+    let unknown_id_outcome = direct_reattach_outcome(
+        &engine
+            .reattach_receipt(ReceiptId(u64::MAX))
+            .expect("direct reattach call must succeed while the engine is open"),
+    );
+    engine.shutdown();
+    ReattachProof {
+        outcome: norm_outcome,
+        replay,
+        unknown_id_outcome,
+    }
+}
+
+async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
+    let keys = Keys::generate();
+    let receipt_id = {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        })
+        .expect("FFI engine must construct");
+        engine
+            .set_active_account(Some(keys.public_key().to_hex()))
+            .expect("FFI account must activate");
+        let (tx, rx) = mpsc::channel();
+        let observer = Box::new(FfiReceipts { tx: Mutex::new(tx) });
+        let receipt_id = engine
+            .publish(
+                FfiWriteIntent {
+                    payload: FfiWritePayload::Unsigned {
+                        pubkey: keys.public_key().to_hex(),
+                        created_at: WRITE_CREATED_AT,
+                        kind: REATTACH_TERMINAL_KIND,
+                        tags: vec![],
+                        content: "reattach-terminal".to_string(),
+                    },
+                    durability: FfiDurability::Ephemeral,
+                    routing: FfiWriteRouting::AuthorOutbox,
+                },
+                observer,
+            )
+            .expect("FFI ephemeral publish must enqueue");
+        let deadline = Instant::now() + WAIT;
+        assert_eq!(
+            normalize_ffi_status(
+                recv_before(&rx, deadline, "FFI terminal-setup Accepted"),
+                "n/a"
+            ),
+            NormStatus::Accepted
+        );
+        engine.shutdown();
+        receipt_id
+    };
+
+    let engine = NmpEngine::new(NmpEngineConfig {
+        store_path: Some(path.to_string_lossy().into_owned()),
+        ..NmpEngineConfig::default()
+    })
+    .expect("FFI engine must reopen over the same store");
+    let (replay_tx, replay_rx) = mpsc::channel();
+    let replay_observer = Box::new(FfiReceipts {
+        tx: Mutex::new(replay_tx),
+    });
+    let outcome = engine
+        .reattach_receipt(receipt_id, replay_observer)
+        .expect("FFI reattach call must succeed while the engine is open");
+    let norm_outcome = ffi_reattach_outcome(outcome);
+    let replay = match outcome {
+        FfiReceiptReattachment::Attached => {
+            let deadline = Instant::now() + WAIT;
+            vec![normalize_ffi_status(
+                recv_before(&replay_rx, deadline, "FFI terminal replay"),
+                "n/a",
+            )]
+        }
+        other => panic!("expected Attached for an abandoned terminal receipt, got {other:?}"),
+    };
+    let (unknown_tx, unknown_rx) = mpsc::channel();
+    let unknown_observer = Box::new(FfiReceipts {
+        tx: Mutex::new(unknown_tx),
+    });
+    let unknown_id_outcome = ffi_reattach_outcome(
+        engine
+            .reattach_receipt(u64::MAX, unknown_observer)
+            .expect("FFI reattach call must succeed while the engine is open"),
+    );
+    assert_eq!(
+        unknown_rx.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected),
+        "an unknown-id reattach must spawn no forwarding thread"
+    );
+
+    engine.shutdown();
+    ReattachProof {
+        outcome: norm_outcome,
+        replay,
+        unknown_id_outcome,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_and_ffi_reattach_are_semantically_identical_for_a_live_retained_receipt() {
+    let direct = run_direct_reattach_live().await;
+    let ffi = run_ffi_reattach_live().await;
+    assert_eq!(
+        direct, ffi,
+        "direct and FFI reattach must expose identical outcomes, identical replayed receipt \
+         facts, and identical unknown-id NotFound behavior"
+    );
+    assert_eq!(direct.outcome, NormReattach::Attached);
+    assert_eq!(direct.unknown_id_outcome, NormReattach::NotFound);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_and_ffi_reattach_are_semantically_identical_for_a_terminal_retained_receipt() {
+    let direct_dir = tempfile::tempdir().expect("direct tempdir");
+    let ffi_dir = tempfile::tempdir().expect("FFI tempdir");
+    let direct = run_direct_reattach_terminal(&direct_dir.path().join("direct.redb")).await;
+    let ffi = run_ffi_reattach_terminal(&ffi_dir.path().join("ffi.redb")).await;
+    assert_eq!(
+        direct, ffi,
+        "direct and FFI reattach must expose identical outcomes and identical replayed terminal \
+         facts for an ephemeral receipt abandoned on restart"
+    );
+    assert_eq!(direct.outcome, NormReattach::Attached);
+    assert_eq!(
+        direct.replay,
+        vec![NormStatus::Failed(
+            "ephemeral write abandoned after restart".to_string()
+        )]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

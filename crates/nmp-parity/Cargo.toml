@@ -17,3 +17,7 @@ nmp-bdd.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# #99: the terminal-retained-receipt reattach scenario needs a real
+# `RedbStore` file (an ephemeral receipt abandoned across a genuine
+# close/reopen), not an in-memory store.
+tempfile = "3"
