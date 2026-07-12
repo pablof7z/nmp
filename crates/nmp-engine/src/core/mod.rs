@@ -135,6 +135,18 @@ pub trait RowSink: Send {
     fn on_rows(&self, rows: Vec<RowDelta>);
 }
 
+/// The canonical row value (#105): the event plus its sorted, deduplicated
+/// relay-observation set -- `nmp_store::Provenance::seen`'s keys, projected
+/// honestly rather than mirrored into a second parallel provenance store.
+/// `sources` only ever grows for a given event id (`Provenance::
+/// merge_observation` never removes an entry), so `Row`/`RowDelta` never
+/// need a "sources shrank" case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub event: nostr::Event,
+    pub sources: BTreeSet<RelayUrl>,
+}
+
 /// A row-set delta (plan §7 non-goal: no ordering/windowing in M3 — raw
 /// deltas + coverage only). This is the standard reactive-query contract:
 /// `Effect::EmitRows`/`RowSink::on_rows` NEVER re-sends the query's full
@@ -151,9 +163,23 @@ pub trait RowSink: Send {
 /// `docs/known-gaps.md`'s P0).
 #[derive(Debug, Clone)]
 pub enum RowDelta {
-    /// A row that newly matches the query, carrying the full event so the
-    /// app never has to look it up separately.
-    Added(nostr::Event),
+    /// A row that newly matches the query, carrying the full row (event +
+    /// its current relay-provenance set) so the app never has to look
+    /// either up separately.
+    Added(Row),
+    /// The SAME row already matched (#105): its relay-provenance set grew
+    /// (a new relay delivered this exact event id, or an already-seen relay
+    /// redelivered it at a strictly later timestamp -- see
+    /// `nmp_store::Provenance::merge_observation`). The event body itself is
+    /// unchanged, so only the id and the row's FULL current source set are
+    /// carried (matching `Added`'s own "whole value, not a patch" shape) --
+    /// never fired for a no-op redelivery (the store-layer merge already
+    /// no-ops that), and never fired merely because SOME OTHER handle's
+    /// lifecycle event forced a `refresh_handle` recompute of this one.
+    SourcesGrew {
+        id: EventId,
+        sources: BTreeSet<RelayUrl>,
+    },
     /// A row that no longer matches the query. Carries only the id -- the
     /// app is expected to already hold the event from an earlier `Added`
     /// (raw deltas + coverage only: no second copy of the payload is kept
@@ -165,17 +191,19 @@ impl RowDelta {
     /// The event id this delta concerns, regardless of variant.
     pub fn id(&self) -> EventId {
         match self {
-            RowDelta::Added(event) => event.id,
+            RowDelta::Added(row) => row.event.id,
+            RowDelta::SourcesGrew { id, .. } => *id,
             RowDelta::Removed(id) => *id,
         }
     }
 
     /// The event payload, if this is an `Added` delta (`None` for
-    /// `Removed`).
+    /// `SourcesGrew`/`Removed` -- the app is expected to already hold the
+    /// event from an earlier `Added`).
     pub fn event(&self) -> Option<&nostr::Event> {
         match self {
-            RowDelta::Added(event) => Some(event),
-            RowDelta::Removed(_) => None,
+            RowDelta::Added(row) => Some(&row.event),
+            RowDelta::SourcesGrew { .. } | RowDelta::Removed(_) => None,
         }
     }
 }
@@ -277,15 +305,19 @@ pub enum Effect {
 /// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
 /// the `QueryHandle` itself (dropping it would withdraw the subscription —
 /// see `nmp_resolver::QueryHandle`'s `Drop` impl), the app-facing sink, and
-/// the last-emitted row-id/evidence pair (so `EmitRows` fires only when
+/// the last-emitted row/evidence state (so `EmitRows` fires only when
 /// something actually changed, not on every unrelated recompile).
 /// `AcquisitionEvidence` derives `PartialEq` precisely so this
 /// change-detection compare stays a plain value comparison, as the former
-/// query-evidence aggregate's did.
+/// query-evidence aggregate's did. `last_rows` maps each currently-matching
+/// id to the SOURCE SET last emitted for it (#105) -- not just the id --
+/// so `refresh_handle` can detect provenance growth on an already-matching
+/// row the SAME way it already detects `Added`/`Removed`: a plain value
+/// compare against this remembered state, never a second bespoke mechanism.
 struct HandleState {
     _handle: QueryHandle,
     sink: Box<dyn RowSink>,
-    last_rows: BTreeSet<EventId>,
+    last_rows: BTreeMap<EventId, BTreeSet<RelayUrl>>,
     last_evidence: Option<AcquisitionEvidence>,
 }
 
@@ -1037,7 +1069,7 @@ impl<S: EventStore> EngineCore<S> {
             HandleState {
                 _handle: qh,
                 sink,
-                last_rows: BTreeSet::new(),
+                last_rows: BTreeMap::new(),
                 last_evidence: None,
             },
         );
@@ -2600,34 +2632,50 @@ impl<S: EventStore> EngineCore<S> {
     /// Recompute `id`'s current row set + acquisition evidence; emit (and
     /// synchronously deliver to its sink) `Effect::EmitRows` only if either
     /// changed since the last refresh -- and, when something DID change, the
-    /// row payload is ALWAYS just the incremental added/removed delta
-    /// against `state.last_rows`, never the full current set (see
+    /// row payload is ALWAYS just the incremental added/sources-grew/removed
+    /// delta against `state.last_rows`, never the full current set (see
     /// `RowDelta`'s doc: this is what keeps a long-running subscription's
     /// total delivered row volume ~O(distinct rows) instead of O(rows²)).
     /// Evidence can change with no row change at all (a watermark advancing,
     /// or a source's link status flipping) -- that case still emits,
-    /// carrying an EMPTY row delta alongside the new evidence.
+    /// carrying an EMPTY row delta alongside the new evidence. #105:
+    /// per-id provenance growth is detected the SAME way -- a plain value
+    /// compare of `state.last_rows`'s remembered source set against this
+    /// recompute's -- so a lifecycle-driven recompute of some OTHER
+    /// handle's query (`refresh_all_handles`, e.g. on ANY subscribe/
+    /// unsubscribe) can never spuriously emit a `SourcesGrew` for a row
+    /// whose provenance did not actually change.
     fn refresh_handle(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
         let (current, evidence) = self.rows_and_evidence_for(id);
         let Some(state) = self.handles.get_mut(&id) else {
             return;
         };
-        let current_ids: BTreeSet<EventId> = current.keys().copied().collect();
-        if current_ids == state.last_rows && state.last_evidence.as_ref() == Some(&evidence) {
+        let current_sources: BTreeMap<EventId, BTreeSet<RelayUrl>> = current
+            .iter()
+            .map(|(id, row)| (*id, row.sources.clone()))
+            .collect();
+        if current_sources == state.last_rows && state.last_evidence.as_ref() == Some(&evidence) {
             return;
         }
         let mut delta: Vec<RowDelta> = Vec::new();
-        for (event_id, event) in &current {
-            if !state.last_rows.contains(event_id) {
-                delta.push(RowDelta::Added(event.clone()));
+        for (event_id, row) in current {
+            match state.last_rows.get(&event_id) {
+                None => delta.push(RowDelta::Added(row)),
+                Some(last_sources) if *last_sources != row.sources => {
+                    delta.push(RowDelta::SourcesGrew {
+                        id: event_id,
+                        sources: row.sources,
+                    });
+                }
+                Some(_) => {}
             }
         }
-        for old_id in &state.last_rows {
-            if !current.contains_key(old_id) {
+        for old_id in state.last_rows.keys() {
+            if !current_sources.contains_key(old_id) {
                 delta.push(RowDelta::Removed(*old_id));
             }
         }
-        state.last_rows = current_ids;
+        state.last_rows = current_sources;
         state.last_evidence = Some(evidence.clone());
         state.sink.on_rows(delta.clone());
         effects.push(Effect::EmitRows(id, delta, evidence));
@@ -2639,16 +2687,20 @@ impl<S: EventStore> EngineCore<S> {
     /// outgoing delta. This snapshot itself is never handed to a caller/
     /// effect directly. Rows are computed over `root_atoms` alone (delivery
     /// shape unchanged); evidence is computed over `subtree_atoms` (#12: the
-    /// query's FULL subtree, interior `Derived` atoms included).
-    fn rows_and_evidence_for(
-        &self,
-        id: HandleId,
-    ) -> (BTreeMap<EventId, nostr::Event>, AcquisitionEvidence) {
+    /// query's FULL subtree, interior `Derived` atoms included). Each row
+    /// carries its provenance (#105: `StoredEvent::provenance`, already
+    /// merged/persisted by `EventStore::insert`'s dedup path) rather than
+    /// discarding it -- the mechanism already exists in `nmp-store`; this is
+    /// only its honest projection.
+    fn rows_and_evidence_for(&self, id: HandleId) -> (BTreeMap<EventId, Row>, AcquisitionEvidence) {
         let root_atoms = self.resolver.root_atoms(id);
-        let mut by_id: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
+        let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
             for se in self.resolver.store().query(&atom.to_nostr()) {
-                by_id.entry(se.event.id).or_insert(se.event);
+                by_id.entry(se.event.id).or_insert_with(|| Row {
+                    event: se.event,
+                    sources: se.provenance.seen.into_keys().collect(),
+                });
             }
         }
         let subtree_atoms = self.resolver.subtree_atoms(id);

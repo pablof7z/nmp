@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, DiagnosticsSnapshot, Durability, Engine, EngineConfig,
-    Filter, Lane, LiveQuery, ReceiptId, ReceiptReattachment, RowDelta, ShortfallFact, SourceStatus,
-    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting, WriteStatus,
+    Filter, Lane, LiveQuery, ReceiptId, ReceiptReattachment, Row, RowDelta, ShortfallFact,
+    SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
@@ -43,6 +43,9 @@ struct NormRow {
     tags: Vec<Vec<String>>,
     content: String,
     sig: String,
+    /// #105: the row's relay-provenance set, normalized the same way every
+    /// other relay identifier in this file is (loopback placeholder).
+    sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -414,24 +417,39 @@ fn ffi_filter(pubkey: &str, kind: u16) -> FfiFilter {
     }
 }
 
-fn direct_row(row: &nostr::Event) -> NormRow {
+fn direct_row(row: &Row, relay: &str) -> NormRow {
+    let event = &row.event;
     NormRow {
-        id: row.id.to_hex(),
-        pubkey: row.pubkey.to_hex(),
-        created_at: row.created_at.as_secs(),
-        kind: row.kind.as_u16(),
-        tags: row.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
-        content: row.content.clone(),
-        sig: row.sig.to_string(),
+        id: event.id.to_hex(),
+        pubkey: event.pubkey.to_hex(),
+        created_at: event.created_at.as_secs(),
+        kind: event.kind.as_u16(),
+        tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
+        content: event.content.clone(),
+        sig: event.sig.to_string(),
+        sources: row
+            .sources
+            .iter()
+            .map(|url| normalize_url(url.as_str(), relay))
+            .collect(),
     }
 }
 
-fn apply_direct_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<RowDelta>) {
+fn apply_direct_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<RowDelta>, relay: &str) {
     for delta in deltas {
         match delta {
             RowDelta::Added(row) => {
-                let normalized = direct_row(&row);
+                let normalized = direct_row(&row, relay);
                 rows.insert(normalized.id.clone(), normalized);
+            }
+            RowDelta::SourcesGrew { id, sources } => {
+                let id = id.to_hex();
+                if let Some(existing) = rows.get_mut(&id) {
+                    existing.sources = sources
+                        .iter()
+                        .map(|url| normalize_url(url.as_str(), relay))
+                        .collect();
+                }
             }
             RowDelta::Removed(id) => {
                 rows.remove(&id.to_hex());
@@ -440,7 +458,7 @@ fn apply_direct_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<RowDelt
     }
 }
 
-fn apply_ffi_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<FfiRowDelta>) {
+fn apply_ffi_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<FfiRowDelta>, relay: &str) {
     for delta in deltas {
         match delta {
             FfiRowDelta::Added { row } => {
@@ -452,8 +470,21 @@ fn apply_ffi_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<FfiRowDelt
                     tags: row.tags,
                     content: row.content,
                     sig: row.sig,
+                    sources: row
+                        .sources
+                        .iter()
+                        .map(|url| normalize_url(url, relay))
+                        .collect(),
                 };
                 rows.insert(normalized.id.clone(), normalized);
+            }
+            FfiRowDelta::SourcesGrew { id, sources } => {
+                if let Some(existing) = rows.get_mut(&id) {
+                    existing.sources = sources
+                        .iter()
+                        .map(|url| normalize_url(url, relay))
+                        .collect();
+                }
             }
             FfiRowDelta::Removed { id } => {
                 rows.remove(&id);
@@ -796,7 +827,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let rows_deadline = Instant::now() + WAIT;
     let evidence = loop {
         let (deltas, evidence) = recv_before(&rows_rx, rows_deadline, "direct query");
-        apply_direct_deltas(&mut rows, deltas);
+        apply_direct_deltas(&mut rows, deltas, &relay_url);
         let normalized = normalize_direct_evidence(evidence, &relay_url);
         if rows.contains_key(&expected_row_id) && normalized == expected_limited_evidence() {
             break normalized;
@@ -906,7 +937,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     let rows_deadline = Instant::now() + WAIT;
     let evidence = loop {
         let (deltas, evidence) = recv_before(&rows_rx, rows_deadline, "FFI query");
-        apply_ffi_deltas(&mut rows, deltas);
+        apply_ffi_deltas(&mut rows, deltas, &relay_url);
         let normalized = normalize_ffi_evidence(evidence, &relay_url);
         if rows.contains_key(&expected_row_id) && normalized == expected_limited_evidence() {
             break normalized;

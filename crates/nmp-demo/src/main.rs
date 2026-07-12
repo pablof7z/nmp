@@ -277,7 +277,8 @@ fn main() {
                 let coverage_str = format!("{coverage:?}");
                 for delta in deltas {
                     match delta {
-                        RowDelta::Added(event) => {
+                        RowDelta::Added(row) => {
+                            let event = row.event;
                             if known_notes.insert(event.id, event.clone()).is_some() {
                                 continue; // already rendered this exact event; skip re-printing it
                             }
@@ -285,11 +286,21 @@ fn main() {
                             authors_seen.insert(event.pubkey.to_hex());
                             let preview: String = event.content.chars().take(80).collect();
                             println!(
-                                "[note] author={} created_at={} \"{}\"",
+                                "[note] author={} created_at={} \"{}\" (sources: {})",
                                 event.pubkey.to_hex(),
                                 event.created_at.as_secs(),
                                 preview.replace('\n', " "),
+                                row.sources.len(),
                             );
+                        }
+                        RowDelta::SourcesGrew { id, sources } => {
+                            if known_notes.contains_key(&id) {
+                                println!(
+                                    "[sources] {} now confirmed by {} relay(s)",
+                                    id,
+                                    sources.len()
+                                );
+                            }
                         }
                         RowDelta::Removed(id) => {
                             known_notes.remove(&id);

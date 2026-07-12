@@ -1520,7 +1520,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     let accepted_id = accepted_template.clone().sign_with_keys(&a).unwrap().id;
     assert!(all_row_deltas(&effects)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(event) if event.id == accepted_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == accepted_id)));
     assert!(matches!(
         receipt_sink.0.lock().unwrap().as_slice(),
         [WriteStatus::Accepted]
@@ -1590,7 +1590,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let (newer_receipt, _, _) = find_sign_request(&effects);
     assert!(all_row_deltas(&effects)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(event) if event.id == newer_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == newer_id)));
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == older.id)));
@@ -1601,7 +1601,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newer_id)));
     assert!(all_row_deltas(&effects)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(event) if event.id == older.id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == older.id)));
 }
 
 #[test]
@@ -1635,7 +1635,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     ));
     assert!(all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(event) if event.id == expected_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == expected_id)));
 }
 
 #[test]
@@ -1710,7 +1710,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     ));
     assert!(all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(event) if event.id == signed.id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == signed.id)));
 }
 
 #[test]
@@ -1780,7 +1780,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     let older_cancel = core.handle(EngineMsg::CancelWrite(middle_receipt));
     assert!(!all_row_deltas(&older_cancel).iter().any(|delta| {
         matches!(delta, RowDelta::Removed(id) if *id == newest_id)
-            || matches!(delta, RowDelta::Added(event) if event.id == middle_id)
+            || matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)
     }));
 
     let newest_cancel = core.handle(EngineMsg::CancelWrite(newest_receipt));
@@ -1789,7 +1789,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newest_id)));
     assert!(!all_row_deltas(&newest_cancel)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(event) if event.id == middle_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)));
     let fresh = core.handle(EngineMsg::Subscribe(
         literal_query(&[0], &a.public_key().to_hex()),
         Box::new(CapturingSink::default()),
@@ -2132,7 +2132,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     ));
     assert!(all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(event) if event.id == event_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
 
     let retried = core.handle(EngineMsg::CancelWrite(id));
     assert!(retried.iter().any(
@@ -3390,7 +3390,7 @@ fn root_query_emits_removed_on_delete() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _)
-            if rows.iter().any(|r| matches!(r, RowDelta::Added(ev) if ev.id == note_id)))),
+            if rows.iter().any(|r| matches!(r, RowDelta::Added(row) if row.event.id == note_id)))),
         "the note must arrive as Added first"
     );
 
@@ -3449,7 +3449,7 @@ fn expiry_emits_removed_via_manual_tick() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _)
-            if rows.iter().any(|r| matches!(r, RowDelta::Added(ev) if ev.id == expiring_id)))),
+            if rows.iter().any(|r| matches!(r, RowDelta::Added(row) if row.event.id == expiring_id)))),
         "the expiring note must arrive as Added first"
     );
 

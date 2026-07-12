@@ -139,7 +139,10 @@ pub struct FfiFilter {
 }
 
 /// One delivered row -- RAW tokens only (ledger #12). Mirrors
-/// `nostr::Event`'s wire shape, never a formatted/localized field.
+/// `nostr::Event`'s wire shape, never a formatted/localized field, plus
+/// `nmp::Row::sources` (#105): the sorted, deduplicated relay-observation
+/// set for this exact event id -- not a formatted/display field either,
+/// just the raw relay URLs that have delivered it.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiRow {
     pub id: String,
@@ -151,6 +154,8 @@ pub struct FfiRow {
     pub tags: Vec<Vec<String>>,
     pub content: String,
     pub sig: String,
+    /// Sorted, deduplicated relay URLs that have delivered this event id.
+    pub sources: Vec<String>,
 }
 
 /// `nmp::RowDelta` mirror -- the wire is deltas, never snapshots (see that
@@ -158,8 +163,19 @@ pub struct FfiRow {
 /// into a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiRowDelta {
-    Added { row: FfiRow },
-    Removed { id: String },
+    Added {
+        row: FfiRow,
+    },
+    /// #105: the SAME row already matched; its relay-provenance set grew.
+    /// Carries the FULL current source set (matching `Added`'s own
+    /// "whole value, not a patch" shape), never the event body again.
+    SourcesGrew {
+        id: String,
+        sources: Vec<String>,
+    },
+    Removed {
+        id: String,
+    },
 }
 
 /// `nmp::SourceStatus` mirror (`docs/design/scoped-evidence-49-12-plan.md`

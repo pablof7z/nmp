@@ -85,7 +85,7 @@ pub use nmp_engine::runtime::{ReceiptReattachment, ReceiptStream};
 // design, and never reused as a query-level verdict either.
 pub use nmp_engine::core::{
     AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry,
-    RelayDiagnosticsSnapshot, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
+    RelayDiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
 };
 pub use nmp_engine::runtime::RowsMsg;
 pub use nmp_router::Lane;
