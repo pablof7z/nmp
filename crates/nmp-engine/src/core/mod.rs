@@ -30,6 +30,7 @@ mod diagnostics;
 mod evidence;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 
 use nostr::{
     Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayMessage, RelayUrl, Timestamp,
@@ -300,7 +301,13 @@ struct PendingWrite {
     routing_valid: bool,
     /// Zero or more observers. Recovery owns the obligation even before an
     /// app reattaches, and multiple observers may follow the same receipt.
-    sinks: Vec<Box<dyn ReceiptSink>>,
+    /// `Rc`, not `Box` (issue #93): a durable `EVENT` handoff's eventual
+    /// `Written` result must still be able to notify these EVEN IF this
+    /// whole `PendingWrite` entry has since been removed (the `Ephemeral`
+    /// case -- see `AttemptCorrelationTarget::sinks`) -- so a correlation
+    /// mint clones the `Rc` handles out at that moment rather than trying
+    /// to look `pending` back up later.
+    sinks: Vec<Rc<dyn ReceiptSink>>,
     /// Store-allocated durable intent id. `None` only for Ephemeral's
     /// receipt-only path, which never owns a pending row.
     intent_id: Option<IntentId>,
@@ -430,9 +437,9 @@ pub struct EngineCore<S: EventStore> {
     /// Next transport-native [`AttemptCorrelation`] to mint (issue #93).
     /// Purely volatile/in-process — never persisted, never restart-durable
     /// (the plan's own words: "no persistence migration" for this unit).
-    /// Checked, typed exhaustion, same discipline as
-    /// `next_unaccepted_receipt` above.
-    next_attempt_correlation: u64,
+    /// `None` once exhausted — checked, typed exhaustion, same discipline
+    /// as `next_unaccepted_receipt` above (#86's `PublishError` ruling).
+    next_attempt_correlation: Option<u64>,
     /// `AttemptCorrelation` -> which receipt/relay it was minted for. Engine-
     /// owned bookkeeping only; transport never needs to understand this
     /// mapping, only echo the correlation back unchanged. An entry is
@@ -442,11 +449,36 @@ pub struct EngineCore<S: EventStore> {
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
-/// reducer's own bookkeeping.
+/// reducer's own bookkeeping. `sinks` is a snapshot of the observers this
+/// receipt had AT MINT TIME, cloned (cheap `Rc` bumps) rather than looked
+/// up later through `EngineCore::pending` — `Ephemeral`'s `PendingWrite`
+/// entry is removed the instant `on_signed` finishes (no durable
+/// obligation survives it), so a `Written` handoff arriving afterward would
+/// otherwise have nothing left to notify. Durable/`AtMostOnce` still have a
+/// live `pending` entry when their handoff resolves, but they go through
+/// the identical path — one door, not a special case for `Ephemeral`.
 struct AttemptCorrelationTarget {
     receipt: ReceiptId,
     relay: RelayUrl,
+    sinks: Vec<Rc<dyn ReceiptSink>>,
 }
+
+/// The attempt-correlation namespace is exhausted (issue #93). Purely
+/// in-process/volatile — this counter is never persisted (see
+/// `EngineCore::next_attempt_correlation`'s doc) — mirrors #86's
+/// `PublishError` discipline (typed, no panic on counter exhaustion) but is
+/// kept as its OWN type rather than a `PublishError` variant: unlike
+/// `PublishError::ReceiptCorrelationIdExhausted` (the whole publish never
+/// got accepted at all), a call reaching this point is for an intent that
+/// is ALREADY accepted and durable — only THIS one relay's wire-attempt
+/// correlation couldn't be minted. Every call site folds it into the SAME
+/// `unstarted_relays`/`PersistenceBlocked` lane-retention path a
+/// `start_attempt` persistence failure already uses (owned, nonterminal,
+/// no wire effect, no false `Sent`) rather than inventing a second
+/// "publish failed" surface for what is, to the app, the identical
+/// observable fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttemptCorrelationExhausted;
 
 impl<S: EventStore> EngineCore<S> {
     pub fn new(store: S, directory: Box<dyn RelayDirectory>, cap: usize) -> Self {
@@ -476,21 +508,28 @@ impl<S: EventStore> EngineCore<S> {
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
             events_by_relay_kind: HashMap::new(),
-            next_attempt_correlation: 0,
+            next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
         }
     }
 
     /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
     /// exhaustion -- same discipline as [`Self::alloc_receipt_id`]'s
-    /// `next_unaccepted_receipt` counter.
-    fn alloc_attempt_correlation(&mut self) -> AttemptCorrelation {
-        let id = self.next_attempt_correlation;
-        self.next_attempt_correlation = self
+    /// `next_unaccepted_receipt` counter (#86): `Err` on exhaustion, never a
+    /// panic.
+    fn alloc_attempt_correlation(
+        &mut self,
+    ) -> Result<AttemptCorrelation, AttemptCorrelationExhausted> {
+        let current = self
             .next_attempt_correlation
-            .checked_add(1)
-            .expect("attempt correlation namespace exhausted");
-        AttemptCorrelation(id)
+            .ok_or(AttemptCorrelationExhausted)?;
+        self.next_attempt_correlation = current.checked_add(1);
+        Ok(AttemptCorrelation(current))
+    }
+
+    #[cfg(test)]
+    fn set_next_attempt_correlation_for_test(&mut self, next: Option<u64>) {
+        self.next_attempt_correlation = next;
     }
 
     /// The one, ever, resolution of `correlation`'s `HandoffResult` (issue
@@ -518,13 +557,18 @@ impl<S: EventStore> EngineCore<S> {
             return effects;
         };
         if let HandoffResult::Written = result {
-            if let Some(pending) = self.pending.get(&target.receipt) {
-                Self::notify(pending, WriteStatus::Sent(target.relay.clone()));
-                effects.push(Effect::EmitReceipt(
-                    target.receipt,
-                    WriteStatus::Sent(target.relay),
-                ));
+            // Notify via the SNAPSHOT taken at mint time, never by looking
+            // `self.pending` back up -- `Ephemeral`'s entry is long gone by
+            // the time this fires, but its observers must still learn
+            // `Sent` (issue #93 correction: this used to depend on
+            // `pending` still existing, silently starving `Ephemeral`).
+            for sink in &target.sinks {
+                sink.on_status(WriteStatus::Sent(target.relay.clone()));
             }
+            effects.push(Effect::EmitReceipt(
+                target.receipt,
+                WriteStatus::Sent(target.relay),
+            ));
         }
         effects
     }
@@ -604,33 +648,46 @@ impl<S: EventStore> EngineCore<S> {
                     continue;
                 }
                 match durability {
-                    Durability::Durable => {
-                        if let Some(pending) = self.pending.get_mut(&id) {
-                            pending.pending_relays.insert(attempt.relay.clone());
-                            pending
-                                .attempt_ordinals
-                                .insert(attempt.relay.clone(), attempt.ordinal);
+                    Durability::Durable => match self.alloc_attempt_correlation() {
+                        Ok(correlation) => {
+                            if let Some(pending) = self.pending.get_mut(&id) {
+                                pending.pending_relays.insert(attempt.relay.clone());
+                                pending
+                                    .attempt_ordinals
+                                    .insert(attempt.relay.clone(), attempt.ordinal);
+                            }
+                            self.event_to_receipts
+                                .entry(attempt.event.id)
+                                .or_default()
+                                .insert(id);
+                            self.attempt_correlations.insert(
+                                correlation,
+                                AttemptCorrelationTarget {
+                                    receipt: id,
+                                    relay: attempt.relay.clone(),
+                                    sinks: self.sinks_for(id),
+                                },
+                            );
+                            // Exact retained bytes, same ordinal. The Started
+                            // row already predates this replay effect.
+                            effects.push(Effect::PublishEvent(
+                                attempt.relay,
+                                attempt.event,
+                                correlation,
+                            ));
                         }
-                        self.event_to_receipts
-                            .entry(attempt.event.id)
-                            .or_default()
-                            .insert(id);
-                        let correlation = self.alloc_attempt_correlation();
-                        self.attempt_correlations.insert(
-                            correlation,
-                            AttemptCorrelationTarget {
-                                receipt: id,
-                                relay: attempt.relay.clone(),
-                            },
-                        );
-                        // Exact retained bytes, same ordinal. The Started row
-                        // already predates this replay effect.
-                        effects.push(Effect::PublishEvent(
-                            attempt.relay,
-                            attempt.event,
-                            correlation,
-                        ));
-                    }
+                        Err(AttemptCorrelationExhausted) => {
+                            // Never mark this relay pending_relays without a
+                            // wire effect to back it -- that would strand it
+                            // in-flight forever with nothing to ever resolve
+                            // it. Same lane-retention treatment as a
+                            // start_attempt persistence failure: owned,
+                            // nonterminal, no wire.
+                            if let Some(pending) = self.pending.get_mut(&id) {
+                                pending.unstarted_relays.insert(attempt.relay.clone());
+                            }
+                        }
+                    },
                     Durability::AtMostOnce => {
                         if self
                             .resolver
@@ -712,6 +769,15 @@ impl<S: EventStore> EngineCore<S> {
                         continue;
                     }
                 };
+                // Never mark this relay pending_relays without a correlated
+                // wire effect to back it -- see the Durable replay branch
+                // above for why.
+                let Ok(correlation) = self.alloc_attempt_correlation() else {
+                    if let Some(pending) = self.pending.get_mut(&id) {
+                        pending.unstarted_relays.insert(relay);
+                    }
+                    continue;
+                };
                 if let Some(pending) = self.pending.get_mut(&id) {
                     pending.pending_relays.insert(relay.clone());
                     pending
@@ -722,12 +788,12 @@ impl<S: EventStore> EngineCore<S> {
                     .entry(intent.frozen.id)
                     .or_default()
                     .insert(id);
-                let correlation = self.alloc_attempt_correlation();
                 self.attempt_correlations.insert(
                     correlation,
                     AttemptCorrelationTarget {
                         receipt: id,
                         relay: relay.clone(),
+                        sinks: self.sinks_for(id),
                     },
                 );
                 effects.push(Effect::PublishEvent(
@@ -822,7 +888,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         if let Some(pending) = self.pending.get_mut(&id) {
-            pending.sinks.push(sink);
+            pending.sinks.push(Rc::from(sink));
         }
         ReattachOutcome::Attached
     }
@@ -1163,7 +1229,7 @@ impl<S: EventStore> EngineCore<S> {
                 durability,
                 routing,
                 routing_valid: true,
-                sinks: vec![sink],
+                sinks: vec![Rc::from(sink)],
                 intent_id,
                 signing_pubkey,
                 frozen: frozen.clone(),
@@ -1439,18 +1505,27 @@ impl<S: EventStore> EngineCore<S> {
             let Some(ordinal) = ordinal else {
                 continue;
             };
+            // Never mark this relay sent/pending_relays without a
+            // correlated wire effect to back it -- a correlation-mint
+            // failure here is the identical class of problem a
+            // start_attempt persistence failure already is, so it gets the
+            // SAME lane-retention treatment (owned, nonterminal, no wire).
+            let Ok(correlation) = self.alloc_attempt_correlation() else {
+                blocked_relays.insert(relay.clone());
+                continue;
+            };
             if let Some(pending) = self.pending.get_mut(&id) {
                 if ordinal != 0 {
                     pending.attempt_ordinals.insert(relay.clone(), ordinal);
                 }
             }
             sent_relays.insert(relay.clone());
-            let correlation = self.alloc_attempt_correlation();
             self.attempt_correlations.insert(
                 correlation,
                 AttemptCorrelationTarget {
                     receipt: id,
                     relay: relay.clone(),
+                    sinks: self.sinks_for(id),
                 },
             );
             effects.push(Effect::PublishEvent(
@@ -1902,6 +1977,19 @@ impl<S: EventStore> EngineCore<S> {
         for sink in &pending.sinks {
             sink.on_status(status.clone());
         }
+    }
+
+    /// Snapshot `id`'s current observers (cheap `Rc` clones) for an
+    /// `AttemptCorrelationTarget` minted right now (issue #93) -- empty if
+    /// `id` names no live `pending` entry. Cloning here, rather than
+    /// looking `pending` back up when the handoff result eventually
+    /// arrives, is what lets `Ephemeral`'s immediately-removed entry still
+    /// receive its `Sent` notification.
+    fn sinks_for(&self, id: ReceiptId) -> Vec<Rc<dyn ReceiptSink>> {
+        self.pending
+            .get(&id)
+            .map(|pending| pending.sinks.clone())
+            .unwrap_or_default()
     }
 
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
@@ -2741,6 +2829,102 @@ mod receipt_allocator_tests {
         assert_eq!(FIRST_UNACCEPTED_ID - 1, u64::MAX >> 1);
         assert!(core.pending.is_empty());
         assert!(core.resolver.store().recover_outbox().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod attempt_correlation_allocator_tests {
+    //! Issue #93's own exhaustion boundary (mirroring #86's
+    //! `receipt_allocator_tests` discipline exactly): `alloc_attempt_
+    //! correlation` must never panic, and an exhausted namespace must fold
+    //! into the SAME `unstarted_relays`/`PersistenceBlocked` lane-retention
+    //! path a `start_attempt` persistence failure already uses -- the
+    //! receipt/intent stays owned and open, only this one relay's wire lane
+    //! is blocked, never a panic, never silently stranded "in flight" with
+    //! no wire effect to back it.
+
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+    use nostr::Kind;
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<WriteStatus>>>);
+
+    impl ReceiptSink for Sink {
+        fn on_status(&self, status: WriteStatus) {
+            self.0.lock().unwrap().push(status);
+        }
+    }
+
+    fn find_sign_request(effects: &[Effect]) -> (ReceiptId, u64, UnsignedEvent) {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(id, generation, unsigned) => {
+                    Some((*id, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("a RequestSign effect")
+    }
+
+    #[test]
+    fn exhausted_attempt_correlation_blocks_the_relay_lane_without_panicking() {
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://relay.example").unwrap();
+        let mut core = EngineCore::new(
+            MemoryStore::new(),
+            Box::new(
+                FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()]),
+            ),
+            10,
+        );
+        core.set_next_attempt_correlation_for_test(None);
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+
+        let sink = Sink::default();
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(1u64),
+                    Kind::TextNote,
+                    vec![],
+                    "exhausted correlation",
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(sink.clone()),
+        ));
+        let (id, generation, unsigned) = find_sign_request(&accepted);
+        let signed = unsigned.sign_with_keys(&keys).expect("sign fixture event");
+        let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::PublishEvent(..))),
+            "no wire effect may be emitted once the correlation namespace is exhausted, \
+             got {effects:?}"
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(receipt, WriteStatus::PersistenceBlocked(r))
+                if *receipt == id && r == &relay
+        )));
+        assert!(sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|status| matches!(status, WriteStatus::PersistenceBlocked(_))));
+        // The receipt/intent itself stays owned and open -- only this
+        // relay's own wire lane is blocked.
+        assert!(core.pending.contains_key(&id));
     }
 }
 

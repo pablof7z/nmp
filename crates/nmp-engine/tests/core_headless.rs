@@ -2485,6 +2485,59 @@ fn event_handoff_for_an_unknown_correlation_is_inert() {
     assert!(effects.is_empty());
 }
 
+/// The regression this round's review caught: `on_signed` mints a
+/// correlation then immediately removes `Ephemeral`'s `PendingWrite` entry
+/// (no durable obligation survives it) -- if `Written`-notification
+/// depended on looking `pending` back up, `Ephemeral` could never receive
+/// `Sent` once the synchronous emission was removed. Proves it now does,
+/// via the SAME `EngineMsg::EventHandoff` path Durable/AtMostOnce use.
+#[test]
+fn ephemeral_still_receives_sent_from_the_written_handoff() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+    activate(&mut core, &author);
+    let sink = CapturingReceiptSink::default();
+
+    let accepted = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 1, "ephemeral sent")),
+            durability: Durability::Ephemeral,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, generation, unsigned_event) = find_sign_request(&accepted);
+    let signed = unsigned_event
+        .sign_with_keys(&author)
+        .expect("sign fixture event");
+    let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+
+    let correlation = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::PublishEvent(r, _, c) if r == &relay => Some(*c),
+            _ => None,
+        })
+        .expect("a PublishEvent effect must have been emitted for this relay");
+
+    let handoff_effects = core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
+    assert!(
+        handoff_effects.iter().any(|e| matches!(
+            e,
+            Effect::EmitReceipt(receipt, WriteStatus::Sent(r)) if *receipt == id && r == &relay
+        )),
+        "Ephemeral must still receive Sent from a Written handoff, got {handoff_effects:?}"
+    );
+    assert!(sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+}
+
 #[test]
 fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel() {
     let author = Keys::generate();

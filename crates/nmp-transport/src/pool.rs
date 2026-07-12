@@ -251,48 +251,52 @@ impl Pool {
             self.resolve_not_handed_off(correlation);
             return false; // Binary is reserved; no wire-emittable path yet.
         };
-        let outcome = match self.inner.lock() {
-            Ok(guard) => match guard.command_tx_for(h) {
-                Some(worker) => {
-                    let handed_off = worker.push(worker::WorkerCommand::SendDurable {
-                        generation: h.generation,
-                        correlation,
-                        frame: text,
-                    });
-                    if handed_off {
-                        None
-                    } else {
-                        Some(guard.sink())
-                    }
-                }
-                None => Some(guard.sink()),
-            },
-            Err(_) => None,
+        // Recover from a poisoned lock rather than silently dropping the
+        // correlation forever: a poisoned `Mutex` means some OTHER call
+        // panicked while holding it, not that the pool's own bookkeeping is
+        // unusable -- `PoisonError::into_inner` hands back the same
+        // (possibly stale, never fabricated) guard `Ok` would have. Every
+        // durable EVENT must resolve regardless (issue #93's "accepted
+        // always gets a result" rule); an `Err(_) => None`/`handed_off`
+        // conflation here previously meant a poisoned lock reported `true`
+        // (falsely implying success) while never enqueuing OR resolving
+        // anything -- the correlation was silently lost for good.
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handed_off = match guard.command_tx_for(h) {
+            Some(worker) => worker.push(worker::WorkerCommand::SendDurable {
+                generation: h.generation,
+                correlation,
+                frame: text,
+            }),
+            None => false,
         };
-        match outcome {
-            Some(sink) => {
-                sink.on_event(PoolEvent::EventHandoff {
-                    correlation,
-                    result: HandoffResult::NotHandedOff,
-                });
-                false
-            }
-            None => true,
+        if !handed_off {
+            guard.sink().on_event(PoolEvent::EventHandoff {
+                correlation,
+                result: HandoffResult::NotHandedOff,
+            });
         }
+        handed_off
     }
 
     /// Synchronously resolve `correlation` as `NotHandedOff` when the frame
     /// could not even be considered for handoff (e.g. a non-text `WireFrame`
     /// — reserved, never wire-emittable today). Mirrors the stale-handle
     /// path in [`Self::send_durable`] so every call resolves exactly once
-    /// regardless of which early-return fires.
+    /// regardless of which early-return fires; recovers from a poisoned
+    /// lock the same way [`Self::send_durable`] does, for the same reason.
     fn resolve_not_handed_off(&self, correlation: AttemptCorrelation) {
-        if let Ok(guard) = self.inner.lock() {
-            guard.sink().on_event(PoolEvent::EventHandoff {
-                correlation,
-                result: HandoffResult::NotHandedOff,
-            });
-        }
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.sink().on_event(PoolEvent::EventHandoff {
+            correlation,
+            result: HandoffResult::NotHandedOff,
+        });
     }
 
     /// Close the slot for `h`. No-op if the handle is stale or the slot was

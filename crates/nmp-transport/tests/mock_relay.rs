@@ -63,11 +63,38 @@ fn frame_contains(event: &PoolEvent, needle: &str) -> bool {
 }
 
 /// Reserve an ephemeral TCP port by binding then immediately dropping the
-/// listener, so the *second* relay instance in the reconnect half of this
-/// test can rebind the exact same port the first one used.
+/// listener, so the *second* relay instance in the reconnect half of a test
+/// can rebind the exact same port the first one used.
+///
+/// This crate's tests run concurrently by default (Rust's own harness, no
+/// `#[serial]`), and MULTIPLE tests in this file now reuse a port this way
+/// (issue #93 added a second one). A bare `bind(0)`-then-drop is a genuine
+/// cross-test TOCTOU: two tests' own `free_port()` calls landing close
+/// enough in wall-clock time could observe (and later rebind) the SAME
+/// just-released port before either test's own relay claims it, since the
+/// OS's ephemeral allocator has no notion of "this process's OWN separate
+/// test threads." A monotonically-increasing, process-wide counter removes
+/// that cross-test collision entirely: no two calls in this binary, no
+/// matter how they interleave, can ever be handed the same port number.
+static NEXT_PORT_HINT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20_000);
+
 fn free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
-    listener.local_addr().expect("local_addr").port()
+    use std::sync::atomic::Ordering;
+    loop {
+        let hint = NEXT_PORT_HINT.fetch_add(1, Ordering::Relaxed);
+        if hint < 20_000 {
+            // Wrapped past u16::MAX -- reset into range and retry.
+            NEXT_PORT_HINT.store(20_000, Ordering::Relaxed);
+            continue;
+        }
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", hint)) {
+            drop(listener);
+            return hint;
+        }
+        // Already bound by something else on the machine (never by another
+        // call in THIS binary, since the counter never repeats) -- try the
+        // next hint.
+    }
 }
 
 // Multi-thread flavor is load-bearing here, not a style choice: the test
