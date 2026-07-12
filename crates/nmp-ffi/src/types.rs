@@ -199,6 +199,26 @@ pub struct FfiRow {
     pub sources: Vec<String>,
 }
 
+/// A remembered NIP-29 group reference (#108, `nmp_nip29::GroupRef`
+/// mirror) -- group id, host relay, and optional display name.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiGroupRef {
+    pub group_id: String,
+    pub host: String,
+    pub name: Option<String>,
+}
+
+/// The composed remembered-groups/host-relays value (#108,
+/// `nmp_nip29::RememberedGroups` mirror) -- what
+/// `crate::nip29::decode_remembered_groups` returns from a delivered
+/// kind:10009 [`FfiRow`].
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiRememberedGroups {
+    pub groups: Vec<FfiGroupRef>,
+    pub hosts_in_use: Vec<String>,
+    pub has_private_content: bool,
+}
+
 /// `nmp::RowDelta` mirror -- the wire is deltas, never snapshots (see that
 /// type's own doc); the Swift bridge (a later builder) accumulates these
 /// into a snapshot.
