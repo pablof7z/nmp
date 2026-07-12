@@ -3026,6 +3026,18 @@ impl<S: EventStore> EngineCore<S> {
 /// NIP-01's `limit` is a property of the subscription, so the app sees the N
 /// newest rows across the WHOLE union, not N per operand.
 fn effective_row_limit(root_atoms: &BTreeSet<ConcreteFilter>) -> Option<usize> {
+    // The uniform-limit invariant this fold rests on: every fanned root atom
+    // is a clone of the same base filter, so they all carry the IDENTICAL
+    // `limit`. `max` therefore returns exactly that shared value. If a future
+    // graph change ever broke that assumption, `max` would silently
+    // over-return (project the largest atom's N while smaller-N atoms wanted
+    // fewer) -- so pin it here: a mixed-limit root set trips in tests rather
+    // than degrading semantics in release (debug-only, zero release cost).
+    debug_assert!(
+        root_atoms.iter().map(|atom| atom.limit).collect::<BTreeSet<_>>().len() <= 1,
+        "root_atoms must share a single limit (NIP-01 limit is per-subscription); \
+         got a mixed-limit set: {root_atoms:?}",
+    );
     root_atoms.iter().filter_map(|atom| atom.limit).max()
 }
 
