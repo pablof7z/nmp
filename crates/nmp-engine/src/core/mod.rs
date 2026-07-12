@@ -44,8 +44,9 @@ use nmp_router::{
 };
 use nmp_signer::SignerError;
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, CompensateOutcome, CoverageKey, EventStore,
-    IntentId, IntentSigState, PromoteOutcome, RelayObserved, WriteDurability,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, CompensateOutcome, CoverageKey,
+    EventStore, IntentId, IntentSigState, PromoteOutcome, ReceiptState, RelayObserved,
+    WriteDurability,
 };
 use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
 
@@ -242,7 +243,12 @@ struct HandleState {
 struct PendingWrite {
     durability: Durability,
     routing: WriteRouting,
-    sink: Box<dyn ReceiptSink>,
+    /// False only when a persisted routing snapshot cannot be decoded.
+    /// Recovery keeps owning the obligation but fails closed on wire output.
+    routing_valid: bool,
+    /// Zero or more observers. Recovery owns the obligation even before an
+    /// app reattaches, and multiple observers may follow the same receipt.
+    sinks: Vec<Box<dyn ReceiptSink>>,
     /// Store-allocated durable intent id. `None` only for Ephemeral's
     /// receipt-only path, which never owns a pending row.
     intent_id: Option<IntentId>,
@@ -269,6 +275,9 @@ struct PendingWrite {
     /// dropped pending relay always resolves to `GaveUp`, never a retry
     /// `PublishEvent` (no blind retry, ledger's `AtMostOnce` amendment).
     pending_relays: BTreeSet<RelayUrl>,
+    /// The persisted started ordinal currently awaiting a terminal outcome
+    /// for each relay.
+    attempt_ordinals: BTreeMap<RelayUrl, u64>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for
@@ -310,7 +319,10 @@ pub struct EngineCore<S: EventStore> {
     ever_connected_relays: BTreeSet<RelayUrl>,
     clock: Timestamp,
     active_pubkey: Option<PublicKey>,
-    next_receipt: u64,
+    /// Correlation ids for failures that were never accepted use the upper
+    /// half of the namespace. Store-issued durable ids occupy the lower half
+    /// and advance independently, so reattachment can never alias one.
+    next_unaccepted_receipt: u64,
     /// Write outbox (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
     /// `ReceiptId` from `Publish` through to the last terminal per-relay
     /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
@@ -375,7 +387,7 @@ impl<S: EventStore> EngineCore<S> {
             ever_connected_relays: BTreeSet::new(),
             clock: Timestamp::from(0u64),
             active_pubkey: None,
-            next_receipt: 0,
+            next_unaccepted_receipt: u64::MAX,
             pending: HashMap::new(),
             event_to_receipts: HashMap::new(),
             prober: Prober::new(),
@@ -386,6 +398,198 @@ impl<S: EventStore> EngineCore<S> {
             discovery_authors: BTreeSet::new(),
             events_by_relay_kind: HashMap::new(),
         }
+    }
+
+    /// Rebuild volatile ownership from the journal without reinserting a
+    /// single row. Called exactly once by the runtime before its first
+    /// command. No retry clock is armed here: #79 owns eligibility policy.
+    pub fn recover_on_boot(&mut self) -> Vec<Effect> {
+        let recovered = self.resolver.store().recover_outbox();
+        let mut effects = Vec::new();
+        for intent in recovered {
+            let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
+            let routing_valid = parsed_routing.is_some();
+            let routing = parsed_routing.unwrap_or_else(|| {
+                WriteRouting::PrivateNarrow(crate::outbox::PrivateRoute {
+                    relays: crate::outbox::NarrowOnly::new(Vec::<RelayUrl>::new()),
+                })
+            });
+            let id = ReceiptId(intent.receipt_id);
+            let durability = match intent.durability {
+                WriteDurability::Durable => Durability::Durable,
+                WriteDurability::AtMostOnce => Durability::AtMostOnce,
+            };
+            let attempts = self.resolver.store().recover_attempts(intent.intent_id);
+            let already_signed = intent.sig_state == IntentSigState::Signed;
+            self.pending.insert(
+                id,
+                PendingWrite {
+                    durability,
+                    routing,
+                    routing_valid,
+                    sinks: Vec::new(),
+                    intent_id: Some(intent.intent_id),
+                    signing_pubkey: intent.expected_pubkey,
+                    frozen: intent.frozen.clone(),
+                    already_signed,
+                    sign_request_in_flight: false,
+                    sign_generation: 0,
+                    event_id: already_signed.then_some(intent.frozen.id),
+                    pending_relays: BTreeSet::new(),
+                    attempt_ordinals: BTreeMap::new(),
+                },
+            );
+
+            if !already_signed {
+                continue;
+            }
+
+            let Ok(attempts) = attempts else {
+                // Corrupt/unknown attempt evidence must not panic and must
+                // not make the parent journal disappear. Keep the rebuilt
+                // obligation owned, fail closed on wire output, and await an
+                // explicit repair/migration.
+                continue;
+            };
+
+            let mut existing_relays = BTreeSet::new();
+            for attempt in attempts {
+                existing_relays.insert(attempt.relay.clone());
+                if attempt.outcome != AttemptOutcome::Started {
+                    continue;
+                }
+                match durability {
+                    Durability::Durable => {
+                        if let Some(pending) = self.pending.get_mut(&id) {
+                            pending.pending_relays.insert(attempt.relay.clone());
+                            pending
+                                .attempt_ordinals
+                                .insert(attempt.relay.clone(), attempt.ordinal);
+                        }
+                        self.event_to_receipts
+                            .entry(attempt.event.id)
+                            .or_default()
+                            .insert(id);
+                        // Exact retained bytes, same ordinal. The Started row
+                        // already predates this replay effect.
+                        effects.push(Effect::PublishEvent(attempt.relay, attempt.event));
+                    }
+                    Durability::AtMostOnce => {
+                        if self
+                            .resolver
+                            .store_mut()
+                            .finish_attempt(
+                                intent.intent_id,
+                                &attempt.relay,
+                                attempt.ordinal,
+                                AttemptOutcome::OutcomeUnknown,
+                            )
+                            .is_err()
+                        {
+                            if let Some(pending) = self.pending.get_mut(&id) {
+                                pending.pending_relays.insert(attempt.relay.clone());
+                                pending
+                                    .attempt_ordinals
+                                    .insert(attempt.relay.clone(), attempt.ordinal);
+                            }
+                            self.event_to_receipts
+                                .entry(attempt.event.id)
+                                .or_default()
+                                .insert(id);
+                        }
+                    }
+                    Durability::Ephemeral => unreachable!(),
+                }
+            }
+
+            // Re-resolve the acceptance snapshot and append only genuinely
+            // new relay lanes. Existing terminal lanes are never rewritten;
+            // existing Started lanes follow their durability rule above.
+            // This is also the signed-before-first-send case when the set is
+            // empty. Route evolution therefore survives restart losslessly
+            // without turning into retry-policy scheduling.
+            if routing_valid {
+                let current_routes = self
+                    .pending
+                    .get(&id)
+                    .and_then(|pending| {
+                        self.resolve_routes(&pending.routing, &intent.frozen.pubkey.to_hex())
+                            .ok()
+                    })
+                    .unwrap_or_default();
+                for relay in current_routes.difference(&existing_relays) {
+                    let Ok(attempt) = self.resolver.store_mut().start_attempt(
+                        intent.intent_id,
+                        relay.clone(),
+                        intent.frozen.clone(),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(pending) = self.pending.get_mut(&id) {
+                        pending.pending_relays.insert(relay.clone());
+                        pending
+                            .attempt_ordinals
+                            .insert(relay.clone(), attempt.ordinal);
+                    }
+                    self.event_to_receipts
+                        .entry(intent.frozen.id)
+                        .or_default()
+                        .insert(id);
+                    effects.push(Effect::PublishEvent(relay.clone(), intent.frozen.clone()));
+                }
+            }
+        }
+        effects
+    }
+
+    /// Attach another observer to an existing durable receipt and replay
+    /// its retained facts. Unknown ids do not create state.
+    pub fn reattach_receipt(&mut self, id: ReceiptId, sink: Box<dyn ReceiptSink>) -> bool {
+        let Some(receipt) = self.resolver.store().reattach_receipt(id.0) else {
+            return false;
+        };
+        let attempts = match receipt.intent_id {
+            Some(intent_id) => match self.resolver.store().recover_attempts(intent_id) {
+                Ok(attempts) => attempts,
+                Err(_) => return false,
+            },
+            None => Vec::new(),
+        };
+        let status = match receipt.state {
+            ReceiptState::Accepted => WriteStatus::Accepted,
+            ReceiptState::Signed => WriteStatus::Signed(receipt.frozen_id),
+            ReceiptState::Compensated => WriteStatus::Failed("write compensated".to_string()),
+            ReceiptState::Abandoned => {
+                WriteStatus::Failed("ephemeral write abandoned after restart".to_string())
+            }
+        };
+        sink.on_status(status);
+        if receipt.state == ReceiptState::Accepted
+            && self
+                .pending
+                .get(&id)
+                .is_some_and(|pending| !pending.already_signed)
+        {
+            sink.on_status(WriteStatus::AwaitingCapability);
+        }
+        if receipt.intent_id.is_some() {
+            for attempt in attempts {
+                let status = match attempt.outcome {
+                    AttemptOutcome::Started => WriteStatus::Sent(attempt.relay),
+                    AttemptOutcome::Acked => WriteStatus::Acked(attempt.relay),
+                    AttemptOutcome::Rejected(reason) => {
+                        WriteStatus::Rejected(attempt.relay, reason)
+                    }
+                    AttemptOutcome::GaveUp => WriteStatus::GaveUp(attempt.relay),
+                    AttemptOutcome::OutcomeUnknown => WriteStatus::OutcomeUnknown(attempt.relay),
+                };
+                sink.on_status(status);
+            }
+        }
+        if let Some(pending) = self.pending.get_mut(&id) {
+            pending.sinks.push(sink);
+        }
+        true
     }
 
     /// Read-only access to the resolver's current demand (test/diagnostic
@@ -711,7 +915,6 @@ impl<S: EventStore> EngineCore<S> {
             )
         };
 
-        self.next_receipt = self.next_receipt.max(id.0);
         let mut effects = Vec::new();
         sink.on_status(WriteStatus::Accepted);
         effects.push(Effect::EmitReceipt(id, WriteStatus::Accepted));
@@ -721,7 +924,8 @@ impl<S: EventStore> EngineCore<S> {
             PendingWrite {
                 durability,
                 routing,
-                sink,
+                routing_valid: true,
+                sinks: vec![sink],
                 intent_id,
                 signing_pubkey,
                 frozen: frozen.clone(),
@@ -730,6 +934,7 @@ impl<S: EventStore> EngineCore<S> {
                 sign_generation: 0,
                 event_id: None,
                 pending_relays: BTreeSet::new(),
+                attempt_ordinals: BTreeMap::new(),
             },
         );
 
@@ -798,7 +1003,7 @@ impl<S: EventStore> EngineCore<S> {
                 return effects;
             }
             pending.sign_request_in_flight = false;
-            pending.sink.on_status(WriteStatus::AwaitingCapability);
+            Self::notify(pending, WriteStatus::AwaitingCapability);
             effects.push(Effect::EmitReceipt(id, WriteStatus::AwaitingCapability));
         }
         effects
@@ -912,8 +1117,16 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         if let Some(pending) = self.pending.get(&id) {
-            pending.sink.on_status(WriteStatus::Signed(event.id));
+            Self::notify(pending, WriteStatus::Signed(event.id));
             effects.push(Effect::EmitReceipt(id, WriteStatus::Signed(event.id)));
+            if !pending.routing_valid {
+                // Corrupt/unknown persisted routing is fail-closed, but the
+                // durable obligation remains owned and reattachable. Never
+                // silently `continue` it out of recovery and never guess a
+                // relay. A future migration/explicit cancellation can
+                // resolve it.
+                return;
+            }
         }
 
         let author_hex = event.pubkey.to_hex();
@@ -927,7 +1140,7 @@ impl<S: EventStore> EngineCore<S> {
             Err(reason) => {
                 if let Some(pending) = self.pending.remove(&id) {
                     let status = WriteStatus::Failed(reason);
-                    pending.sink.on_status(status.clone());
+                    Self::notify(&pending, status.clone());
                     effects.push(Effect::EmitReceipt(id, status));
                 }
                 return;
@@ -935,16 +1148,39 @@ impl<S: EventStore> EngineCore<S> {
         };
 
         if let Some(pending) = self.pending.get(&id) {
-            pending.sink.on_status(WriteStatus::Routed(relays.clone()));
+            Self::notify(pending, WriteStatus::Routed(relays.clone()));
             effects.push(Effect::EmitReceipt(id, WriteStatus::Routed(relays.clone())));
         }
 
+        // The durable attempt fact is committed before the corresponding
+        // wire effect can exist. Ephemeral has no obligation/attempt row.
+        let mut sent_relays = BTreeSet::new();
         for relay in &relays {
+            let ordinal = match self.pending.get(&id).and_then(|p| p.intent_id) {
+                Some(intent_id) => match self.resolver.store_mut().start_attempt(
+                    intent_id,
+                    relay.clone(),
+                    event.clone(),
+                ) {
+                    Ok(attempt) => Some(attempt.ordinal),
+                    Err(_) => None,
+                },
+                None => Some(0),
+            };
+            let Some(ordinal) = ordinal else {
+                continue;
+            };
+            if let Some(pending) = self.pending.get_mut(&id) {
+                if ordinal != 0 {
+                    pending.attempt_ordinals.insert(relay.clone(), ordinal);
+                }
+            }
+            sent_relays.insert(relay.clone());
             effects.push(Effect::PublishEvent(relay.clone(), event.clone()));
         }
         if let Some(pending) = self.pending.get(&id) {
-            for relay in &relays {
-                pending.sink.on_status(WriteStatus::Sent(relay.clone()));
+            for relay in &sent_relays {
+                Self::notify(pending, WriteStatus::Sent(relay.clone()));
                 effects.push(Effect::EmitReceipt(id, WriteStatus::Sent(relay.clone())));
             }
         }
@@ -959,7 +1195,7 @@ impl<S: EventStore> EngineCore<S> {
             // durable publication obligation remains in this reducer.
             self.pending.remove(&id);
         } else if let Some(pending) = self.pending.get_mut(&id) {
-            pending.pending_relays = relays;
+            pending.pending_relays = sent_relays;
             self.event_to_receipts
                 .entry(event.id)
                 .or_default()
@@ -1046,6 +1282,41 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    fn parse_routing_snapshot(snapshot: &str) -> Option<WriteRouting> {
+        if snapshot == "author-outbox" {
+            return Some(WriteRouting::AuthorOutbox);
+        }
+        if let Some(keys) = snapshot.strip_prefix("to-inboxes:") {
+            let recipients = if keys.is_empty() {
+                Vec::new()
+            } else {
+                keys.split(',')
+                    .map(PublicKey::from_hex)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?
+            };
+            return Some(WriteRouting::ToInboxes(recipients));
+        }
+        if let Some(encoded) = snapshot.strip_prefix("private-narrow-hex:") {
+            let relays = if encoded.is_empty() {
+                Vec::new()
+            } else {
+                encoded
+                    .split(',')
+                    .map(|part| {
+                        let bytes = hex::decode(part).ok()?;
+                        let url = String::from_utf8(bytes).ok()?;
+                        RelayUrl::parse(&url).ok()
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            };
+            return Some(WriteRouting::PrivateNarrow(crate::outbox::PrivateRoute {
+                relays: crate::outbox::NarrowOnly::new(relays),
+            }));
+        }
+        None
+    }
+
     fn fail_unaccepted(&mut self, sink: Box<dyn ReceiptSink>, reason: String) -> Vec<Effect> {
         // No store id exists on refusal/persistence failure by contract.
         // This correlation id is stream-local only and never enters the
@@ -1093,7 +1364,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        pending.sink.on_status(WriteStatus::Failed(reason.clone()));
+        Self::notify(&pending, WriteStatus::Failed(reason.clone()));
         effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
     }
 
@@ -1198,19 +1469,43 @@ impl<S: EventStore> EngineCore<S> {
         };
         let mut terminal = Vec::new();
         for id in ids {
-            let Some(pending) = self.pending.get_mut(&id) else {
+            let Some(pending) = self.pending.get(&id) else {
                 terminal.push(id);
                 continue;
             };
-            if !pending.pending_relays.remove(relay) {
+            if !pending.pending_relays.contains(relay) {
                 continue;
             }
+            let attempt = pending
+                .intent_id
+                .zip(pending.attempt_ordinals.get(relay).copied());
+            if let Some((intent_id, ordinal)) = attempt {
+                let outcome = if status {
+                    AttemptOutcome::Acked
+                } else {
+                    AttemptOutcome::Rejected(message.clone())
+                };
+                if self
+                    .resolver
+                    .store_mut()
+                    .finish_attempt(intent_id, relay, ordinal, outcome)
+                    .is_err()
+                {
+                    continue;
+                }
+            }
+            let pending = self
+                .pending
+                .get_mut(&id)
+                .expect("lane checked immediately above");
+            pending.pending_relays.remove(relay);
+            pending.attempt_ordinals.remove(relay);
             let new_status = if status {
                 WriteStatus::Acked(relay.clone())
             } else {
                 WriteStatus::Rejected(relay.clone(), message.clone())
             };
-            pending.sink.on_status(new_status.clone());
+            Self::notify(pending, new_status.clone());
             effects.push(Effect::EmitReceipt(id, new_status));
             if pending.pending_relays.is_empty() {
                 terminal.push(id);
@@ -1245,10 +1540,26 @@ impl<S: EventStore> EngineCore<S> {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
+            let attempt = self.pending.get(&id).and_then(|pending| {
+                pending
+                    .intent_id
+                    .zip(pending.attempt_ordinals.get(relay).copied())
+            });
+            if let Some((intent_id, ordinal)) = attempt {
+                if self
+                    .resolver
+                    .store_mut()
+                    .finish_attempt(intent_id, relay, ordinal, AttemptOutcome::GaveUp)
+                    .is_err()
+                {
+                    continue;
+                }
+            }
             let event_id = if let Some(pending) = self.pending.get_mut(&id) {
                 pending.pending_relays.remove(relay);
+                pending.attempt_ordinals.remove(relay);
                 let status = WriteStatus::GaveUp(relay.clone());
-                pending.sink.on_status(status.clone());
+                Self::notify(pending, status.clone());
                 effects.push(Effect::EmitReceipt(id, status));
                 if pending.pending_relays.is_empty() {
                     pending.event_id
@@ -1273,8 +1584,19 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn alloc_receipt_id(&mut self) -> ReceiptId {
-        self.next_receipt += 1;
-        ReceiptId(self.next_receipt)
+        let id = ReceiptId(self.next_unaccepted_receipt);
+        self.next_unaccepted_receipt = self
+            .next_unaccepted_receipt
+            .checked_sub(1)
+            .filter(|next| *next >= (1u64 << 63))
+            .expect("unaccepted correlation namespace exhausted");
+        id
+    }
+
+    fn notify(pending: &PendingWrite, status: WriteStatus) {
+        for sink in &pending.sinks {
+            sink.on_status(status.clone());
+        }
     }
 
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----

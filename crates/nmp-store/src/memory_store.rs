@@ -14,10 +14,11 @@ use crate::coverage::{
     coverage_key, merge_interval, shape_matches, shrink_after_eviction, window_erase,
 };
 use crate::{
-    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
-    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError,
-    PromoteOutcome, Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason,
-    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
+    AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
+    CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, IntentId,
+    IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState,
+    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RefuseReason, RelayObserved,
+    RetractReason, SigState, StoredEvent, WriteDurability,
 };
 
 /// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
@@ -153,6 +154,8 @@ pub struct MemoryStore {
     /// `outbox_intents`'s open-work rows (architecture review correction —
     /// see `ReceiptState`'s doc). Never pruned by this unit.
     outbox_receipts: HashMap<u64, RecoveredReceipt>,
+    /// Typed mirror of `OUTBOX_ATTEMPTS`, keyed by its complete stable key.
+    outbox_attempts: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttempt>,
     /// Every still-open kind:5 intent's OWN suppression claims (see
     /// [`SuppressClaim`]'s doc) — dropped wholesale by `promote_signed`
     /// (after committing the deletion for real) or `compensate_write`
@@ -184,15 +187,27 @@ impl MemoryStore {
     /// high-water mark (never inferred from the currently-open set — see
     /// `IntentId`'s doc). Starts at 1 (0 is never issued, kept free as an
     /// unambiguous "no id" sentinel for callers that want one).
-    fn alloc_intent_id(&mut self) -> IntentId {
-        self.next_intent_id += 1;
-        IntentId(self.next_intent_id)
+    fn alloc_intent_id(&mut self) -> Result<IntentId, PersistenceError> {
+        self.next_intent_id = self
+            .next_intent_id
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("intent id exhausted".into()))?;
+        Ok(IntentId(self.next_intent_id))
     }
 
     /// Allocate the next receipt id, same treatment as `alloc_intent_id`.
-    fn alloc_receipt_id(&mut self) -> u64 {
-        self.next_receipt_id += 1;
-        self.next_receipt_id
+    fn alloc_receipt_id(&mut self) -> Result<u64, PersistenceError> {
+        let next = self
+            .next_receipt_id
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("receipt id exhausted".into()))?;
+        if next >= (1u64 << 63) {
+            return Err(PersistenceError(
+                "durable receipt id namespace exhausted".into(),
+            ));
+        }
+        self.next_receipt_id = next;
+        Ok(next)
     }
 
     /// Write (or overwrite) one `OUTBOX_INTENTS` row plus its
@@ -1024,8 +1039,8 @@ impl EventStore for MemoryStore {
             return Ok(AcceptOutcome::Refused(RefuseReason::Tombstoned));
         }
 
-        let intent_id = self.alloc_intent_id();
-        let receipt_id = self.alloc_receipt_id();
+        let intent_id = self.alloc_intent_id()?;
+        let receipt_id = self.alloc_receipt_id()?;
         let local = LocalOrigin {
             owners: BTreeSet::from([intent_id]),
             sig_state: SigState::Pending,
@@ -1637,6 +1652,93 @@ impl EventStore for MemoryStore {
         self.outbox_receipts.get(&receipt_id).cloned()
     }
 
+    fn start_attempt(
+        &mut self,
+        intent_id: IntentId,
+        relay: RelayUrl,
+        event: Event,
+    ) -> Result<RecoveredAttempt, PersistenceError> {
+        let Some(intent) = self.outbox_intents.get(&intent_id) else {
+            return Err(PersistenceError("attempt intent is not open".into()));
+        };
+        if intent.sig_state != IntentSigState::Signed || intent.frozen != event {
+            return Err(PersistenceError(
+                "attempt bytes are not the intent's promoted signed bytes".into(),
+            ));
+        }
+        event
+            .verify()
+            .map_err(|err| PersistenceError(format!("attempt event is invalid: {err}")))?;
+        let ordinal = self
+            .outbox_attempts
+            .keys()
+            .filter(|(candidate, candidate_relay, _)| {
+                *candidate == intent_id && candidate_relay == &relay
+            })
+            .map(|(_, _, ordinal)| *ordinal)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
+        let attempt = RecoveredAttempt {
+            version: 1,
+            intent_id,
+            relay: relay.clone(),
+            ordinal,
+            event,
+            outcome: AttemptOutcome::Started,
+        };
+        self.outbox_attempts
+            .insert((intent_id, relay, ordinal), attempt.clone());
+        Ok(attempt)
+    }
+
+    fn finish_attempt(
+        &mut self,
+        intent_id: IntentId,
+        relay: &RelayUrl,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    ) -> Result<FinishAttemptOutcome, PersistenceError> {
+        if outcome == AttemptOutcome::Started {
+            return Err(PersistenceError("Started is not a terminal outcome".into()));
+        }
+        let Some(attempt) = self
+            .outbox_attempts
+            .get_mut(&(intent_id, relay.clone(), ordinal))
+        else {
+            return Err(PersistenceError("attempt row not found".into()));
+        };
+        if attempt.outcome == AttemptOutcome::Started {
+            attempt.outcome = outcome;
+            Ok(FinishAttemptOutcome::Committed)
+        } else if attempt.outcome == outcome {
+            Ok(FinishAttemptOutcome::AlreadySame)
+        } else {
+            Err(PersistenceError(
+                "attempt already has a conflicting terminal outcome".into(),
+            ))
+        }
+    }
+
+    fn recover_attempts(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+        let mut recovered: Vec<_> = self
+            .outbox_attempts
+            .values()
+            .filter(|attempt| attempt.intent_id == intent_id)
+            .cloned()
+            .collect();
+        recovered.sort_by(|left, right| {
+            left.relay
+                .cmp(&right.relay)
+                .then(left.ordinal.cmp(&right.ordinal))
+        });
+        Ok(recovered)
+    }
+
     fn accept_ephemeral(
         &mut self,
         frozen_id: EventId,
@@ -1648,7 +1750,7 @@ impl EventStore for MemoryStore {
         // `Abandoned` here — an ephemeral receipt just stays `Accepted`
         // for the life of the process unless the engine transitions it
         // itself (out of this unit's scope).
-        let receipt_id = self.alloc_receipt_id();
+        let receipt_id = self.alloc_receipt_id()?;
         self.outbox_receipts.insert(
             receipt_id,
             RecoveredReceipt {

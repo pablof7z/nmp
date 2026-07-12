@@ -18,23 +18,19 @@ about current code:
   exact per-relay/filter intervals as a distinct type. `AwaitingAuth` and
   `AuthDenied` land with #8, and `Error` lands with #51. Full source-authority
   and access-context identity remains part of the descriptor gap above (#49).
-- **Crash-safe `Accepted` is built; restart recovery is not wired.** Durable and
-  at-most-once acceptance now atomically owns the intent, receipt, canonical
-  pending row, displaced replaceable state, and initial retry record through
-  the store/resolver path. Signing, promotion, cancellation/compensation,
-  co-owner fanout, and frozen signer selection run from those durable ids. The
-  runtime still must call `recover_outbox`, reattach observers/signers, resume
-  attempts without duplicate terminal facts, and prove the restart matrix.
-- **Signer selection is frozen at acceptance, but the full provider contract is
-  incomplete.** The default uses the signer registered for the active pubkey
-  and does not drift when the active account changes. A per-write identity
-  override, persisted `AwaitingSigner(pubkey)` recovery, standard platform
-  secure signer providers, and restart reattachment are unbuilt.
-- **Durable logical retry is unbuilt.** The outbox does not yet persist exact
-  per-`(intent, relay)` attempt bytes, ordinal, outcome, and next eligibility.
-  The deadline driver must grow into the one scheduler for expiry, liveness,
-  signer operations, and retry without adding polling or transport-owned
-  durable buffering.
+- **Crash-safe acceptance and Rust restart reattachment are built; bounded
+  retry policy is not.** One transaction owns the intent, stable receipt,
+  frozen body, canonical pending row and displaced state. Rust boot recovery
+  rebuilds ownership without reinsertion, resumes the frozen signer, persists
+  versioned exact-byte `(intent, relay, ordinal)` Started facts before wire,
+  replays Durable in-flight bytes, and converts AtMostOnce ambiguity to
+  `OutcomeUnknown` without resend. Retry eligibility, backoff, caps, terminal
+  lane cleanup and the single deadline fold remain issue #79; there is no
+  polling/busy-spin placeholder.
+- **Signer selection is frozen for accepted writes, but standard platform
+  providers are unbuilt.** Missing Rust capabilities survive restart and resume
+  only for the exact persisted pubkey. Per-write identity override and secure
+  Swift/Kotlin provider/vault reattachment remain #47/#6.
 - **Protocol-module composition is unbuilt.** The existing ownership design
   incorrectly makes kind ownership gate all route authority. Modules must claim
   only exact NIP-defined schemas while typed contextual operations may add their

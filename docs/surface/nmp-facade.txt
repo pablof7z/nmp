@@ -20,6 +20,8 @@ pub use nmp::Kind
 pub use nmp::Lane
 pub use nmp::LiveQuery
 pub use nmp::PublicKey
+pub use nmp::ReceiptId
+pub use nmp::ReceiptStream
 pub use nmp::RelayDiagnosticsSnapshot
 pub use nmp::RelayUrl
 pub use nmp::RowDelta
@@ -83,6 +85,8 @@ pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::En
 pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
 pub fn nmp::Engine::publish(&self, nmp_engine::outbox::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
+pub fn nmp::Engine::publish_tracked(&self, nmp_engine::outbox::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
+pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<core::option::Option<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>>, nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
 impl core::ops::drop::Drop for nmp::Engine

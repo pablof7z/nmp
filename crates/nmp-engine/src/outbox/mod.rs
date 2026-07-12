@@ -47,6 +47,7 @@ pub struct WriteIntent {
 }
 
 /// Where a `WriteIntent` is routed.
+#[derive(Clone)]
 pub enum WriteRouting {
     /// The author's write relays (reuses the M2 router's lanes).
     AuthorOutbox,
@@ -89,6 +90,7 @@ impl<T: Ord> NarrowOnly<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct PrivateRoute {
     pub relays: NarrowOnly<RelayUrl>,
 }
@@ -105,6 +107,9 @@ pub enum WriteStatus {
     Acked(RelayUrl),
     Rejected(RelayUrl, String),
     GaveUp(RelayUrl),
+    /// An at-most-once attempt crossed a process-loss boundary after its
+    /// Started fact committed. Terminal ambiguity, never retry permission.
+    OutcomeUnknown(RelayUrl),
     /// Whole-intent terminal reached BEFORE any relay was ever contacted —
     /// a signer rejection, or (ledger #6) an unroutable `PrivateNarrow`
     /// route. Distinct from the per-relay `Rejected`: no `RelayUrl` exists

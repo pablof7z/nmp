@@ -3,6 +3,17 @@ import XCTest
 import NMPFFI
 
 final class EvidenceMappingTests: XCTestCase {
+    func testOutcomeUnknownReceiptMappingRemainsDistinctFromGaveUp() {
+        XCTAssertEqual(
+            WriteStatus(.outcomeUnknown(relay: "wss://ambiguous.example")),
+            .outcomeUnknown(relay: "wss://ambiguous.example")
+        )
+        XCTAssertNotEqual(
+            WriteStatus(.outcomeUnknown(relay: "wss://ambiguous.example")),
+            WriteStatus(.gaveUp(relay: "wss://ambiguous.example"))
+        )
+    }
+
     func testEveryAcquisitionEvidenceVariantMapsWithoutARollup() {
         let raw = FfiAcquisitionEvidence(
             sources: [
