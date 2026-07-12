@@ -45,6 +45,7 @@ pub nmp::EngineError::EngineClosed
 pub nmp::EngineError::InvalidRelayUrl
 pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
 pub nmp::EngineError::InvalidSecretKey
+pub nmp::EngineError::ReceiptCorrelationIdExhausted
 pub nmp::EngineError::StoreOpenFailed
 pub nmp::EngineError::StoreOpenFailed::reason: alloc::string::String
 impl core::clone::Clone for nmp::EngineError

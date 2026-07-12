@@ -88,6 +88,26 @@ pub(crate) use attribution::wire_sub_id_string;
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct ReceiptId(pub u64);
 
+/// A publish failure that occurs before any receipt identity can exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishError {
+    /// Every upper-half correlation id has already been issued. No id is
+    /// reused, wrapped into the durable lower half, or fabricated.
+    ReceiptCorrelationIdExhausted,
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReceiptCorrelationIdExhausted => {
+                write!(f, "receipt correlation id namespace exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PublishError {}
+
 /// Truthful result of trying to attach a receipt observer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReattachOutcome {
@@ -228,6 +248,9 @@ pub enum Effect {
     /// buffered/replayed).
     EmitDiagnostics(DiagnosticsSnapshot),
     EmitReceipt(ReceiptId, WriteStatus),
+    /// The publish could not even allocate a non-durable correlation id,
+    /// so no `EmitReceipt` can truthfully accompany this failure.
+    PublishFailed(PublishError),
     RequestSign(ReceiptId, u64, UnsignedEvent),
     RequestDecrypt(EventId, PublicKey, String),
     /// Outbox: publish `event` to `relay` (plan §3.4's "`Effect::Wire`
@@ -349,7 +372,7 @@ pub struct EngineCore<S: EventStore> {
     /// Correlation ids for failures that were never accepted use the upper
     /// half of the namespace. Store-issued durable ids occupy the lower half
     /// and advance independently, so reattachment can never alias one.
-    next_unaccepted_receipt: u64,
+    next_unaccepted_receipt: Option<u64>,
     /// Write outbox (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
     /// `ReceiptId` from `Publish` through to the last terminal per-relay
     /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
@@ -414,7 +437,7 @@ impl<S: EventStore> EngineCore<S> {
             ever_connected_relays: BTreeSet::new(),
             clock: Timestamp::from(0u64),
             active_pubkey: None,
-            next_unaccepted_receipt: u64::MAX,
+            next_unaccepted_receipt: Some(u64::MAX),
             pending: HashMap::new(),
             event_to_receipts: HashMap::new(),
             prober: Prober::new(),
@@ -1467,7 +1490,10 @@ impl<S: EventStore> EngineCore<S> {
         // No store id exists on refusal/persistence failure by contract.
         // This correlation id is stream-local only and never enters the
         // durable receipt namespace.
-        let id = self.alloc_receipt_id();
+        let id = match self.alloc_receipt_id() {
+            Ok(id) => id,
+            Err(err) => return vec![Effect::PublishFailed(err)],
+        };
         let status = WriteStatus::Failed(reason);
         sink.on_status(status.clone());
         vec![Effect::EmitReceipt(id, status)]
@@ -1735,14 +1761,20 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    fn alloc_receipt_id(&mut self) -> ReceiptId {
-        let id = ReceiptId(self.next_unaccepted_receipt);
-        self.next_unaccepted_receipt = self
+    fn alloc_receipt_id(&mut self) -> Result<ReceiptId, PublishError> {
+        const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
+        let current = self
             .next_unaccepted_receipt
-            .checked_sub(1)
-            .filter(|next| *next >= (1u64 << 63))
-            .expect("unaccepted correlation namespace exhausted");
-        id
+            .ok_or(PublishError::ReceiptCorrelationIdExhausted)?;
+        debug_assert!(current >= FIRST_UNACCEPTED_ID);
+        self.next_unaccepted_receipt = (current > FIRST_UNACCEPTED_ID).then_some(current - 1);
+        Ok(ReceiptId(current))
+    }
+
+    #[cfg(test)]
+    fn set_next_unaccepted_receipt_for_test(&mut self, next: Option<u64>) {
+        assert!(next.is_none_or(|id| id >= (1u64 << 63)));
+        self.next_unaccepted_receipt = next;
     }
 
     fn notify(pending: &PendingWrite, status: WriteStatus) {
@@ -2509,6 +2541,86 @@ fn parse_nip65_read_relays(event: &nostr::Event) -> Vec<LanedRelay> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod receipt_allocator_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+    use nostr::{Keys, Kind};
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<WriteStatus>>>);
+
+    impl ReceiptSink for Sink {
+        fn on_status(&self, status: WriteStatus) {
+            self.0.lock().unwrap().push(status);
+        }
+    }
+
+    fn rejected_intent(keys: &Keys, created_at: u64) -> WriteIntent {
+        WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(created_at),
+                Kind::TextNote,
+                vec![],
+                "no active account",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        }
+    }
+
+    #[test]
+    fn last_upper_half_id_is_issued_once_then_exhaustion_is_stable_and_typed() {
+        const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
+        let keys = Keys::generate();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+        core.set_next_unaccepted_receipt_for_test(Some(FIRST_UNACCEPTED_ID));
+
+        let last_sink = Sink::default();
+        let last = core.handle(EngineMsg::Publish(
+            rejected_intent(&keys, 1),
+            Box::new(last_sink.clone()),
+        ));
+        assert!(last.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::EmitReceipt(ReceiptId(id), WriteStatus::Failed(_))
+                    if *id == FIRST_UNACCEPTED_ID
+            )
+        }));
+        assert!(matches!(
+            last_sink.0.lock().unwrap().as_slice(),
+            [WriteStatus::Failed(_)]
+        ));
+
+        for created_at in [2, 3] {
+            let exhausted_sink = Sink::default();
+            let exhausted = core.handle(EngineMsg::Publish(
+                rejected_intent(&keys, created_at),
+                Box::new(exhausted_sink.clone()),
+            ));
+            assert!(matches!(
+                exhausted.as_slice(),
+                [Effect::PublishFailed(
+                    PublishError::ReceiptCorrelationIdExhausted
+                )]
+            ));
+            assert!(exhausted_sink.0.lock().unwrap().is_empty());
+            assert!(!exhausted
+                .iter()
+                .any(|effect| matches!(effect, Effect::EmitReceipt(..))));
+        }
+
+        assert_eq!(FIRST_UNACCEPTED_ID - 1, u64::MAX >> 1);
+        assert!(core.pending.is_empty());
+        assert!(core.resolver.store().recover_outbox().is_empty());
+    }
 }
 
 #[cfg(test)]

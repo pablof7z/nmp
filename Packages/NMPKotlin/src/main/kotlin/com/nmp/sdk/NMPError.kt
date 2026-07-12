@@ -20,6 +20,8 @@ import uniffi.nmp_ffi.FfiException
  * `nmp-engine`'s acceptance boundary so it holds for every entry point, not
  * only this one). It surfaces on the `publish` `Flow<WriteStatus>` instead,
  * as `WriteStatus.Failed`, the first and only status delivered.
+ * Receipt-correlation exhaustion is synchronous because no truthful
+ * `Receipt` or status flow can be created without an identity.
  *
  * Also no `SignerHasNoPublicKey` case: `addAccount` goes through
  * `nmp::Engine::add_account`, whose built-in `LocalKeySigner` path always
@@ -34,6 +36,8 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
+    object ReceiptCorrelationIdExhausted :
+        NMPError("receipt correlation id namespace exhausted")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
@@ -47,6 +51,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
                 is FfiException.InvalidSecretKey -> InvalidSecretKey
+                is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed
