@@ -45,7 +45,9 @@ NMPName(pubkey: pubkey, profile: profile)
 
 Before kind:0 resolves, Avatar uses a deterministic pubkey-derived color and
 initials while Name uses a stable abbreviated pubkey. A resolved image never
-changes layout. Replace image policy for any subtree:
+changes layout. Remote HTTP image loading is disabled by default because profile
+and event URLs are network-authored. Explicitly opt into the small `AsyncImage`
+policy with `.nmpImageLoader(.system)`, or replace image policy for any subtree:
 
 ```swift
 view.nmpImageLoader(

@@ -18,6 +18,7 @@ struct GalleryRootView: View {
                 .tabItem { Label("Live proof", systemImage: "dot.radiowaves.left.and.right") }
         }
         .tint(Color(red: 0.45, green: 0.22, blue: 0.93))
+        .nmpImageLoader(.system)
     }
 }
 

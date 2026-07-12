@@ -57,7 +57,7 @@ public struct NMPAvatar: View {
                 .font(.system(size: max(10, size * 0.31), weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.94))
 
-            if let pictureURL {
+            if let pictureURL, imageLoader.isEnabled {
                 imageLoader.render(pictureURL)
                     .frame(width: size, height: size)
                     .clipShape(Circle())

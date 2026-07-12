@@ -30,13 +30,24 @@ public struct NMPUITheme: Sendable {
     }
 }
 
-/// App-owned remote image policy. The system default is intentionally small:
-/// `AsyncImage`, a progress placeholder, and no preview/proxy/autoplay work.
+/// App-owned remote image policy. Remote loading is disabled by default; an app
+/// may explicitly install `.system` or a privacy/proxy-aware loader.
 public struct NMPImageLoader {
     let render: (URL) -> AnyView
+    let isEnabled: Bool
 
     public init<Content: View>(@ViewBuilder render: @escaping (URL) -> Content) {
+        self.isEnabled = true
         self.render = { AnyView(render($0)) }
+    }
+
+    private init(isEnabled: Bool, render: @escaping (URL) -> AnyView) {
+        self.isEnabled = isEnabled
+        self.render = render
+    }
+
+    public static let disabled = NMPImageLoader(isEnabled: false) { _ in
+        AnyView(EmptyView())
     }
 
     public static let system = NMPImageLoader { url in
@@ -66,7 +77,7 @@ private struct NMPUIThemeKey: EnvironmentKey {
 }
 
 private struct NMPImageLoaderKey: EnvironmentKey {
-    static let defaultValue = NMPImageLoader.system
+    static let defaultValue = NMPImageLoader.disabled
 }
 
 public extension EnvironmentValues {
@@ -96,6 +107,13 @@ struct NMPRemoteImage: View {
     let url: URL
 
     var body: some View {
-        loader.render(url)
+        if loader.isEnabled {
+            loader.render(url)
+        } else {
+            ZStack {
+                Color.secondary.opacity(0.08)
+                Image(systemName: "photo").foregroundStyle(.secondary)
+            }
+        }
     }
 }
