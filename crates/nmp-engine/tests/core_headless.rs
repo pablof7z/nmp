@@ -27,7 +27,7 @@ use nmp_store::{
     PersistenceError, PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt,
     RecoveredRouteRevision, RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
-use nmp_transport::{RelayFrame, RelayHandle};
+use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
     JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent,
 };
@@ -1438,7 +1438,7 @@ fn enqueue_is_not_converged() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::PublishEvent(r, _) if r == &relay0)),
+            .any(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &relay0)),
         "an ephemeral write is fire-and-forget -- it still reaches the wire"
     );
     assert!(effects
@@ -1464,7 +1464,7 @@ fn enqueue_is_not_converged() {
     ));
     let publish_count = effects
         .iter()
-        .filter(|e| matches!(e, Effect::PublishEvent(r, _) if r == &relay0))
+        .filter(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &relay0))
         .count();
     assert_eq!(publish_count, 1, "at-most-once sends exactly once");
 
@@ -1933,13 +1933,13 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     ));
     assert!(routed
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &ack)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &ack)));
     assert!(routed
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &drop_relay)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &drop_relay)));
     assert!(routed
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &nack)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &nack)));
 
     let acked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -2023,7 +2023,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &out))
+            .filter(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &out))
             .count(),
         2
     );
@@ -2248,7 +2248,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
     );
     assert!(
         effects.iter().any(
-            |e| matches!(e, Effect::PublishEvent(r, ev) if r == &relay0 && ev.id == genuine.id)
+            |e| matches!(e, Effect::PublishEvent(r, ev, _) if r == &relay0 && ev.id == genuine.id)
         ),
         "a valid Signed publish must still reach the wire -- got {effects:?}"
     );
@@ -2323,10 +2323,10 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     );
     assert!(effects
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &good)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &good)));
     assert!(!effects
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &blocked)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &blocked)));
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::EmitReceipt(receipt, WriteStatus::PersistenceBlocked(relay))
@@ -2341,6 +2341,231 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
         .lock()
         .unwrap()
         .contains(&WriteStatus::PersistenceBlocked(blocked)));
+}
+
+// ---- issue #93: durable EVENT handoff -----------------------------------
+
+/// `Sent` must never fire synchronously at enqueue time -- the moment this
+/// call returns effects for a signed publish is not the same fact as
+/// transport confirming the write. Only `EngineMsg::EventHandoff(_,
+/// Written)` may ever produce it (asserted below by actually driving that
+/// message and observing exactly one `Sent`).
+#[test]
+fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+    let sink = CapturingReceiptSink::default();
+
+    let (id, _signed, effects) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitReceipt(_, WriteStatus::Sent(_)))),
+        "Sent must never fire synchronously at enqueue time, got {effects:?}"
+    );
+    assert!(
+        !sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| matches!(s, WriteStatus::Sent(_))),
+        "the sink must not have observed Sent before any handoff result arrives"
+    );
+
+    let correlation = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::PublishEvent(r, _, c) if r == &relay => Some(*c),
+            _ => None,
+        })
+        .expect("a PublishEvent effect must have been emitted for this relay");
+
+    let reattached = CapturingReceiptSink::default();
+    assert!(core
+        .reattach_receipt(id, Box::new(reattached.clone()))
+        .is_attached());
+    assert!(
+        !reattached
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|status| matches!(status, WriteStatus::Sent(_))),
+        "a persisted Started row is pre-wire and must not replay as Sent"
+    );
+
+    let handoff_effects = core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
+    assert!(
+        handoff_effects.iter().any(|e| matches!(
+            e,
+            Effect::EmitReceipt(receipt, WriteStatus::Sent(r)) if *receipt == id && r == &relay
+        )),
+        "a Written handoff must emit exactly one Sent, got {handoff_effects:?}"
+    );
+    assert!(sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+    assert!(reattached
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+
+    // The SAME correlation resolving a second time (a defensive duplicate
+    // delivery, which transport itself never actually produces) must be a
+    // complete no-op -- the correlation was already consumed above.
+    let repeat = core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
+    assert!(
+        repeat.is_empty(),
+        "an already-resolved correlation must never re-fire Sent, got {repeat:?}"
+    );
+}
+
+#[test]
+fn ephemeral_observer_survives_until_every_handoff_result_then_sees_written_sent() {
+    let author = Keys::generate();
+    let relay_a = RelayUrl::parse("wss://ephemeral-a.example").unwrap();
+    let relay_b = RelayUrl::parse("wss://ephemeral-b.example").unwrap();
+    let mut core = new_core(FixtureDirectory::new());
+    activate(&mut core, &author);
+    let sink = CapturingReceiptSink::default();
+    let accepted = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 93, "ephemeral handoff")),
+            durability: Durability::Ephemeral,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay_a.clone(), relay_b.clone()]),
+            }),
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, generation, unsigned) = find_sign_request(&accepted);
+    let signed = unsigned.sign_with_keys(&author).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+    assert!(!sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|status| matches!(status, WriteStatus::Sent(_))));
+    let correlation_for = |relay: &RelayUrl| {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PublishEvent(found, _, correlation) if found == relay => Some(*correlation),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    assert!(core
+        .handle(EngineMsg::EventHandoff(
+            correlation_for(&relay_a),
+            HandoffResult::NotHandedOff,
+        ))
+        .is_empty());
+    let written = core.handle(EngineMsg::EventHandoff(
+        correlation_for(&relay_b),
+        HandoffResult::Written,
+    ));
+    assert!(written.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(found, WriteStatus::Sent(relay))
+            if *found == id && relay == &relay_b
+    )));
+    assert_eq!(
+        sink.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|status| matches!(status, WriteStatus::Sent(relay) if relay == &relay_b))
+            .count(),
+        1
+    );
+}
+
+/// `NotHandedOff`/`Ambiguous` are typed INTERNAL facts only (issue #93
+/// scope): neither ever emits `WriteStatus::Sent`, any other receipt
+/// status, or any effect at all -- #96 wires governed visibility, #95
+/// wires the scheduler that acts on them; this unit's job stops at
+/// correlating the fact correctly.
+#[test]
+fn not_handed_off_and_ambiguous_never_emit_any_receipt_status() {
+    let author = Keys::generate();
+    let relay_a = RelayUrl::parse("wss://relay-a.example.com").unwrap();
+    let relay_b = RelayUrl::parse("wss://relay-b.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(
+        author.public_key().to_hex(),
+        [relay_a.clone(), relay_b.clone()],
+    );
+    let mut core = new_core(dir);
+    let sink = CapturingReceiptSink::default();
+
+    let (_id, _signed, effects) = publish_private(
+        &mut core,
+        &author,
+        [relay_a.clone(), relay_b.clone()],
+        sink.clone(),
+    );
+    let correlation_for = |relay: &RelayUrl| {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::PublishEvent(r, _, c) if r == relay => Some(*c),
+                _ => None,
+            })
+            .expect("a PublishEvent effect must have been emitted for this relay")
+    };
+
+    let not_handed_off = core.handle(EngineMsg::EventHandoff(
+        correlation_for(&relay_a),
+        HandoffResult::NotHandedOff,
+    ));
+    assert!(
+        not_handed_off.is_empty(),
+        "NotHandedOff must produce no effects, got {not_handed_off:?}"
+    );
+    let ambiguous = core.handle(EngineMsg::EventHandoff(
+        correlation_for(&relay_b),
+        HandoffResult::Ambiguous,
+    ));
+    assert!(
+        ambiguous.is_empty(),
+        "Ambiguous must produce no effects, got {ambiguous:?}"
+    );
+    assert!(
+        !sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| matches!(s, WriteStatus::Sent(_))),
+        "neither NotHandedOff nor Ambiguous may ever surface as Sent"
+    );
+}
+
+/// An `EventHandoff` for a correlation this reducer never minted (unknown,
+/// or belonging to a different process entirely) is a structural no-op --
+/// never a panic, never a stray effect.
+#[test]
+fn event_handoff_for_an_unknown_correlation_is_inert() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+    let _ = publish_private(&mut core, &author, [relay], CapturingReceiptSink::default());
+
+    let unknown = nmp_transport::AttemptCorrelation(u64::MAX);
+    let effects = core.handle(EngineMsg::EventHandoff(unknown, HandoffResult::Written));
+    assert!(effects.is_empty());
 }
 
 #[test]
@@ -2467,7 +2692,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &relay))
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &relay))
             .count(),
         1
     );
@@ -2534,7 +2759,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &relay))
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &relay))
             .count(),
         1
     );
@@ -2592,16 +2817,16 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
         let old_event = effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::PublishEvent(relay, event) if relay == &old => Some(event.clone()),
+                Effect::PublishEvent(relay, event, _) if relay == &old => Some(event.clone()),
                 _ => None,
             })
             .expect("durable old lane publishes");
         assert!(effects
             .iter()
-            .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &old)));
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &old)));
         assert!(!effects
             .iter()
-            .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &new)));
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &new)));
         core.handle(EngineMsg::RelayConnected(
             RelayHandle {
                 slot: 0,
@@ -2651,10 +2876,10 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
     let effects = core.recover_on_boot();
     assert!(!effects
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &old)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &old)));
     assert!(effects
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &new)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &new)));
 }
 
 #[test]
@@ -3389,7 +3614,7 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
     let published: BTreeSet<RelayUrl> = effects
         .iter()
         .filter_map(|e| match e {
-            Effect::PublishEvent(relay, _) => Some(relay.clone()),
+            Effect::PublishEvent(relay, _, _) => Some(relay.clone()),
             _ => None,
         })
         .collect();

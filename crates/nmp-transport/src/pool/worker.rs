@@ -41,7 +41,7 @@ use crate::keepalive::{KeepaliveAction, KeepaliveState};
 
 use super::connect::{open_relay_socket, RelaySocket};
 use super::frame::classify_message;
-use super::RelayFrame;
+use super::{AttemptCorrelation, HandoffResult, RelayFrame};
 
 const SOCKET: Token = Token(0);
 const CONTROL: Token = Token(1);
@@ -55,6 +55,21 @@ pub(super) enum WorkerCommand {
     /// engine after observing `Connected` so the current live subscriptions
     /// survive a reconnect without the engine racing the socket.
     SetReconnectPreamble(Vec<String>),
+    /// A durable `EVENT` handoff (issue #93), scoped to the generation the
+    /// caller observed when it submitted this. Tracked in a queue entirely
+    /// separate from the plain `Send` deque above: it never survives a
+    /// reconnect, and it is the ONLY command that produces a
+    /// [`WorkerEventKind::EventHandoff`] result. `generation` is checked
+    /// against the worker's OWN current `pack_generation(worker_id, attempt)`
+    /// the moment this is drained from the command channel -- a command
+    /// that raced a reconnect (queued for generation G, drained after the
+    /// worker already moved to G+1) is resolved `NotHandedOff` immediately,
+    /// never silently attempted against the new connection.
+    SendDurable {
+        generation: u64,
+        correlation: AttemptCorrelation,
+        frame: String,
+    },
 }
 
 /// What happened, tagged with the worker's packed `(worker_id, attempt)`
@@ -71,6 +86,14 @@ pub(super) enum WorkerEventKind {
         retry_in: Option<Duration>,
     },
     Frame(RelayFrame),
+    /// The one, ever, resolution of a `SendDurable` command's
+    /// `AttemptCorrelation` (issue #93). See [`super::PoolEvent::EventHandoff`]
+    /// for the delivery contract (never gated on generation/slot staleness
+    /// at the pool-translator level).
+    EventHandoff {
+        correlation: AttemptCorrelation,
+        result: HandoffResult,
+    },
 }
 
 pub(super) struct WorkerEvent {
@@ -189,6 +212,13 @@ fn run_worker(
 ) {
     let mut pending: VecDeque<String> = VecDeque::new();
     let mut preamble: Vec<String> = Vec::new();
+    // Durable EVENT tracking (issue #93): entirely separate from `pending`
+    // above, and NEVER carried across a reconnect — each `run_connected`
+    // call starts these two empty and `resolve_generation_end` drains both
+    // (firing `NotHandedOff`/`Ambiguous`) the instant that call returns, no
+    // matter which internal path produced the outcome.
+    let mut durable: VecDeque<(AttemptCorrelation, String)> = VecDeque::new();
+    let mut write_accepted: Vec<AttemptCorrelation> = Vec::new();
     let mut attempt: u32 = 0;
     let mut backoff_delay = reconnect_delay_initial;
 
@@ -225,6 +255,8 @@ fn run_worker(
                     &mut socket,
                     &mut keepalive,
                     &mut preamble,
+                    &mut durable,
+                    &mut write_accepted,
                 );
                 match outcome {
                     ConnectedOutcome::Shutdown => return,
@@ -242,12 +274,26 @@ fn run_worker(
                             },
                         });
                         if permanent {
+                            drain_permanently_disconnected(
+                                &command_rx,
+                                &event_tx,
+                                slot,
+                                generation,
+                            );
                             return;
                         }
                         let base = retry_in.expect("retry_in set above for non-permanent");
                         let delay = backoff::jittered(base, &url);
                         attempt = attempt.wrapping_add(1);
-                        if !wait_before_reconnect(&command_rx, &mut pending, &mut preamble, delay) {
+                        if !wait_before_reconnect(
+                            &command_rx,
+                            &mut pending,
+                            &mut preamble,
+                            delay,
+                            &event_tx,
+                            slot,
+                            pack_generation(worker_id, attempt),
+                        ) {
                             return;
                         }
                     }
@@ -271,12 +317,21 @@ fn run_worker(
                     return;
                 }
                 if permanent {
+                    drain_permanently_disconnected(&command_rx, &event_tx, slot, generation);
                     return;
                 }
                 let base = retry_in.expect("retry_in set above for non-permanent");
                 let delay = backoff::jittered(base, &url);
                 attempt = attempt.wrapping_add(1);
-                if !wait_before_reconnect(&command_rx, &mut pending, &mut preamble, delay) {
+                if !wait_before_reconnect(
+                    &command_rx,
+                    &mut pending,
+                    &mut preamble,
+                    delay,
+                    &event_tx,
+                    slot,
+                    pack_generation(worker_id, attempt),
+                ) {
                     return;
                 }
             }
@@ -284,15 +339,109 @@ fn run_worker(
     }
 }
 
+/// Keep the worker's command receiver alive after a permanent connection
+/// failure until the pool explicitly closes the slot. This closes the race
+/// between `Pool::send_durable` successfully enqueueing a command and the
+/// worker returning after its final dial/session failure: every command the
+/// sender accepted before the pool observed the permanent failure is
+/// drained and resolved `NotHandedOff`, while commands submitted after the
+/// health transition are rejected synchronously by `PoolInner`.
+fn drain_permanently_disconnected(
+    command_rx: &Receiver<WorkerCommand>,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) {
+    loop {
+        match command_rx.recv() {
+            Ok(WorkerCommand::SendDurable { correlation, .. }) => resolve_correlation(
+                event_tx,
+                slot,
+                generation,
+                correlation,
+                HandoffResult::NotHandedOff,
+            ),
+            Ok(WorkerCommand::Send(_) | WorkerCommand::SetReconnectPreamble(_)) => {}
+            Ok(WorkerCommand::Shutdown) | Err(_) => return,
+        }
+    }
+}
+
+/// Fire the one, ever, [`WorkerEventKind::EventHandoff`] for `correlation`.
+/// The receiving end is `[super::inner::apply_worker_event`], which
+/// delivers every `EventHandoff` unconditionally (never gated on slot/
+/// generation staleness) — losing this send (a disconnected `event_tx`,
+/// meaning the whole pool is gone) is the only way it's ever NOT delivered,
+/// which is the same fate every other `WorkerEvent` already has.
+fn resolve_correlation(
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+    correlation: AttemptCorrelation,
+    result: HandoffResult,
+) {
+    let _ = event_tx.send(WorkerEvent {
+        slot,
+        generation,
+        kind: WorkerEventKind::EventHandoff {
+            correlation,
+            result,
+        },
+    });
+}
+
+/// Resolve every durable `EVENT` still tracked for this generation the
+/// instant it ends (issue #93's core invariant — nothing is ever silently
+/// carried into the next connection):
+/// - `durable` (still queued, never reached `socket.write()`) resolves
+///   `NotHandedOff` — provably safe to resubmit under a fresh generation.
+/// - `write_accepted` (its own `write()` succeeded, but the shared flush
+///   that would confirm it never completed before this generation ended)
+///   resolves `Ambiguous` — the bytes MAY have reached the relay, so
+///   nothing may treat it as a fresh, never-attempted send.
+fn resolve_generation_end(
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+    durable: &mut VecDeque<(AttemptCorrelation, String)>,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+) {
+    for (correlation, _frame) in durable.drain(..) {
+        resolve_correlation(
+            event_tx,
+            slot,
+            generation,
+            correlation,
+            HandoffResult::NotHandedOff,
+        );
+    }
+    for correlation in write_accepted.drain(..) {
+        resolve_correlation(
+            event_tx,
+            slot,
+            generation,
+            correlation,
+            HandoffResult::Ambiguous,
+        );
+    }
+}
+
 /// Wait for the reconnect delay to elapse, buffering incoming `Send`
 /// commands and updating `preamble` if `SetReconnectPreamble` arrives
 /// (stored, never discarded — a fast-flap registration during the wait must
-/// still apply to the next connect).
+/// still apply to the next connect). A durable `EVENT` (`SendDurable`)
+/// resolves `NotHandedOff` immediately — there is no live connection to
+/// queue it against during backoff, and buffering it here would be exactly
+/// the hidden carry-over queue issue #93 removes.
+#[allow(clippy::too_many_arguments)]
 fn wait_before_reconnect(
     command_rx: &Receiver<WorkerCommand>,
     pending: &mut VecDeque<String>,
     preamble: &mut Vec<String>,
     delay: Duration,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
 ) -> bool {
     let deadline = Instant::now() + delay;
     loop {
@@ -303,12 +452,28 @@ fn wait_before_reconnect(
         match command_rx.recv_timeout(remaining) {
             Ok(WorkerCommand::Send(text)) => pending.push_back(text),
             Ok(WorkerCommand::SetReconnectPreamble(frames)) => *preamble = frames,
+            Ok(WorkerCommand::SendDurable { correlation, .. }) => {
+                resolve_correlation(
+                    event_tx,
+                    slot,
+                    generation,
+                    correlation,
+                    HandoffResult::NotHandedOff,
+                );
+            }
             Ok(WorkerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => return false,
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
 }
 
+/// Thin wrapper: run one connected generation, then unconditionally resolve
+/// whatever durable EVENT state is still outstanding the instant it ends —
+/// regardless of WHICH internal path produced the outcome. Centralizing the
+/// resolution here (once) rather than at every internal early-return inside
+/// [`run_connected_inner`] is what makes "every generation end resolves
+/// everything, exactly once" true by construction instead of by care at
+/// each call site.
 #[allow(clippy::too_many_arguments)]
 fn run_connected(
     slot: u32,
@@ -320,6 +485,39 @@ fn run_connected(
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
     preamble: &mut Vec<String>,
+    durable: &mut VecDeque<(AttemptCorrelation, String)>,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+) -> ConnectedOutcome {
+    let outcome = run_connected_inner(
+        slot,
+        generation,
+        event_tx,
+        command_rx,
+        waker_slot,
+        pending,
+        socket,
+        keepalive,
+        preamble,
+        durable,
+        write_accepted,
+    );
+    resolve_generation_end(event_tx, slot, generation, durable, write_accepted);
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_connected_inner(
+    slot: u32,
+    generation: u64,
+    event_tx: &Sender<WorkerEvent>,
+    command_rx: &Receiver<WorkerCommand>,
+    waker_slot: &Arc<Mutex<Option<Waker>>>,
+    pending: &mut VecDeque<String>,
+    socket: &mut RelaySocket,
+    keepalive: &mut KeepaliveState,
+    preamble: &mut Vec<String>,
+    durable: &mut VecDeque<(AttemptCorrelation, String)>,
+    write_accepted: &mut Vec<AttemptCorrelation>,
 ) -> ConnectedOutcome {
     let mut poller = match RelayPoller::new(socket, waker_slot) {
         Ok(poller) => poller,
@@ -332,7 +530,9 @@ fn run_connected(
     };
 
     loop {
-        match drain_commands(command_rx, pending, preamble) {
+        match drain_commands(
+            command_rx, pending, preamble, durable, event_tx, slot, generation,
+        ) {
             Drain::Continue => {}
             Drain::Shutdown | Drain::Disconnected => {
                 let _ = socket.close(None);
@@ -340,7 +540,15 @@ fn run_connected(
             }
         }
 
-        let mut wants_write = match flush_writes(pending, socket) {
+        let mut wants_write = match flush_writes(
+            pending,
+            durable,
+            write_accepted,
+            socket,
+            event_tx,
+            slot,
+            generation,
+        ) {
             FlushResult::Flushed => false,
             FlushResult::Blocked => true,
             FlushResult::Broken(message) => {
@@ -354,7 +562,14 @@ fn run_connected(
         match keepalive.step(Instant::now()) {
             KeepaliveAction::Idle => {}
             KeepaliveAction::EmitPing => {
-                match flush_message(socket, Message::Ping(Vec::new().into())) {
+                match flush_message(
+                    socket,
+                    Message::Ping(Vec::new().into()),
+                    write_accepted,
+                    event_tx,
+                    slot,
+                    generation,
+                ) {
                     FlushResult::Flushed => keepalive.on_ping_flushed(Instant::now()),
                     FlushResult::Blocked => wants_write = true,
                     FlushResult::Broken(message) => {
@@ -409,16 +624,44 @@ enum Drain {
     Disconnected,
 }
 
+/// `generation` is the CURRENT worker generation this call is draining
+/// for. A `SendDurable` command whose own `generation` field doesn't match
+/// is stale — it raced a reconnect between the caller reading its
+/// `RelayHandle` and this drain running — and resolves `NotHandedOff`
+/// immediately rather than ever being attempted against a connection it
+/// was never actually meant for.
+#[allow(clippy::too_many_arguments)]
 fn drain_commands(
     command_rx: &Receiver<WorkerCommand>,
     pending: &mut VecDeque<String>,
     preamble: &mut Vec<String>,
+    durable: &mut VecDeque<(AttemptCorrelation, String)>,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
 ) -> Drain {
     loop {
         match command_rx.try_recv() {
             Ok(WorkerCommand::Send(text)) => pending.push_back(text),
             Ok(WorkerCommand::Shutdown) => return Drain::Shutdown,
             Ok(WorkerCommand::SetReconnectPreamble(frames)) => *preamble = frames,
+            Ok(WorkerCommand::SendDurable {
+                generation: cmd_generation,
+                correlation,
+                frame,
+            }) => {
+                if cmd_generation == generation {
+                    durable.push_back((correlation, frame));
+                } else {
+                    resolve_correlation(
+                        event_tx,
+                        slot,
+                        generation,
+                        correlation,
+                        HandoffResult::NotHandedOff,
+                    );
+                }
+            }
             Err(TryRecvError::Empty) => return Drain::Continue,
             Err(TryRecvError::Disconnected) => return Drain::Disconnected,
         }
@@ -431,7 +674,25 @@ enum FlushResult {
     Broken(String),
 }
 
-fn flush_writes(pending: &mut VecDeque<String>, socket: &mut RelaySocket) -> FlushResult {
+/// Write every pending REQ frame, then every queued durable EVENT frame,
+/// then flush the socket ONCE for the whole batch — durable frames whose
+/// OWN `write()` succeeds move to `write_accepted` (awaiting THIS shared
+/// flush to confirm them); once ANY socket flush reports `Flushed` they
+/// resolve `Written` through [`flush_socket_and_settle`] (including a later
+/// keepalive/control flush). A `Blocked`/`Broken` flush leaves them in
+/// `write_accepted` for the caller to resolve later (a subsequent flush
+/// attempt, or — on `Broken` — [`resolve_generation_end`] once the
+/// connection actually ends): never resolved twice, never resolved early.
+#[allow(clippy::too_many_arguments)]
+fn flush_writes(
+    pending: &mut VecDeque<String>,
+    durable: &mut VecDeque<(AttemptCorrelation, String)>,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+    socket: &mut RelaySocket,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) -> FlushResult {
     while let Some(text) = pending.pop_front() {
         match socket.write(Message::Text(text.clone().into())) {
             Ok(()) => {}
@@ -442,15 +703,69 @@ fn flush_writes(pending: &mut VecDeque<String>, socket: &mut RelaySocket) -> Flu
             Err(error) => return FlushResult::Broken(error.to_string()),
         }
     }
-    flush_socket(socket)
+    while let Some((correlation, text)) = durable.pop_front() {
+        match socket.write(Message::Text(text.clone().into())) {
+            Ok(()) => write_accepted.push(correlation),
+            Err(error) if is_nonblocking_io(&error) => {
+                durable.push_front((correlation, text));
+                return FlushResult::Blocked;
+            }
+            Err(error) => {
+                // This exact frame's OWN write() call failed outright --
+                // never accepted by the socket library at all, unlike the
+                // entries already sitting in `write_accepted` (which DID
+                // succeed their own write() and are merely unconfirmed).
+                // Pushing it back means `resolve_generation_end` resolves
+                // it `NotHandedOff`, not `Ambiguous`.
+                durable.push_front((correlation, text));
+                return FlushResult::Broken(error.to_string());
+            }
+        }
+    }
+    flush_socket_and_settle(socket, write_accepted, event_tx, slot, generation)
 }
 
-fn flush_message(socket: &mut RelaySocket, message: Message) -> FlushResult {
+#[allow(clippy::too_many_arguments)]
+fn flush_message(
+    socket: &mut RelaySocket,
+    message: Message,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) -> FlushResult {
     match socket.write(message) {
-        Ok(()) => flush_socket(socket),
+        Ok(()) => flush_socket_and_settle(socket, write_accepted, event_tx, slot, generation),
         Err(error) if is_nonblocking_io(&error) => FlushResult::Blocked,
         Err(error) => FlushResult::Broken(error.to_string()),
     }
+}
+
+/// The single successful-flush boundary for a connected generation. A
+/// flush confirms every prior socket-accepted durable frame, regardless of
+/// which message caused the flush (EVENT batch, keepalive ping, or future
+/// control traffic). Keeping settlement here prevents a later successful
+/// control flush from being forgotten and mislabeled `Ambiguous` at teardown.
+fn flush_socket_and_settle(
+    socket: &mut RelaySocket,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) -> FlushResult {
+    let result = flush_socket(socket);
+    if matches!(result, FlushResult::Flushed) {
+        for correlation in write_accepted.drain(..) {
+            resolve_correlation(
+                event_tx,
+                slot,
+                generation,
+                correlation,
+                HandoffResult::Written,
+            );
+        }
+    }
+    result
 }
 
 fn flush_socket(socket: &mut RelaySocket) -> FlushResult {
@@ -596,6 +911,75 @@ fn socket_tcp(socket: &mut RelaySocket) -> io::Result<&mut TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use tungstenite::protocol::{Role, WebSocketConfig};
+
+    const LARGE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+    fn real_buffered_socket() -> (RelaySocket, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        client.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let config = WebSocketConfig::default().write_buffer_size(LARGE_FRAME_BYTES * 2);
+        let socket = tungstenite::WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(client),
+            Role::Client,
+            Some(config),
+        );
+        (socket, peer)
+    }
+
+    fn begin_real_unconfirmed_write(
+        socket: &mut RelaySocket,
+        correlation: AttemptCorrelation,
+        event_tx: &Sender<WorkerEvent>,
+        write_accepted: &mut Vec<AttemptCorrelation>,
+    ) {
+        let mut pending = VecDeque::new();
+        let mut durable = VecDeque::from([(correlation, "x".repeat(LARGE_FRAME_BYTES))]);
+        assert!(matches!(
+            flush_writes(
+                &mut pending,
+                &mut durable,
+                write_accepted,
+                socket,
+                event_tx,
+                1,
+                1,
+            ),
+            FlushResult::Blocked
+        ));
+        assert!(durable.is_empty(), "the frame's write() was accepted");
+        assert_eq!(write_accepted, &[correlation]);
+    }
+
+    fn drain_peer(peer: &mut TcpStream) {
+        let mut bytes = [0u8; 64 * 1024];
+        loop {
+            match peer.read(&mut bytes) {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                Err(error) => panic!("peer read failed: {error}"),
+            }
+        }
+    }
+
+    fn handoff_results(rx: &Receiver<WorkerEvent>) -> Vec<(AttemptCorrelation, HandoffResult)> {
+        rx.try_iter()
+            .filter_map(|event| match event.kind {
+                WorkerEventKind::EventHandoff {
+                    correlation,
+                    result,
+                } => Some((correlation, result)),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn pack_generation_is_ordered_by_worker_id_then_attempt() {
@@ -611,6 +995,126 @@ mod tests {
         assert_ne!(
             worker_id_of(pack_generation(1, 0)),
             worker_id_of(pack_generation(2, 0))
+        );
+    }
+
+    #[test]
+    fn generation_end_classifies_queued_and_write_accepted_exactly() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let queued = AttemptCorrelation(10);
+        let accepted = AttemptCorrelation(11);
+        let mut durable = VecDeque::from([(queued, "queued".to_string())]);
+        let mut write_accepted = vec![accepted];
+
+        resolve_generation_end(&event_tx, 3, 7, &mut durable, &mut write_accepted);
+
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![
+                (queued, HandoffResult::NotHandedOff),
+                (accepted, HandoffResult::Ambiguous),
+            ]
+        );
+        assert!(durable.is_empty());
+        assert!(write_accepted.is_empty());
+    }
+
+    #[test]
+    fn real_socket_write_ok_unconfirmed_flush_then_generation_end_is_ambiguous() {
+        let (mut socket, peer) = real_buffered_socket();
+        let (event_tx, event_rx) = mpsc::channel();
+        let correlation = AttemptCorrelation(31);
+        let mut write_accepted = Vec::new();
+        begin_real_unconfirmed_write(&mut socket, correlation, &event_tx, &mut write_accepted);
+
+        drop(peer);
+        let mut durable = VecDeque::new();
+        resolve_generation_end(&event_tx, 1, 1, &mut durable, &mut write_accepted);
+
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![(correlation, HandoffResult::Ambiguous)]
+        );
+    }
+
+    #[test]
+    fn successful_control_flush_settles_prior_durable_write_as_written() {
+        let (mut socket, mut peer) = real_buffered_socket();
+        let (event_tx, event_rx) = mpsc::channel();
+        let correlation = AttemptCorrelation(32);
+        let mut write_accepted = Vec::new();
+        begin_real_unconfirmed_write(&mut socket, correlation, &event_tx, &mut write_accepted);
+
+        let mut flushed = false;
+        for _ in 0..512 {
+            drain_peer(&mut peer);
+            match flush_message(
+                &mut socket,
+                Message::Ping(Vec::new().into()),
+                &mut write_accepted,
+                &event_tx,
+                1,
+                1,
+            ) {
+                FlushResult::Flushed => {
+                    flushed = true;
+                    break;
+                }
+                FlushResult::Blocked => std::thread::yield_now(),
+                FlushResult::Broken(message) => panic!("control flush broke: {message}"),
+            }
+        }
+        assert!(
+            flushed,
+            "peer draining must eventually allow a control flush"
+        );
+        assert!(write_accepted.is_empty());
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![(correlation, HandoffResult::Written)]
+        );
+
+        let mut durable = VecDeque::new();
+        resolve_generation_end(&event_tx, 1, 1, &mut durable, &mut write_accepted);
+        assert!(
+            handoff_results(&event_rx).is_empty(),
+            "generation end cannot resolve the already-Written correlation twice"
+        );
+    }
+
+    #[test]
+    fn permanent_disconnect_drains_every_accepted_durable_command_once() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let first = AttemptCorrelation(21);
+        let second = AttemptCorrelation(22);
+        let drain = std::thread::spawn(move || {
+            drain_permanently_disconnected(&command_rx, &event_tx, 1, 9);
+        });
+        command_tx
+            .send(WorkerCommand::SendDurable {
+                generation: 9,
+                correlation: first,
+                frame: "first".to_string(),
+            })
+            .unwrap();
+        command_tx.send(WorkerCommand::Send("req".into())).unwrap();
+        command_tx
+            .send(WorkerCommand::SendDurable {
+                generation: 9,
+                correlation: second,
+                frame: "second".to_string(),
+            })
+            .unwrap();
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        drain.join().unwrap();
+
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![
+                (first, HandoffResult::NotHandedOff),
+                (second, HandoffResult::NotHandedOff),
+            ]
         );
     }
 }
