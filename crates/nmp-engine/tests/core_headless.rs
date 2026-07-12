@@ -884,6 +884,141 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
     );
 }
 
+/// #107's core Done-when trio, exercised as one flow since they compose
+/// naturally: (1) Agnostic pinned-R1 returns a matching cached R2-only row
+/// while wire contacts only R1; (2) Strict pinned-R1 excludes that same row
+/// until it is observed from R1 too; (6) same-filter Agnostic and Strict
+/// handles remain distinct even though they share ONE wire subscription
+/// (`AcquisitionKey` excludes `cache`, #106/#107's ratified shape -- two
+/// handles differing ONLY in `cache` dedup onto the identical graph node/
+/// wire/coverage, per `nmp-resolver::Engine::subscribe`'s own doc).
+#[test]
+fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire() {
+    let a = Keys::generate();
+    let relay_other = RelayUrl::parse("wss://other.example.com").unwrap();
+    let relay_pinned = RelayUrl::parse("wss://pinned.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay_other.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay_other);
+    connect(&mut core, 1, &relay_pinned);
+
+    // Seed the store: an ordinary AuthorOutboxes subscribe pulls the event
+    // in from relay_other, giving it Row.sources == {relay_other}.
+    let outbox_effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let (outbox_sub, _f) = req_for(&outbox_effects, &relay_other);
+    let outbox_wire = wire_sub_string(outbox_sub);
+    let event = unsigned(&a, 1, "seeded via relay_other")
+        .sign_with_keys(&a)
+        .expect("sign fixture event");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame(&outbox_wire, event.clone()),
+    ));
+
+    // Two NEW handles over the IDENTICAL selection, both declared
+    // SourceAuthority::Pinned({relay_pinned}) -- the SAME AcquisitionKey --
+    // but one Agnostic (the default), one Strict.
+    let filter = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+        ..Filter::default()
+    };
+    let pinned_relays = BTreeSet::from([relay_pinned.clone()]);
+    let agnostic_demand = nmp_grammar::Demand::new(
+        filter,
+        SourceAuthority::Pinned(pinned_relays),
+        AccessContext::Public,
+    )
+    .expect("a nonempty pinned relay set is legal (#107)");
+    let mut strict_demand = agnostic_demand.clone();
+    strict_demand.cache = nmp_grammar::CacheMode::Strict;
+
+    let effects_agnostic = core.handle(EngineMsg::Subscribe(
+        LiveQuery(agnostic_demand),
+        Box::new(CapturingSink::default()),
+    ));
+
+    // Wire contacts ONLY the declared pinned relay for this new atom --
+    // never relay_other (no re-req there at all: nothing about that atom
+    // changed), and (since this fixture directory configures no app/
+    // fallback/indexer/group-host facts) there is nowhere else it even
+    // COULD leak to.
+    let (pinned_sub, _f) = req_for(&effects_agnostic, &relay_pinned);
+    let pinned_wire = wire_sub_string(pinned_sub);
+    assert!(
+        !effects_agnostic.iter().any(|effect| matches!(
+            effect,
+            Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay_other)
+        )),
+        "an ExplicitPinned atom's subscribe must never recompile a Req/Close at any \
+         relay but its own declared set"
+    );
+    assert!(
+        all_row_deltas(&effects_agnostic)
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id)),
+        "Agnostic must return a matching cached row regardless of its recorded provenance"
+    );
+
+    // The Strict handle dedups onto the SAME graph/wire (no new Req at
+    // relay_pinned), yet must NOT see the row: its provenance ({relay_other})
+    // is disjoint from the pinned set ({relay_pinned}).
+    let effects_strict = core.handle(EngineMsg::Subscribe(
+        LiveQuery(strict_demand),
+        Box::new(CapturingSink::default()),
+    ));
+    assert!(
+        !effects_strict
+            .iter()
+            .any(|effect| matches!(effect, Effect::Wire(_))),
+        "a Strict handle sharing the identical AcquisitionKey must dedup onto the \
+         existing wire subscription, never open a second one"
+    );
+    assert!(
+        !all_row_deltas(&effects_strict)
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id)),
+        "Strict must exclude a row whose recorded provenance is disjoint from the \
+         pinned relay set"
+    );
+
+    // The SAME event now arrives from the pinned relay too: the Strict
+    // handle must pick it up the instant its own provenance intersects the
+    // pinned set, and the Agnostic handle (which already had it) must still
+    // record the provenance growth -- both are the SAME underlying
+    // `Row.sources` growing, projected differently per handle's `cache`.
+    let after = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        event_frame(&pinned_wire, event.clone()),
+    ));
+    let deltas = all_row_deltas(&after);
+    assert!(
+        deltas.iter().any(|delta| matches!(
+            delta,
+            RowDelta::Added(row) if row.event.id == event.id && row.sources.contains(&relay_pinned)
+        )),
+        "the Strict handle must newly Add the row once its provenance includes the \
+         pinned relay: {deltas:?}"
+    );
+    assert!(
+        deltas.iter().any(|delta| matches!(
+            delta,
+            RowDelta::SourcesGrew { id, sources } if *id == event.id && sources.contains(&relay_pinned)
+        )),
+        "the Agnostic handle's already-visible row must still record the provenance \
+         growth: {deltas:?}"
+    );
+}
+
 // ---- the EOSE-overwrite-race rule (ruling §2) ---------------------------
 
 #[test]

@@ -38,7 +38,7 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, SourceAuthority,
+    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Filter, SourceAuthority,
 };
 use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
 use nmp_router::{
@@ -2729,18 +2729,59 @@ impl<S: EventStore> EngineCore<S> {
     /// merged/persisted by `EventStore::insert`'s dedup path) rather than
     /// discarding it -- the mechanism already exists in `nmp-store`; this is
     /// only its honest projection.
+    ///
+    /// #107: `CacheMode::Strict` applies the pinned cache projection here --
+    /// a cached row is returned only when its unioned provenance set
+    /// intersects the handle's own pinned relay set (`Row.sources`, #105's
+    /// existing field; no new store mechanism). This is read off THIS
+    /// handle's own `QueryHandle::cache()`, never the shared graph node's --
+    /// two handles sharing the identical (cache-free-deduped) acquisition
+    /// key may still disagree on `cache` (Fable's ruling: cache is excluded
+    /// from `AcquisitionKey`), so an Agnostic and a Strict handle over the
+    /// same pinned selection MUST project different row sets despite
+    /// sharing one graph/wire/coverage underneath. The pinned relay set
+    /// itself comes from `subtree_atoms`' `source` -- Fable's ruling B
+    /// ("uniform per Demand, not subtree") guarantees every atom in a
+    /// single handle's subtree carries the SAME declared `SourceAuthority`,
+    /// so any one atom's `source` is authoritative for the whole handle.
+    /// `CacheMode::Strict` is only meaningful over a `SourceAuthority::
+    /// Pinned` selection (the Contract: "pinned cache policy is part of
+    /// source identity") -- over any other source there is no pinned relay
+    /// set to intersect against, so Strict is a no-op there, identical to
+    /// Agnostic.
     fn rows_and_evidence_for(&self, id: HandleId) -> (BTreeMap<EventId, Row>, AcquisitionEvidence) {
+        let subtree_atoms = self.resolver.subtree_atoms(id);
+        let pinned_relays: Option<&BTreeSet<RelayUrl>> = self
+            .handles
+            .get(&id)
+            .filter(|state| state._handle.cache() == CacheMode::Strict)
+            .and_then(|_| {
+                subtree_atoms.iter().find_map(|atom| match &atom.source {
+                    SourceAuthority::Pinned(relays) => Some(relays),
+                    _ => None,
+                })
+            });
+
         let root_atoms = self.resolver.root_atoms(id);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
             for se in self.resolver.store().query(&atom.to_nostr()) {
+                if let Some(relays) = pinned_relays {
+                    if !se
+                        .provenance
+                        .seen
+                        .keys()
+                        .any(|relay| relays.contains(relay))
+                    {
+                        continue;
+                    }
+                }
                 by_id.entry(se.event.id).or_insert_with(|| Row {
                     event: se.event,
                     sources: se.provenance.seen.into_keys().collect(),
                 });
             }
         }
-        let subtree_atoms = self.resolver.subtree_atoms(id);
         let evidence = evidence::acquisition_evidence(
             &subtree_atoms,
             self.router.plan(),

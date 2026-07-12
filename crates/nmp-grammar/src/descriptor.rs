@@ -57,14 +57,17 @@ pub enum AccessContext {
 }
 
 /// The cache-provenance mode a [`Demand`] carries -- meaningful ONLY under
-/// `SourceAuthority::Pinned` once #107 adds that variant (today's closed
-/// `SourceAuthority` has no `Pinned` case yet, so this field is currently
-/// always `Agnostic`'s no-op equivalent in practice, but is threaded through
-/// now so #107 lands as a clean read of an already-present field, never a
-/// later widening of `Demand` itself). Deliberately NOT part of
+/// `SourceAuthority::Pinned` (#107's Contract: "pinned cache policy is part
+/// of source identity"); a no-op over any other source, since there is no
+/// pinned relay set to intersect against. Deliberately NOT part of
 /// `ContextualAtom`'s hashed identity (`Demand::hash`-equivalent) — it
-/// governs the LOCAL row-projection read, never wire/coverage identity
-/// (atlas's #106/#107 seam ruling: the two axes are orthogonal).
+/// governs the LOCAL row-projection read (`nmp-engine`'s
+/// `rows_and_evidence_for`), never wire/coverage identity (atlas's
+/// #106/#107 seam ruling: the two axes are orthogonal). Consumed per-handle,
+/// off `QueryHandle::cache()` -- never per-graph-node, since two handles
+/// may share the identical (cache-free-deduped) `AcquisitionKey` while
+/// disagreeing on `cache` (the #107 Done-when: "Same-filter Agnostic and
+/// Strict handles remain distinct even when wire work coalesces").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum CacheMode {
     /// Serve every matching cached row regardless of provenance.
