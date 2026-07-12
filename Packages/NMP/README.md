@@ -1,10 +1,14 @@
 # NMP (Swift package)
 
-The Swift SDK boundary (M4). `NMP` is the only target a consuming app
-imports: `import NMP; let nmp = try NMPEngine(config: .init(...))`, then
-`for await batch in nmp.observe(filter)`. See `Sources/NMP/Engine.swift` for
-the full public surface and `Package.swift`'s header comment for how the
-three targets (`nmp_ffiFFI`, `NMPFFI`, `NMP`) relate.
+The Swift SDK boundary. `NMP` is the raw two-noun engine target:
+`import NMP; let nmp = try NMPEngine(config: .init(...))`, then
+`for await batch in nmp.observe(filter)`. `NMPContent` is an optional product
+for source-ranged mixed-content parsing, typed kind:0/NIP-23 resources, and
+bounded live reference sessions over that same engine. Importing or linking
+`NMPContent` is never required to use `NMP`.
+
+See `Sources/NMP/Engine.swift` and
+[`docs/builder/34-content.md`](../../docs/builder/34-content.md).
 
 ## Building from a clean clone (#18)
 

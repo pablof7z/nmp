@@ -29,6 +29,7 @@ let package = Package(
     ],
     products: [
         .library(name: "NMP", targets: ["NMP"]),
+        .library(name: "NMPContent", targets: ["NMPContent"]),
     ],
     targets: [
         .binaryTarget(
@@ -43,9 +44,17 @@ let package = Package(
             name: "NMP",
             dependencies: ["NMPFFI"]
         ),
+        .target(
+            name: "NMPContent",
+            dependencies: ["NMP", "NMPFFI"]
+        ),
         .testTarget(
             name: "NMPTests",
             dependencies: ["NMP"]
+        ),
+        .testTarget(
+            name: "NMPContentTests",
+            dependencies: ["NMPContent"]
         ),
     ]
 )

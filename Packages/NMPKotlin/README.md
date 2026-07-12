@@ -27,6 +27,19 @@ NMPEngine(NMPConfig(indexerRelays = listOf("wss://purplepag.es"))).use { nmp ->
 
 See `src/main/kotlin/com/nmp/sdk/Engine.kt` for the full public surface.
 
+The same package also exposes the optional content substrate:
+
+```kotlin
+val content = NMPContentClient(nmp).session(rawContent, viewModelScope)
+val occurrence = content.snapshot.value.document.references.first()
+val claim = content.claim(occurrence.id)
+```
+
+It parses through the shared Rust semantic document and collects only ordinary
+NMP demand. `ContentSession.close()` and each `ContentClaim.close()` map
+deterministically onto coroutine cancellation; no JVM `Cleaner` owns reference
+withdrawal. See `docs/builder/34-content.md`.
+
 ## Building from a clean clone
 
 `build.gradle.kts` compiles two things this module does NOT commit (see

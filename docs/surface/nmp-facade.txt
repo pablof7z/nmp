@@ -155,6 +155,7 @@ impl core::marker::Unpin for nmp::Subscription
 impl core::marker::UnsafeUnpin for nmp::Subscription
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::Subscription
 impl !core::panic::unwind_safe::UnwindSafe for nmp::Subscription
+pub fn nmp::admits_network_relay_hint(&nostr::types::url::RelayUrl) -> bool
 
 # resolved dependency-owned reexports (rustdoc JSON format 60)
 reexport nmp::AccessContext => nmp_grammar::descriptor::AccessContext
