@@ -340,6 +340,31 @@ fn query_ignores_limit_and_returns_every_matching_row_on_both_backends() {
     });
 }
 
+#[test]
+fn query_newest_is_an_explicit_bounded_door_on_both_backends() {
+    for_each_backend(|store| {
+        let k = keys();
+        for created_at in [100, 500, 300, 200, 400] {
+            store
+                .insert(
+                    regular_event_at(&k, &format!("note {created_at}"), created_at),
+                    observed("wss://r1", created_at),
+                )
+                .unwrap();
+        }
+
+        let filter = Filter::new().kind(Kind::TextNote).author(k.public_key());
+        let rows = store.query_newest(&filter, 3).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![500, 400, 300]
+        );
+    });
+}
+
 // ---------------------------------------------------------------------
 // Provenance merge (ledger #5, plan §5 test 8)
 // ---------------------------------------------------------------------
