@@ -79,7 +79,9 @@ let previewRenderers = NostrContentRenderers.standard
 NostrContent(
     session: previewSession,
     purpose: .preview,
-    renderers: previewRenderers
+    renderers: previewRenderers,
+    maximumBlocks: 1,
+    maximumLinesPerBlock: 2
 )
 ```
 

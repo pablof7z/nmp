@@ -11,22 +11,28 @@ public struct NostrContent: View {
     public let purpose: NostrContentPurpose
     public let renderers: NostrContentRenderers
     public let actions: NostrContentActions
+    public let maximumBlocks: Int?
+    public let maximumLinesPerBlock: Int?
 
     public init(
         session: NostrContentSession,
         purpose: NostrContentPurpose = .body,
         renderers: NostrContentRenderers = .standard,
-        actions: NostrContentActions = NostrContentActions()
+        actions: NostrContentActions = NostrContentActions(),
+        maximumBlocks: Int? = nil,
+        maximumLinesPerBlock: Int? = nil
     ) {
         self.session = session
         self.purpose = purpose
         self.renderers = renderers
         self.actions = actions
+        self.maximumBlocks = maximumBlocks.map { max(1, $0) }
+        self.maximumLinesPerBlock = maximumLinesPerBlock.map { max(1, $0) }
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: blockSpacing) {
-            ForEach(session.snapshot.document.blocks) { block in
+            ForEach(visibleBlocks) { block in
                 blockView(block)
             }
         }
@@ -66,7 +72,11 @@ public struct NostrContent: View {
     }
 
     private func flow(_ block: NostrContentBlock) -> some View {
-        NMPFlowLayout(horizontalSpacing: 0, verticalSpacing: 5) {
+        NMPFlowLayout(
+            horizontalSpacing: 0,
+            verticalSpacing: 5,
+            maximumLines: maximumLinesPerBlock
+        ) {
             ForEach(fragments(for: block)) { fragment in
                 fragment.view
                     .layoutValue(key: NMPFlowRoleKey.self, value: fragment.role)
@@ -81,7 +91,12 @@ public struct NostrContent: View {
                 Fragment(
                     id: "\(block.id)-text-runs",
                     role: .inline,
-                    view: AnyView(NMPStyledTextRuns(inlines: block.inlines))
+                    view: AnyView(
+                        NMPStyledTextRuns(
+                            inlines: block.inlines,
+                            maximumLines: maximumLinesPerBlock
+                        )
+                    )
                 )
             ]
         }
@@ -214,6 +229,11 @@ public struct NostrContent: View {
         }
     }
 
+    private var visibleBlocks: [NostrContentBlock] {
+        guard let maximumBlocks else { return session.snapshot.document.blocks }
+        return Array(session.snapshot.document.blocks.prefix(maximumBlocks))
+    }
+
     private static func textPieces(_ text: String) -> [String] {
         guard !text.isEmpty else { return [] }
         var result: [String] = []
@@ -282,9 +302,11 @@ private struct NMPStyledText: View {
 
 private struct NMPStyledTextRuns: View {
     let inlines: [NostrContentInline]
+    let maximumLines: Int?
 
     var body: some View {
         composed
+            .lineLimit(maximumLines)
     }
 
     private var composed: Text {

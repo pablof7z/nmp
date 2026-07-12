@@ -71,7 +71,9 @@ private struct ComponentsGallery: View {
                             NostrContent(
                                 session: model.previewSession,
                                 purpose: .preview,
-                                renderers: nameOnlyRenderers
+                                renderers: nameOnlyRenderers,
+                                maximumBlocks: 1,
+                                maximumLinesPerBlock: 1
                             )
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
