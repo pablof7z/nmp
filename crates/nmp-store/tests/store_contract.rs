@@ -14,8 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::ConcreteFilter;
 use nmp_store::{
-    coverage_key, ClaimSet, CoverageInterval, EventStore, InsertOutcome, MemoryStore, Provenance,
-    RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    coverage_key, sentinel_signature, AcceptWrite, ClaimSet, CoverageInterval, EventStore,
+    InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore, RefuseReason, RelayObserved,
+    RetractReason, StoredEvent, WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -1044,18 +1045,21 @@ fn expired_events_retract_at_reopen() {
 }
 
 #[test]
-fn coverage_bit_identical_across_delete_and_expiry() {
+fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
     for_each_backend(|store| {
         let k = keys();
         let r = relay("wss://r1");
-        let s = shape(&[1], Some(&k));
+        let s = shape(&[1, 3], Some(&k));
 
         let deleted_target = regular_event_at(&k, "delete me", 50);
         let deleted_target_id = deleted_target.id;
         let expiring_target = expiring_event(&k, "expire me", 60, 150);
+        let old_replaceable = kind3_event(&k, 70);
+        let new_replaceable = kind3_event(&k, 80);
 
         store.insert(deleted_target, observed("wss://r1", 1));
         store.insert(expiring_target, observed("wss://r1", 1));
+        store.insert(old_replaceable, observed("wss://r1", 1));
         store.record_coverage(
             &s,
             &r,
@@ -1065,6 +1069,16 @@ fn coverage_bit_identical_across_delete_and_expiry() {
         let key = coverage_key(&s);
         let before = store.get_coverage(key, &r).expect("row exists");
 
+        assert!(matches!(
+            store.insert(new_replaceable, observed("wss://r1", 2)),
+            InsertOutcome::Superseded { .. }
+        ));
+        assert_eq!(
+            store.get_coverage(key, &r),
+            Some(before),
+            "supersession must not touch coverage"
+        );
+
         let deletion = deletion_event(&k, vec![Tag::event(deleted_target_id)], 200);
         store.insert(deletion, observed("wss://r1", 2));
         let after_delete = store.get_coverage(key, &r).expect("row still exists");
@@ -1073,6 +1087,46 @@ fn coverage_bit_identical_across_delete_and_expiry() {
         store.expire_due(Timestamp::from(200u64));
         let after_expiry = store.get_coverage(key, &r).expect("row still exists");
         assert_eq!(before, after_expiry, "expiry must not touch coverage");
+
+        let signed_pending = regular_event_at(&k, "cancel me", 220);
+        let frozen_pending = Event::new(
+            signed_pending.id,
+            signed_pending.pubkey,
+            signed_pending.created_at,
+            signed_pending.kind,
+            signed_pending.tags.clone(),
+            signed_pending.content.clone(),
+            sentinel_signature(),
+        );
+        let accepted = store
+            .accept_write(AcceptWrite {
+                frozen: frozen_pending,
+                expected_pubkey: k.public_key(),
+                signing_identity_ref: "coverage-proof".into(),
+                durability: WriteDurability::Durable,
+                routing: "coverage-proof".into(),
+                sig_state: IntentSigState::Pending,
+                accepted_at: Timestamp::from(220u64),
+            })
+            .expect("accept pending row");
+        store
+            .compensate_write(accepted.journaled_intent_id().expect("pending intent"))
+            .expect("compensate pending row");
+        assert_eq!(
+            store.get_coverage(key, &r),
+            Some(before),
+            "pre-signature termination must not touch coverage"
+        );
+
+        let gc_target = regular_event_at(&k, "gc me", 250);
+        store.insert(gc_target, observed("wss://r1", 3));
+        let report = store.gc(&ClaimSet::new(vec![]));
+        assert!(report.coverage_rows_shrunk + report.coverage_rows_deleted > 0);
+        assert_ne!(
+            store.get_coverage(key, &r),
+            Some(before),
+            "GC must remain the only operation in this matrix that lowers coverage"
+        );
     });
 }
 

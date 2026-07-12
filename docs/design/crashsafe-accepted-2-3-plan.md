@@ -2,8 +2,9 @@
 
 - **Date:** 2026-07-11
 - **Status:** Active implementation plan. U1 store doors landed in #58, U2
-  resolver integration landed in #74, and U3 engine lifecycle merged in #78.
-  U4 restart recovery/reattachment is the current unit. Governs GitHub issues
+  resolver integration landed in #74, U3 engine lifecycle merged in #78, and
+  U4 restart recovery/reattachment merged in #83. U5 crash-boundary proof
+  consolidation is the current unit. Governs GitHub issues
   **#2** (canonical pending-signature row, no app optimistic mirror) and **#3**
   (crash-safe durable `Accepted`). Epic #23's sequencing note treats these as
   **one atomic persistence seam**; this plan designs them together.
@@ -24,7 +25,8 @@
 
 The description below records the state U3 replaced. As of #78, local durable
 acceptance, pending-row visibility, signing/promotion, and compensation are
-built; U4 owns restart recovery and reattachment.
+built; #83 added U4 restart recovery, stable receipt reattachment, and durable
+per-relay attempt evidence.
 
 Before U3, the write path **never inserted a local row into the store**. `on_publish`
 (`crates/nmp-engine/src/core/mod.rs:530`) allocs a `ReceiptId`, emits
