@@ -1469,12 +1469,14 @@ dependencies = [
 name = "nmp-store"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "nmp-grammar",
  "nostr 0.44.4",
  "redb",
  "serde",
  "serde_json",
  "tempfile",
+ "wait-timeout",
 ]
 
 [[package]]

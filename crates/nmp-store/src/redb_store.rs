@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
@@ -1456,8 +1456,22 @@ struct CoverageRowRecord {
 /// A persistent, `redb`-backed `EventStore`. Single file, MVCC, ACID; the
 /// same insert door and coverage/GC contract as [`crate::MemoryStore`], the
 /// oracle it is diffed against in `nmp-store/tests/store_contract.rs`.
+#[cfg(test)]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedbCrashPoint {
+    AcceptAfterEventBeforeJournal = 1,
+    AcceptBeforeCommit,
+    PromoteBeforeCommit,
+    CompensateBeforeCommit,
+    StartAttemptBeforeCommit,
+    FinishAttemptBeforeCommit,
+}
+
 pub struct RedbStore {
     db: Database,
+    #[cfg(test)]
+    crash_point: AtomicU8,
     /// Test-only instrumentation for the `query`-indexing falsifier
     /// (`query_by_author_does_not_scan_all_rows`, issue #17): counts every
     /// row `query` actually JSON-decodes across a run, so a test can assert
@@ -1503,8 +1517,33 @@ impl RedbStore {
         Ok(Self {
             db,
             #[cfg(test)]
+            crash_point: AtomicU8::new(0),
+            #[cfg(test)]
             examined_rows: AtomicU64::new(0),
         })
+    }
+
+    #[cfg(test)]
+    fn open_with_crash_point(
+        path: impl AsRef<Path>,
+        crash_point: RedbCrashPoint,
+    ) -> Result<Self, redb::Error> {
+        let store = Self::open(path)?;
+        store
+            .crash_point
+            .store(crash_point as u8, Ordering::Relaxed);
+        Ok(store)
+    }
+
+    #[cfg(test)]
+    fn crash_if(&self, point: RedbCrashPoint) {
+        if self
+            .crash_point
+            .compare_exchange(point as u8, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            std::process::abort();
+        }
     }
 
     /// Current value of [`Self::examined_rows`] — the `query`-indexing
@@ -2660,6 +2699,9 @@ impl EventStore for RedbStore {
                 }
             };
 
+            #[cfg(test)]
+            self.crash_if(RedbCrashPoint::AcceptAfterEventBeforeJournal);
+
             // R7: the intent's full journal payload AND the retained
             // receipt record commit in this SAME transaction as the
             // event-table mutation (and the `IntentId`/receipt-id
@@ -2713,6 +2755,8 @@ impl EventStore for RedbStore {
 
             result
         };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::AcceptBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(outcome)
     }
@@ -2986,6 +3030,8 @@ impl EventStore for RedbStore {
             };
             outcome
         };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::PromoteBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(outcome)
     }
@@ -3299,6 +3345,8 @@ impl EventStore for RedbStore {
             };
             outcome
         };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::CompensateBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(outcome)
     }
@@ -3445,6 +3493,8 @@ impl EventStore for RedbStore {
                 outcome: AttemptOutcome::Started,
             }
         };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::StartAttemptBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(attempt)
     }
@@ -3491,6 +3541,8 @@ impl EventStore for RedbStore {
                 ));
             }
         };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::FinishAttemptBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(result)
     }
@@ -3557,6 +3609,9 @@ fn decode_interval(json: &str) -> CoverageInterval {
         Timestamp::from(record.through),
     )
 }
+
+#[cfg(test)]
+mod crash_atomicity_tests;
 
 #[cfg(test)]
 mod tests {
