@@ -5035,6 +5035,39 @@ reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsS
               },
               "name": "relays_rejected_over_cap",
               "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "String",
+                                "resolved_item": {
+                                  "path": "alloc::string::String"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Option",
+                    "resolved_item": {
+                      "path": "core::option::Option"
+                    }
+                  }
+                }
+              },
+              "name": "store_degraded",
+              "visibility": "public"
             }
           ],
           "has_stripped_fields": false

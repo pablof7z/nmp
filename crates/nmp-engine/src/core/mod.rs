@@ -506,6 +506,13 @@ pub struct EngineCore<S: EventStore> {
     /// snapshot. A minimal, honest "the local cache went read-only" signal;
     /// a richer failure-mode framework (recovery, reopen, per-door policy)
     /// is deliberately out of scope — see the issue's priority note.
+    ///
+    /// This flag is OBSERVATIONAL, not a gate: no code path reads it to
+    /// refuse work. "Read-only" is descriptive — a later message simply
+    /// re-attempts the same door and degrades again on a repeat failure
+    /// (harmless: every widened door is atomic, so a failed attempt commits
+    /// nothing). Enforcing degrade (short-circuiting further writes) would be
+    /// the richer policy explicitly deferred here.
     store_degraded: Option<String>,
 }
 
