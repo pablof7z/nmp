@@ -50,7 +50,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{AccessContext, ConcreteFilter, SourceAuthority};
 use nmp_router::SubId;
 use nostr::{EventId, RelayUrl};
 
@@ -158,7 +158,17 @@ impl Prober {
         self.states.insert(relay.clone(), ProbeState::Probing);
 
         let filter = probe_filter();
-        let sub_id = SubId::for_filter(relay.clone(), &filter);
+        // A protocol-support probe, never a real acquisition (#106): its
+        // sub-id lives in this module's OWN `pending` map, entirely
+        // separate from `core::attribution`'s bookkeeping, so a fixed
+        // context is harmless -- it never touches coverage/attribution
+        // identity at all.
+        let sub_id = SubId::for_wire(
+            relay.clone(),
+            &filter,
+            SourceAuthority::Public,
+            AccessContext::Public,
+        );
         let wire_id = crate::core::wire_sub_id_string(&sub_id);
 
         // An empty, sealed storage: a probe measures PROTOCOL support, not

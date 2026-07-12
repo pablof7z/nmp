@@ -35,8 +35,8 @@
 //! the two nouns are not just nameable but usable.
 
 use nmp::{
-    AcquisitionEvidence, CoverageInterval, Derived, DiagnosticsSnapshot, Durability, Filter,
-    FilterCoverageEntry, IdentityField, IndexedTagName, Kind, Lane, LiveQuery, PublicKey,
+    AcquisitionEvidence, CoverageInterval, Demand, Derived, DiagnosticsSnapshot, Durability,
+    Filter, FilterCoverageEntry, IdentityField, IndexedTagName, Kind, Lane, LiveQuery, PublicKey,
     RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload,
     WriteRouting,
 };
@@ -62,10 +62,10 @@ const CALLER_CONTENT_KIND: u16 = 9999;
 /// by `IndexedTagName` (the wire/local indexed-filter alphabet, #64) --
 /// deliberately exercising both halves of that split from this crate alone.
 pub fn build_derived_index_query() -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(std::collections::BTreeSet::from([CALLER_CONTENT_KIND])),
         authors: Some(nmp::Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(std::collections::BTreeSet::from([CALLER_INDEX_KIND])),
                 authors: Some(nmp::Binding::Reactive(IdentityField::ActivePubkey)),
                 tags: std::collections::BTreeMap::from([(
@@ -75,7 +75,7 @@ pub fn build_derived_index_query() -> LiveQuery {
                     ])),
                 )]),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()

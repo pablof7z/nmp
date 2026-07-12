@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::filter::MatchEventOptions;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, Timestamp};
@@ -1018,12 +1018,12 @@ impl EventStore for MemoryStore {
 
     fn record_coverage(
         &mut self,
-        filter: &ConcreteFilter,
+        atom: &ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
     ) {
-        let key = coverage_key(filter);
-        let shape = window_erase(filter);
+        let key = coverage_key(atom);
+        let shape = window_erase(&atom.filter);
         let entry_key = (key, relay.clone());
         let existing = self.coverage.get(&entry_key).map(|row| row.interval);
         let merged = merge_interval(existing, proven);

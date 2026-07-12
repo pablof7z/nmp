@@ -56,7 +56,7 @@ impl CapturingSink {
 }
 
 fn literal_kind_query(kind: u16, author_hex: &str) -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([kind])),
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()

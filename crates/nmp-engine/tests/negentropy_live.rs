@@ -88,7 +88,7 @@ fn wait_for_rows(
 }
 
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(std::collections::BTreeSet::from([1u16])),
         authors: Some(Binding::Literal(std::collections::BTreeSet::from([
             author_hex.to_string(),

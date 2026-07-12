@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::descriptor::Demand;
 use crate::indexed_tag_name::IndexedTagName;
 use crate::selector::{IdentityField, Selector};
 
@@ -22,12 +23,18 @@ pub enum Binding {
     SetOp(Box<SetOp>),
 }
 
-/// A `Binding::Derived` payload: an inner live filter plus the selector that
-/// projects its resolved rows into a value set.
+/// A `Binding::Derived` payload: an inner live query plus the selector that
+/// projects its resolved rows into a value set. `inner` is a full
+/// [`Demand`] (#106), NOT a bare `Filter` — the inner query carries its OWN
+/// complete `source`/`access` descriptor and NEVER inherits the outer
+/// query's (no `Default` path that would blank/copy the outer's axes onto
+/// the inner). A `$myFollows`-shaped outer query pinned to R1, whose inner
+/// kind:3 lookup should resolve from the author's own outbox regardless,
+/// is exactly why this must be explicit per-Demand, not inherited.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Derived {
-    /// The inner live query.
-    pub inner: Filter,
+    /// The inner live query's full descriptor.
+    pub inner: Demand,
     /// How the inner query's resolved rows are projected into a value set.
     pub project: Selector,
 }
@@ -127,11 +134,11 @@ mod tests {
 
         // AddressCoord selector round-trips through a Derived binding.
         let derived = Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(Set::from([30003])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::AddressCoord,
         };
         assert_eq!(derived.project, Selector::AddressCoord);

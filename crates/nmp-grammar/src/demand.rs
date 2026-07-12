@@ -1,15 +1,18 @@
 //! [`DemandOp`] and [`DemandDelta`] — the abstract demand-set delta the
-//! resolver emits: sets of concrete resolved filters to open/close.
+//! resolver emits: sets of resolved atoms to open/close.
 
-use crate::concrete::ConcreteFilter;
+use crate::concrete::ContextualAtom;
 
-/// A single demand-set operation.
+/// A single demand-set operation. Carries a full [`ContextualAtom`] (#106,
+/// was a bare `ConcreteFilter`) — the delta reflects the SAME identity the
+/// engine's atom-refcount table keys on, so a caller inspecting `opened()`/
+/// `closed()` sees an atom's true `source`/`access`, not just its selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DemandOp {
-    /// Withdraw demand for this concrete filter.
-    Close(ConcreteFilter),
-    /// Assert demand for this concrete filter.
-    Open(ConcreteFilter),
+    /// Withdraw demand for this atom.
+    Close(ContextualAtom),
+    /// Assert demand for this atom.
+    Open(ContextualAtom),
 }
 
 /// A demand-set delta.
@@ -36,23 +39,23 @@ impl DemandDelta {
         self.ops.is_empty()
     }
 
-    /// The concrete filters opened by this delta, in order.
-    pub fn opened(&self) -> Vec<&ConcreteFilter> {
+    /// The atoms opened by this delta, in order.
+    pub fn opened(&self) -> Vec<&ContextualAtom> {
         self.ops
             .iter()
             .filter_map(|op| match op {
-                DemandOp::Open(f) => Some(f),
+                DemandOp::Open(a) => Some(a),
                 DemandOp::Close(_) => None,
             })
             .collect()
     }
 
-    /// The concrete filters closed by this delta, in order.
-    pub fn closed(&self) -> Vec<&ConcreteFilter> {
+    /// The atoms closed by this delta, in order.
+    pub fn closed(&self) -> Vec<&ContextualAtom> {
         self.ops
             .iter()
             .filter_map(|op| match op {
-                DemandOp::Close(f) => Some(f),
+                DemandOp::Close(a) => Some(a),
                 DemandOp::Open(_) => None,
             })
             .collect()
@@ -62,12 +65,18 @@ impl DemandDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::concrete::ConcreteFilter;
+    use crate::descriptor::{AccessContext, SourceAuthority};
     use std::collections::BTreeSet;
 
-    fn cf(kind: u16) -> ConcreteFilter {
-        ConcreteFilter {
-            kinds: Some(BTreeSet::from([kind])),
-            ..ConcreteFilter::default()
+    fn atom(kind: u16) -> ContextualAtom {
+        ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([kind])),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
         }
     }
 
@@ -83,13 +92,13 @@ mod tests {
     fn opened_and_closed_partition_the_ops_preserving_order() {
         let d = DemandDelta {
             ops: vec![
-                DemandOp::Close(cf(1)),
-                DemandOp::Close(cf(2)),
-                DemandOp::Open(cf(3)),
+                DemandOp::Close(atom(1)),
+                DemandOp::Close(atom(2)),
+                DemandOp::Open(atom(3)),
             ],
         };
         assert!(!d.is_empty());
-        assert_eq!(d.closed(), vec![&cf(1), &cf(2)]);
-        assert_eq!(d.opened(), vec![&cf(3)]);
+        assert_eq!(d.closed(), vec![&atom(1), &atom(2)]);
+        assert_eq!(d.opened(), vec![&atom(3)]);
     }
 }

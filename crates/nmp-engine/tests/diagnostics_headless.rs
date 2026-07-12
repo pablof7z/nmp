@@ -33,7 +33,7 @@ fn new_core(dir: FixtureDirectory) -> EngineCore<MemoryStore> {
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(kinds.iter().copied().collect()),
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()

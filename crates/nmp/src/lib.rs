@@ -54,9 +54,13 @@ pub use engine::Engine;
 pub use error::EngineError;
 pub use subscription::{DiagnosticsSubscription, ObservationCancel, Subscription};
 
-// The grammar an app builds a `LiveQuery`'s `Filter` out of.
+// The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
+// `selection` is the `Filter`; `source`/`access`/`cache` are the #106 axes
+// -- `LiveQuery::from_filter` applies `Demand`'s static default so existing
+// `Filter`-only call sites need no source/access reasoning of their own.
 pub use nmp_grammar::{
-    Binding, Derived, Filter, IdentityField, IndexedTagName, Selector, SetAlgebra, SetOp,
+    AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, IdentityField,
+    IndexedTagName, Selector, SetAlgebra, SetOp, SourceAuthority,
 };
 pub use nmp_resolver::LiveQuery;
 

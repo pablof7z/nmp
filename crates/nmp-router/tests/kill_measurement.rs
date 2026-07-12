@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_router::{
     test_relay, DiscoveryKinds, FixtureDirectory, PubkeyHex, RelayLimits, RelayUrl, Router,
     RuleRegistry,
@@ -47,12 +47,16 @@ fn realistic_directory() -> FixtureDirectory {
     dir
 }
 
-fn falsifier_demand() -> BTreeSet<ConcreteFilter> {
+fn falsifier_demand() -> BTreeSet<ContextualAtom> {
     (0..NUM_AUTHORS)
-        .map(|i| ConcreteFilter {
-            kinds: Some(BTreeSet::from([1u16])),
-            authors: Some(BTreeSet::from([author_hex(i)])),
-            ..ConcreteFilter::default()
+        .map(|i| ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(BTreeSet::from([author_hex(i)])),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::AuthorOutboxes,
+            access: AccessContext::Public,
         })
         .collect()
 }

@@ -17,8 +17,9 @@ use nmp::{
     WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
-    Binding as GBinding, Derived as GDerived, Filter as GFilter, IdentityField as GIdentityField,
-    IndexedTagName, Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
+    Binding as GBinding, Demand as GDemand, Derived as GDerived, Filter as GFilter,
+    IdentityField as GIdentityField, IndexedTagName, Selector as GSelector,
+    SetAlgebra as GSetAlgebra, SetOp as GSetOp,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{
@@ -252,7 +253,12 @@ fn binding_from_ffi(b: FfiBinding, field: LiteralField) -> Result<GBinding, FfiE
             GBinding::Reactive(identity_field_from_ffi(id_field))
         }
         FfiBinding::Derived { derived } => GBinding::Derived(Box::new(GDerived {
-            inner: filter_from_ffi(derived.inner.clone())?,
+            // #106: the FFI surface stays `Filter`-only (no `Demand`/
+            // `SourceAuthority` exposed to apps yet) -- `Demand::
+            // from_filter`'s static default applies transparently at this
+            // boundary, identical to every direct-Rust `LiveQuery::
+            // from_filter` call site.
+            inner: GDemand::from_filter(filter_from_ffi(derived.inner.clone())?),
             project: selector_from_ffi(derived.project.clone())?,
         })),
         FfiBinding::SetOp { set_op } => GBinding::SetOp(Box::new(GSetOp {
@@ -277,7 +283,11 @@ pub fn binding_to_ffi(b: GBinding) -> FfiBinding {
         },
         GBinding::Derived(d) => FfiBinding::Derived {
             derived: std::sync::Arc::new(FfiDerived {
-                inner: filter_to_ffi(d.inner),
+                // The inverse of `binding_from_ffi`'s `Derived` arm: only
+                // the selection crosses back out (`source`/`access` are
+                // not yet part of the FFI surface, #106) -- reconstructed
+                // identically by `Demand::from_filter` on the way back in.
+                inner: filter_to_ffi(d.inner.selection),
                 project: selector_to_ffi(d.project),
             }),
         },

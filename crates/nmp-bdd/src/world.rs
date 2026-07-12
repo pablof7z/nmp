@@ -23,7 +23,7 @@ use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsMsg};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory, RelayUrl};
 use nmp_signer::LocalKeySigner;
@@ -64,14 +64,14 @@ pub const ME: &str = "me";
 /// `nmp-engine`'s own `runtime_integration.rs`/`self_bootstrap_outbox.rs`
 /// fixture query.
 pub fn my_follows_query() -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(std::collections::BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(std::collections::BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()

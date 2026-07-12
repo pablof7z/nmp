@@ -16,7 +16,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, IndexedTagName, Selector,
+    Binding, ConcreteFilter, Demand, DemandOp, Derived, Filter, IdentityField, IndexedTagName,
+    Selector,
 };
 use nmp_resolver::testkit::{accept_write_of, deletion, kind3, Harness};
 use nmp_resolver::LiveQuery;
@@ -53,11 +54,11 @@ fn my_follows_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -76,11 +77,11 @@ fn deletions_by_etag_filter() -> Filter {
     tags.insert(
         IndexedTagName::new('e').unwrap(),
         Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([5u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("e".to_string()),
         })),
     );
@@ -91,15 +92,19 @@ fn deletions_by_etag_filter() -> Filter {
     }
 }
 
-/// The `DemandOp::Open` atoms of a delta, as a set (op ORDER is the
-/// resolver's internal `BTreeSet` ordering — these tests assert on the SET,
-/// keeping them robust to that ordering while still exact on membership).
+/// The `DemandOp::Open` atoms of a delta, as a SELECTION-only set (op ORDER
+/// is the resolver's internal `BTreeSet` ordering — these tests assert on
+/// the SET, keeping them robust to that ordering while still exact on
+/// membership). `DemandOp` carries a full `ContextualAtom` (#106), but
+/// every fixture in this file is `my_follows_filter()`-shaped (uniformly
+/// `AuthorOutboxes`), so these tests are about atom identity, not context;
+/// extracting `.filter` keeps every existing assertion unchanged.
 fn opened(delta: &nmp_grammar::DemandDelta) -> BTreeSet<ConcreteFilter> {
     delta
         .ops
         .iter()
         .filter_map(|op| match op {
-            DemandOp::Open(cf) => Some(cf.clone()),
+            DemandOp::Open(atom) => Some(atom.filter.clone()),
             DemandOp::Close(_) => None,
         })
         .collect()
@@ -110,7 +115,7 @@ fn closed(delta: &nmp_grammar::DemandDelta) -> BTreeSet<ConcreteFilter> {
         .ops
         .iter()
         .filter_map(|op| match op {
-            DemandOp::Close(cf) => Some(cf.clone()),
+            DemandOp::Close(atom) => Some(atom.filter.clone()),
             DemandOp::Open(_) => None,
         })
         .collect()
@@ -132,7 +137,7 @@ fn accept_local_seeds_the_derived_add_path() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     let inner = cf_kinds_authors(&[3], &[&a.public_key().to_hex()]);
     let atom_a = cf_kinds_authors(&[1], &[&a.public_key().to_hex()]);
@@ -205,7 +210,7 @@ fn superseding_local_edit_adds_and_removes_through_one_react() {
     let d = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     // First optimistic edit: follows = {a, b, c}.
     h.accept(accept_write_of(
@@ -280,7 +285,7 @@ fn older_local_edit_is_stale_and_yields_empty_delta() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     // Winner at t=101: follows = {a, b}.
     h.accept(accept_write_of(
@@ -331,7 +336,7 @@ fn duplicate_local_accept_yields_empty_delta() {
     let b = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     let follow_list = kind3(&a, &[a.public_key(), b.public_key()], 100);
     h.accept(accept_write_of(follow_list.clone(), 100));
@@ -382,8 +387,8 @@ fn local_kind5_processed_inserts_row_and_removes_hidden_targets_in_one_react() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_h_follows, _d1) = h.subscribe(LiveQuery(my_follows_filter()));
-    let (_h_dels, _d2) = h.subscribe(LiveQuery(deletions_by_etag_filter()));
+    let (_h_follows, _d1) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
+    let (_h_dels, _d2) = h.subscribe(LiveQuery::from_filter(deletions_by_etag_filter()));
 
     // A pending local kind:3 => my_follows resolves to {b, c}.
     let follow_list = kind3(&a, &[b.public_key(), c.public_key()], 100);
