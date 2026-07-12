@@ -1030,6 +1030,9 @@ impl EventStore for MemoryStore {
         // kind:5 intent has provisionally claimed (architecture review
         // requirement — see `SuppressClaim`'s doc): the row stays fully
         // present in `by_id`, only hidden from this read path.
+        // `filter.limit` is deliberately NOT consulted here (#124) -- see
+        // `EventStore::query`'s own doc for why (deferred to #9's ordering
+        // fork, not an oversight).
         Ok(self
             .by_id
             .values()
