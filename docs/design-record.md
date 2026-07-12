@@ -269,6 +269,7 @@ canonical statement is `docs/VISION.md`; detailed ownership lives in:
 - `docs/design/durable-write-signing-and-retry.md`
 - `docs/design/protocol-modules-and-composition.md`
 - `docs/design/bounded-delivery.md`
+- `docs/design/ui-components-strategy.md`
 
 ### Settled invariants
 
