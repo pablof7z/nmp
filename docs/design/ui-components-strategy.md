@@ -1,193 +1,803 @@
-# UI components across platforms — strategy design note
+# Optional Nostr content and UI building blocks
 
-- **Date:** 2026-07-11
-- **Status:** Historical ideation note, **roadmap recommendation superseded** by
-  the v2 contract promotion. Its old-repo failure analysis remains useful. NMP
-  currently blesses no content kind, feed recipe, component family, or first UI
-  kit. Optional protocol/feature modules may expose exact-schema codecs,
-  builders, typed queries, and contextual operations; rendering remains app/UI-
-  framework territory.
-- **Anchors:** VISION P1 (library, not framework), §3 ownership table (rendering/layout/navigation belong to the UI framework), §10 ("values in, code after"; Collection observation mode), bug-ledger #11 (no app-owned expansion) and #12 (no presentation in core); README "Who owns what."
-- **Cautionary ground truth (old repo, `nostr-multi-platform`):** `crates/nmp-component-registry/` (122 files, 5 platform targets), `crates/nmp-content/src/{tokenizer,grouper}.rs`, `docs/recipes/content-rendering.md`, `docs/recipes/app-shapes.md`, `docs/cli.md` §"add component"; the three independent consumer-app forks of `NostrInlineVideoPlayer.swift` (evidence in §2.3).
+- **Date:** 2026-07-12
+- **Status:** Architecture direction for issue #75. This replaces the
+  superseded "no component roadmap" recommendation. Implementation remains
+  issue-first and separately sequenced.
+- **Core boundary:** NMP Core remains the content-neutral live-query and
+  write-intent engine. The content runtime and UI kits are optional consumers
+  of its public API.
+- **Evidence:** the old `nostr-multi-platform` `nmp-content`, component registry,
+  installer, gallery, and three divergent `NostrInlineVideoPlayer` forks;
+  shadcn's open-code distribution model; Bits UI's headless primitive model;
+  SwiftUI and Compose's native composition and state-lifetime conventions.
 
----
+## 1. Decision
 
-## 1. The problem, honestly stated
+NMP will have an optional, multi-platform content/UI ecosystem whose purpose is
+to make correct Nostr content rendering reusable across applications.
 
-This exploration began from a hypothetical NMP-owned component program intended
-to save apps from rebuilding common social UI. The promoted contract does not
-adopt that program: choosing those components would privilege one content model
-and pull NMP back toward an application framework. The old repo still provides
-valuable evidence about how "just helpers" re-annexed the app, so that analysis
-is retained below without treating its examples as a roadmap.
+The ecosystem is not part of NMP Core, but it is a real product surface. “The
+app owns presentation” means the app has final authority over its product
+experience. It does **not** mean every app must independently rebuild Nostr URI
+parsing, reference acquisition, recursive embed lifecycle, kind dispatch,
+accessibility, media layout, article rendering, product rendering, or all the
+other machinery needed to render an open protocol well.
 
-The four constraints this design must hold simultaneously:
+The selected distribution model is deliberately hybrid:
 
-1. **Library, not framework (P1).** The README assigns rendering, layout, navigation to the UI framework. A component story must not silently re-annex them.
-2. **Two nouns + "values in, code after."** Anything the engine uses to *decide* is a closed introspectable value; app closures may fold *delivered* rows into view state but never parameterize engine behavior. Rendering any delivered protocol data must land cleanly on one side of that line.
-3. **Modularity.** A minimal app links zero of any component offering.
-4. **Multi-platform reality.** SwiftUI, Compose, and web are different rendering systems. Pixels do not port. The design must be honest about what is genuinely shareable.
+1. **Linked, versioned substrate** for correctness-sensitive semantics,
+   reference-session lifecycle, and low-level native primitives. Fixes to
+   parsing, cancellation, accessibility, and resolution propagate normally.
+2. **Source-installable, styled compositions** for opinionated cards, readers,
+   product views, and blocks. An app receives readable native source, may edit
+   it without permission, and may selectively install only what it uses.
+3. **Explicit app composition** for renderer selection, navigation, resource
+   policy, and product-specific overrides. No global import side effects and no
+   engine-owned renderer registry.
 
-## 2. What happened last time — the mechanism of the creep
+This is the shadcn/Bits split adapted to native applications: stable primitives
+underneath, beautiful open-code compositions on top.
 
-The old repo's component registry was, on paper, the *right* instinct: shadcn-style copy-in source components (`nmp add component swiftui/content-view`), app-owned after install, "pure renderers — they do not fetch, retry, cache, route, or decide policy" (`docs/cli.md`). It crept into a framework anyway, through five distinct mechanisms. Each one is a rule for v2.
+## 2. The problem is a content runtime, not a `Text` view
 
-### 2.1 Components consumed engine-interior seams, not the app-facing surface
+This content is ordinary on Nostr:
 
-`NostrContentView` did not consume "what any app would." Its host contract (`docs/recipes/content-rendering.md` §"Host Contract") required `refs.profile`, `refs.event`, and `refs.event.envelopes` — engine-interior projections — plus an `EventRefResolverProtocol` forwarding visible refs into `resolve_ref`/`release_ref`. Installing a "content view" therefore *obligated the app into the projection/registry architecture*: an app-root `NmpComponentHost(profileHost:embedSource:eventRefResolver:kindRegistry:)` provider (`crates/nmp-component-registry/registry/swiftui/component-host/NmpComponentHost.swift`), concrete bridge objects, and a resolve/release lifecycle the component "managed" on the app's behalf. That is precisely M5's kill phrase — *NMP-shaped scaffolding* — imported through the side door of a view.
-
-### 2.2 Extension by registration, not composition
-
-Customizing one card meant registering a renderer into a `NostrKindRegistry` dispatch table (`registry.setArticle(MagazineArticleRenderer())`, content-rendering.md Recipe 4). Inversion of control: the component owns the dispatch loop and calls the app. Radix, shadcn, and every headless library that has stayed a library extend by *composition* — you pass children/slots; nothing registers into anything. A registry is a framework's spine wearing a component's clothes. (The SwiftUI registry alone grew 23 component families — `content-kind-0`, `content-kind-9802`, `content-kind-30023`, `chat-composer`, `login-block`, `user-card`, … — each new kind another registry entry, another dispatch arm, another doc.)
-
-### 2.3 The AVPlayer saga — the shared component that wasn't shareably correct
-
-The canonical registry component constructs a media player **inline in the SwiftUI body**:
-
-```swift
-// crates/nmp-component-registry/registry/swiftui/content-view/NostrContentView.swift:217
-VideoPlayer(player: AVPlayer(url: first))
+```text
+hello nostr:npub1... read my article nostr:naddr1...
+and buy my product nostr:naddr1...
+and see this note nostr:nevent1...
+and this photo nostr:nevent1...
 ```
 
-A new `AVPlayer` per body evaluation — full `AVPlayerViewController` KVO churn on every unrelated re-render of the containing note; observed to saturate the main thread for minutes on a video-bearing feed. Three external consumer apps each fixed it **independently**, and their fixes exist today as three files with three different md5 sums:
+Rendering it requires a coordinated system:
 
-- `hl/app/ios/.../Vendor/nmp/Components/NostrContent/NostrInlineVideoPlayer.swift` — eager player in `@State` initialValue, plus a `failed`-latch so a dead URL isn't retried forever;
-- `29er/ios/29er/29er/Components/NostrContent/NostrInlineVideoPlayer.swift` — near-copy of hl's, already drifted;
-- `chirp/apps/ios/Chirp/Components/NostrContent/NostrInlineVideoPlayer.swift` — a *different design entirely*: lazy poster + tap-to-play, per chirp#63's acceptance criterion.
+- tokenize plaintext and Markdown without corrupting source text;
+- recognize NIP-21/NIP-27 entities, hashtags, links, custom emoji, invoices,
+  media, code spans, and protocol extensions;
+- decode `npub`, `nprofile`, `note`, `nevent`, and `naddr` correctly;
+- turn each reference into the right live demand, including relay hints,
+  authors, coordinates, and source authority;
+- render cached content immediately while acquisition continues;
+- resolve profiles and event references without a second cache or one network
+  stack per view;
+- preserve loading, invalid, unavailable, shortfall, deletion, replacement,
+  and provenance facts;
+- dispatch resolved events to kind/schema-specific renderers;
+- recurse when an embedded event contains more references;
+- prevent cycles, runaway depth, query explosions, and scroll-time resource
+  leaks;
+- support rich native renderers for notes, profiles, articles, products,
+  photos, highlights, and future protocol modules;
+- allow the app to replace navigation, theming, media, wallet, purchase, and
+  other product policy.
 
-Meanwhile the canonical registry file **still ships the bug**. Two lessons, not one:
+That complexity must be solved once as reusable infrastructure and exercised
+continuously across platforms.
 
-- **Copy-distribution without an upstream path means divergence-without-reconciliation.** Fixes flowed neither up nor across; "shared" was true only at install time.
-- **Deeper: a stateful, resource-owning element has app-policy behavior, so a single canonical implementation is wrong for someone by construction.** chirp *wanted* lazy tap-to-play (scroll performance); hl wanted eager-with-latch. Neither is a bug fix of the other. Media playback, image prefetch, link-preview fetching — anything that owns a resource lifecycle is app policy and must be a *slot*, never a baked default with retrofitted knobs.
+## 3. Product goals
 
-### 2.4 Policing app-owned code — the contradiction in terms
+An application should be able to start with something equivalent to:
 
-`docs/recipes/app-shapes.md:140`: "Do not fork `NostrContentView` or parse raw events in a renderer." A doc-level prohibition on modifying files the model explicitly hands the app to own. When your component story needs a police force patrolling the consumer's own source tree, the correctness didn't live in the shape — the exact failure the whole v2 thesis exists to escape.
+```swift
+NostrContent(event: row.event, content: contentClient)
+```
 
-### 2.5 What the old repo got *right* — and knew it
+```kotlin
+NostrContent(event = row.event, content = contentClient)
+```
 
-Two positive controls, both worth harvesting as principles:
+and receive a useful, styled, accessible default renderer with live mentions
+and embeds. It should then be able to move progressively, without a rewrite,
+through these levels of ownership:
 
-- **The tokenizer** (`crates/nmp-content/src/tokenizer.rs`): one entry point, content string + tags → a `ContentTree` of typed segments (mentions, hashtags, links, invoices, custom emoji, markdown blocks). Pure, deterministic, closed vocabulary, raw tokens only. It is protocol *parsing* — that `nostr:npub1…` is a mention is a NIP-27 fact, not a rendering choice. This is the data side of the line done right, and every platform needs identical semantics of it.
-- **The grouper knew where the line was** (`grouper.rs` header): "classification (whether a URL is media or generic) is a **rendering** concern, not a protocol one. Keeping the cut means apps that want raw URLs can skip the grouper." The old repo correctly ran the line *through* the middle of nmp-content and made the render-flavored pass separable.
-- **Feed = mechanics, not render policy** (old #3082): `RootIndexed`/`Nip10ReplyAttribution` welded one app's render model into the feed engine; the settled ruling deleted them and established the owner principle — *"does any app USE it" is the wrong question; expose mechanics, don't bake one app's surface.* Same shape as display-separation (raw pubkeys only across FFI; `display::` banned from projections — enforced there by lint and audit, i.e. by policing; here it is ledger #12, enforced by absent vocabulary).
+1. change theme tokens;
+2. replace a primitive slot such as media, profile name, or embed chrome;
+3. replace one renderer such as the NIP-23 article card;
+4. install and edit the source of a composed renderer;
+5. add a renderer for an app-defined or newly standardized kind;
+6. replace the whole top-level content view while retaining the parser and
+   reference runtime;
+7. replace every optional layer and consume NMP Core directly.
 
-## 3. The line
+The adoption path is therefore a gradient, not take-it-or-leave-it.
 
-Where "engine/data-owned content structure" ends and "app/UI-framework-owned rendering" begins, drawn as altitudes. Every candidate offering must name its layer.
+## 4. Ownership and dependency direction
 
-| Layer | What it is | Sharing | Legality |
-|---|---|---|---|
-| **L0 — engine** | Events, rows, receipts, coverage, diagnostics. Raw tokens only: hex pubkeys, Unix timestamps, verbatim content (ledger #12). | The engine itself | Already settled. Nothing rendering-adjacent may ever live here. |
-| **L1 — protocol-semantic data** | Pure functions from delivered rows to typed values with closed vocabularies. Each opt-in module owns only its exact NIP/feature semantics; no generic social-content taxonomy is privileged. No I/O, no engine parameterization, off the demand path. | **Genuinely cross-platform** — one Rust implementation, values across FFI | Legal and squarely inside "values in, code after": these fold delivered rows or build immutable drafts; the engine never consults presentation structure. Vocabulary names protocol facts, never card/row/column/gallery nodes. |
-| **L2 — headless behavior (per platform)** | A possible future thin observable adapter around an opt-in protocol/feature module's public values and the ordinary query/write APIs. | Per-platform idiom (`@Observable` / `ViewModel`+`Flow`). | Not on the current roadmap. Legal only if public-surface-only and if it does not establish an NMP-prescribed app architecture. |
-| **L3 — reference views (per platform)** | Possible future pixels consuming public SDK/module values. | **Not shareable.** N implementations, one per platform. | Not on the current roadmap. If revisited, they must remain ordinary optional consumers, never the default path or a kind-dispatch system. |
-| **App** | Screen composition, navigation, theming decisions, resource-lifecycle policy (media playback, prefetch), anything it replaces. | — | — |
+```text
+Application
+  screens · navigation · product policy · local overrides
+      │
+      ├── source-installed styled components and blocks
+      │     note card · article card/reader · product card/view · photo view
+      │
+      ├── linked native primitive kit
+      │     content · embed · profile · media · article · product primitives
+      │
+      └── linked content client/runtime
+            parser · entity decoder · render session · reference acquisition
+                         │
+                         ▼ public API only
+                    NMP Core
+              live queries · store · routing · evidence
+```
 
-The pivotal distinction, inherited from the old repo's late realization (its #3113: *codec vs formatting*): **codec** — mapping between protocol representations (hex↔npub, content→token tree, rows→reply tree) — is shared, reusable, one-implementation work. **Formatting** — truncation, locale dates, "2h ago", display-name fallback chains — is app-owned presentation and appears in *no* NMP layer, not even L3's reference views except as trivially replaceable view code. L1 is all codec; the engine stays all-raw; formatting never gets a shared home.
+The dependency arrow points downward only:
 
-## 4. The design space
+- NMP Core has no renderer catalog, component manifest, theme, view type, or UI
+  lifecycle concept.
+- The optional content runtime depends on NMP's supported public facade.
+- Native primitive kits depend on the content runtime and native UI framework.
+- Styled components depend on primitives and are copied into the app.
+- The app may replace or bypass any optional layer.
 
-### Historical Option A — protocol-semantic values (not a selected first artifact)
+Repository placement does not define the boundary; the dependency graph does.
+The recommended physical split is:
 
-The old tokenizer remains a possible harvest candidate, but it is not a blessed
-`nmp-content` roadmap or the default semantic layer. The general legal shape is
-an opt-in protocol/feature crate exposing closed typed values or immutable draft
-builders through Rust and platform projections. A candidate earns a module by
-owning exact protocol semantics and proving cross-platform value; popularity of
-one content kind is not sufficient.
+- this repository owns the optional shared content semantics and platform
+  content-client packages because they must track the governed NMP facade and
+  FFI contract closely;
+- a sibling `nmp-ui` repository owns native primitive packages, source
+  registries, design tokens, galleries, and styled components while consuming
+  released NMP public artifacts only.
 
-- **Shared:** everything — one Rust implementation is the whole point; identical NIP-21/27/30 semantics on every platform is a correctness property, not a convenience.
-- **Constraints:** honors all four. Opt-in crate = zero weight (C3). Values with closed vocabularies (C2). No rendering opinion whatsoever (C1). Fully portable because it's data (C4).
-- **Failure mode:** vocabulary creep — segments that describe *appearance* (gallery, card, collapsed-run) rather than protocol facts. The tripwire is nameable: any variant whose meaning you'd explain by describing pixels is a render-IR node. Second failure: an `EventRef` token tempts a "resolver" abstraction back into existence (the old `refs.event.envelopes` chain). v2 answer: an event ref resolves by *the app running another live query* — the engine already dedups and caches; there is no third resolution machinery to build.
+This keeps the engine repository from becoming a component catalog while still
+making content resolution a supported, tested part of the NMP developer story.
 
-### Historical Option B — Headless/behavior components (L2)
+## 5. Layer A — shared content semantics
 
-Per-platform packages of concept view-models. Honest inventory of what behavior actually remains once the engine exists: **less than TanStack's, by design.** Query lifecycle, caching, pagination, ordering, deltas, receipt state machines — all engine. What's left: draft/composition state, autocomplete orchestration, L1 folding, and platform-reactive packaging. Each headless component is thin — which is the *proof the engine's surface is right*, and the first place a gap would show (dogfooding, VISION §3's "second job").
+Layer A is optional, linked, cross-platform semantic code. Its output describes
+what the content **is**, never how pixels are arranged.
 
-- **Shared:** the shape and the L1 substrate; the code is per-platform idiom.
-- **Constraints:** honors C1 iff zero-scaffold (drop into a bare view, no host/provider) and public-surface-only. C2: legal by construction — folds delivered rows, submits intents. C3: separate packages, trivially zero-weight. C4: honest — behavior semantics port, code doesn't.
-- **Failure mode:** the soft framework. A family of `Nmp*Model` types becomes "the NMP way to build screens," and docs start assuming them. Mitigation is structural (§5 R3/R4) plus a docs rule: every L2 component's documentation *shows the raw two-noun equivalent first*, the component second.
+### 5.1 Content document
 
-### Historical Option C — Per-platform reference component kits (L3, opt-in, outside the engine contract)
+The old `ContentTree` is the correct starting point, with its accidental policy
+removed. The document vocabulary should cover protocol or source-text facts:
 
-SwiftUI package + Compose artifact of actual views consuming L1+L2. This was the
-most framework-shaped part of the hypothetical component program, and the part
-the old repo demonstrated is dangerous. It would be legal only with the §5
-rules; it is not selected by the promoted direction.
+```text
+ContentDocument
+  Text
+  Mention(NostrEntity.Profile | NostrEntity.Pubkey)
+  EventReference(NostrEntity.Event | EventId | Coordinate)
+  Hashtag
+  Url(syntacticMediaHint?)
+  CustomEmoji
+  Invoice
+  MarkdownBlock(children)
+  InvalidReference(originalText, reason)
+```
 
-- **Shared:** nothing at the pixel layer. What's shared is that both kits sit on the same L1 values and the same public SDK — so their *correctness* is shared even though their code isn't.
-- **Constraints:** C1 is the knife-edge — held only by the structural rules below. C2: fine (render side). C3: separate packages. C4: honest — this option openly commits NMP to N parallel UI codebases (the old registry's 122 files across 5 targets is the price tag from last time; budget for 2 targets max, ever).
-- **Failure modes,** each mapped to its §2 ancestor: components needing engine-interior seams (§2.1) → R1/R4; kind-dispatch registries (§2.2) → R5; baked resource policy (§2.3) → R6; policing app copies (§2.4) → distribution choice in §5.
-- **Distribution:** linked packages (SwiftPM/Maven) as the default, *reversing* the old copy-in model. The three-fork AVPlayer evidence shows copy-in failed both directions: the canonical stayed buggy, the forks diverged. With linked+slots, a bug fix ships once, and the legitimate per-app divergence (eager vs lazy playback) lives in slots rather than forks. Vendoring the source remains trivially possible for an app that wants full ownership — but NMP builds no copy/lock/update machinery (`nmp add component`, `nmp.components.lock`, hash-diff updates were themselves framework tooling; never rebuild them).
+Rules:
 
-### Option D — Cross-platform render-IR (rejected, and worth rejecting precisely)
+- Tokens retain stable source ranges and original text.
+- Parsing is deterministic, side-effect free, and separately testable.
+- Plaintext versus Markdown is explicit. A protocol module may select a mode
+  for a schema it owns; generic core never guesses from a global kind table.
+- A URL may carry a conservative syntactic hint derived from its source or
+  extension. MIME confirmation, media grouping, gallery layout, truncation,
+  “2h ago,” and display-name fallback are presentation and do not enter the
+  shared document vocabulary.
+- New token variants require cross-platform fixtures and a fallback rendering
+  rule.
+- Invalid or unsupported entities fall back to their original source text.
 
-A Rust-side declarative UI description (nodes like card/column/text-style) that platform interpreters render. Rejected on all four constraints at once: it *is* a UI framework (C1 — rendering and layout re-annexed wholesale); its node vocabulary is exactly the "visual structure" a closed value must not encode (C2 in spirit); it is mandatory weight for anything rendered through it (C3); and it lands on lowest-common-denominator or grows per-platform escape hatches, the two classic ends of every write-once-render-anywhere attempt (C4). The old repo's `ContentTreeWire` was only a *mild* IR — semantic tokens, no layout nodes — and even it pulled kind-registries, dispatchers, and hosts into existence around it. A real IR is that gravitational field squared. The one thing to keep from considering it: the discipline it clarifies — **the shareable cross-platform artifact is what content *is*, never what it *looks like*.**
+### 5.2 Protocol-owned typed values
 
-## 5. Promoted direction
+Each opt-in protocol module owns the exact semantic values for its schema:
 
-**No blessed content/component roadmap in v2.** NMP first proves the generic live
-query and write-intent engine across kind-diverse applications. Reusable
-semantics enter through opt-in protocol/feature modules that own exact schemas
-or contribute typed context to immutable drafts. NMP does not select a note
-card, thread view, social feed, content tokenizer, or platform kit as the next
-canonical layer.
+- a NIP-23 module may decode an article title, summary, image, published time,
+  and Markdown body;
+- a NIP-99 module may decode a classified/product value and its protocol fields;
+- a photo module may decode the exact photo event schema it owns;
+- an app-defined module may expose its own typed value.
 
-The six rules below remain useful **conditional gates if UI packages are ever
-revisited**. They are not a commitment to build L2/L3.
+There is no central Rust enum that must be extended for every renderable Nostr
+kind. Modules expose typed decoders/adapters, and the optional renderer catalog
+associates those adapters with native views. Raw-event fallback remains
+permanent so unknown kinds never render as blank space.
 
-The rules — stated ledger-style, structural and falsifiable, not lints:
+### 5.3 What is shared across platforms
 
-- **R1 — Public-surface-only.** L2/L3 packages link the *published* SDK artifact. They cannot import engine internals because internals are not in their dependency graph — enforced by packaging, not review.
-- **R2 — Zero-scaffold.** Every component drops into a bare SwiftUI view / Compose function with only its declared inputs. No app-root host, provider, or environment installation may be *required*. (Native environment use for optional theming is platform idiom, fine.) Falsifier: a one-file sample app per component, compiled in CI.
-- **R3 — Rederivability.** Every reference component must be writable by an app developer from the public API alone. A component that needs a private hook is a *discovered SDK deficiency*: fix the surface first, then the component consumes the fix publicly. This makes the kit a permanent dogfooding instrument — the M5 question ("library or framework in disguise?") re-asked continuously.
-- **R4 — Engine blindness.** The engine repo contains no component registry, no component CLI verb, no component-aware type. The dependency arrow points one way. (Sharpest form: L3 kits live in sibling repos — see owner decisions.)
-- **R5 — Composition, not registration.** Extension = slots / children / native composition. No kind-dispatch registry, no renderer registration, no inversion of control. An app that wants a different article card passes a different view; nothing is "installed."
-- **R6 — Policy is a slot.** Anything owning a resource lifecycle (media playback, image loading, link-preview fetch) is a slot with a deliberately minimal default (static placeholder + tap-out). The AVPlayer rule: a canonical stateful default is wrong for someone by construction.
+The parser, entity decoding, stable node identity, recursion-budget rules, and
+protocol decoders should be shared Rust semantics projected to native values.
+SwiftUI and Compose must not independently reinterpret the same NIP fields.
 
-**What NMP owns / offers optionally / leaves to the app:**
+## 6. Layer B — the content client and render session
 
-| Owns (engine, always) | Offers optionally (opt-in, replaceable) | Leaves to the app |
-|---|---|---|
-| Rows, receipts, acquisition evidence, diagnostics — raw protocol values only | Exact-schema NIP/feature modules; immutable builders; typed protocol queries/context operations | Screen composition, navigation |
-| Generic store, routing, signing, retry, and query correctness | Pure protocol-semantic helpers when a module justifies them | Formatting, content taxonomy, display-name policy |
-| — | No official L2/L3 package currently planned | Resource policy, theming, rendering, and component selection |
+Layer B is the missing piece in both the current no-component direction and the
+old “pure renderer” rule. It prevents every application from rebuilding nested
+query orchestration.
 
-## 6. Staging
+### 6.1 Content client
 
-1. **Now:** ship no component or generic content package. Use kind-diverse
-   falsifiers to prove the core and provisional SDK surface.
-2. **As protocols demand it:** add opt-in modules around exact NIP/feature
-   semantics. Schema builders, typed queries, and contextual operations must
-   remain introspectable and must not privilege unrelated content kinds.
-3. **After diverse evidence:** consider pure semantic helpers only when at least
-   two materially different applications demonstrate the same protocol-owned
-   need. Popularity of kind:1/social-feed UI is not an architectural argument.
-4. **Revisit UI kits later, explicitly:** there is no first platform, first card,
-   or component distribution decision today. Any future proposal starts from
-   R1–R6 and must survive a fresh thesis review.
-5. **Never:** copy/lock/update component tooling; kind registries; component
-   hosts; a render IR in core.
+An app creates one optional content client from an existing engine:
 
-## 7. Honesty — what cannot be reconciled, and the owner decisions
+```swift
+let contentClient = NMPContentClient(engine: engine)
+```
 
-**The original hypothetical ask, taken literally, was not fully satisfiable.**
-"Offer UI components so builders don't re-implement per platform" implies shared
-component *code*. There is no such thing across SwiftUI/Compose/web without
-building the render-IR (Option D), which is the framework this rebuild exists to
-escape. The old repo's 122-file, five-target registry records what that business
-costs when unbudgeted; the promoted direction declines to start it.
+```kotlin
+val contentClient = NmpContentClient(engine)
+```
 
-**The residual thesis tension that never fully dissolves:** any official component kit, however governed, exerts gravity — examples get written against it, new users conflate it with NMP, and its convenience quietly competes with the two-noun surface for attention. R3 (rederivability) and the docs rule (raw surface first, component second) are mitigations, not cures. If at some point the kit's needs start driving SDK changes that no plain app asked for, that is the §4 tripwire ("a second mechanism appearing") wearing UI clothes — stop and re-read this note.
+This is not a second engine. It owns no event database, sockets, relay routing,
+or global account state. It uses public live queries and relies on NMP Core for
+canonical rows, query sharing, routing, provenance, and evidence.
 
-**Promotion decisions:**
+Environment/`CompositionLocal` injection may be offered as convenience, but is
+never required. Every component must have an explicit initializer accepting the
+content client or an already-created session. A bare preview/test can use a
+scripted session without constructing an engine.
 
-1. Do not fund or sequence an official L2/L3 component business in the current
-   v2 frame.
-2. Do not choose sibling-repo/in-repo distribution, a first platform, or a first
-   component before a later explicit review.
-3. Let exact-schema protocol/feature modules prove reusable semantics without
-   turning one content family into NMP's default product model.
-4. Keep the old-repo evidence and R1–R6 as rejection tests for any future
-   proposal, not as a latent implementation queue.
+### 6.2 Render session
+
+A `ContentSession` is scoped to one root document or rendered event. It exposes
+an observable latest-state `ContentSnapshot`:
+
+```text
+ContentSnapshot
+  document
+  nodes: NodeId -> NodeState
+  revision
+  activeReferenceCount
+  shortfalls
+```
+
+Reference node states are explicit:
+
+```text
+idle
+loading(cachedRow?)
+resolved(row, typedValue?, evidence)
+unavailable(evidence)
+shortfall(reason, evidence)
+invalid(originalText, reason)
+collapsed(depth | cycle | budget)
+```
+
+The runtime never translates scoped evidence into “globally missing.” A failed
+relay hint or EOSE is a fact about that acquisition path, not proof that the
+referenced event does not exist.
+
+### 6.3 Reference lowering
+
+The session converts Nostr entities into ordinary public NMP demands:
+
+- `npub` / `nprofile` -> current kind:0 metadata for that author;
+- `note` -> exact event-id selection;
+- `nevent` -> exact event-id selection; optional author/kind values are
+  validation/routing hints rather than extra match constraints, and relay hints
+  inform acquisition;
+- `naddr` -> exact address selection: kind + author + `d` identifier, retaining
+  replaceable-event semantics;
+- nested references -> the same process under a descended render context.
+
+Acquisition uses a configurable `ReferenceAcquisitionPolicy`. The sensible
+default is:
+
+1. expose matching cached rows immediately;
+2. use explicit relay hints when present;
+3. use author outboxes when an author is known and the target is author-owned;
+4. otherwise use the configured public/indexer authority;
+5. retain each path's evidence rather than merging it into a false global
+   success/failure flag.
+
+One logical reference may therefore own multiple ordinary live-query handles.
+NMP Core still coalesces compatible wire work and preserves distinct contextual
+evidence.
+
+### 6.4 Claim/release and visibility
+
+Parsing a document must not eagerly fetch an unbounded number of embeds. Each
+resolvable node supports idempotent claim/release:
+
+- a native primitive claims a node when it becomes render-relevant;
+- the last release tears down its child query after a small configurable grace
+  period to avoid scroll thrash;
+- identical targets within or across sessions share NMP's underlying demand and
+  cache even though their render paths remain distinct;
+- a session has explicit caps for active references, total resolved nodes,
+  recursion depth, and concurrent acquisitions;
+- exceeding a cap yields a visible collapsed/shortfall state, never silent
+  truncation.
+
+The old claim/release concept was sound. Its defect was requiring apps to wire
+`refs.event`, `refs.event.envelopes`, and an app-root host. The new client owns
+that orchestration directly over the public live-query API.
+
+### 6.5 Lifetime
+
+- A Swift session follows ARC/task cancellation and emits through an
+  `AsyncSequence` or `@Observable` adapter on the correct actor.
+- A Kotlin session follows coroutine/`Flow` cancellation.
+- Dropping a session releases all claims and query handles deterministically.
+- A native view may own a session for convenience; apps may also create and
+  retain sessions in their existing state architecture.
+- No app-wide NMP `ViewModel`, reducer, provider, or navigation container is
+  required.
+
+### 6.6 Shared versus native implementation
+
+The split must be explicit so “cross-platform” does not become either duplicated
+protocol logic or a hidden UI framework:
+
+- optional Rust content code owns parsing, stable node ids, entity-to-reference
+  plans, recursion/budget rules, and pure snapshot-reducer semantics;
+- Swift and Kotlin content clients own their native `NMPQuery`/`Flow` tasks,
+  visibility claims, actor/coroutine lifetime, and projection into observable
+  platform state;
+- the same fixture traces drive the pure reducer and both native clients;
+- query sharing, cache, routing, and evidence remain in NMP Core.
+
+This avoids forcing a foreign Rust-owned view lifecycle across FFI while keeping
+the protocol and state-transition semantics shared. If a later prototype proves
+a Rust-owned session object can share the supported engine facade without a
+second FFI component or host callback scaffold, it may replace the duplicated
+native orchestration. The public `ContentSession` contract does not depend on
+that internal choice.
+
+## 7. Layer C — native headless primitives
+
+Layer C is a linked, versioned SwiftUI and Compose primitive kit. Pixel code is
+implemented natively on each platform; API concepts and conformance fixtures
+remain aligned.
+
+The primitives are analogous to Bits UI: behaviorally complete, accessible,
+composable, minimally styled, and useful underneath many visual compositions.
+
+Candidate primitive families include:
+
+- `Content.Root`, `Content.Text`, `Content.Link`, `Content.Hashtag`;
+- `Mention.Root`, `Mention.Avatar`, `Mention.Name`;
+- `Embed.Root`, `Embed.Loading`, `Embed.Unavailable`, `Embed.Content`;
+- `Event.Root`, `Event.Author`, `Event.Timestamp`, `Event.Body`, `Event.Actions`;
+- `Article.Root`, `Article.Hero`, `Article.Title`, `Article.Byline`,
+  `Article.Body`;
+- `Product.Root`, `Product.Media`, `Product.Title`, `Product.Price`,
+  `Product.Actions`;
+- `Media.Grid`, `Media.Image`, `Media.VideoSlot`, `Media.Overflow`;
+- `Profile.Avatar`, `Profile.Name`, `Profile.Nip05`, `Profile.About`;
+- `UnknownEvent` and `RawEventDisclosure`.
+
+These names are illustrative, not frozen API.
+
+### 7.1 Primitive contract
+
+- State flows down; typed actions flow up.
+- Primitives consume a content session, node, or typed protocol value. They do
+  not parse raw events independently.
+- SwiftUI uses generic `@ViewBuilder` slots; Compose uses composable lambdas and
+  standard `Modifier` conventions.
+- Simple element-local state may stay local. Business/product state remains
+  app-controlled.
+- Accessibility labels, focus behavior, dynamic type/font scaling, reduced
+  motion, RTL, and input semantics are part of primitive correctness.
+- Theme values use native environment/`CompositionLocal` patterns and can be
+  overridden for any subtree.
+- Primitives do not navigate. They emit typed actions such as open profile,
+  open event, open URL, open hashtag, inspect relay evidence, or invoke a
+  protocol-specific action supplied by its renderer.
+
+### 7.2 Resource-owning slots
+
+Resource lifecycle is extensible by construction:
+
+- image loading;
+- video/audio playback;
+- link-preview HTTP work;
+- invoice/wallet interaction;
+- product purchase/contact flows;
+- file download or Blossom upload.
+
+A styled component may supply a conservative default, but the primitive accepts
+a replacement. No canonical renderer constructs a new media player during body
+evaluation, and no application must fork an article card merely to change video
+autoplay policy.
+
+## 8. Layer D — renderer catalog
+
+Heterogeneous content requires dispatch. Refusing to name that requirement does
+not remove it; it merely makes every app write a private switch statement.
+
+The renderer catalog belongs in the optional native UI layer, never in NMP Core.
+
+### 8.1 Catalog properties
+
+- Explicitly constructed and immutable after construction.
+- Scoped per app, screen, or subtree.
+- No registration through import side effects.
+- No process-global mutable singleton.
+- Deterministic duplicate handling: adding a second renderer for the same key is
+  an error unless the caller explicitly uses an override operation.
+- Permanent unknown-kind fallback.
+- Separate token renderers from resolved-event renderers.
+- Renderer packages may register exact kinds/schema adapters owned by their
+  protocol module; apps may register their own kinds.
+
+Illustrative composition:
+
+```swift
+let catalog = NostrRendererCatalog.standard
+    .install(Nip23ArticleRenderer())
+    .install(Nip99ProductRenderer())
+    .overriding(kind: appKind, with: AppRecordRenderer())
+```
+
+```kotlin
+val catalog = NostrRendererCatalog.standard()
+    .install(Nip23ArticleRenderer())
+    .install(Nip99ProductRenderer())
+    .override(appKind, AppRecordRenderer())
+```
+
+Passing a different catalog to a notification subtree can select compact
+renderers without changing the rest of the app.
+
+### 8.2 Dispatch flow
+
+```text
+resolved canonical row
+  -> protocol adapter, if installed
+  -> exact native renderer, if installed
+  -> generic event renderer
+  -> raw-event disclosure as final fallback
+```
+
+The catalog chooses presentation after delivery. It cannot influence demand,
+relay admission, store winner selection, or protocol validation.
+
+## 9. Layer E — styled open-code components
+
+Layer E supplies the useful defaults the primitive layer intentionally does not.
+These are polished native components and blocks distributed as source into the
+application.
+
+Examples:
+
+- minimal inline Nostr text;
+- full mixed-content view;
+- compact and standard note cards;
+- quote/event embed;
+- NIP-23 article card and reader;
+- NIP-99 product card and detail view;
+- photo card/gallery;
+- profile chip/card;
+- media grid and lightbox composition;
+- unknown-event fallback;
+- thread block;
+- composer pieces where a protocol module supplies the write semantics.
+
+Every component must:
+
+- look sensible immediately under the default theme;
+- be built from Layer C primitives rather than a monolith;
+- declare source files, linked dependencies, registry dependencies, supported
+  platform versions, and renderer keys;
+- expose important subviews as slots or small replaceable source files;
+- emit actions instead of owning navigation or product flows;
+- compile in a one-screen bare host with a scripted content session;
+- include previews/examples and accessibility metadata;
+- use only released public NMP/content/UI APIs.
+
+The app owns the installed source. Documentation may recommend extension seams,
+but it may never prohibit the app from editing its own component.
+
+## 10. Distribution and update design
+
+### 10.1 Why neither extreme works
+
+**Pure linked UI kit:** propagates fixes, but a large opinionated package becomes
+take-it-or-leave-it, encourages wrapper stacks, and makes deep visual changes
+fight a foreign API.
+
+**Pure source copy-in:** maximizes ownership, but correctness and accessibility
+fixes stop propagating. The old AVPlayer forks prove that a canonical bug and
+three divergent app copies can coexist indefinitely.
+
+The hybrid boundary puts code on the side matching its change character:
+
+| Linked and versioned | Source-installed and app-owned |
+|---|---|
+| parsing and entity decoding | styled cards and blocks |
+| reference/session lifecycle | visual composition |
+| protocol semantic adapters | app-specific renderer catalog assembly |
+| accessibility/behavior primitives | local theme presets and product chrome |
+| stable fallback behavior | opinionated resource-policy choices |
+
+### 10.2 Registry
+
+A standalone `nmp-ui` registry and CLI distributes native source items. The
+shape borrows from shadcn/jsrepo and the old NMP registry, with these commands as
+the intended capability set rather than frozen spelling:
+
+```text
+nmp-ui search
+nmp-ui view swiftui/article-card
+nmp-ui add swiftui/article-card
+nmp-ui diff swiftui/article-card
+nmp-ui update swiftui/article-card
+nmp-ui migrate <migration>
+```
+
+Requirements:
+
+- install only selected items and their declared dependency closure;
+- support SwiftUI and Compose as independent native targets;
+- allow namespaced third-party registries;
+- preview and diff before writing;
+- perform safe path validation;
+- never silently overwrite local edits;
+- record the exact upstream base for every installed file;
+- use a three-way merge for updates when possible;
+- leave unresolved files and the component version honestly conflicted rather
+  than advancing the lock as though the update succeeded;
+- support explicit overwrite or re-install only with user intent;
+- keep custom renderer files separate from upstream-owned installed files when
+  the app wants easy fast-forward updates;
+- make every generated mutation reviewable as an ordinary source diff.
+
+The old registry's dependency graph, roles, hashes, conflict preservation, and
+fixtures are reusable foundations. Its update behavior must be corrected: a
+conflicted file cannot retain its old base hash while the component-level lock
+advances and pretends the new version is installed.
+
+### 10.3 Ejection and long-term ownership
+
+Source-installed components are already ejected at the visual layer: they are
+ordinary app files from day one. An app may also vendor or fork a linked
+primitive/runtime package, but doing so is an explicit dependency decision with
+the understood cost of leaving the upstream fix stream.
+
+## 11. Styling and customization
+
+Each platform has a native default theme with semantic tokens, not hard-coded
+brand colors:
+
+```text
+colors · typography · spacing · shapes · borders · elevation/material
+content density · embed chrome · media aspect policy
+```
+
+Rules:
+
+- Defaults are carefully designed and production-usable.
+- Tokens can inherit from the app's native design system.
+- Any subtree can override theme values.
+- Component parameters/slots override theme defaults when local control is
+  needed.
+- Themes never cross FFI and never affect engine or content-session identity.
+- Compact/standard/reader layouts are separate compositions, not giant mode
+  enums with dozens of unrelated switches.
+
+## 12. Extensibility examples
+
+### 12.1 Replace one article card
+
+An app installs the standard article component, edits the source to match its
+brand, and explicitly overrides only the article renderer. Parsing, reference
+resolution, Markdown semantics, mentions, nested embeds, and evidence continue
+to receive linked fixes.
+
+### 12.2 Add an app-defined kind
+
+The app defines a typed decoder for its own event schema and a native renderer,
+then adds one explicit catalog entry. No NMP Core switch statement, central
+ontology change, or registry-server approval is required.
+
+### 12.3 Change media policy
+
+The app keeps the standard note/article compositions but supplies a lazy,
+tap-to-play video slot. Another app supplies eager playback. Neither forks the
+content parser or reference runtime.
+
+### 12.4 Use only the headless runtime
+
+An app with a radically different design can ignore all styled components and
+walk `ContentSnapshot` using its own views. It still avoids rebuilding parsing,
+entity lowering, nested query lifetime, and cycle/budget handling.
+
+## 13. Failure and fallback rules
+
+- Invalid token: render the original source text.
+- Unknown event kind: generic event card, then optional raw disclosure.
+- Missing renderer dependency: use the generic fallback; never blank space.
+- Cached row available while acquisition runs: render cached content and retain
+  scoped evidence.
+- Relay failure/EOSE: expose scoped state; never claim global absence.
+- Deleted/expired/replaced row: update through the ordinary live-query path.
+- Reference cycle: render a collapsed link/card explaining the cycle boundary.
+- Depth or active-reference budget reached: render a collapsed continuation.
+- Slow consumer: deliver the latest complete content snapshot.
+- Media loader failure: preserve layout and expose a retry/open-externally slot.
+- Protocol decoder failure: fall back to the generic raw event renderer.
+
+## 14. Security and privacy
+
+- Nostr URI parsing rejects secret-key entities and malformed payloads.
+- Relay hints pass through NMP's relay-admission policy; a renderer cannot turn
+  an arbitrary `.onion`, loopback, private, or otherwise disallowed URL into a
+  transport connection.
+- HTTP link previews and media loads are separate capabilities with explicit
+  SSRF, redirect, MIME, size, and privacy policy; they are not implied by Nostr
+  event acquisition.
+- Embedded private/decrypted content must not be inserted into a public shared
+  cache or rendered outside its authorized access context.
+- Rendered Markdown/HTML never executes arbitrary script or unsafe markup.
+- Recursion, node, byte, media, and concurrent-acquisition budgets are enforced
+  before work is scheduled.
+
+## 15. Verification strategy
+
+The UI ecosystem needs stronger proof than “the package compiles.”
+
+### Shared semantic fixtures
+
+- one corpus covering plaintext, Markdown, every supported Nostr entity,
+  Unicode, malformed inputs, custom emoji, invoices, overlapping matches,
+  source-range preservation, and nested references;
+- identical expected semantic documents across Rust, Swift, and Kotlin;
+- protocol-specific typed-value fixtures owned by each module.
+
+### Render-session falsifiers
+
+- two visible references to the same target share underlying demand;
+- release of one claimant does not close another claimant's work;
+- final release closes after the configured grace window;
+- `naddr` selects the correct current replaceable winner;
+- relay hints and fallback sources retain distinct evidence;
+- a self-reference and a multi-event cycle collapse deterministically;
+- depth, node, and concurrency budgets produce explicit states;
+- scroll churn does not grow active queries or tasks without bound;
+- cached rows render before live acquisition completes;
+- deletion/replacement/retraction updates mounted embeds.
+
+### Platform conformance
+
+- every primitive and source component compiles in a bare sample app;
+- scripted previews cover loading, resolved, unavailable, shortfall, unknown,
+  cycle, and budget states;
+- accessibility, dynamic type/font scale, dark mode, RTL, reduced motion, and
+  keyboard/focus behavior are exercised where applicable;
+- screenshot/golden tests cover the default styled components;
+- SwiftUI and Compose galleries consume only released public surfaces;
+- a real-engine mock-relay test proves the complete reference-to-query-to-view
+  path on both platforms.
+
+### Registry falsifiers
+
+- dependency closure is deterministic;
+- add/diff/view are stable and safe;
+- unmodified files fast-forward;
+- edited files three-way merge or remain honestly conflicted;
+- a conflicted update never advances the installed version falsely;
+- deleting a local file is not silently undone;
+- third-party namespaces cannot escape the app root;
+- installed source remains buildable after supported migrations.
+
+## 16. Options considered
+
+### A. No official content/UI ecosystem
+
+Rejected. It preserves a clean core by exporting an unreasonable amount of
+open-protocol complexity into every application.
+
+### B. Headless semantics only
+
+Rejected as the complete answer. It helps parsing and resolution but still
+requires every app to rebuild polished article, product, photo, note, profile,
+and unknown-kind renderers.
+
+### C. Pure linked UI packages
+
+Rejected as the only distribution. It is good for primitives and correctness,
+but poor as the sole home of opinionated, deeply customized product views.
+
+### D. Pure shadcn-style copy-in
+
+Rejected as the only distribution. It maximizes control but strands parser,
+lifecycle, accessibility, and resource fixes in app forks.
+
+### E. Cross-platform render IR
+
+Rejected. Sharing pixel/layout nodes across SwiftUI and Compose creates a UI
+framework, constrains native capabilities, and still requires platform
+interpreters. Shared semantics stop before pixels.
+
+### F. Hybrid linked substrate plus source-installed styled compositions
+
+Selected. It places update-sensitive correctness in dependencies and
+product-sensitive composition in app-owned source.
+
+## 17. Required boundaries
+
+These are the structural gates for implementation:
+
+1. **Core blindness:** no NMP Core dependency on content/UI packages.
+2. **Public-surface-only:** content/UI packages build against released NMP
+   facade products, not engine-interior crates or projection names.
+3. **No parallel truth:** content runtime owns no event store or transport.
+4. **No app-root requirement:** explicit initializers work without a provider;
+   environment injection is convenience only.
+5. **Scoped resolution:** nested demand belongs to observable, cancellable,
+   bounded content sessions.
+6. **Explicit catalog:** no import-time or process-global renderer mutation.
+7. **Native composition:** slots and child builders are normal SwiftUI/Compose
+   constructs, not a cross-platform render IR.
+8. **Open-code top layer:** styled compositions can be installed selectively and
+   edited freely.
+9. **Propagating substrate fixes:** semantics, lifecycle, and primitives remain
+   versioned dependencies by default.
+10. **Permanent fallbacks:** unknown, invalid, unavailable, and shortfall states
+    always render intelligibly.
+11. **Kind diversity:** conformance includes unrelated kinds and app-defined
+    schemas; kind:1 is not the architecture's privileged center.
+12. **Honest updates:** registry tooling never overwrites edits or reports a
+    conflicted component as current.
+
+## 18. Sequencing
+
+Implementation should be split into issue-backed vertical proofs:
+
+1. **Contract and fixtures:** define `ContentDocument`, stable node identity,
+   malformed fallback, and the shared cross-platform corpus.
+2. **Reference-session proof:** resolve `npub`/`nevent`/`naddr` through public
+   NMP queries with claim/release, evidence, cycle, and budget falsifiers.
+3. **One platform primitive proof:** SwiftUI content/embed primitives consuming
+   scripted and real sessions, with no app-root provider.
+4. **Second platform parity proof:** equivalent Compose primitives and the same
+   fixture/session contract.
+5. **Hybrid distribution proof:** install one styled component whose linked
+   primitives can update independently; prove local edits survive registry
+   updates honestly.
+6. **Kind-diverse renderer proof:** ship a note plus at least two materially
+   different schemas such as an article and a product/photo, including an
+   app-defined fallback/override.
+7. **Gallery and performance gate:** native galleries, screenshot/accessibility
+   proof, and a rapid-scroll nested-embed stress case.
+
+No broad catalog should be built before steps 1-5 prove the architecture. Once
+the foundation is proven, renderer breadth is an ongoing product program rather
+than a one-time milestone.
+
+## 19. Honest remaining choices
+
+The architecture above settles ownership and distribution boundaries. The
+following still require implementation issues or owner selection:
+
+- final package/repository names;
+- whether SwiftUI or Compose is the first vertical proof;
+- exact default theme direction;
+- the first protocol renderer set after the kind-diverse proof;
+- the default reference-acquisition fallback timings and budgets;
+- whether registry update uses an embedded merge library or shells out to Git;
+- supported platform/version matrix;
+- governance for accepting third-party registry namespaces.
+
+Those choices do not reopen the central decision: reusable Nostr rendering is
+an optional NMP ecosystem responsibility, with linked correctness primitives
+and app-owned styled compositions.
+
+## 20. Prior art and historical evidence
+
+- [shadcn/ui introduction](https://ui.shadcn.com/docs): open code,
+  composition, flat-file distribution, and beautiful defaults.
+- [shadcn CLI](https://ui.shadcn.com/docs/cli): selective add, view, diff,
+  migration, and ejection capabilities.
+- [Bits UI introduction](https://www.bits-ui.com/docs/introduction): linked
+  headless primitives with stable APIs, accessibility, composability, and full
+  styling control.
+- [Compose state hoisting](https://developer.android.com/develop/ui/compose/state-hoisting):
+  state stays near its lowest necessary owner and is exposed as immutable state
+  plus events.
+- [Compose custom design systems](https://developer.android.com/develop/ui/compose/designsystems/custom):
+  native themes and components can be extended, partially replaced, or fully
+  replaced using public APIs.
+- [Swift packages](https://developer.apple.com/documentation/xcode/swift-packages):
+  source packages are normal reusable dependencies and can be overridden with
+  local packages when deeper ownership is needed.
+- [Old NMP content crate](https://github.com/pablof7z/nostr-multi-platform/tree/master/crates/nmp-content),
+  [component registry](https://github.com/pablof7z/nostr-multi-platform/tree/master/crates/nmp-component-registry),
+  and [component installer](https://github.com/pablof7z/nostr-multi-platform/tree/master/crates/nmp-cli):
+  evidence for the tokenizer, recursion guard, claim/release, kind dispatch,
+  source registry, dependency closure, fixtures, and update failure modes this
+  design refines rather than discards.
