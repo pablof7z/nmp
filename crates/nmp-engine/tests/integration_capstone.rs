@@ -18,6 +18,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, RowsMsg};
@@ -225,6 +226,7 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),
                 ..PoolConfig::default()
             },
+            RelayAdmissionPolicy::default(),
         );
 
         let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
@@ -263,6 +265,7 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_secs(3600)),
                 ..PoolConfig::default()
             },
+            RelayAdmissionPolicy::default(),
         );
 
         // THE assertion: a's shape reads back from cache, offline, as a
@@ -371,6 +374,7 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
     handle.add_signer(LocalKeySigner::new(a.clone()));
     handle.set_active_account(Some(a.public_key()));
@@ -469,6 +473,7 @@ async fn write_ack_per_relay_over_real_relays() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
     handle.add_signer(LocalKeySigner::new(a.clone()));
     handle.set_active_account(Some(a.public_key()));
@@ -621,6 +626,7 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
     handle.add_signer(LocalKeySigner::new(a.clone()));
 

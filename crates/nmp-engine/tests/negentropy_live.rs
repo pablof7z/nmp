@@ -18,6 +18,7 @@ use std::net::TcpListener;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::runtime::{EngineThread, RowsMsg};
 use nmp_grammar::{Binding, Filter};
@@ -153,6 +154,7 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
+        RelayAdmissionPolicy::default(),
     );
     handle.add_signer(LocalKeySigner::new(a.clone()));
 

@@ -58,6 +58,18 @@ pub struct NmpEngineConfig {
     pub app_relays: Vec<String>,
     /// Operator fallback relay set (`Lane::Fallback`). Default empty.
     pub fallback_relays: Vec<String>,
+    /// Local/private relay HOSTS the operator explicitly opts into despite
+    /// the SSRF admission policy (issue #121). A DISCOVERED (network-sourced
+    /// kind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`
+    /// host is rejected by default; listing its host here (e.g. `"127.0.0.1"`
+    /// or `"localhost"`) re-admits discovered relays on that exact host.
+    /// Host-only match (port- and path-insensitive). Default empty.
+    pub allowed_local_relay_hosts: Vec<String>,
+    /// Global ceiling on concurrently-connected relays (issue #121, worker-
+    /// exhaustion defense). `0` (default) imposes no cap; a non-zero value
+    /// refuses relay dials past it and counts them in the diagnostics
+    /// `relays_rejected_over_cap`.
+    pub max_relays: u32,
 }
 
 impl From<NmpEngineConfig> for nmp::EngineConfig {
@@ -67,6 +79,8 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             indexer_relays: config.indexer_relays,
             app_relays: config.app_relays,
             fallback_relays: config.fallback_relays,
+            allowed_local_relay_hosts: config.allowed_local_relay_hosts,
+            max_relays: config.max_relays as usize,
         }
     }
 }

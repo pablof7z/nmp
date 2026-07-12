@@ -110,9 +110,11 @@ impl core::marker::UnsafeUnpin for nmp::Engine
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::Engine
 impl core::panic::unwind_safe::UnwindSafe for nmp::Engine
 pub struct nmp::EngineConfig
+pub nmp::EngineConfig::allowed_local_relay_hosts: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::app_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::fallback_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::indexer_relays: alloc::vec::Vec<alloc::string::String>
+pub nmp::EngineConfig::max_relays: usize
 pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
 impl core::clone::Clone for nmp::EngineConfig
 pub fn nmp::EngineConfig::clone(&self) -> nmp::EngineConfig
@@ -5012,6 +5014,26 @@ reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsS
                 }
               },
               "name": "dropped_merge_rules",
+              "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "primitive": "u64"
+                }
+              },
+              "name": "discovered_private_relays_rejected",
+              "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "primitive": "u64"
+                }
+              },
+              "name": "relays_rejected_over_cap",
               "visibility": "public"
             }
           ],

@@ -662,6 +662,8 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
             .into_iter()
             .map(|s| s.to_string())
             .collect(),
+        discovered_private_relays_rejected: s.discovered_private_relays_rejected,
+        relays_rejected_over_cap: s.relays_rejected_over_cap,
     }
 }
 
@@ -989,6 +991,8 @@ mod tests {
             }],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
+            discovered_private_relays_rejected: 0,
+            relays_rejected_over_cap: 0,
         });
 
         assert_eq!(ffi.relays[0].relay, relay.to_string());

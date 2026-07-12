@@ -75,7 +75,7 @@ use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
-    ReattachOutcome, ReceiptId, RowDelta, RowSink,
+    ReattachOutcome, ReceiptId, RelayAdmissionPolicy, RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteIntent, WriteStatus};
 
@@ -275,6 +275,7 @@ impl EngineThread {
         directory: D,
         cap: usize,
         pool_config: PoolConfig,
+        admission: RelayAdmissionPolicy,
     ) -> (Self, Handle)
     where
         S: EventStore + Send + 'static,
@@ -296,7 +297,9 @@ impl EngineThread {
         let self_inbox = cmd_tx.clone();
         let engine_join = thread::Builder::new()
             .name("nmp-engine".to_string())
-            .spawn(move || engine_loop(store, directory, cap, pool, &cmd_rx, &self_inbox))
+            .spawn(move || {
+                engine_loop(store, directory, cap, admission, pool, &cmd_rx, &self_inbox)
+            })
             .expect("nmp-engine: engine thread spawn must succeed");
 
         (
@@ -412,6 +415,7 @@ fn engine_loop<S, D>(
     store: S,
     directory: D,
     cap: usize,
+    admission: RelayAdmissionPolicy,
     pool: Pool,
     cmd_rx: &Receiver<Cmd>,
     self_inbox: &Sender<Cmd>,
@@ -419,7 +423,7 @@ fn engine_loop<S, D>(
     S: EventStore,
     D: RelayDirectory + 'static,
 {
-    let mut core = EngineCore::new(store, Box::new(directory), cap);
+    let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
@@ -491,7 +495,13 @@ fn engine_loop<S, D>(
                 let id = next_diag_id;
                 next_diag_id += 1;
                 let (tx, rx) = latest_channel();
-                tx.send(core.diagnostics_snapshot());
+                // Same pool-count stitch as the `Effect::EmitDiagnostics` arm
+                // (issue #121) — the proactive open-time snapshot must carry
+                // the relay-cap rejection count too, not only the ones fanned
+                // out later.
+                let mut snapshot = core.diagnostics_snapshot();
+                snapshot.relays_rejected_over_cap = pool.admission_rejections();
+                tx.send(snapshot);
                 if reply.send((id, rx)).is_err() {
                     // Caller already gave up -- nothing to register.
                     continue;
@@ -719,7 +729,15 @@ fn dispatch_effect(
                 let _ = tx.send((rows, evidence));
             }
         }
-        Effect::EmitDiagnostics(snapshot) => {
+        Effect::EmitDiagnostics(mut snapshot) => {
+            // Fold in the transport pool's own relay-cap rejection count
+            // (issue #121, worker-exhaustion half). `EngineCore` builds the
+            // snapshot with this field `0` because it has no view of the
+            // pool's slot table; the runtime edge is the one place that holds
+            // both the core-built snapshot AND the `Pool`, so it stitches the
+            // count in here before fan-out. Idempotent per snapshot (a fresh
+            // read each time), monotonic across snapshots.
+            snapshot.relays_rejected_over_cap = pool.admission_rejections();
             // Fan out to every currently-registered observer (M5 plan §1.2
             // step 4) -- each observer's own `LatestSender` overwrites its
             // own slot, so a slow consumer only ever sees the newest
