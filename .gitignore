@@ -39,6 +39,13 @@ xcuserdata/
 /apps/Falsifier/build/
 /apps/Falsifier/DerivedData/
 
+# NMP UI Gallery -- same xcodegen/build-output discipline as Falsifier.
+/apps/UIGallery/NMPUIGallery.xcodeproj
+/apps/UIGallery/Generated-Info.plist
+/apps/UIGallery/build/
+/apps/UIGallery/DerivedData/
+/apps/UIGallery/.derivedData/
+
 # #40 Kotlin/Flow falsifier packaging outputs
 # (scripts/build-kotlin-jvm.sh) -- same discipline as the Swift block above:
 # /gen-kotlin holds the raw uniffi-bindgen dump, and

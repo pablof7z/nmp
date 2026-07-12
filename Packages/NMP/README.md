@@ -5,10 +5,15 @@ The Swift SDK boundary. `NMP` is the raw two-noun engine target:
 `for await batch in nmp.observe(filter)`. `NMPContent` is an optional product
 for source-ranged mixed-content parsing, typed kind:0/NIP-23 resources, and
 bounded live reference sessions over that same engine. Importing or linking
-`NMPContent` is never required to use `NMP`.
+`NMPContent` is never required to use `NMP`. `NMPUI` is the optional SwiftUI
+product: `Avatar`, `Name`, mentions, event chrome, portrait and Medium-style
+article cards, user cards, reactions, and `NostrContent` with locally scoped
+renderer overrides.
 
 See `Sources/NMP/Engine.swift` and
 [`docs/builder/34-content.md`](../../docs/builder/34-content.md).
+For the SwiftUI product and live Gallery, see
+[`docs/builder/35-swiftui-ui.md`](../../docs/builder/35-swiftui-ui.md).
 
 ## Building from a clean clone (#18)
 

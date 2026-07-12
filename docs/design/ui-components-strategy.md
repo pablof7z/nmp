@@ -1,9 +1,10 @@
 # Optional Nostr content and UI building blocks
 
 - **Date:** 2026-07-12
-- **Status:** Architecture direction for issue #75. This replaces the
-  superseded "no component roadmap" recommendation. Implementation remains
-  issue-first and separately sequenced.
+- **Status:** Ratified architecture for issue #75. The shared content engine
+  is implemented by #147. The first SwiftUI family and live iOS Gallery are
+  implemented by #154; Compose, the open-code registry/CLI, and broader
+  protocol families remain separately tracked work.
 - **Core boundary:** NMP Core remains the content-neutral live-query and
   write-intent engine. The content runtime and UI kits are optional consumers
   of its public API.
@@ -77,10 +78,11 @@ continuously across platforms.
 
 ## 3. Product goals
 
-An application should be able to start with something equivalent to:
+An application can start with:
 
 ```swift
-NostrContent(event: row.event, content: contentClient)
+let session = contentClient.session(content: row.content)
+NostrContent(session: session, renderers: .standard)
 ```
 
 ```kotlin
@@ -132,17 +134,19 @@ The dependency arrow points downward only:
 - The app may replace or bypass any optional layer.
 
 Repository placement does not define the boundary; the dependency graph does.
-The recommended physical split is:
+The implemented physical split is:
 
 - this repository owns the optional shared content semantics and platform
   content-client packages because they must track the governed NMP facade and
   FFI contract closely;
-- a sibling `nmp-ui` repository owns native primitive packages, source
-  registries, design tokens, galleries, and styled components while consuming
-  released NMP public artifacts only.
+- this repository also owns first-party native primitive packages, the source
+  registry, galleries, and styled component sources as separately optional
+  products above the public content boundary. The CLI is named `nmp-ui`; it is
+  not a subcommand or hidden mode of the engine CLI.
 
-This keeps the engine repository from becoming a component catalog while still
-making content resolution a supported, tested part of the NMP developer story.
+Co-location keeps the components continuously tested against their public
+substrate. Dependency direction—not repository geography—keeps NMP Core from
+becoming a component framework.
 
 ## 5. Layer A — shared content semantics
 
@@ -414,13 +418,13 @@ The renderer catalog belongs in the optional native UI layer, never in NMP Core.
 - Renderer packages may register exact kinds/schema adapters owned by their
   protocol module; apps may register their own kinds.
 
-Illustrative composition:
+Swift composition:
 
 ```swift
-let catalog = NostrRendererCatalog.standard
-    .install(Nip23ArticleRenderer())
-    .install(Nip99ProductRenderer())
-    .overriding(kind: appKind, with: AppRecordRenderer())
+let renderers = NostrContentRenderers.standard
+    .event(kind: appKind, purpose: .embedded) { input in
+        AppRecordCard(event: input.event)
+    }
 ```
 
 ```kotlin
@@ -506,7 +510,7 @@ The hybrid boundary puts code on the side matching its change character:
 
 ### 10.2 Registry
 
-A standalone `nmp-ui` registry and CLI distributes native source items. The
+A standalone `nmp-ui` CLI distributes native source items. The
 shape borrows from shadcn/jsrepo and the old NMP registry, with these commands as
 the intended capability set rather than frozen spelling:
 
@@ -738,11 +742,11 @@ These are the structural gates for implementation:
 
 Implementation should be split into issue-backed vertical proofs:
 
-1. **Contract and fixtures:** define `ContentDocument`, stable node identity,
+1. **Contract and fixtures — built (#147):** define `ContentDocument`, stable node identity,
    malformed fallback, and the shared cross-platform corpus.
-2. **Reference-session proof:** resolve `npub`/`nevent`/`naddr` through public
+2. **Reference-session proof — built (#147):** resolve `npub`/`nevent`/`naddr` through public
    NMP queries with claim/release, evidence, cycle, and budget falsifiers.
-3. **One platform primitive proof:** SwiftUI content/embed primitives consuming
+3. **One platform primitive proof — built (#154):** SwiftUI content/embed primitives consuming
    scripted and real sessions, with no app-root provider.
 4. **Second platform parity proof:** equivalent Compose primitives and the same
    fixture/session contract.
@@ -752,8 +756,10 @@ Implementation should be split into issue-backed vertical proofs:
 6. **Kind-diverse renderer proof:** ship a note plus at least two materially
    different schemas such as an article and a product/photo, including an
    app-defined fallback/override.
-7. **Gallery and performance gate:** native galleries, screenshot/accessibility
-   proof, and a rapid-scroll nested-embed stress case.
+7. **Gallery and performance gate — first live iOS Gallery built (#154):**
+   native galleries, screenshot/accessibility proof, and a rapid-scroll
+   nested-embed stress case. Compose Gallery and deeper performance automation
+   remain open.
 
 No broad catalog should be built before steps 1-5 prove the architecture. Once
 the foundation is proven, renderer breadth is an ongoing product program rather
@@ -764,13 +770,12 @@ than a one-time milestone.
 The architecture above settles ownership and distribution boundaries. The
 following still require implementation issues or owner selection:
 
-- final package/repository names;
-- whether SwiftUI or Compose is the first vertical proof;
+- final Compose package names;
 - exact default theme direction;
 - the first protocol renderer set after the kind-diverse proof;
 - the default reference-acquisition fallback timings and budgets;
 - whether registry update uses an embedded merge library or shells out to Git;
-- supported platform/version matrix;
+- supported Compose platform/version matrix;
 - governance for accepting third-party registry namespaces.
 
 Those choices do not reopen the central decision: reusable Nostr rendering is
