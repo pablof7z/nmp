@@ -190,6 +190,7 @@ impl NmpEngine {
             while let Ok(status) = receipt_rx.recv() {
                 observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
             }
+            observer.on_closed();
         });
 
         Ok(receipt_id)
@@ -210,6 +211,7 @@ impl NmpEngine {
                     while let Ok(status) = receipt_rx.recv() {
                         observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
                     }
+                    observer.on_closed();
                 });
             }
             ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {}
@@ -339,6 +341,8 @@ mod tests {
         fn on_status(&self, status: FfiWriteStatus) {
             let _ = self.tx.lock().unwrap().send(status);
         }
+
+        fn on_closed(&self) {}
     }
 
     /// #52's headline falsifier, exercised through the FFI boundary this
@@ -654,6 +658,84 @@ mod tests {
         assert!(
             closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "on_closed must fire EXACTLY once, not once per cancel() call/Arc owner/Drop"
+        );
+
+        engine.shutdown();
+    }
+
+    struct ClosedCountingReceiptObserver {
+        status_tx: Mutex<mpsc::Sender<FfiWriteStatus>>,
+        closed_tx: Mutex<mpsc::Sender<()>>,
+    }
+
+    impl ReceiptObserver for ClosedCountingReceiptObserver {
+        fn on_status(&self, status: FfiWriteStatus) {
+            let _ = self.status_tx.lock().unwrap().send(status);
+        }
+
+        fn on_closed(&self) {
+            let _ = self.closed_tx.lock().unwrap().send(());
+        }
+    }
+
+    /// #125's falsifier, mirroring the `RowObserver` close proof above but for
+    /// the receipt drain: a receipt stream must terminate its observer with
+    /// exactly one `on_closed` when the receipt `Sender` is dropped (here via
+    /// a tampered `Signed` payload that fails closed -- `Failed` is the sole
+    /// terminal, after which the engine drops the receipt sender). Before this
+    /// fix `NmpEngine::publish`'s drain loop ended silently, so a Swift/Kotlin
+    /// receipt stream was never finished and its continuation leaked/hung.
+    #[test]
+    fn ffi_receipt_stream_yields_exactly_one_on_closed_when_sender_dropped() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9999), "original")
+            .sign_with_keys(&keys)
+            .expect("test fixture must sign cleanly");
+        let intent = FfiWriteIntent {
+            payload: FfiWritePayload::Signed {
+                id: event.id.to_hex(),
+                pubkey: event.pubkey.to_hex(),
+                created_at: event.created_at.as_secs(),
+                kind: event.kind.as_u16(),
+                tags: event.tags.iter().map(|t| t.clone().to_vec()).collect(),
+                // Tampered after signing: guarantees a fail-closed terminal so
+                // the receipt sender is dropped and the drain loop ends.
+                content: "tampered".to_string(),
+                sig: event.sig.to_string(),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+        };
+
+        let (status_tx, status_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let observer = Box::new(ClosedCountingReceiptObserver {
+            status_tx: Mutex::new(status_tx),
+            closed_tx: Mutex::new(closed_tx),
+        });
+
+        engine
+            .publish(intent, observer)
+            .expect("a well-formed (if tampered) Signed payload must parse at the FFI boundary");
+
+        // The stream is genuinely active first (the terminal fact arrives),
+        // proving `on_closed` follows real delivery, not an empty stream.
+        match status_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a Durable intent must yield a status")
+        {
+            FfiWriteStatus::Failed { .. } => {}
+            other => panic!("expected FfiWriteStatus::Failed, got {other:?}"),
+        }
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("on_closed must fire once the receipt sender is dropped, not hang");
+        assert!(
+            closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "on_closed must fire EXACTLY once when the receipt stream terminates"
         );
 
         engine.shutdown();

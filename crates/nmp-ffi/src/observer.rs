@@ -26,9 +26,14 @@ pub trait RowObserver: Send + Sync {
 /// converged -- this may be called many times per publish, ending only when
 /// the intent reaches every relay's terminal, or never at all for an
 /// `Ephemeral` intent, mirroring `Handle::publish`'s own receiver).
+/// `on_closed` fires exactly once, when the receipt's `Sender` is dropped
+/// (the intent has resolved or the engine has shut down) -- after which no
+/// further `on_status` call will ever occur, mirroring `RowObserver` and
+/// `DiagnosticsObserver`.
 #[uniffi::export(callback_interface)]
 pub trait ReceiptObserver: Send + Sync {
     fn on_status(&self, status: FfiWriteStatus);
+    fn on_closed(&self);
 }
 
 /// Drains a live diagnostics stream (`nmp::Engine::observe_diagnostics`'s

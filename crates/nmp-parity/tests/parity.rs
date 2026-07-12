@@ -774,6 +774,8 @@ impl ReceiptObserver for FfiReceipts {
             .unwrap_or_else(|poison| poison.into_inner())
             .send(status);
     }
+
+    fn on_closed(&self) {}
 }
 
 async fn setup_relay(keys: &Keys, query_event: &nostr::Event) -> ScriptedRelay {

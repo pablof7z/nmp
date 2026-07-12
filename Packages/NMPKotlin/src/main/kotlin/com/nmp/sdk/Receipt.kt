@@ -30,6 +30,13 @@ private class ReceiptBridge {
             override fun onStatus(status: FfiWriteStatus) {
                 channel.trySendBlocking(WriteStatus.from(status))
             }
+
+            override fun onClosed() {
+                // The receipt `Sender` was dropped (intent resolved / engine
+                // shut down) -- close the channel so its `Flow` completes,
+                // mirroring Query.kt's `RowObserver` bridge.
+                channel.close()
+            }
         }
 
     fun receipt(id: ULong): Receipt = Receipt(id, channel.receiveAsFlow())
