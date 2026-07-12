@@ -50,14 +50,30 @@ pub struct SimpleGroupsList {
 /// concern (the query that acquired it already constrained `kinds:
 /// [10009]`), not re-validated here.
 pub fn decode_simple_groups_list(event: &Event) -> SimpleGroupsList {
+    decode_simple_groups_list_from_raw_tags(
+        event.tags.iter().map(|tag| tag.as_slice()),
+        &event.content,
+    )
+}
+
+/// The same decode, over raw `[tag_name, values...]` string arrays rather
+/// than a `nostr::Event` -- the shape `nmp-ffi`'s `FfiRow.tags` already
+/// carries (a delivered row's raw tokens, ledger #12). Sharing this core
+/// with [`decode_simple_groups_list`] (which just adapts a real `Event`'s
+/// `Tag`s into the same `&[String]` shape via `Tag::as_slice`) means the
+/// FFI boundary never needs to reconstruct a full signed `nostr::Event`
+/// just to re-decode tags it already received as raw strings.
+pub fn decode_simple_groups_list_from_raw_tags<'a>(
+    tags: impl IntoIterator<Item = &'a [String]>,
+    content: &str,
+) -> SimpleGroupsList {
     let mut items = Vec::new();
     let mut relays_in_use = Vec::new();
     let mut malformed_item_count = 0usize;
 
-    for tag in event.tags.iter() {
-        match tag.kind().as_str() {
-            "group" => {
-                let slice = tag.as_slice();
+    for slice in tags {
+        match slice.first().map(String::as_str) {
+            Some("group") => {
                 // `["group", id, relay, name?]` -- id + relay are
                 // required, name is optional (#63).
                 let Some(group_id) = slice.get(1) else {
@@ -78,14 +94,11 @@ pub fn decode_simple_groups_list(event: &Event) -> SimpleGroupsList {
                     name: slice.get(3).cloned(),
                 });
             }
-            "r" => {
-                let slice = tag.as_slice();
-                match slice.get(1).map(|s| RelayUrl::parse(s)) {
-                    Some(Ok(relay)) => relays_in_use.push(relay),
-                    Some(Err(_)) => malformed_item_count += 1,
-                    None => malformed_item_count += 1,
-                }
-            }
+            Some("r") => match slice.get(1).map(|s| RelayUrl::parse(s)) {
+                Some(Ok(relay)) => relays_in_use.push(relay),
+                Some(Err(_)) => malformed_item_count += 1,
+                None => malformed_item_count += 1,
+            },
             _ => {}
         }
     }
@@ -94,7 +107,7 @@ pub fn decode_simple_groups_list(event: &Event) -> SimpleGroupsList {
         items,
         relays_in_use,
         malformed_item_count,
-        has_private_content: !event.content.is_empty(),
+        has_private_content: !content.is_empty(),
     }
 }
 
@@ -198,5 +211,26 @@ mod tests {
         let list = decode_simple_groups_list(&event);
         assert!(list.has_private_content);
         assert!(list.items.is_empty());
+    }
+
+    /// This equivalence is the seam `nmp-ffi` relies on: an app only ever
+    /// hands the FFI boundary raw tag arrays (`FfiRow.tags`), never a
+    /// reconstructed `nostr::Event` -- so `decode_simple_groups_list_from_
+    /// raw_tags` must produce EXACTLY what `decode_simple_groups_list`
+    /// would over the same event's tags/content.
+    #[test]
+    fn raw_tags_entry_point_agrees_with_the_event_entry_point() {
+        let tags = vec![
+            group_tag("group-a", "wss://relay-a.example.com", Some("Group A")),
+            r_tag("wss://relay-c.example.com"),
+        ];
+        let event = signed_event(tags.clone(), "some-content");
+        let via_event = decode_simple_groups_list(&event);
+        let raw_tags: Vec<Vec<String>> = tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        let via_raw = decode_simple_groups_list_from_raw_tags(
+            raw_tags.iter().map(|t| t.as_slice()),
+            "some-content",
+        );
+        assert_eq!(via_event, via_raw);
     }
 }

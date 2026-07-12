@@ -28,6 +28,14 @@ nostr.workspace = true
 nmp-grammar.workspace = true
 nmp.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
+# #108: the read-only NIP-29 host-browser projection. Direct deps here
+# (not proxied through the `nmp` facade) -- these stay opt-in, app-chosen
+# dependencies at the direct-Rust layer (#63/#45's "opt-in protocol
+# crate" framing), but `nmp-ffi` is the ONE staticlib/cdylib every Swift/
+# Kotlin app links, so it bundles the projection directly, same treatment
+# as `nmp-grammar` itself gets here.
+nmp-nip51.workspace = true
+nmp-nip29.workspace = true
 
 # #99: the corrupt-retained-receipt reattach falsifier needs to write a
 # genuinely undecodable row directly into a real `RedbStore` file, the same

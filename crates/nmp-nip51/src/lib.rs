@@ -14,4 +14,7 @@ mod simple_groups;
 
 pub use claims::claims;
 pub use demand::active_account_demand;
-pub use simple_groups::{decode_simple_groups_list, SimpleGroupEntry, SimpleGroupsList};
+pub use simple_groups::{
+    decode_simple_groups_list, decode_simple_groups_list_from_raw_tags, SimpleGroupEntry,
+    SimpleGroupsList,
+};

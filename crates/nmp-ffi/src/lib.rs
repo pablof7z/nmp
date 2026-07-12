@@ -22,14 +22,19 @@
 //! - [`entity`] -- the bech32 nostr-entity DECODE codec (#116), the one
 //!   exported free function that needs no `NmpEngine` instance at all: no
 //!   engine, no network, no signing.
+//! - [`nip29`] -- the read-only NIP-29 host-browser projection (#108):
+//!   `nmp-nip51`/`nmp-nip29`'s constructors/codec as top-level free
+//!   functions, same "no `NmpEngine` instance needed" shape as [`entity`].
 //!
 //! This crate has NO dependency on `nmp-engine` (or any other mechanism
 //! crate) at all -- every engine-side value type it mirrors is sourced
-//! through `nmp`'s own re-exports (#52 Unit B).
+//! through `nmp`'s own re-exports (#52 Unit B). `nmp-nip51`/`nmp-nip29`
+//! are the one deliberate exception (see [`nip29`]'s own doc for why).
 
 pub mod convert;
 pub mod entity;
 pub mod facade;
+pub mod nip29;
 pub mod observer;
 pub mod types;
 
