@@ -58,7 +58,45 @@ pub struct NmpEngineConfig {
     pub app_relays: Vec<String>,
     /// Operator fallback relay set (`Lane::Fallback`). Default empty.
     pub fallback_relays: Vec<String>,
+    /// Local/private relay HOSTS the operator explicitly opts into despite
+    /// the SSRF admission policy (issue #121). A DISCOVERED (network-sourced
+    /// kind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`
+    /// host is rejected by default; listing its host here (e.g. `"127.0.0.1"`
+    /// or `"localhost"`) re-admits discovered relays on that exact host.
+    /// Host-only match (port- and path-insensitive). Default empty.
+    ///
+    /// `default = []` keeps this field OPTIONAL for existing foreign-language
+    /// callers — adding it must not break records constructed before #121.
+    #[uniffi(default = [])]
+    pub allowed_local_relay_hosts: Vec<String>,
+    /// OPT-IN, defense-in-depth ceiling on concurrently-connected relays
+    /// (issue #121). `0` imposes no cap; a non-zero value refuses relay dials
+    /// past it and counts them in the diagnostics `relays_rejected_over_cap`.
+    /// NOT the primary worker-exhaustion defense — fan-out is already bounded
+    /// by `nmp-router`'s solver cap; this is a coarse absolute backstop.
+    ///
+    /// The `default =` literal below MUST stay equal to
+    /// [`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,
+    /// never a const path) — the const is the single Rust-side knob; the
+    /// literal is its foreign-binding mirror. The default VALUE itself is an
+    /// open owner decision (sane cap vs. uncapped, issue #121); `0` is the
+    /// interim uncapped placeholder.
+    #[uniffi(default = 0)]
+    pub max_relays: u32,
 }
+
+/// The default relay-count ceiling for a freshly-constructed engine config
+/// (issue #121). HOLD: the value is an open owner decision (a sane cap vs.
+/// uncapped); `0` (uncapped) is the interim placeholder. When the owner picks
+/// a number, update BOTH this const AND the `#[uniffi(default = N)]` literal
+/// on [`NmpEngineConfig::max_relays`] above — they must match.
+pub const DEFAULT_MAX_RELAYS: u32 = 0;
+
+// Compile-time guard that the Rust `Default` derive for `NmpEngineConfig`
+// (which yields `0` for `max_relays`) still agrees with `DEFAULT_MAX_RELAYS`.
+// If the owner raises the const without giving `NmpEngineConfig` a matching
+// manual `Default`, this fails the build rather than silently diverging.
+const _: () = assert!(DEFAULT_MAX_RELAYS == 0);
 
 impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {
@@ -67,6 +105,8 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             indexer_relays: config.indexer_relays,
             app_relays: config.app_relays,
             fallback_relays: config.fallback_relays,
+            allowed_local_relay_hosts: config.allowed_local_relay_hosts,
+            max_relays: config.max_relays as usize,
         }
     }
 }

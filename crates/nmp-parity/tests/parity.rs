@@ -791,6 +791,11 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
         indexer_relays: vec![relay_url.clone()],
+        // This scenario exercises the REAL discovery path: the author's
+        // seeded kind:10002 names this loopback relay as its write relay, so
+        // it arrives as a DISCOVERED relay and must be opted past the SSRF
+        // admission policy (issue #121) for the test's loopback host.
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..EngineConfig::default()
     })
     .expect("direct engine must construct");
@@ -916,6 +921,11 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         indexer_relays: vec![relay_url.clone()],
         app_relays: vec![],
         fallback_relays: vec![],
+        // Same real-discovery opt-in as `run_direct_success` — the seeded
+        // kind:10002 names this loopback relay, so it must be admitted past
+        // the SSRF policy (issue #121) for the two facades to stay identical.
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..NmpEngineConfig::default()
     })
     .expect("FFI engine must construct");
     let pubkey = engine
@@ -1052,6 +1062,7 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         indexer_relays: vec![],
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
+        ..NmpEngineConfig::default()
     })
     .expect("FFI tampered engine must construct");
     let event = nostr::EventBuilder::new(Kind::Custom(WRITE_KIND), "original")
