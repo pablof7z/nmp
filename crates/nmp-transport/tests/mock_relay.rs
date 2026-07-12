@@ -102,6 +102,28 @@ async fn wait_for_listener(port: u16) {
     .expect("test relay listener did not become ready");
 }
 
+/// `LocalRelay::shutdown()` is fire-and-forget: it calls `tokio::sync::
+/// Notify::notify_waiters` on the listener task and returns immediately --
+/// it never awaits that task actually waking up, ceasing to accept, or
+/// releasing the OS-level TCP socket. A fixed `sleep` after it is a guess
+/// at how long that async teardown takes, not a fact about it (the #60
+/// anti-pattern this rewrite removes: condition on what is actually true,
+/// never on how long something usually takes). This is `wait_for_listener`'s
+/// mirror image: poll for the OBSERVABLE condition that actually matters --
+/// the port is bindable again -- rather than assuming a delay was enough.
+async fn wait_for_port_released(port: u16) {
+    tokio::time::timeout(Duration::from_secs(5), async move {
+        loop {
+            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("port was not released by the previous relay instance");
+}
+
 // Multi-thread flavor is load-bearing here, not a style choice: the test
 // body blocks synchronously (`recv_matching` calls `mpsc::Receiver::recv_timeout`,
 // never `.await`) while waiting for `nmp-transport`'s own OS threads to do
@@ -204,13 +226,11 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     // briefly, and redial — no NMP code drives this, only the harvested
     // reconnect loop.
     relay_a.shutdown();
+    wait_for_port_released(port).await;
     let relay_b = LocalRelay::builder()
         .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .port(port)
         .build();
-    // Give the OS a brief moment to release the port after relay_a's
-    // shutdown before relay_b binds it.
-    tokio::time::sleep(Duration::from_millis(100)).await;
     relay_b.run().await.expect("run relay_b");
     wait_for_listener(port).await;
     relay_b
@@ -355,11 +375,11 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
     }
 
     // Bring relay_b up on the SAME port and let the pool reconnect.
+    wait_for_port_released(port).await;
     let relay_b = LocalRelay::builder()
         .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .port(port)
         .build();
-    tokio::time::sleep(Duration::from_millis(100)).await;
     relay_b.run().await.expect("run relay_b");
     wait_for_listener(port).await;
 
