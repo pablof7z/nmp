@@ -73,3 +73,14 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Updated falsifiers:** backend-parity and real-Redb-reopen route-revision tests; a SIGABRT-before-commit rollback/ordinal proof; one-lane, all-lane, mixed-success-plus-ACK, and repeated restart tests; dynamic AuthorOutbox empty-directory recovery; ToInboxes changed-directory/removal recovery with partial revision failure; exhaustive Rust/FFI/parity plus Swift/Kotlin status mappings.
 - **Superseded path removed:** the ambiguous empty `pending_relays` sentinel and recovery that depended only on current directory resolution are replaced by separate Started, durable-unstarted, and volatile-route-blocked ownership sets backed by append-only route facts; no compatibility alias or blind retry path remains.
 - **Human signoff:** the repository owner's delegated orchestrator approves this surface contract for review in draft PR #91 on 2026-07-12; exact-head adversarial review and required CI remain merge gates.
+
+## 2026-07-12 — Distinguish absent receipts from retained unreadable evidence ([PR #97](https://github.com/pablof7z/nmp/pull/97))
+
+- **Failure evidence:** issue #88 showed that the prior optional/bare-false reattachment result made a never-issued receipt indistinguishable from a retained durable obligation whose receipt, attempt, or route evidence could not be decoded.
+- **Changed projections:** ffi,kotlin,rust,swift
+- **Rust / FFI / Swift / Kotlin impact:** Rust replaces optional reattachment with `ReceiptReattachment::{Attached, NotFound, RetainedButUnreadable}`; UniFFI mirrors the three outcomes, `publish` returns the stable store-issued receipt id, and Swift/Kotlin expose a native typed reattachment result carrying a receipt stream only for `Attached`.
+- **Persistence impact:** the canonical store receipt lookup is now fallible; Redb preserves undecodable receipt bytes through boot reconciliation and reports them as unreadable, while corrupt receipt/attempt/route evidence never registers an observer, publishes, or deletes the retained obligation. Terminal retained receipts remain readable and reattachable.
+- **Diagnostics impact:** none; receipt reattachment remains a write-observation surface and does not change query or relay diagnostics schemas.
+- **Updated falsifiers:** unknown, live, terminal, multiple-observer, genuine-restart, corrupt-receipt, corrupt-attempt, and corrupt-route/lane tests plus exhaustive Rust/FFI/Swift/Kotlin three-variant mapping tests.
+- **Superseded path removed:** optional/bare-false reattachment and the infallible Redb receipt decoder are replaced rather than retained as compatibility paths; corruption can no longer collapse into absence or panic during boot reconciliation.
+- **Human signoff:** the repository owner's delegated orchestrator approves this surface contract for review in draft PR #97 on 2026-07-12; exact-head adversarial review and required CI remain merge gates.
