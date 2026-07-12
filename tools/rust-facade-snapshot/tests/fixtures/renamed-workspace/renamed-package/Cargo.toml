@@ -1,0 +1,11 @@
+[package]
+name = "renamed-package"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "actual_lib_root"
+
+[dependencies]
+deep_alias = { package = "nested-package", path = "../nested-package" }

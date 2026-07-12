@@ -1,0 +1,8 @@
+[package]
+name = "nmp"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+first_alias = { package = "renamed-package", path = "../renamed-package" }

@@ -1,0 +1,12 @@
+[package]
+name = "nmp-rust-facade-snapshot"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "=1.0.103"
+cargo_metadata = "=0.23.1"
+serde_json = "=1.0.150"

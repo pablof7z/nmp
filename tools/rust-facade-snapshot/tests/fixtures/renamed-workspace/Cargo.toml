@@ -1,0 +1,3 @@
+[workspace]
+members = ["facade", "renamed-package", "nested-package"]
+resolver = "2"

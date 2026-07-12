@@ -1,5 +1,6 @@
 /target
 /tools/component-interface-snapshot/target/
+/tools/rust-facade-snapshot/target/
 **/*.rs.bk
 Cargo.lock.orig
 .DS_Store
