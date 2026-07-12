@@ -724,6 +724,80 @@ fn raw_attempt_key(intent_id: nmp_store::IntentId, relay: &RelayUrl, ordinal: &s
     )
 }
 
+fn raw_route_revision_key(intent_id: nmp_store::IntentId, ordinal: u64) -> String {
+    format!("{:020}:{:020}", intent_id.0, ordinal)
+}
+
+#[test]
+fn route_revision_range_excludes_prefix_intents_but_rejects_target_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("route-range-corruption.redb");
+    let k = keys();
+    let short = RelayUrl::parse("wss://prefix.example/x").unwrap();
+    let extended = RelayUrl::parse("wss://prefix.example/x:443").unwrap();
+    let (target, prefix_adversary) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let mut ids = Vec::new();
+        for index in 0..10u64 {
+            let (frozen, _) = compose(&k, Kind::TextNote, &format!("intent-{index}"), 500 + index);
+            let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 500 + index));
+            ids.push(outcome.journaled_intent_id().unwrap());
+        }
+        assert_eq!(ids[0], nmp_store::IntentId(1));
+        assert_eq!(ids[9], nmp_store::IntentId(10));
+        store
+            .record_route_revision(ids[0], BTreeSet::from([short.clone(), extended.clone()]))
+            .unwrap();
+        store
+            .record_route_revision(ids[9], BTreeSet::from([short.clone()]))
+            .unwrap();
+        (ids[0], ids[9])
+    };
+
+    const ROUTES: TableDefinition<&str, &str> = TableDefinition::new("outbox_route_revisions");
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(ROUTES).unwrap();
+        table
+            .insert(raw_route_revision_key(prefix_adversary, 1).as_str(), "{}")
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+
+    let store = RedbStore::open(&path).unwrap();
+    let target_rows = store.recover_route_revisions(target).unwrap();
+    assert_eq!(target_rows.len(), 1);
+    assert_eq!(target_rows[0].relays, BTreeSet::from([short, extended]));
+    drop(store);
+
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(ROUTES).unwrap();
+        let key = raw_route_revision_key(target, 1);
+        let json = table
+            .get(key.as_str())
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_string();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["ordinal"] = serde_json::json!(2);
+        let encoded = serde_json::to_string(&value).unwrap();
+        table.insert(key.as_str(), encoded.as_str()).unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+    assert!(RedbStore::open(&path)
+        .unwrap()
+        .recover_route_revisions(target)
+        .unwrap_err()
+        .to_string()
+        .contains("key does not match"));
+}
+
 #[test]
 fn corrupt_or_unknown_attempt_rows_are_fallible_not_panics() {
     let dir = tempfile::tempdir().unwrap();
