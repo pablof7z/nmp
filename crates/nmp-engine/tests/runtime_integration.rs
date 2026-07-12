@@ -214,7 +214,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-                }),
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()

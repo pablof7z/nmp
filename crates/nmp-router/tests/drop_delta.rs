@@ -42,7 +42,8 @@ fn dropped_handle_close_reaches_wire() {
     );
 
     let mut h = Harness::new();
-    let (handle, _open_delta) = h.subscribe(LiveQuery::from_filter(literal_author_filter(&author_hex)));
+    let (handle, _open_delta) =
+        h.subscribe(LiveQuery::from_filter(literal_author_filter(&author_hex)));
 
     let demand_open = h.demand_with_context();
     assert_eq!(demand_open.len(), 1);

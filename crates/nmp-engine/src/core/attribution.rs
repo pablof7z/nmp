@@ -67,7 +67,10 @@ impl AttributionState {
     /// all). `demand` carries each atom's full `ContextualAtom` identity
     /// (#106) so the retained value is keyed AND populated the SAME way
     /// `record_send`/`attribute_eose`'s `CoverageKey`s already are.
-    pub(crate) fn observe_demand<'a>(&mut self, demand: impl IntoIterator<Item = &'a ContextualAtom>) {
+    pub(crate) fn observe_demand<'a>(
+        &mut self,
+        demand: impl IntoIterator<Item = &'a ContextualAtom>,
+    ) {
         for atom in demand {
             self.shape_by_key
                 .entry(coverage_key(atom))

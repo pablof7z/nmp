@@ -549,7 +549,7 @@ fn follows_minus_mutes_filter() -> Filter {
             kinds: Some(BTreeSet::from([3u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-            }),
+        }),
         project: Selector::Tag("p".to_string()),
     }));
     let mutes = Binding::Derived(Box::new(Derived {
@@ -557,7 +557,7 @@ fn follows_minus_mutes_filter() -> Filter {
             kinds: Some(BTreeSet::from([10_000u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-            }),
+        }),
         project: Selector::Tag("p".to_string()),
     }));
     Filter {

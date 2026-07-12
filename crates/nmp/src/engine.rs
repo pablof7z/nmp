@@ -650,7 +650,7 @@ mod tests {
     }
 
     fn probe_query() -> LiveQuery {
-        LiveQuery(nmp_grammar::Filter {
+        LiveQuery::from_filter(nmp_grammar::Filter {
             // An arbitrary caller-owned kind, not any NIP-01 core schema --
             // see this module's other fixtures for why.
             kinds: Some(std::collections::BTreeSet::from([9999u16])),

@@ -302,7 +302,10 @@ mod tests {
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
-        let demand = BTreeSet::from([outbox(1, &[pk('a').as_str()]), outbox(1, &[pk('b').as_str()])]);
+        let demand = BTreeSet::from([
+            outbox(1, &[pk('a').as_str()]),
+            outbox(1, &[pk('b').as_str()]),
+        ]);
         let _ = router.compile(&demand, &dir, 10);
         let plan = router.plan();
         assert!(plan.reqs.contains_key(&test_relay(0)));
@@ -387,7 +390,10 @@ mod tests {
         );
         // kind:1 (content, never discovery-eligible) + kind:3 (discovery)
         // for the SAME author -- both must route to `shared`.
-        let demand = BTreeSet::from([outbox(1, &[pk('a').as_str()]), outbox(3, &[pk('a').as_str()])]);
+        let demand = BTreeSet::from([
+            outbox(1, &[pk('a').as_str()]),
+            outbox(3, &[pk('a').as_str()]),
+        ]);
         let _ = router.compile(&demand, &dir, 10);
         let plan = router.plan();
 

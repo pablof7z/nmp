@@ -1016,7 +1016,12 @@ impl EventStore for MemoryStore {
             .collect()
     }
 
-    fn record_coverage(&mut self, atom: &ContextualAtom, relay: &RelayUrl, proven: CoverageInterval) {
+    fn record_coverage(
+        &mut self,
+        atom: &ContextualAtom,
+        relay: &RelayUrl,
+        proven: CoverageInterval,
+    ) {
         let key = coverage_key(atom);
         let shape = window_erase(&atom.filter);
         let entry_key = (key, relay.clone());

@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, Filter,
-    IdentityField, Kind, LiveQuery, PublicKey, RowDelta, RowsMsg, Selector, SourceAuthority,
-    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    IdentityField, Kind, LiveQuery, PublicKey, RowDelta, RowsMsg, Selector, Timestamp,
+    UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::Keys;
 
@@ -505,7 +505,7 @@ mod tests {
         let LiveQuery(demand) = build_follow_feed_query();
         let filter = demand.selection;
         assert_eq!(filter.kinds, Some(BTreeSet::from([1u16])));
-        assert_eq!(demand.source, SourceAuthority::AuthorOutboxes);
+        assert_eq!(demand.source, nmp::SourceAuthority::AuthorOutboxes);
         match filter.authors {
             Some(Binding::Derived(derived)) => {
                 assert_eq!(derived.inner.selection.kinds, Some(BTreeSet::from([3u16])));

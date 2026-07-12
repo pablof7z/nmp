@@ -710,7 +710,10 @@ fn stage_direct_discovery(
     diagnostics: &mpsc::Receiver<DiagnosticsSnapshot>,
 ) -> u64 {
     let subscription = engine
-        .observe(LiveQuery(direct_filter(pubkey, DISCOVERY_TRIGGER_KIND)))
+        .observe(LiveQuery::from_filter(direct_filter(
+            pubkey,
+            DISCOVERY_TRIGGER_KIND,
+        )))
         .expect("direct discovery query must open");
     let cancel = subscription.cancel_handle();
     let (tx, rx) = mpsc::channel();
@@ -811,7 +814,10 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let nip65_baseline = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay, &diag_rx);
 
     let subscription = engine
-        .observe(LiveQuery(direct_filter(&pubkey.to_hex(), QUERY_KIND)))
+        .observe(LiveQuery::from_filter(direct_filter(
+            &pubkey.to_hex(),
+            QUERY_KIND,
+        )))
         .expect("direct query must open");
     let query_cancel = subscription.cancel_handle();
     let (rows_tx, rows_rx) = mpsc::channel();

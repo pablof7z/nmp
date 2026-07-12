@@ -358,7 +358,8 @@ impl<S: EventStore> Engine<S> {
             return (handle, merge_deltas(drop_delta, acc.into_delta()));
         }
 
-        let root = self.build_filter_node(&q.0.selection, q.0.source, q.0.access, ParentLink::Root, 0);
+        let root =
+            self.build_filter_node(&q.0.selection, q.0.source, q.0.access, ParentLink::Root, 0);
         self.descriptor_to_root.insert(key.clone(), root);
         self.graph_entries.insert(
             root,

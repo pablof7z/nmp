@@ -84,7 +84,7 @@ fn follow_feed_query() -> LiveQuery {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-                }),
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()

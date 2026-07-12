@@ -992,7 +992,12 @@ pub trait EventStore {
     /// atom's `Demand` context, must supply it; the store has no notion of
     /// `SourceAuthority`/`AccessContext` of its own). Merge-only: no public
     /// lowering path exists outside `gc`.
-    fn record_coverage(&mut self, atom: &ContextualAtom, relay: &RelayUrl, proven: CoverageInterval);
+    fn record_coverage(
+        &mut self,
+        atom: &ContextualAtom,
+        relay: &RelayUrl,
+        proven: CoverageInterval,
+    );
 
     /// The proven interval for `key` at `relay`, or `None` if no row exists.
     /// `None` means this relay has no persisted interval for this key; it

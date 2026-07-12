@@ -37,7 +37,9 @@ use nostr::{
     UnsignedEvent,
 };
 
-use nmp_grammar::{AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, SourceAuthority};
+use nmp_grammar::{
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, SourceAuthority,
+};
 use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
 use nmp_router::{
     DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayLimits, Router, RuleRegistry,

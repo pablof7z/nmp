@@ -249,7 +249,12 @@ mod tests {
             SourceAuthority::AuthorOutboxes,
             AccessContext::Public,
         );
-        let public_sub = SubId::for_wire(relay(0), &filter, SourceAuthority::Public, AccessContext::Public);
+        let public_sub = SubId::for_wire(
+            relay(0),
+            &filter,
+            SourceAuthority::Public,
+            AccessContext::Public,
+        );
         assert_ne!(
             outbox_sub, public_sub,
             "identical relay+filter under different SourceAuthority must never share a SubId"
@@ -264,8 +269,18 @@ mod tests {
     fn for_wire_author_churn_same_context_reuses_sub_id() {
         let a = cf(1, &["aa", "bb"]);
         let b = cf(1, &["aa", "cc"]);
-        let sub_a = SubId::for_wire(relay(0), &a, SourceAuthority::AuthorOutboxes, AccessContext::Public);
-        let sub_b = SubId::for_wire(relay(0), &b, SourceAuthority::AuthorOutboxes, AccessContext::Public);
+        let sub_a = SubId::for_wire(
+            relay(0),
+            &a,
+            SourceAuthority::AuthorOutboxes,
+            AccessContext::Public,
+        );
+        let sub_b = SubId::for_wire(
+            relay(0),
+            &b,
+            SourceAuthority::AuthorOutboxes,
+            AccessContext::Public,
+        );
         assert_eq!(sub_a, sub_b);
     }
 }

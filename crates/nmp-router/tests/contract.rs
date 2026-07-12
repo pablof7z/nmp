@@ -93,10 +93,8 @@ fn coverage_gives_each_author_min_two_relays() {
     let dir = FixtureDirectory::shared_pool_mailboxes(&authors, &pool);
     let mut router = new_router();
 
-    let demand: BTreeSet<ContextualAtom> = authors
-        .iter()
-        .map(|a| outbox(1, &[a.as_str()]))
-        .collect();
+    let demand: BTreeSet<ContextualAtom> =
+        authors.iter().map(|a| outbox(1, &[a.as_str()])).collect();
     router.compile(&demand, &dir, 10);
 
     assert!(router.diagnostics().uncovered_authors.is_empty());
@@ -128,10 +126,8 @@ fn coverage_respects_cap_under_disjoint_mailboxes() {
     let dir = FixtureDirectory::disjoint_mailboxes(&authors);
     let mut router = new_router();
 
-    let demand: BTreeSet<ContextualAtom> = authors
-        .iter()
-        .map(|a| outbox(1, &[a.as_str()]))
-        .collect();
+    let demand: BTreeSet<ContextualAtom> =
+        authors.iter().map(|a| outbox(1, &[a.as_str()])).collect();
     let cap = 6;
     router.compile(&demand, &dir, cap);
 
@@ -246,11 +242,7 @@ fn author_union_coalesces_shards_into_one_req() {
         .with_write(d.clone(), [test_relay(0), test_relay(1)]);
     let mut router = new_router();
 
-    let demand = BTreeSet::from([
-        outbox(1, &[&a]),
-        outbox(1, &[&b]),
-        outbox(1, &[&d]),
-    ]);
+    let demand = BTreeSet::from([outbox(1, &[&a]), outbox(1, &[&b]), outbox(1, &[&d])]);
     router.compile(&demand, &dir, 10);
 
     let reqs = &router.plan().reqs[&test_relay(0)];
@@ -270,18 +262,10 @@ fn per_relay_diff_is_surgical() {
         .with_write(d.clone(), [test_relay(2), test_relay(3)]);
     let mut router = new_router();
 
-    let demand1 = BTreeSet::from([
-        outbox(1, &[&a]),
-        outbox(1, &[&b]),
-        outbox(1, &[&c]),
-    ]);
+    let demand1 = BTreeSet::from([outbox(1, &[&a]), outbox(1, &[&b]), outbox(1, &[&c])]);
     router.compile(&demand1, &dir, 10);
 
-    let demand2 = BTreeSet::from([
-        outbox(1, &[&a]),
-        outbox(1, &[&b]),
-        outbox(1, &[&d]),
-    ]);
+    let demand2 = BTreeSet::from([outbox(1, &[&a]), outbox(1, &[&b]), outbox(1, &[&d])]);
     let delta = router.compile(&demand2, &dir, 10);
 
     let touched: BTreeSet<_> = delta.ops.iter().map(|(r, _)| r.clone()).collect();

@@ -2492,7 +2492,12 @@ impl EventStore for RedbStore {
         ))
     }
 
-    fn record_coverage(&mut self, atom: &ContextualAtom, relay: &RelayUrl, proven: CoverageInterval) {
+    fn record_coverage(
+        &mut self,
+        atom: &ContextualAtom,
+        relay: &RelayUrl,
+        proven: CoverageInterval,
+    ) {
         let key = compute_coverage_key(atom);
         let shape = window_erase(&atom.filter);
         let row_key = Self::coverage_row_key(key, relay);
