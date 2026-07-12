@@ -12,79 +12,69 @@ flowchart LR
   Outbox --> Store[(Lane cursor + eligibility + attempts)]
   Store --> Scheduler[Single engine scheduler]
   Scheduler -->|generation-scoped PublishAttempt| Transport[Transport socket worker]
-  Transport -->|typed handoff result| Scheduler
+  Transport -->|NotHandedOff / Written / Ambiguous| Scheduler
   Scheduler --> Receipts[Receipt truth]
   Receipts --> SDKs[Rust / Swift / Kotlin]
 ```
 
 ## Detailed Plan
 
-## Authority and current failure
+## Current failure
 
-Parent #79 and epic #23 define one owner for durable retry. Today the attempt table is history-only, the engine has volatile relay sets, and transport can retain queued EVENT commands across reconnect. That combination creates a second hidden publication queue. `next_deadline()` currently consumes only expiration and negentropy; adding retry timestamps alone would create a past-due busy loop.
+The attempt table is history-only, engine relay ownership is volatile, and transport retains queued EVENT commands across reconnect. That creates a second publication queue. Adding retry timestamps to `next_deadline()` without a consuming reducer would also busy-loop.
 
-## Unit #93 — transport handoff ownership
+## #93 — transport handoff
 
-Add a correlated `PublishAttempt` command keyed by persisted attempt identity and connection generation. The typed result is exactly `NotHandedOff`, `Written`, or `Ambiguous`. Durable EVENT commands must be dropped and reported at generation end; they never enter the reconnect carry-over deque. `Written` means the socket write completed and is the only result that may later persist/emit `Sent`. `Ambiguous` never emits `Sent`; Durable waits for ACK then applies timeout policy, while AtMostOnce becomes `OutcomeUnknown` immediately. Keep REQ/subscription preamble replay unchanged. Prove rollover, disconnect-before-write, each handoff class, duplicate result, and unrelated read traffic.
+Add correlated `PublishAttempt` keyed by attempt identity and connection generation. Results are exactly `NotHandedOff`, `Written`, or `Ambiguous`. EVENT commands never enter reconnect carry-over; REQ preamble behavior stays unchanged. Only `Written` can later become `Sent`. `Ambiguous` emits no `Sent`; Durable awaits ACK, AtMostOnce becomes `OutcomeUnknown`. Prove all classes, rollover, duplicate result, and unchanged reads. No schema/policy in this unit.
 
-Rollback: the PR is an internal seam and can be reverted before #95 consumes it. No persistence migration.
+## #94 — lane cursor and eligibility
 
-## Unit #94 — durable lane cursor and eligibility index
+Add bounded, versioned `OUTBOX_LANES`, ordered `OUTBOX_ELIGIBILITY`, and additive `OUTBOX_ATTEMPT_DETAILS`. Keep existing `OUTBOX_ATTEMPTS` v1 rows unchanged so older binaries decode them. Details hold time, handoff, and transient classification. Add policy-free atomic waiting/eligible/in-flight/transient/terminal/close doors.
 
-Add versioned `OUTBOX_LANES` keyed by length-prefixed `(intent, relay)`, ordered `OUTBOX_ELIGIBILITY` keyed by `(eligible_at, intent, relay)`, and additive `OUTBOX_ATTEMPT_DETAILS` keyed by the existing attempt key. Keep existing `OUTBOX_ATTEMPTS` rows at version 1 and immutable; timing, handoff, and transient classification live in the additive detail table so older binaries can still decode attempt rows. Add policy-free atomic doors for waiting, eligible, in-flight, transient, terminal, and terminal-intent-close transitions. Offline and AUTH waits have no eligibility row. All reads are bounded/indexed, using #87's discipline.
+Idempotent bootstrap inserts missing cursors from open intents, routes, and highest v1 attempt: no attempt becomes waiting connection; terminal maps terminal; Started maps legacy in-flight. Engine converts legacy Durable Started to interrupted/eligible and AtMostOnce Started to `OutcomeUnknown`. No history rewrite.
 
-On first new-engine boot, deterministically insert missing lane cursors from open intents, route revisions, and the highest v1 attempt per lane: no attempt becomes waiting-for-connection; v1 terminal maps terminal; v1 Started maps a legacy in-flight state. The engine then atomically converts legacy Durable Started to interrupted/eligible and legacy AtMostOnce Started to `OutcomeUnknown`. The bootstrap is insert-if-absent and idempotent; it never rewrites v1 history.
+Crash-test lane creation, start, handoff detail, finish, eligibility, and close. Reads are bounded per #87. Evidence is retained. Downgrade is schema-readable but behaviorally unsafe with open new-lane work, so rollback requires quiescing/closing work or rolling forward.
 
-Crash matrix: before/after lane creation, attempt start, handoff-detail write, terminal/transient finish, eligibility update, and open-intent close. Memory and Redb must be identical. Corruption fails closed and never deletes obligations. Retain receipts, routes, lanes, attempts, and details as evidence after open-work closure.
+## #95 — reducer and scheduler
 
-Rollback truth: the schema is additive and old binaries can decode unchanged v1 attempts, but behavioral rollback is unsafe while open intents have new lane state because the old engine cannot honor that cursor. Operational rollback therefore requires quiescing/closing open work or rolling forward; no destructive downgrade is claimed.
+One `schedule_ready(now)` runs after boot, tick, connection/AUTH change, handoff, OK, disconnect, cancellation, and persistence recovery. Stable order is `(eligible_at, intent, relay)`. Caps are 32 global/1 relay. Backoff is 3,6,12 seconds to 300 plus deterministic 0..<5-second jitter; ACK timeout is 30 seconds. Offline/AUTH consume no attempt/deadline.
 
-## Unit #95 — engine reducer and scheduler
+`NotHandedOff` emits no `Sent` and may safely re-arm either durability. Persist `Written` before `Sent`, then await ACK. `Ambiguous` emits no `Sent`; Durable awaits ACK then retries after timeout, AtMostOnce immediately becomes `OutcomeUnknown`. Durable retries use a new ordinal. Tick consumes due eligibility/ACK deadlines before returning the next deadline; when caps are full, completion messages wake work.
 
-Use typed states `WaitingConnection`, `WaitingAuth`, `Eligible`, `InFlight`, and terminal outcomes. One `schedule_ready(now)` path runs after boot, tick, connection/AUTH change, handoff result, OK, disconnect, cancellation, and persistence recovery. Stable order is `(eligible_at, intent, relay)`. Enforce 32 global and 1 per relay. Backoff is 3, 6, 12 seconds up to 300 seconds plus deterministic 0..<5-second jitter derived from persisted attempt identity. ACK timeout is 30 seconds.
+Classify standardized NIP-01 plus NIP-42 prefixes only: `duplicate` -> Acked; `rate-limited`/`error` -> transient; `auth-required` -> WaitingAuth; `invalid`/`pow`/`blocked`/`restricted`/`mute` -> terminal Rejected. Unknown/malformed -> terminal Rejected with raw reason. Tests cover every class/default, timing equality, caps/fairness, restart determinism, no polling, no hidden queue, persistence failures, exact bytes/ordinals, and bounded ticks.
 
-Only actual committed starts consume an ordinal. Offline/AUTH waits consume none. `NotHandedOff` records that outcome without `Sent` and may safely re-arm either durability mode. `Written` is persisted before `Sent` and enters ACK wait. `Ambiguous` emits no `Sent`; Durable remains ACK-waiting and becomes transient at timeout, while AtMostOnce immediately becomes `OutcomeUnknown` and never re-enters eligibility. Durable interrupted attempts later dispatch under a new ordinal. Tick must consume due eligibility and ACK deadlines before computing the next deadline; when capacity is full, completion messages—not a zero deadline—wake scheduling.
+## #96 — governed receipt projection
 
-NIP-20 classification uses only standardized machine prefixes, never free-form text: `duplicate` satisfies delivery and maps to Acked; `rate-limited` and `error` are transient; `auth-required` enters WaitingAuth; `invalid`, `pow`, `blocked`, and `restricted` are terminal Rejected. Unknown or malformed prefixes default to terminal Rejected and retain the raw reason, preventing infinite retries of possibly permanent invalidity.
+Add `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, and `HandoffAmbiguous`; emit `Sent` only after persisted `Written`. Keep write retry truth separate from query evidence. Update Rust facade, UniFFI, Swift, Kotlin, direct/FFI parity, exhaustive mappings, snapshots, and exact change-log entry.
 
-Falsifiers cover no-deadline blocking, exact equality, cap-full past-due work, stable fairness, deterministic reopen, no polling, all handoff classes, every NIP-20 class/default, no hidden transport queue, persistence failure at every transition, exact bytes/ordinals, and bounded tick/effect counts.
+## Coordination and acceptance
 
-## Unit #96 — governed receipt projection
-
-Add `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, and `HandoffAmbiguous` plus ordinal/timing where required to canonical receipt facts. Emit `Sent` only after persisted `Written`, never for queue acceptance or ambiguity. Keep write retry truth distinct from query acquisition evidence. Update facade, UniFFI, Swift, Kotlin, direct-vs-FFI parity, exhaustive native mappings, both snapshots, and the exact append-only surface entry.
-
-## Dependencies and coordination
-
-#87 is merged. Prefer #88 before #95/#96 so corrupt retained evidence is typed. #86 may land independently but must rebase around core changes. #8 owns AUTH negotiation; #95 adds only the waiting/wake seam. #49 query evidence and #51 diagnostics remain separate. #81 requires repository-admin configuration and is not an implementation gate.
-
-## Observability and acceptance
-
-Receipts expose every wait/retry/handoff transition. Unchanged v1 attempt history plus additive detail rows preserve exact ordinals, timestamps, handoff classification, and outcomes. Tests assert the scheduler's visited/due work is bounded and the runtime blocks rather than polls. Completion requires all child PR tests plus workspace, Swift, Kotlin, surface regeneration, and trusted governance gates.
+#87 is merged. Prefer #88 before #95/#96. #86 may rebase independently. #8 owns AUTH negotiation; #49 query evidence and #51 diagnostics remain separate. #81 is admin-only. Completion requires crash/no-spin/scale falsifiers plus workspace, Swift, Kotlin, regeneration, and governance gates.
 
 ## Rule And ADR Check
 
-- Complies with AGENTS.md issue-first discipline through parent #79 and children #93–#96; each implementation unit maps to one cohesive PR.
-- Complies with VISION section 3.3 and bug-class ledger #16: transport owns sockets, outbox owns durable attempts, and one engine scheduler owns retry time and caps.
-- Complies with the crash-safe Accepted plan correction: retry deadlines enter next_deadline only in the same unit as the transition that consumes and advances them.
-- Complies with current store boundaries: persistence enforces atomic facts while the engine owns classification and policy.
-- Complies with surface governance: #96 updates every platform, snapshots, parity tests, and the append-only change log together.
+- Complies with AGENTS.md issue-first discipline through parent #79 and children #93–#96.
+- Complies with VISION section 3.3 and bug-class ledger #16: transport owns sockets, outbox owns durable attempts, one engine scheduler owns retry time and caps.
+- Complies with the crash-safe Accepted correction: retry deadlines enter next_deadline only with the transition that consumes them.
+- Complies with store boundaries: persistence enforces atomic facts; engine owns policy.
+- Complies with surface governance: #96 updates every platform, snapshots, parity, and change log together.
 
 ## Possible Rule Or ADR Loosening
 
-- No existing rule should be loosened. In particular, transport must not regain an implicit durable EVENT queue, and failed persistence must not produce wire or terminal facts.
+- No rule should be loosened. Transport must not regain an implicit durable EVENT queue, and failed persistence must not produce wire or terminal facts.
 
 ## Possible Rule Tightening
 
-- Consider adding a durable rule that every deadline source must name the state transition that consumes and advances it.
-- Consider requiring every durable transport handoff to be correlated, generation-scoped, and classified as NotHandedOff, Written, or Ambiguous.
+- Require every deadline source to name the state transition that consumes and advances it.
+- Require every durable handoff to be correlated, generation-scoped, and classified as NotHandedOff, Written, or Ambiguous.
 
 ## Alternatives Considered
 
-- Reuse transport reconnect backoff as publication retry policy: rejected because it creates duplicate ownership and cannot preserve attempt ordinals or AtMostOnce ambiguity.
-- Reconstruct current retry state by scanning attempt history: rejected because it is unbounded, complicates crash truth, and conflicts with #87's indexed-range discipline.
-- Add retry timestamps to next_deadline before the reducer exists: rejected because a past-due value would wake repeatedly without advancing state.
-- Expose waits only in diagnostics: rejected by owner decision; receipts now carry AwaitingRelay, AwaitingAuth, and RetryEligible truth across all SDKs.
-- Prune terminal history in the retry implementation: rejected; open working rows close, but retained evidence waits for an explicit GC policy.
+- Reuse transport reconnect backoff: rejected because it creates duplicate publication ownership.
+- Reconstruct current state by scanning attempt history: rejected as unbounded and crash-fragile.
+- Add deadlines before the reducer: rejected because past-due values would busy-loop.
+- Expose waits only in diagnostics: rejected by owner decision; receipts carry them now.
+- Prune terminal history here: rejected; retained evidence needs a separate explicit GC policy.
 
 ## Certainty
 
@@ -96,6 +86,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: https://pablof7z.github.io/nmp/plans/durable-retry-policy-79/
+- Plan page: Generated after publishing.
 
-- TTS audio: https://blossom.primal.net/ac0ffc9274bb7879bd8c103042ea77ead17db85928a1ff30af07503147398e59.mp3
+- TTS audio: https://blossom.primal.net/d0b0b572b4fbb4337ba29424bace040722822a037b5c1c5335b5199e773da564.mp3
