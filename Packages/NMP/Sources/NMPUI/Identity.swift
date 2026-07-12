@@ -123,12 +123,10 @@ public struct NMPProfileIdentity: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(theme.foreground)
                 if showsNIP05, let nip05 = profile?.nip05, !nip05.isEmpty {
-                    Text(nip05)
-                        .font(.caption)
-                        .foregroundStyle(theme.secondary)
-                        .lineLimit(1)
+                    NMPNIP05(nip05)
                 }
             }
         }
+        .accessibilityElement(children: .combine)
     }
 }
