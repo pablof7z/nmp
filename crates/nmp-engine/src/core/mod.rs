@@ -48,7 +48,9 @@ use nmp_store::{
     EventStore, IntentId, IntentSigState, PromoteOutcome, ReceiptState, RelayObserved,
     WriteDurability,
 };
-use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
+use nmp_transport::{
+    AttemptCorrelation, HandoffResult, RelayFrame, RelayHandle as TransportRelayHandle,
+};
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
 use crate::outbox::{
@@ -197,6 +199,11 @@ pub enum EngineMsg {
     /// Explicit pre-signature cancellation. Once promotion has committed,
     /// cancellation cannot retract a valid signed cache row.
     CancelWrite(ReceiptId),
+    /// The one, ever, typed result of a durable `EVENT` handoff (issue
+    /// #93), translated from `PoolEvent::EventHandoff`. See
+    /// `EngineCore::on_event_handoff`'s doc for what this does and does
+    /// NOT do in this unit.
+    EventHandoff(AttemptCorrelation, HandoffResult),
     Tick(Timestamp),
 }
 
@@ -258,9 +265,12 @@ pub enum Effect {
     /// `nmp_router::WireOp` variant — `WireOp`/`WireDelta` are read-
     /// subscription vocabulary owned by `nmp-router`, out of this builder's
     /// scope to extend; this is engine-owned wire vocabulary for the write
-    /// plane). C (runtime) translates this to `Pool::send` of an `["EVENT",
-    /// …]` frame on `relay`'s current generation.
-    PublishEvent(RelayUrl, SignedEvent),
+    /// plane). C (runtime) translates this to `Pool::send_durable` of an
+    /// `["EVENT", …]` frame on `relay`'s current generation, correlated by
+    /// `AttemptCorrelation` (issue #93) — the durable handoff is generation-
+    /// scoped and reports back exactly one typed `HandoffResult`, never
+    /// silently carried into a later connection.
+    PublishEvent(RelayUrl, SignedEvent, AttemptCorrelation),
 }
 
 /// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
@@ -417,6 +427,25 @@ pub struct EngineCore<S: EventStore> {
     /// `Diagnostics` cannot see on its own — it never observes inbound
     /// frames, only what was compiled/sent.
     events_by_relay_kind: HashMap<RelayUrl, BTreeMap<u16, u64>>,
+    /// Next transport-native [`AttemptCorrelation`] to mint (issue #93).
+    /// Purely volatile/in-process — never persisted, never restart-durable
+    /// (the plan's own words: "no persistence migration" for this unit).
+    /// Checked, typed exhaustion, same discipline as
+    /// `next_unaccepted_receipt` above.
+    next_attempt_correlation: u64,
+    /// `AttemptCorrelation` -> which receipt/relay it was minted for. Engine-
+    /// owned bookkeeping only; transport never needs to understand this
+    /// mapping, only echo the correlation back unchanged. An entry is
+    /// removed the instant its one-and-only `HandoffResult` arrives — see
+    /// `Self::on_event_handoff`.
+    attempt_correlations: HashMap<AttemptCorrelation, AttemptCorrelationTarget>,
+}
+
+/// What one `AttemptCorrelation` (issue #93) resolves back to in this
+/// reducer's own bookkeeping.
+struct AttemptCorrelationTarget {
+    receipt: ReceiptId,
+    relay: RelayUrl,
 }
 
 impl<S: EventStore> EngineCore<S> {
@@ -447,7 +476,57 @@ impl<S: EventStore> EngineCore<S> {
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
             events_by_relay_kind: HashMap::new(),
+            next_attempt_correlation: 0,
+            attempt_correlations: HashMap::new(),
         }
+    }
+
+    /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
+    /// exhaustion -- same discipline as [`Self::alloc_receipt_id`]'s
+    /// `next_unaccepted_receipt` counter.
+    fn alloc_attempt_correlation(&mut self) -> AttemptCorrelation {
+        let id = self.next_attempt_correlation;
+        self.next_attempt_correlation = self
+            .next_attempt_correlation
+            .checked_add(1)
+            .expect("attempt correlation namespace exhausted");
+        AttemptCorrelation(id)
+    }
+
+    /// The one, ever, resolution of `correlation`'s `HandoffResult` (issue
+    /// #93). An unknown correlation (already resolved, or never minted by
+    /// this process) is a structural no-op -- this is what makes a
+    /// defensive duplicate delivery harmless even though the transport side
+    /// never actually produces one.
+    ///
+    /// `Written` is the ONLY case that emits `WriteStatus::Sent` -- the
+    /// synchronous "queue-accepted" `Sent` this reducer used to emit right
+    /// after handing a frame to the pool is gone; a claim of `Sent` is now
+    /// truthful only once transport has actually confirmed the write.
+    /// `NotHandedOff`/`Ambiguous` stay a typed INTERNAL fact only: no
+    /// receipt status, no retry action -- #96 wires governed visibility,
+    /// #95 wires the scheduler that acts on it. This unit's whole job is
+    /// making sure the fact reaches the engine at all, correlated and
+    /// generation-safe, never silently dropped or requeued by transport.
+    fn on_event_handoff(
+        &mut self,
+        correlation: AttemptCorrelation,
+        result: HandoffResult,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let Some(target) = self.attempt_correlations.remove(&correlation) else {
+            return effects;
+        };
+        if let HandoffResult::Written = result {
+            if let Some(pending) = self.pending.get(&target.receipt) {
+                Self::notify(pending, WriteStatus::Sent(target.relay.clone()));
+                effects.push(Effect::EmitReceipt(
+                    target.receipt,
+                    WriteStatus::Sent(target.relay),
+                ));
+            }
+        }
+        effects
     }
 
     /// Rebuild volatile ownership from the journal without reinserting a
@@ -536,9 +615,21 @@ impl<S: EventStore> EngineCore<S> {
                             .entry(attempt.event.id)
                             .or_default()
                             .insert(id);
+                        let correlation = self.alloc_attempt_correlation();
+                        self.attempt_correlations.insert(
+                            correlation,
+                            AttemptCorrelationTarget {
+                                receipt: id,
+                                relay: attempt.relay.clone(),
+                            },
+                        );
                         // Exact retained bytes, same ordinal. The Started row
                         // already predates this replay effect.
-                        effects.push(Effect::PublishEvent(attempt.relay, attempt.event));
+                        effects.push(Effect::PublishEvent(
+                            attempt.relay,
+                            attempt.event,
+                            correlation,
+                        ));
                     }
                     Durability::AtMostOnce => {
                         if self
@@ -631,7 +722,19 @@ impl<S: EventStore> EngineCore<S> {
                     .entry(intent.frozen.id)
                     .or_default()
                     .insert(id);
-                effects.push(Effect::PublishEvent(relay, intent.frozen.clone()));
+                let correlation = self.alloc_attempt_correlation();
+                self.attempt_correlations.insert(
+                    correlation,
+                    AttemptCorrelationTarget {
+                        receipt: id,
+                        relay: relay.clone(),
+                    },
+                );
+                effects.push(Effect::PublishEvent(
+                    relay,
+                    intent.frozen.clone(),
+                    correlation,
+                ));
             }
         }
         effects
@@ -874,6 +977,9 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::SignerAttached(pk) => self.on_signer_attached(pk),
             EngineMsg::CancelWrite(id) => self.on_cancel_write(id),
+            EngineMsg::EventHandoff(correlation, result) => {
+                self.on_event_handoff(correlation, result)
+            }
             EngineMsg::Tick(now) => self.tick(now),
         }
     }
@@ -1339,13 +1445,28 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
             sent_relays.insert(relay.clone());
-            effects.push(Effect::PublishEvent(relay.clone(), event.clone()));
+            let correlation = self.alloc_attempt_correlation();
+            self.attempt_correlations.insert(
+                correlation,
+                AttemptCorrelationTarget {
+                    receipt: id,
+                    relay: relay.clone(),
+                },
+            );
+            effects.push(Effect::PublishEvent(
+                relay.clone(),
+                event.clone(),
+                correlation,
+            ));
         }
+        // `Sent` is no longer emitted synchronously here (issue #93): the
+        // frame being handed to the pool's outbound queue is not the same
+        // fact as the relay actually receiving it. `Self::on_event_handoff`
+        // is the ONLY place `Sent` now fires, gated on the async `Written`
+        // result. `sent_relays` above still drives `pending.pending_relays`
+        // (below) and the correlation bookkeeping -- it just no longer
+        // implies delivery on its own.
         if let Some(pending) = self.pending.get(&id) {
-            for relay in &sent_relays {
-                Self::notify(pending, WriteStatus::Sent(relay.clone()));
-                effects.push(Effect::EmitReceipt(id, WriteStatus::Sent(relay.clone())));
-            }
             for relay in &blocked_relays {
                 let status = WriteStatus::PersistenceBlocked(relay.clone());
                 Self::notify(pending, status.clone());

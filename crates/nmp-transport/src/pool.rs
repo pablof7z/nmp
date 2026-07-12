@@ -38,6 +38,42 @@ pub enum WireFrame {
     Binary(Vec<u8>),
 }
 
+/// An opaque correlation token for one durable `EVENT` handoff (issue #93).
+/// Transport-native and meaningless to this crate beyond identity — the
+/// caller (the engine) mints it from its own persisted attempt bookkeeping
+/// (`(IntentId, RelayUrl, ordinal)` in `nmp-store` terms) and maps it back
+/// on the way in; this crate never needs to know what it means, only that
+/// each one gets EXACTLY one [`HandoffResult`], ever. Kept distinct from a
+/// bare `u64` so a caller can't accidentally pass an ordinal, a slot, or any
+/// other transport-internal number where a correlation is expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AttemptCorrelation(pub u64);
+
+/// The one typed result of a durable `EVENT` handoff (issue #93). Exactly
+/// three classes — never collapsed to a bool, never silently re-queued past
+/// the connection generation it was submitted against:
+///
+/// - [`Self::NotHandedOff`]: PROVEN the frame never reached a socket write
+///   call for this generation — still queued, or the handle/generation was
+///   already stale at submission. Safe to resubmit under a fresh generation
+///   with no ambiguity about double-delivery.
+/// - [`Self::Written`]: PROVEN the socket write AND the subsequent flush
+///   both completed before this generation ended. The ONLY result that may
+///   later become `Sent` (retraction-and-negative-deltas.md's sibling
+///   principle for writes: don't claim delivery you can't back up).
+/// - [`Self::Ambiguous`]: UNKNOWN whether the relay received it — a write
+///   was accepted by the socket library but its flush was never confirmed
+///   before the connection ended (or broke), or the connection died mid
+///   in-flight write. Durable durability waits for an ACK/timeout policy
+///   (#95); `AtMostOnce` becomes `OutcomeUnknown` — either way, NEVER a
+///   blind resend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffResult {
+    NotHandedOff,
+    Written,
+    Ambiguous,
+}
+
 /// An inbound frame off the wire. The pool pre-classifies `AUTH` only;
 /// everything else stays opaque text for the engine reducer to parse
 /// (`EVENT`/`EOSE`/`OK`/`CLOSED`/`NEG-*`). Keepalive `Ping`/`Pong` and the
@@ -83,6 +119,17 @@ pub enum PoolEvent {
     Health {
         slot: u32,
         health: RelayHealth,
+    },
+    /// The one, ever, typed result for a durable `EVENT` handoff submitted
+    /// via [`Pool::send_durable`] (issue #93). Delivered EXACTLY once per
+    /// [`AttemptCorrelation`], unconditionally — never gated on the slot's
+    /// current generation, never dropped because the slot has since closed
+    /// or reconnected. Gating this like [`Self::Frame`] would risk silently
+    /// stranding a correlation with no answer at all, which is exactly the
+    /// hidden-queue failure mode this seam exists to remove.
+    EventHandoff {
+        correlation: AttemptCorrelation,
+        result: HandoffResult,
     },
 }
 
@@ -172,6 +219,79 @@ impl Pool {
                 None => false,
             },
             Err(_) => false,
+        }
+    }
+
+    /// Hand off exactly one durable `EVENT` frame for one specific (URL,
+    /// generation), correlated for exactly one async [`HandoffResult`]
+    /// delivered via [`PoolEvent::EventHandoff`] (issue #93). Unlike
+    /// [`Self::send`] (REQ/subscription traffic, fire-and-forget, may
+    /// legitimately survive a reconnect via the preamble mechanism), a
+    /// durable EVENT frame NEVER carries into a later connection
+    /// generation: if the generation ends before the worker can confirm the
+    /// write, the worker itself resolves and reports the correlation
+    /// (`NotHandedOff` if still queued, `Ambiguous` if a write was accepted
+    /// but never confirmed flushed) rather than silently requeuing it.
+    ///
+    /// The returned `bool` mirrors [`Self::send`]'s (`true` iff handed to a
+    /// live worker's outbound queue) but is NOT the authoritative answer —
+    /// the caller must watch for `PoolEvent::EventHandoff{correlation, ..}`
+    /// either way. A stale handle or a worker whose command channel has
+    /// already disconnected resolves the correlation synchronously, right
+    /// here, as `NotHandedOff` (provably true: it never reached any live
+    /// worker at all) — the caller never needs a separate "did `false` mean
+    /// I should treat this as resolved" branch.
+    pub fn send_durable(
+        &self,
+        h: RelayHandle,
+        correlation: AttemptCorrelation,
+        frame: WireFrame,
+    ) -> bool {
+        let WireFrame::Text(text) = frame else {
+            self.resolve_not_handed_off(correlation);
+            return false; // Binary is reserved; no wire-emittable path yet.
+        };
+        let outcome = match self.inner.lock() {
+            Ok(guard) => match guard.command_tx_for(h) {
+                Some(worker) => {
+                    let handed_off = worker.push(worker::WorkerCommand::SendDurable {
+                        generation: h.generation,
+                        correlation,
+                        frame: text,
+                    });
+                    if handed_off {
+                        None
+                    } else {
+                        Some(guard.sink())
+                    }
+                }
+                None => Some(guard.sink()),
+            },
+            Err(_) => None,
+        };
+        match outcome {
+            Some(sink) => {
+                sink.on_event(PoolEvent::EventHandoff {
+                    correlation,
+                    result: HandoffResult::NotHandedOff,
+                });
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// Synchronously resolve `correlation` as `NotHandedOff` when the frame
+    /// could not even be considered for handoff (e.g. a non-text `WireFrame`
+    /// — reserved, never wire-emittable today). Mirrors the stale-handle
+    /// path in [`Self::send_durable`] so every call resolves exactly once
+    /// regardless of which early-return fires.
+    fn resolve_not_handed_off(&self, correlation: AttemptCorrelation) {
+        if let Ok(guard) = self.inner.lock() {
+            guard.sink().on_event(PoolEvent::EventHandoff {
+                correlation,
+                result: HandoffResult::NotHandedOff,
+            });
         }
     }
 

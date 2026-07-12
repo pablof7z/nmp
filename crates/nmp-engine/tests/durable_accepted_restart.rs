@@ -71,7 +71,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             Box::new(Sink::default()),
         ));
         assert!(effects.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e) if r == &relay && e == &event
+            Effect::PublishEvent(r, e, _) if r == &relay && e == &event
         )));
         receipt_id(&effects)
     };
@@ -87,11 +87,11 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     );
     let recovery = core.recover_on_boot();
     assert!(recovery.iter().any(|effect| matches!(effect,
-        Effect::PublishEvent(r, e) if r == &relay && e == &event
+        Effect::PublishEvent(r, e, _) if r == &relay && e == &event
     )));
     assert!(
         recovery.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e) if r == &appended && e == &event
+            Effect::PublishEvent(r, e, _) if r == &appended && e == &event
         )),
         "a newly resolved relay appends a first lane without overwriting the recovered one"
     );
@@ -292,7 +292,9 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
     let effects = core.recover_on_boot();
     let replays = effects
         .iter()
-        .filter(|effect| matches!(effect, Effect::PublishEvent(_, replayed) if replayed == &event))
+        .filter(
+            |effect| matches!(effect, Effect::PublishEvent(_, replayed, _) if replayed == &event),
+        )
         .count();
     assert_eq!(
         replays, 4,
