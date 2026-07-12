@@ -95,8 +95,8 @@ pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nostr::key:
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
-pub fn nmp::Engine::publish(&self, nmp_engine::outbox::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
-pub fn nmp::Engine::publish_tracked(&self, nmp_engine::outbox::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
+pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
+pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
@@ -5078,7 +5078,7 @@ reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsS
   "name": "DiagnosticsSnapshot",
   "visibility": "public"
 }
-reexport nmp::Durability => nmp_engine::outbox::Durability
+reexport nmp::Durability => nmp_grammar::write::Durability
 {
   "attrs": [],
   "inner": {
@@ -23589,7 +23589,7 @@ reexport nmp::UnsignedEvent => nostr::event::unsigned::UnsignedEvent
   "name": "UnsignedEvent",
   "visibility": "public"
 }
-reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
+reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
 {
   "attrs": [],
   "inner": {
@@ -23691,7 +23691,7 @@ reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
                         "name": "WritePayload",
                         "visibility": "public"
                       },
-                      "path": "nmp_engine::outbox::WritePayload"
+                      "path": "nmp_grammar::write::WritePayload"
                     }
                   }
                 }
@@ -23708,9 +23708,9 @@ reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
                     "path": "Durability",
                     "resolved_item": {
                       "definition": {
-                        "previously_defined": "nmp_engine::outbox::Durability"
+                        "previously_defined": "nmp_grammar::write::Durability"
                       },
-                      "path": "nmp_engine::outbox::Durability"
+                      "path": "nmp_grammar::write::Durability"
                     }
                   }
                 }
@@ -23881,7 +23881,7 @@ reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
                                                                           "name": "NarrowOnly",
                                                                           "visibility": "public"
                                                                         },
-                                                                        "path": "nmp_engine::outbox::NarrowOnly"
+                                                                        "path": "nmp_grammar::write::NarrowOnly"
                                                                       }
                                                                     }
                                                                   }
@@ -23898,7 +23898,7 @@ reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
                                                     "name": "PrivateRoute",
                                                     "visibility": "public"
                                                   },
-                                                  "path": "nmp_engine::outbox::PrivateRoute"
+                                                  "path": "nmp_grammar::write::PrivateRoute"
                                                 }
                                               }
                                             }
@@ -23912,6 +23912,55 @@ reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
                                 },
                                 "name": "PrivateNarrow",
                                 "visibility": "default"
+                              },
+                              {
+                                "attrs": [],
+                                "inner": {
+                                  "variant": {
+                                    "discriminant": null,
+                                    "kind": {
+                                      "tuple": [
+                                        {
+                                          "attrs": [],
+                                          "inner": {
+                                            "struct_field": {
+                                              "resolved_path": {
+                                                "args": null,
+                                                "path": "HostAuthority",
+                                                "resolved_item": {
+                                                  "definition": {
+                                                    "attrs": [],
+                                                    "inner": {
+                                                      "struct": {
+                                                        "generics": {
+                                                          "params": [],
+                                                          "where_predicates": []
+                                                        },
+                                                        "kind": {
+                                                          "plain": {
+                                                            "fields": [],
+                                                            "has_stripped_fields": true
+                                                          }
+                                                        }
+                                                      }
+                                                    },
+                                                    "name": "HostAuthority",
+                                                    "visibility": "public"
+                                                  },
+                                                  "path": "nmp_grammar::write::HostAuthority"
+                                                }
+                                              }
+                                            }
+                                          },
+                                          "name": "0",
+                                          "visibility": "default"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                "name": "PinnedHost",
+                                "visibility": "default"
                               }
                             ]
                           }
@@ -23919,7 +23968,7 @@ reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
                         "name": "WriteRouting",
                         "visibility": "public"
                       },
-                      "path": "nmp_engine::outbox::WriteRouting"
+                      "path": "nmp_grammar::write::WriteRouting"
                     }
                   }
                 }
@@ -23936,13 +23985,13 @@ reexport nmp::WriteIntent => nmp_engine::outbox::WriteIntent
   "name": "WriteIntent",
   "visibility": "public"
 }
-reexport nmp::WritePayload => nmp_engine::outbox::WritePayload
+reexport nmp::WritePayload => nmp_grammar::write::WritePayload
 {
-  "previously_defined": "nmp_engine::outbox::WritePayload"
+  "previously_defined": "nmp_grammar::write::WritePayload"
 }
-reexport nmp::WriteRouting => nmp_engine::outbox::WriteRouting
+reexport nmp::WriteRouting => nmp_grammar::write::WriteRouting
 {
-  "previously_defined": "nmp_engine::outbox::WriteRouting"
+  "previously_defined": "nmp_grammar::write::WriteRouting"
 }
 reexport nmp::WriteStatus => nmp_engine::outbox::WriteStatus
 {

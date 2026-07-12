@@ -26,8 +26,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 
 use nmp_engine::core::ReceiptId;
-use nmp_engine::outbox::{WriteIntent, WriteStatus};
+use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{EngineThread, Handle, ReceiptReattachment, ReceiptStream};
+use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
@@ -284,7 +285,7 @@ impl Drop for Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_engine::outbox::{Durability, WritePayload, WriteRouting};
+    use nmp_grammar::{Durability, WritePayload, WriteRouting};
     use nostr::ToBech32;
 
     /// `EngineConfig::default()` (no `store_path`) must select the

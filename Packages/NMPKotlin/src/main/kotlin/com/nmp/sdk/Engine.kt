@@ -86,6 +86,10 @@ class NMPEngine(config: NMPConfig) : AutoCloseable {
     /** Enqueue a write and return its stable id plus status stream. */
     fun publish(intent: WriteIntent): Receipt = publishReceipt(ffi, intent)
 
+    /** Publish a [GroupSendIntent] from `groupSendIntent` (#115). Take-once
+     * -- see [publishComposedReceipt]'s own doc. */
+    fun publishComposed(intent: GroupSendIntent): Receipt = publishComposedReceipt(ffi, intent)
+
     /** Attach to retained facts without conflating corruption with absence. */
     fun reattachReceipt(id: ULong): ReceiptReattachment = reattachReceipt(ffi, id)
 

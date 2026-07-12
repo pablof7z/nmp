@@ -113,6 +113,18 @@ pub enum FfiError {
     /// (`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,
     /// #107 Contract: "the pinned relay set must be nonempty").
     EmptyPinnedRelaySet,
+    /// #115: `group_send_intent`'s `extra_tags` named a tag
+    /// `nmp_nip29::compose_group_send` owns itself (`"h"`/`"previous"`) --
+    /// mirrors `nmp_nip29::GroupSendError::ReservedTag`, surfaced rather
+    /// than silently rewritten.
+    ReservedGroupTag {
+        got: String,
+    },
+    /// #115: `NmpEngine::publish_composed` was called a second time on the
+    /// same `FfiComposedWriteIntent` handle -- it is take-once by design
+    /// (recompose via `group_send_intent` again is the correct retry path,
+    /// since `created_at`/`previous` should refresh anyway).
+    IntentAlreadyConsumed,
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -155,6 +167,12 @@ impl std::fmt::Display for FfiError {
             Self::EmptyPinnedRelaySet => {
                 write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
             }
+            Self::ReservedGroupTag { got } => {
+                write!(f, "extra_tags named a reserved tag: {got:?}")
+            }
+            Self::IntentAlreadyConsumed => {
+                write!(f, "this composed write intent was already published once")
+            }
         }
     }
 }
@@ -168,6 +186,18 @@ impl From<GDemandError> for FfiError {
                 Self::AuthorOutboxesRequiresBoundAuthors
             }
             GDemandError::PinnedRequiresNonemptyRelaySet => Self::EmptyPinnedRelaySet,
+        }
+    }
+}
+
+/// #115: `nmp_nip29::compose_group_send`'s failure modes -> the shared FFI
+/// error type. `MalformedTag` reuses `InvalidTag` (same meaning: a raw tag
+/// row didn't parse) rather than adding a redundant variant.
+impl From<nmp_nip29::GroupSendError> for FfiError {
+    fn from(err: nmp_nip29::GroupSendError) -> Self {
+        match err {
+            nmp_nip29::GroupSendError::ReservedTag(got) => Self::ReservedGroupTag { got },
+            nmp_nip29::GroupSendError::MalformedTag(got) => Self::InvalidTag { got },
         }
     }
 }
@@ -864,7 +894,12 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
     // here -- see that (deleted) variant's removal note in `types.rs`. A
     // `WriteRouting::PrivateNarrow` intent is still constructible from
     // direct Rust (`nmp::WriteRouting::PrivateNarrow`), just not from raw
-    // FFI-supplied relay-URL strings.
+    // FFI-supplied relay-URL strings. #115: `WriteRouting::PinnedHost`
+    // gets the identical treatment -- `FfiWriteRouting` has no matching
+    // variant at all, so this `match` staying exhaustive over exactly
+    // `{AuthorOutbox, ToInboxes}` IS the enforcement; an app can only reach
+    // a pinned-host write transitively through `nip29::group_send_intent`'s
+    // opaque `FfiComposedWriteIntent`, never through this conversion path.
     let routing = match intent.routing {
         FfiWriteRouting::AuthorOutbox => GWriteRouting::AuthorOutbox,
         FfiWriteRouting::ToInboxes { recipients } => {
