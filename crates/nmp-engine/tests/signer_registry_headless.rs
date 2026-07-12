@@ -174,11 +174,13 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         vec![],
         "published while b is the active account",
     );
-    let receipt_as_b = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned_as_b),
-        durability: Durability::AtMostOnce,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt_as_b = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned_as_b),
+            durability: Durability::AtMostOnce,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt_as_b, Duration::from_secs(5), |s| matches!(
             s,
@@ -198,11 +200,13 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         vec![],
         "wrongly templated for a while b is active",
     );
-    let receipt_wrong = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned_as_a_while_b_active),
-        durability: Durability::AtMostOnce,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt_wrong = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned_as_a_while_b_active),
+            durability: Durability::AtMostOnce,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt_wrong, Duration::from_secs(5), |s| matches!(
             s,
@@ -220,11 +224,13 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         vec![],
         "published after switching back to a",
     );
-    let receipt_as_a = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned_as_a),
-        durability: Durability::AtMostOnce,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt_as_a = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned_as_a),
+            durability: Durability::AtMostOnce,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt_as_a, Duration::from_secs(5), |s| matches!(
             s,
@@ -256,11 +262,13 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
         vec![],
         "nobody is active",
     );
-    let receipt_rx = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned),
-        durability: Durability::AtMostOnce,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt_rx = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::AtMostOnce,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
 
     assert!(wait_for_status(&receipt_rx, Duration::from_secs(5), |s| {
         matches!(s, WriteStatus::Failed(_))
@@ -284,17 +292,19 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
     handle.add_signer(LocalKeySigner::new(b.clone()));
     handle.set_active_account(Some(a.public_key()));
 
-    let receipt = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            b.public_key(),
-            Timestamp::now(),
-            Kind::TextNote,
-            vec![],
-            "unauthorized default author",
-        )),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                b.public_key(),
+                Timestamp::now(),
+                Kind::TextNote,
+                vec![],
+                "unauthorized default author",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
@@ -317,17 +327,19 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
 
     // Pin the active identity before its capability exists.
     handle.set_active_account(Some(a.public_key()));
-    let receipt = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            a.public_key(),
-            Timestamp::now(),
-            Kind::TextNote,
-            vec![],
-            "reattach me",
-        )),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                a.public_key(),
+                Timestamp::now(),
+                Kind::TextNote,
+                vec![],
+                "reattach me",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
@@ -359,17 +371,19 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
     handle.add_signer(LocalKeySigner::new(a.clone()));
     handle.set_active_account(Some(b.public_key()));
 
-    let receipt = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            b.public_key(),
-            Timestamp::now(),
-            Kind::TextNote,
-            vec![],
-            "authored by b",
-        )),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                b.public_key(),
+                Timestamp::now(),
+                Kind::TextNote,
+                vec![],
+                "authored by b",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),

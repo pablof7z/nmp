@@ -148,6 +148,8 @@ impl NmpEngine {
     /// Unit A0/#56, so it holds for every entry point, not only this one) --
     /// it surfaces as `WriteStatus::Failed`, the FIRST and only status
     /// `observer` receives, with no preceding `Accepted`.
+    /// Exhaustion of the pre-acceptance correlation namespace instead returns
+    /// a typed `FfiError` synchronously: no receipt id or stream exists.
     pub fn publish(
         &self,
         intent: FfiWriteIntent,

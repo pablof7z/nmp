@@ -3,6 +3,13 @@ import XCTest
 import NMPFFI
 
 final class EvidenceMappingTests: XCTestCase {
+    func testReceiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
+        XCTAssertEqual(
+            NMPError(.ReceiptCorrelationIdExhausted),
+            .receiptCorrelationIdExhausted
+        )
+    }
+
     func testEveryReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
         let stream = AsyncStream<WriteStatus> { $0.finish() }
 

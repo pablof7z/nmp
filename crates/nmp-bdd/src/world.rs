@@ -584,11 +584,14 @@ impl NmpWorld {
             tags,
             "",
         );
-        let rx = self.handle().publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-        });
+        let rx = self
+            .handle()
+            .publish(WriteIntent {
+                payload: WritePayload::Unsigned(unsigned),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            })
+            .expect("BDD receipt correlation namespace must be available");
         self.last_receipt = Some(ReceiptState {
             rx,
             seen: Vec::new(),
@@ -610,11 +613,14 @@ impl NmpWorld {
             vec![],
             text,
         );
-        let rx = self.handle().publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-        });
+        let rx = self
+            .handle()
+            .publish(WriteIntent {
+                payload: WritePayload::Unsigned(unsigned),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            })
+            .expect("BDD receipt correlation namespace must be available");
         self.last_receipt = Some(ReceiptState {
             rx,
             seen: Vec::new(),

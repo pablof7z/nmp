@@ -240,11 +240,13 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         vec![Tag::public_key(b.public_key())],
         "",
     );
-    let receipt_rx = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(contact_list),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt_rx = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(contact_list),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
 
     assert!(
         wait_for_status(&receipt_rx, Duration::from_secs(10), |s| matches!(
@@ -946,17 +948,19 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         PoolConfig::default(),
     );
     handle.set_active_account(Some(keys.public_key()));
-    let tracked = handle.publish_tracked(WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            keys.public_key(),
-            Timestamp::now(),
-            Kind::TextNote,
-            vec![],
-            "tracked",
-        )),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let tracked = handle
+        .publish_tracked(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::now(),
+                Kind::TextNote,
+                vec![],
+                "tracked",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(
         tracked.id.0 < (1u64 << 63),
         "accepted ids use store namespace"
