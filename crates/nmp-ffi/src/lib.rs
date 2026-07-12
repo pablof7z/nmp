@@ -31,6 +31,7 @@
 //! through `nmp`'s own re-exports (#52 Unit B). `nmp-nip51`/`nmp-nip29`
 //! are the one deliberate exception (see [`nip29`]'s own doc for why).
 
+pub mod content;
 pub mod convert;
 pub mod entity;
 pub mod facade;

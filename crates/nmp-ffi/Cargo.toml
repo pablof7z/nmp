@@ -36,6 +36,7 @@ uniffi = { workspace = true, features = ["cli"] }
 # as `nmp-grammar` itself gets here.
 nmp-nip51.workspace = true
 nmp-nip29.workspace = true
+nmp-content.workspace = true
 
 # #99: the corrupt-retained-receipt reattach falsifier needs to write a
 # genuinely undecodable row directly into a real `RedbStore` file, the same

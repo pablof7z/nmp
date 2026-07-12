@@ -42,15 +42,17 @@ about current code:
   only exact NIP-defined schemas while typed contextual operations may add their
   own tags and route facts to immutable foreign-owned drafts. No kind:1-first
   core catalog is part of the target.
-- **The optional content/UI ecosystem is designed but unbuilt (#75).** Apps
-  should not independently rebuild mixed-content parsing, Nostr reference
-  acquisition, recursive embed lifecycle, kind/schema dispatch, and polished
-  native renderers. The selected architecture keeps semantics, scoped content
-  sessions, and native primitives linked/versioned while distributing styled
-  SwiftUI/Compose compositions as selectively installed, app-owned source. No
-  parser, content client, primitive package, source registry, or kind-diverse
-  renderer proof exists in this repo yet. See
-  `docs/design/ui-components-strategy.md`.
+- **The optional content substrate is built; the UI ecosystem remains open
+  (#75/#154).** `nmp-content`, governed UniFFI values, and Swift/Kotlin content
+  clients now provide source-ranged plaintext/Markdown semantics, normalized
+  NIP-19 references, kind:0/NIP-23 values, ordinary-demand acquisition,
+  deduplicated claim/release, cycle/depth/target bounds, scoped evidence, and
+  raw-event fallback. Live Swift tests prove a profile mention and a relay-less
+  NIP-23 `naddr` using only the two configured indexers and normal NMP outbox
+  discovery. Still unbuilt at this checkpoint: the SwiftUI/Compose primitive
+  packages, immutable renderer catalog, open-code source registry/CLI, polished
+  kind-diverse component family, and native Gallery. See
+  `docs/design/ui-components-strategy.md` and issue #154.
 - **Boundedness is only partial.** Swift newest-frame buffering, indexed queries,
   and router caps exist, but graph, derived-set, wire, relay, result, receipt,
   ingestion, and scheduler bounds do not yet share an explicit shortfall
