@@ -1291,7 +1291,7 @@ record Record {
             type_: UInt64,
             default: None,
             docstring: Some(
-                "DISCOVERED relays rejected by the SSRF admission policy before they\ncould become routable lanes (issue #121): a network-sourced kind:10002\nnaming a loopback/RFC-1918/link-local/`.onion` host the operator never\nopted in.",
+                "DISCOVERED relays rejected by the SSRF admission policy before they\ncould become routable lanes (issue #121): a network-sourced kind:10002\nnaming a loopback/RFC-1918/link-local/`.onion` host the operator never\nopted in. Counted PER LANE (write + read parse of one event), so a\nsingle hostile event naming `N` rejected hosts bumps this by up to\n`2N` — a rejection-event tally, not a distinct-host count.",
             ),
         },
         Field {
@@ -1820,17 +1820,25 @@ record Record {
             type_: Sequence {
                 inner_type: String,
             },
-            default: None,
+            default: Some(
+                EmptySequence,
+            ),
             docstring: Some(
-                "Local/private relay HOSTS the operator explicitly opts into despite\nthe SSRF admission policy (issue #121). A DISCOVERED (network-sourced\nkind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`\nhost is rejected by default; listing its host here (e.g. `\"127.0.0.1\"`\nor `\"localhost\"`) re-admits discovered relays on that exact host.\nHost-only match (port- and path-insensitive). Default empty.",
+                "Local/private relay HOSTS the operator explicitly opts into despite\nthe SSRF admission policy (issue #121). A DISCOVERED (network-sourced\nkind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`\nhost is rejected by default; listing its host here (e.g. `\"127.0.0.1\"`\nor `\"localhost\"`) re-admits discovered relays on that exact host.\nHost-only match (port- and path-insensitive). Default empty.\n\n`default = []` keeps this field OPTIONAL for existing foreign-language\ncallers — adding it must not break records constructed before #121.",
             ),
         },
         Field {
             name: "max_relays",
             type_: UInt32,
-            default: None,
+            default: Some(
+                UInt(
+                    0,
+                    Decimal,
+                    UInt32,
+                ),
+            ),
             docstring: Some(
-                "Global ceiling on concurrently-connected relays (issue #121, worker-\nexhaustion defense). `0` (default) imposes no cap; a non-zero value\nrefuses relay dials past it and counts them in the diagnostics\n`relays_rejected_over_cap`.",
+                "OPT-IN, defense-in-depth ceiling on concurrently-connected relays\n(issue #121). `0` imposes no cap; a non-zero value refuses relay dials\npast it and counts them in the diagnostics `relays_rejected_over_cap`.\nNOT the primary worker-exhaustion defense — fan-out is already bounded\nby `nmp-router`'s solver cap; this is a coarse absolute backstop.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror. The default VALUE itself is an\nopen owner decision (sane cap vs. uncapped, issue #121); `0` is the\ninterim uncapped placeholder.",
             ),
         },
     ],

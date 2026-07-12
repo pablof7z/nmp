@@ -93,13 +93,26 @@ fn classify_ipv4(ip: Ipv4Addr) -> RelayHostClass {
 }
 
 fn classify_ipv6(ip: Ipv6Addr) -> RelayHostClass {
-    // An IPv4-mapped/compatible address (`::ffff:127.0.0.1`) is still the v4
-    // host it embeds — classify it as such rather than treating the wrapper
-    // as an unremarkable public v6 address.
+    let segs = ip.segments();
+    // An IPv4-mapped (`::ffff:a.b.c.d`) or the deprecated IPv4-COMPATIBLE
+    // (`::a.b.c.d`, RFC 4291 §2.5.5.1) address is really the v4 host it
+    // embeds — classify by that so an embedded loopback/private/link-local
+    // host is caught through the wrapper rather than passing as an
+    // unremarkable public v6 address. `::` (unspecified) and `::1`
+    // (loopback) technically fall in the compatible prefix too, but they are
+    // their own well-known specials handled below, so they are excluded here.
     if let Some(v4) = ip.to_ipv4_mapped() {
         return classify_ipv4(v4);
     }
-    let segs = ip.segments();
+    if segs[..6].iter().all(|&s| s == 0) && !ip.is_unspecified() && !ip.is_loopback() {
+        let v4 = Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            (segs[6] & 0xff) as u8,
+            (segs[7] >> 8) as u8,
+            (segs[7] & 0xff) as u8,
+        );
+        return classify_ipv4(v4);
+    }
     let unique_local = (segs[0] & 0xfe00) == 0xfc00; // fc00::/7 (ULA)
     let link_local = (segs[0] & 0xffc0) == 0xfe80; // fe80::/10
     if ip.is_loopback() || ip.is_unspecified() || unique_local || link_local {
@@ -161,6 +174,19 @@ mod tests {
         assert_eq!(class("ws://0.0.0.0"), RelayHostClass::Local);
     }
 
+    /// Non-dotted IPv4 encodings (decimal `2130706433` and hex `0x7f000001`,
+    /// both == 127.0.0.1) are canonicalized to an `Ipv4` host by the `url`
+    /// crate for ws/wss URLs BEFORE we ever see them, so the classifier's
+    /// IPv4 arm catches them for free. Pinned as a falsifier (not assumed):
+    /// if a future `url`/`nostr` bump stopped canonicalizing these, they
+    /// would arrive as `Domain` and silently classify `Public` — an SSRF
+    /// bypass this test would immediately catch.
+    #[test]
+    fn non_dotted_ipv4_loopback_encodings_are_local() {
+        assert_eq!(class("wss://2130706433"), RelayHostClass::Local);
+        assert_eq!(class("wss://0x7f000001"), RelayHostClass::Local);
+    }
+
     #[test]
     fn ipv4_public_ranges_stay_public() {
         // Just outside the RFC-1918 172.16/12 block.
@@ -178,6 +204,13 @@ mod tests {
         assert_eq!(class("ws://[fe80::1]"), RelayHostClass::Local);
         // IPv4-mapped loopback must be caught through the wrapper.
         assert_eq!(class("ws://[::ffff:127.0.0.1]"), RelayHostClass::Local);
+        // The deprecated IPv4-COMPATIBLE loopback (`::127.0.0.1`, which the
+        // url crate canonicalizes to `::7f00:1`) must ALSO be caught — a real
+        // (if archaic) reachable loopback path.
+        assert_eq!(class("ws://[::127.0.0.1]"), RelayHostClass::Local);
+        assert_eq!(class("ws://[::7f00:1]"), RelayHostClass::Local);
+        // ...and an IPv4-compatible RFC-1918 host, for good measure.
+        assert_eq!(class("ws://[::0a00:0005]"), RelayHostClass::Local);
     }
 
     #[test]

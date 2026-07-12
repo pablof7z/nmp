@@ -510,8 +510,11 @@ pub struct EngineCore<S: EventStore> {
     /// loopback/onion host); production threads the operator's opt-in local
     /// allowlist via [`Self::with_relay_admission`].
     admission: RelayAdmissionPolicy,
-    /// Monotonic count of DISCOVERED relays rejected by `admission` before
-    /// they could become directory lanes (issue #121). Surfaced in
+    /// Monotonic count of DISCOVERED relay-lane rejections by `admission`
+    /// before they could become directory lanes (issue #121). Counted PER
+    /// LANE: `ingest_relay_list_winner` filters the write set and the read
+    /// set of one kind:10002 separately (§2.4), so one hostile event naming
+    /// `N` rejected hosts bumps this by up to `2N`. Surfaced in
     /// [`DiagnosticsSnapshot::discovered_private_relays_rejected`]; the
     /// separate worker-exhaustion cap count lives in the pool
     /// (`nmp_transport::Pool::admission_rejections`) and is folded in by the
@@ -2495,6 +2498,16 @@ impl<S: EventStore> EngineCore<S> {
         // directory, so it never becomes a router candidate and never reaches
         // `pool.ensure_open` — the SSRF / forced-Tor path is closed
         // structurally, not filtered downstream.
+        //
+        // FORWARD GUARD: this is currently the SOLE network-discovery path
+        // into the relay directory. ANY future network-sourced relay ingest —
+        // a kind:10050 DM-inbox list, nprofile/nevent relay hints, a
+        // provenance "seen here" lane, etc. — MUST route its parsed relays
+        // through `self.admission.filter_discovered(..)` before calling
+        // `directory.ingest_*`, or the structural exclusion proven here is
+        // silently lost for that new source. Discovery is untrusted;
+        // operator config (the `LiveDirectory` builder lanes) is not and is
+        // deliberately NOT gated here.
         let (write_relays, write_rejected) = self
             .admission
             .filter_discovered(parse_nip65_write_relays(&winner.event));

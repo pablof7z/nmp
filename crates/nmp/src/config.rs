@@ -45,12 +45,19 @@ pub struct EngineConfig {
     /// config, not discovery, and are admitted regardless. Default empty
     /// (fail closed).
     pub allowed_local_relay_hosts: Vec<String>,
-    /// Global ceiling on the number of relays the transport pool will keep a
-    /// live worker for at once (issue #121, worker-exhaustion defense).
-    /// `0` (the default) imposes no cap — preserving prior behavior. A
-    /// non-zero value caps concurrent relay workers; dials past it are
-    /// refused and counted in
-    /// `DiagnosticsSnapshot::relays_rejected_over_cap`.
+    /// OPT-IN, defense-in-depth ceiling on the number of relays the transport
+    /// pool will keep a live worker for at once (issue #121). `0` (the
+    /// default) imposes no cap — preserving prior behavior. A non-zero value
+    /// caps concurrent relay workers; dials past it are refused and counted
+    /// in `DiagnosticsSnapshot::relays_rejected_over_cap`.
+    ///
+    /// This is NOT the primary worker-exhaustion defense. Fan-out per query
+    /// is already bounded structurally by `nmp-router`'s greedy k-cover
+    /// solver (`crates/nmp-router/src/solver.rs`), whose selection is capped
+    /// and drawn only from each author's OWN relays (`route.rs`) — so the
+    /// number of relays a single (validly-signed) kind:10002 lists is
+    /// irrelevant to worker count. This pool cap is a coarse absolute
+    /// backstop an operator may opt into on top of that.
     pub max_relays: usize,
 }
 

@@ -76,6 +76,13 @@ pub struct DiagnosticsSnapshot {
     /// sourced kind:10002 naming a loopback/RFC-1918/link-local/`.onion` host
     /// the operator never opted in. The provenance-aware half of admission —
     /// owned by `EngineCore` (`discovered_private_relays_rejected`).
+    ///
+    /// Counted PER LANE, not per host: one kind:10002 is parsed twice (its
+    /// write lane and its read lane, `routing-and-ownership.md` §2.4), so a
+    /// single hostile event naming `N` rejected hosts increments this by up
+    /// to `2N` (exactly `2N` when every rejected host is an unmarked r-tag,
+    /// which is both read and write). This is a rejection-EVENT tally for a
+    /// diagnostics screen, not a distinct-host count.
     pub discovered_private_relays_rejected: u64,
     /// Relay dials the transport pool refused because the configured
     /// `max_relays` live-worker ceiling was already reached (issue #121, the
