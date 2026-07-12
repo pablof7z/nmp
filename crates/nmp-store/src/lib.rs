@@ -974,6 +974,20 @@ pub trait EventStore {
         from: RelayObserved,
     ) -> Result<InsertOutcome, PersistenceError>;
 
+    /// Insert a relay-delivery batch in input order. Backends may override
+    /// this to amortize durable transaction cost while preserving the exact
+    /// per-event governed semantics and outcomes of repeated [`Self::insert`]
+    /// calls. The default keeps non-transactional backends source-compatible.
+    fn insert_batch(
+        &mut self,
+        events: Vec<(Event, RelayObserved)>,
+    ) -> Result<Vec<InsertOutcome>, PersistenceError> {
+        events
+            .into_iter()
+            .map(|(event, from)| self.insert(event, from))
+            .collect()
+    }
+
     /// Query current winners only (never a superseded/stale event), matched
     /// via `nostr::Filter::match_event`, each with its provenance attached.
     /// Fallible for the same reason as [`EventStore::insert`] (issue #122):

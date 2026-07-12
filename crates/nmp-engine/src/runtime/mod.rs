@@ -60,7 +60,7 @@
 mod diagnostics_channel;
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -351,6 +351,29 @@ fn duration_until(deadline: Timestamp, now: Timestamp) -> Duration {
 /// join`'s doc).
 fn pool_bridge_loop(pool_evt_rx: &Receiver<PoolEvent>, engine_inbox: &Sender<Cmd>) {
     while let Ok(event) = pool_evt_rx.recv() {
+        if let PoolEvent::Frame { handle, frame } = event {
+            let mut frames = vec![(handle, frame)];
+            let trailing = loop {
+                match pool_evt_rx.try_recv() {
+                    Ok(PoolEvent::Frame { handle, frame }) => frames.push((handle, frame)),
+                    Ok(other) => break Some(other),
+                    Err(TryRecvError::Empty) => break None,
+                    Err(TryRecvError::Disconnected) => break None,
+                }
+            };
+            if engine_inbox
+                .send(Cmd::Engine(EngineMsg::RelayFrames(frames)))
+                .is_err()
+            {
+                break;
+            }
+            if let Some(trailing) = trailing.and_then(translate_pool_event) {
+                if engine_inbox.send(Cmd::Engine(trailing)).is_err() {
+                    break;
+                }
+            }
+            continue;
+        }
         if let Some(msg) = translate_pool_event(event) {
             if engine_inbox.send(Cmd::Engine(msg)).is_err() {
                 break; // engine thread is gone; nothing left to feed.

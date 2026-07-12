@@ -344,17 +344,45 @@ fn translator_loop(
     worker_event_rx: &std::sync::mpsc::Receiver<WorkerEvent>,
 ) {
     while let Ok(event) = worker_event_rx.recv() {
+        let mut events = vec![event];
+        events.extend(worker_event_rx.try_iter().take(127));
         let Ok(mut guard) = inner.lock() else { break };
-        let Some(pool_event) = apply_worker_event(&mut guard, event) else {
-            continue;
-        };
+        let frame_positions: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                let WorkerEventKind::Frame(frame) = &event.kind else {
+                    return None;
+                };
+                let state = guard.slots.get(event.slot as usize)?;
+                let current = state.worker.is_some()
+                    && worker_id_of(event.generation) == worker_id_of(state.generation)
+                    && event.generation == state.generation;
+                current.then_some((index, frame))
+            })
+            .collect();
+        let frame_refs: Vec<_> = frame_positions.iter().map(|(_, frame)| *frame).collect();
+        let frame_verdicts = verify::gate_batch(&mut guard.verified_events, &frame_refs);
+        let mut verdict_by_event = vec![None; events.len()];
+        for ((position, _frame), verdict) in frame_positions.into_iter().zip(frame_verdicts) {
+            verdict_by_event[position] = Some(verdict);
+        }
+        let pool_events: Vec<_> = events
+            .into_iter()
+            .zip(verdict_by_event)
+            .filter_map(|(event, verdict)| {
+                apply_worker_event_with_verdict(&mut guard, event, verdict)
+            })
+            .collect();
         // Clone the sink handle (Arc bump) and drop the lock before
         // delivering, so a slow/blocking sink can never stall a concurrent
         // `Pool::send`/`ensure_open` (mirrors the harvested source's
         // off-lock delivery discipline).
         let sink = Arc::clone(&guard.sink);
         drop(guard);
-        sink.on_event(pool_event);
+        for pool_event in pool_events {
+            sink.on_event(pool_event);
+        }
     }
 }
 
@@ -377,7 +405,16 @@ fn translator_loop(
 ///   already reported" — the only real staleness is cross-instance (a
 ///   worker from before an explicit close+reopen), which the worker-id
 ///   check alone fully covers.
+#[cfg(test)]
 fn apply_worker_event(inner: &mut PoolInner, event: WorkerEvent) -> Option<PoolEvent> {
+    apply_worker_event_with_verdict(inner, event, None)
+}
+
+fn apply_worker_event_with_verdict(
+    inner: &mut PoolInner,
+    event: WorkerEvent,
+    preverified: Option<GateVerdict>,
+) -> Option<PoolEvent> {
     // `EventHandoff` (issue #93) is the one exception to every generation/
     // slot-state gate below: it is the sole, ever, resolution of a durable
     // EVENT's `AttemptCorrelation`, decided once by the worker itself. It
@@ -463,7 +500,7 @@ fn apply_worker_event(inner: &mut PoolInner, event: WorkerEvent) -> Option<PoolE
             // pool-global (not per-slot) so a redelivery of the same event
             // id by a DIFFERENT relay still hits the cache-compare fast
             // path instead of re-running schnorr.
-            match verify::gate(&mut inner.verified_events, &frame) {
+            match preverified.unwrap_or_else(|| verify::gate(&mut inner.verified_events, &frame)) {
                 GateVerdict::PassThrough | GateVerdict::Accept => Some(PoolEvent::Frame {
                     handle: RelayHandle {
                         slot: event.slot,
