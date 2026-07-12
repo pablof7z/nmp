@@ -225,6 +225,7 @@ pub enum EngineMsg {
     RelayConnected(TransportRelayHandle, RelayUrl),
     RelayDisconnected(u32),
     RelayFrame(TransportRelayHandle, RelayFrame),
+    RelayFrames(Vec<(TransportRelayHandle, RelayFrame)>),
     SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
     /// The runtime has no signer attached for this accepted author. This is
     /// non-terminal: the canonical pending row and durable obligation stay
@@ -1135,6 +1136,7 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::RelayConnected(handle, url) => self.on_relay_connected(handle, url),
             EngineMsg::RelayDisconnected(slot) => self.on_relay_disconnected(slot),
             EngineMsg::RelayFrame(handle, frame) => self.on_relay_frame(handle, frame),
+            EngineMsg::RelayFrames(frames) => self.on_relay_frames(frames),
             EngineMsg::SignerCompleted(id, generation, result) => {
                 self.on_signer_completed(id, generation, result)
             }
@@ -2202,6 +2204,79 @@ impl<S: EventStore> EngineCore<S> {
     // ---- inbound relay frame: EVENT/EOSE parsed here (D/E own OK/CLOSED/
     // NOTICE/AUTH/COUNT/NEG-*) --------------------------------------------
 
+    fn ingest_relay_events(
+        &mut self,
+        events: Vec<(SignedEvent, RelayObserved)>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if events.is_empty() {
+            return;
+        }
+        let relay_list_authors: Vec<_> = events
+            .iter()
+            .filter_map(|(event, _)| (event.kind == nostr::Kind::RelayList).then_some(event.pubkey))
+            .collect();
+        for (event, observed) in &events {
+            *self
+                .events_by_relay_kind
+                .entry(observed.relay.clone())
+                .or_default()
+                .entry(event.kind.as_u16())
+                .or_insert(0) += 1;
+        }
+        match self.resolver.ingest_observed_detailed(events) {
+            Err(error) => self.degrade_store(error, effects),
+            Ok(ingest) => {
+                let _delta = ingest.delta;
+                for (intent_id, canonical) in ingest.satisfied_intents {
+                    if let Some((receipt_id, pending)) = self
+                        .pending
+                        .iter_mut()
+                        .find(|(_, pending)| pending.intent_id == Some(intent_id))
+                    {
+                        pending.already_signed = true;
+                        pending.sign_request_in_flight = false;
+                        let receipt_id = *receipt_id;
+                        self.on_signed(receipt_id, canonical, effects);
+                    }
+                }
+                for author in relay_list_authors {
+                    self.ingest_relay_list_winner(author, effects);
+                }
+                self.recompile(effects);
+                self.refresh_all_handles(effects);
+            }
+        }
+    }
+
+    fn on_relay_frames(&mut self, frames: Vec<(TransportRelayHandle, RelayFrame)>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let mut events = Vec::new();
+        for (handle, frame) in frames {
+            let parsed_event = match &frame {
+                RelayFrame::Text(text) => RelayMessage::from_json(text.as_bytes()).ok().and_then(
+                    |message| match message {
+                        RelayMessage::Event { event, .. } => {
+                            self.slot_to_url.get(&handle.slot).cloned().map(|relay| {
+                                (event.into_owned(), RelayObserved::new(relay, self.clock))
+                            })
+                        }
+                        _ => None,
+                    },
+                ),
+                RelayFrame::Auth(_) => None,
+            };
+            if let Some(event) = parsed_event {
+                events.push(event);
+                continue;
+            }
+            self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+            effects.extend(self.on_relay_frame(handle, frame));
+        }
+        self.ingest_relay_events(events, &mut effects);
+        effects
+    }
+
     fn on_relay_frame(&mut self, handle: TransportRelayHandle, frame: RelayFrame) -> Vec<Effect> {
         let mut effects = Vec::new();
         let RelayFrame::Text(text) = frame else {
@@ -2219,57 +2294,8 @@ impl<S: EventStore> EngineCore<S> {
         match msg {
             RelayMessage::Event { event, .. } => {
                 let event = event.into_owned();
-                // The diagnostic surface's own counter (M5 plan §1.2 step
-                // 1) — genuinely not tracked anywhere else: bump BEFORE
-                // `recompile()` below so the `EmitDiagnostics` it pushes
-                // already reflects this event.
-                *self
-                    .events_by_relay_kind
-                    .entry(relay.clone())
-                    .or_default()
-                    .entry(event.kind.as_u16())
-                    .or_insert(0) += 1;
-                // M5 self-bootstrapping outbox: a kind:10002 needs its
-                // author's write relays fed into the live directory BEFORE
-                // `recompile()` runs, so the very same recompile that
-                // ingested it can already route that author's content atoms
-                // to the newly-known relay (see `ingest_relay_list_winner`'s
-                // doc for why this re-reads the store's winner rather than
-                // trusting this frame directly).
-                let relay_list_author =
-                    (event.kind == nostr::Kind::RelayList).then_some(event.pubkey);
                 let observed = RelayObserved::new(relay, self.clock);
-                // The ingest door runs on EVERY relay EVENT frame. On a
-                // persistence failure (disk full, I/O error — issue #122)
-                // degrade the local cache to read-only and emit a diagnostic
-                // instead of panicking the host app; this frame is dropped
-                // and no reactive refresh runs.
-                match self
-                    .resolver
-                    .ingest_observed_detailed(vec![(event, observed)])
-                {
-                    Err(e) => self.degrade_store(e, &mut effects),
-                    Ok(ingest) => {
-                        let _delta = ingest.delta;
-                        for (intent_id, canonical) in ingest.satisfied_intents {
-                            if let Some((receipt_id, pending)) = self
-                                .pending
-                                .iter_mut()
-                                .find(|(_, pending)| pending.intent_id == Some(intent_id))
-                            {
-                                pending.already_signed = true;
-                                pending.sign_request_in_flight = false;
-                                let receipt_id = *receipt_id;
-                                self.on_signed(receipt_id, canonical, &mut effects);
-                            }
-                        }
-                        if let Some(author) = relay_list_author {
-                            self.ingest_relay_list_winner(author, &mut effects);
-                        }
-                        self.recompile(&mut effects);
-                        self.refresh_all_handles(&mut effects);
-                    }
-                }
+                self.ingest_relay_events(vec![(event, observed)], &mut effects);
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 let wire_id = sub_id.as_str();
