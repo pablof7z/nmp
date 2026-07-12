@@ -50,6 +50,10 @@ final class NMPUIGalleryUITests: XCTestCase {
         for _ in 0..<18 { scroll.swipeDown(velocity: .fast) }
         let activeCount = app.staticTexts.matching(identifier: "gallery.stress.active-count").firstMatch
         XCTAssertTrue(activeCount.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts["Seventy-two rows. Two live references each."].isHittable,
+            "rapid scroll did not return to the top of the stress gallery"
+        )
         let bounded = NSPredicate { object, _ in
             guard let element = object as? XCUIElement,
                   let count = Int(element.label.split(separator: " ").first ?? "")
@@ -60,7 +64,11 @@ final class NMPUIGalleryUITests: XCTestCase {
             for: [XCTNSPredicateExpectation(predicate: bounded, object: activeCount)],
             timeout: 8
         )
-        XCTAssertEqual(result, .completed, "visible reference claims did not return to a bounded window")
+        XCTAssertEqual(
+            result,
+            .completed,
+            "visible reference claims did not return to a bounded window; observed: \(activeCount.label)"
+        )
         keepScreenshot("stress-returned-to-top")
     }
 
