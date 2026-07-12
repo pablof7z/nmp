@@ -347,15 +347,29 @@ private struct NMPReferenceClaimModifier: ViewModifier {
     let referenceID: UInt64
     @State private var claim: NostrContentClaim?
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
-            .onAppear {
-                if claim == nil { claim = session.claim(referenceID: referenceID) }
-            }
-            .onDisappear {
-                claim?.cancel()
-                claim = nil
-            }
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content
+                .onAppear { setClaimed(true) }
+                .onScrollVisibilityChange(threshold: 0.01) { isVisible in
+                    setClaimed(isVisible)
+                }
+                .onDisappear { setClaimed(false) }
+        } else {
+            content
+                .onAppear { setClaimed(true) }
+                .onDisappear { setClaimed(false) }
+        }
+    }
+
+    private func setClaimed(_ isClaimed: Bool) {
+        if isClaimed {
+            if claim == nil { claim = session.claim(referenceID: referenceID) }
+        } else {
+            claim?.cancel()
+            claim = nil
+        }
     }
 }
 
