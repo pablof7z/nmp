@@ -25,29 +25,33 @@ Parent #79 and epic #23 define one owner for durable retry. Today the attempt ta
 
 ## Unit #93 — transport handoff ownership
 
-Add a correlated `PublishAttempt` command keyed by persisted attempt identity and connection generation. Add a typed result distinguishing proven not handed off from written or ambiguous. Durable EVENT commands must be dropped and reported at generation end; they never enter the reconnect carry-over deque. Keep REQ/subscription preamble replay unchanged. Prove rollover, disconnect-before-write, ambiguity, duplicate result, and unrelated read traffic.
+Add a correlated `PublishAttempt` command keyed by persisted attempt identity and connection generation. The typed result is exactly `NotHandedOff`, `Written`, or `Ambiguous`. Durable EVENT commands must be dropped and reported at generation end; they never enter the reconnect carry-over deque. `Written` means the socket write completed and is the only result that may later persist/emit `Sent`. `Ambiguous` never emits `Sent`; Durable waits for ACK then applies timeout policy, while AtMostOnce becomes `OutcomeUnknown` immediately. Keep REQ/subscription preamble replay unchanged. Prove rollover, disconnect-before-write, each handoff class, duplicate result, and unrelated read traffic.
 
 Rollback: the PR is an internal seam and can be reverted before #95 consumes it. No persistence migration.
 
 ## Unit #94 — durable lane cursor and eligibility index
 
-Add versioned `OUTBOX_LANES` keyed by length-prefixed `(intent, relay)` and ordered `OUTBOX_ELIGIBILITY` keyed by `(eligible_at, intent, relay)`. Add policy-free atomic doors for waiting, eligible, in-flight, transient, terminal, and terminal-intent-close transitions. Attempt v2 records add times/outcome detail; v1 decodes without rewrite. Offline and AUTH waits have no eligibility row. All reads are bounded/indexed, using #87's discipline.
+Add versioned `OUTBOX_LANES` keyed by length-prefixed `(intent, relay)`, ordered `OUTBOX_ELIGIBILITY` keyed by `(eligible_at, intent, relay)`, and additive `OUTBOX_ATTEMPT_DETAILS` keyed by the existing attempt key. Keep existing `OUTBOX_ATTEMPTS` rows at version 1 and immutable; timing, handoff, and transient classification live in the additive detail table so older binaries can still decode attempt rows. Add policy-free atomic doors for waiting, eligible, in-flight, transient, terminal, and terminal-intent-close transitions. Offline and AUTH waits have no eligibility row. All reads are bounded/indexed, using #87's discipline.
 
-Crash matrix: before/after lane creation, attempt start, terminal/transient finish, eligibility update, and open-intent close. Memory and Redb must be identical. Corruption fails closed and never deletes obligations. Retain receipts, routes, lanes, and attempts as evidence after open-work closure.
+On first new-engine boot, deterministically insert missing lane cursors from open intents, route revisions, and the highest v1 attempt per lane: no attempt becomes waiting-for-connection; v1 terminal maps terminal; v1 Started maps a legacy in-flight state. The engine then atomically converts legacy Durable Started to interrupted/eligible and legacy AtMostOnce Started to `OutcomeUnknown`. The bootstrap is insert-if-absent and idempotent; it never rewrites v1 history.
 
-Rollback: schema additions are versioned and additive; old binaries ignore new tables, while the new decoder accepts v1. Do not destructively migrate history.
+Crash matrix: before/after lane creation, attempt start, handoff-detail write, terminal/transient finish, eligibility update, and open-intent close. Memory and Redb must be identical. Corruption fails closed and never deletes obligations. Retain receipts, routes, lanes, attempts, and details as evidence after open-work closure.
+
+Rollback truth: the schema is additive and old binaries can decode unchanged v1 attempts, but behavioral rollback is unsafe while open intents have new lane state because the old engine cannot honor that cursor. Operational rollback therefore requires quiescing/closing open work or rolling forward; no destructive downgrade is claimed.
 
 ## Unit #95 — engine reducer and scheduler
 
 Use typed states `WaitingConnection`, `WaitingAuth`, `Eligible`, `InFlight`, and terminal outcomes. One `schedule_ready(now)` path runs after boot, tick, connection/AUTH change, handoff result, OK, disconnect, cancellation, and persistence recovery. Stable order is `(eligible_at, intent, relay)`. Enforce 32 global and 1 per relay. Backoff is 3, 6, 12 seconds up to 300 seconds plus deterministic 0..<5-second jitter derived from persisted attempt identity. ACK timeout is 30 seconds.
 
-Only actual committed starts consume an ordinal. Offline/AUTH waits consume none. Durable interrupted or ambiguous attempts finish transient and later dispatch under a new ordinal. AtMostOnce proven-not-handed-off may re-arm; written/ambiguous becomes `OutcomeUnknown` and never re-enters eligibility. Tick must consume due eligibility and ACK deadlines before computing the next deadline; when capacity is full, completion messages—not a zero deadline—wake scheduling.
+Only actual committed starts consume an ordinal. Offline/AUTH waits consume none. `NotHandedOff` records that outcome without `Sent` and may safely re-arm either durability mode. `Written` is persisted before `Sent` and enters ACK wait. `Ambiguous` emits no `Sent`; Durable remains ACK-waiting and becomes transient at timeout, while AtMostOnce immediately becomes `OutcomeUnknown` and never re-enters eligibility. Durable interrupted attempts later dispatch under a new ordinal. Tick must consume due eligibility and ACK deadlines before computing the next deadline; when capacity is full, completion messages—not a zero deadline—wake scheduling.
 
-Falsifiers cover no-deadline blocking, exact equality, cap-full past-due work, stable fairness, deterministic reopen, no polling, no hidden transport queue, persistence failure at every transition, exact bytes/ordinals, and bounded tick/effect counts.
+NIP-20 classification uses only standardized machine prefixes, never free-form text: `duplicate` satisfies delivery and maps to Acked; `rate-limited` and `error` are transient; `auth-required` enters WaitingAuth; `invalid`, `pow`, `blocked`, and `restricted` are terminal Rejected. Unknown or malformed prefixes default to terminal Rejected and retain the raw reason, preventing infinite retries of possibly permanent invalidity.
+
+Falsifiers cover no-deadline blocking, exact equality, cap-full past-due work, stable fairness, deterministic reopen, no polling, all handoff classes, every NIP-20 class/default, no hidden transport queue, persistence failure at every transition, exact bytes/ordinals, and bounded tick/effect counts.
 
 ## Unit #96 — governed receipt projection
 
-Add `AwaitingRelay`, `AwaitingAuth`, and `RetryEligible` plus ordinal/timing where required to canonical receipt facts. Do not call queue acceptance `Sent`. Keep write retry truth distinct from query acquisition evidence. Update facade, UniFFI, Swift, Kotlin, direct-vs-FFI parity, exhaustive native mappings, both snapshots, and the exact append-only surface entry.
+Add `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, and `HandoffAmbiguous` plus ordinal/timing where required to canonical receipt facts. Emit `Sent` only after persisted `Written`, never for queue acceptance or ambiguity. Keep write retry truth distinct from query acquisition evidence. Update facade, UniFFI, Swift, Kotlin, direct-vs-FFI parity, exhaustive native mappings, both snapshots, and the exact append-only surface entry.
 
 ## Dependencies and coordination
 
@@ -55,7 +59,7 @@ Add `AwaitingRelay`, `AwaitingAuth`, and `RetryEligible` plus ordinal/timing whe
 
 ## Observability and acceptance
 
-Receipts expose every wait/retry transition. Attempt history preserves exact ordinals, timestamps, handoff classification, and outcomes. Tests assert the scheduler's visited/due work is bounded and the runtime blocks rather than polls. Completion requires all child PR tests plus workspace, Swift, Kotlin, surface regeneration, and trusted governance gates.
+Receipts expose every wait/retry/handoff transition. Unchanged v1 attempt history plus additive detail rows preserve exact ordinals, timestamps, handoff classification, and outcomes. Tests assert the scheduler's visited/due work is bounded and the runtime blocks rather than polls. Completion requires all child PR tests plus workspace, Swift, Kotlin, surface regeneration, and trusted governance gates.
 
 ## Rule And ADR Check
 
@@ -92,6 +96,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: https://pablof7z.github.io/nmp/plans/durable-retry-policy-79/
+- Plan page: Generated after publishing.
 
-- TTS audio: https://blossom.primal.net/9d5222f80bb04ad33cb2372964b4cdca5793a5d21f1b255f94860596b5f71e8d.mp3
+- TTS audio: https://blossom.primal.net/ac0ffc9274bb7879bd8c103042ea77ead17db85928a1ff30af07503147398e59.mp3
