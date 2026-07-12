@@ -166,7 +166,7 @@ impl Prober {
         let sub_id = SubId::for_wire(
             relay.clone(),
             &filter,
-            SourceAuthority::Public,
+            &SourceAuthority::Public,
             AccessContext::Public,
         );
         let wire_id = crate::core::wire_sub_id_string(&sub_id);

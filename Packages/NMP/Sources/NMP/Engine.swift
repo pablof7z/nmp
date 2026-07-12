@@ -90,6 +90,16 @@ public final class NMPEngine: Sendable {
         try NMPQuery(engine: ffi, filter: filter.toFfi())
     }
 
+    /// Open a live, detachable query over an explicit `NMPDemand` (#107) --
+    /// the constructor to reach for once `observe(_ filter:)`'s implicit
+    /// `AuthorOutboxes`/`Public` default isn't enough: declaring `.pinned`
+    /// wire authority, a non-default `NMPAccessContext`, or a non-
+    /// `.agnostic` `NMPCacheMode`. Same deinit-tied teardown as the
+    /// `NMPFilter` overload.
+    public func observe(_ demand: NMPDemand) throws -> NMPQuery {
+        try NMPQuery(engine: ffi, demand: demand.toFfi())
+    }
+
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,
     // events actually received per relay per kind, and per-filter coverage.
