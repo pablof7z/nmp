@@ -23,6 +23,8 @@ pub use nmp::IndexedTagName
 pub use nmp::Kind
 pub use nmp::Lane
 pub use nmp::LiveQuery
+pub use nmp::NostrEntity
+pub use nmp::NostrEntityError
 pub use nmp::PublicKey
 pub use nmp::ReceiptId
 pub use nmp::ReceiptReattachment
@@ -46,6 +48,7 @@ pub use nmp::WriteIntent
 pub use nmp::WritePayload
 pub use nmp::WriteRouting
 pub use nmp::WriteStatus
+pub use nmp::decode_nostr_entity
 pub enum nmp::EngineError
 pub nmp::EngineError::EngineClosed
 pub nmp::EngineError::InvalidRelayUrl
@@ -19532,6 +19535,434 @@ reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
   "name": "LiveQuery",
   "visibility": "public"
 }
+reexport nmp::NostrEntity => nmp_grammar::nip19::NostrEntity
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "pubkey",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Pubkey",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "pubkey",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": {
+                              "angle_bracketed": {
+                                "args": [
+                                  {
+                                    "type": {
+                                      "resolved_path": {
+                                        "args": null,
+                                        "path": "String",
+                                        "resolved_item": {
+                                          "path": "alloc::string::String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                ],
+                                "constraints": []
+                              }
+                            },
+                            "path": "Vec",
+                            "resolved_item": {
+                              "path": "alloc::vec::Vec"
+                            }
+                          }
+                        }
+                      },
+                      "name": "relays",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Profile",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "id",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "EventId",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "id",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": {
+                              "angle_bracketed": {
+                                "args": [
+                                  {
+                                    "type": {
+                                      "resolved_path": {
+                                        "args": null,
+                                        "path": "String",
+                                        "resolved_item": {
+                                          "path": "alloc::string::String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                ],
+                                "constraints": []
+                              }
+                            },
+                            "path": "Option",
+                            "resolved_item": {
+                              "path": "core::option::Option"
+                            }
+                          }
+                        }
+                      },
+                      "name": "author",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": {
+                              "angle_bracketed": {
+                                "args": [
+                                  {
+                                    "type": {
+                                      "primitive": "u16"
+                                    }
+                                  }
+                                ],
+                                "constraints": []
+                              }
+                            },
+                            "path": "Option",
+                            "resolved_item": {
+                              "path": "core::option::Option"
+                            }
+                          }
+                        }
+                      },
+                      "name": "kind",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": {
+                              "angle_bracketed": {
+                                "args": [
+                                  {
+                                    "type": {
+                                      "resolved_path": {
+                                        "args": null,
+                                        "path": "String",
+                                        "resolved_item": {
+                                          "path": "alloc::string::String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                ],
+                                "constraints": []
+                              }
+                            },
+                            "path": "Vec",
+                            "resolved_item": {
+                              "path": "alloc::vec::Vec"
+                            }
+                          }
+                        }
+                      },
+                      "name": "relays",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Event",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "u16"
+                        }
+                      },
+                      "name": "kind",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "author",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "identifier",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": {
+                              "angle_bracketed": {
+                                "args": [
+                                  {
+                                    "type": {
+                                      "resolved_path": {
+                                        "args": null,
+                                        "path": "String",
+                                        "resolved_item": {
+                                          "path": "alloc::string::String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                ],
+                                "constraints": []
+                              }
+                            },
+                            "path": "Vec",
+                            "resolved_item": {
+                              "path": "alloc::vec::Vec"
+                            }
+                          }
+                        }
+                      },
+                      "name": "relays",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Coordinate",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "NostrEntity",
+  "visibility": "public"
+}
+reexport nmp::NostrEntityError => nmp_grammar::nip19::NostrEntityError
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Malformed",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "SecretKeyRejected",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "NostrEntityError",
+  "visibility": "public"
+}
 reexport nmp::PublicKey => nostr::key::public_key::PublicKey
 {
   "previously_defined": "nostr::key::public_key::PublicKey"
@@ -23389,4 +23820,86 @@ reexport nmp::WriteRouting => nmp_engine::outbox::WriteRouting
 reexport nmp::WriteStatus => nmp_engine::outbox::WriteStatus
 {
   "previously_defined": "nmp_engine::outbox::WriteStatus"
+}
+reexport nmp::decode_nostr_entity => nmp_grammar::nip19::decode
+{
+  "attrs": [],
+  "inner": {
+    "function": {
+      "default_unstable": null,
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_body": true,
+      "header": {
+        "abi": "Rust",
+        "is_async": false,
+        "is_const": false,
+        "is_unsafe": false
+      },
+      "sig": {
+        "inputs": [
+          [
+            "input",
+            {
+              "borrowed_ref": {
+                "is_mutable": false,
+                "lifetime": null,
+                "type": {
+                  "primitive": "str"
+                }
+              }
+            }
+          ]
+        ],
+        "is_c_variadic": false,
+        "output": {
+          "resolved_path": {
+            "args": {
+              "angle_bracketed": {
+                "args": [
+                  {
+                    "type": {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "NostrEntity",
+                        "resolved_item": {
+                          "definition": {
+                            "previously_defined": "nmp_grammar::nip19::NostrEntity"
+                          },
+                          "path": "nmp_grammar::nip19::NostrEntity"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "NostrEntityError",
+                        "resolved_item": {
+                          "definition": {
+                            "previously_defined": "nmp_grammar::nip19::NostrEntityError"
+                          },
+                          "path": "nmp_grammar::nip19::NostrEntityError"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "constraints": []
+              }
+            },
+            "path": "Result",
+            "resolved_item": {
+              "path": "core::result::Result"
+            }
+          }
+        }
+      }
+    }
+  },
+  "name": "decode",
+  "visibility": "public"
 }

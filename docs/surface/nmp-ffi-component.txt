@@ -276,6 +276,29 @@ enum Enum {
                 "[`nmp::Engine::shutdown`] has already run -- every other verb fails\nclosed with this variant instead of racing the engine thread's own\nteardown. NOTE: there is deliberately no `InvalidSignedEvent` variant\nhere anymore -- a `FfiWritePayload::Signed` that fails\n`nostr::Event::verify` is no longer rejected synchronously at this\nboundary (#52 Unit B). That guarantee moved to\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary\n(Unit A0/#56) so it holds for every entry point, not only this one;\nit surfaces on the `WriteStatus` receipt stream as `Failed` instead.",
             ),
         },
+        Variant {
+            name: "InvalidNostrEntity",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`decode_nostr_entity`'s input was not valid bech32, had an\nunrecognized HRP prefix, or (for `nprofile`/`nevent`/`naddr`) had a\nmalformed inner TLV payload (#116).",
+            ),
+        },
+        Variant {
+            name: "NostrEntitySecretKeyRejected",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`decode_nostr_entity`'s input decoded to `nsec`/`ncryptsec` -- refused\nrather than decoded, since a secret-key entity is never a valid\ntarget for a display/mention codec (#116).",
+            ),
+        },
     ],
     shape: Error {
         flat: false,
@@ -303,6 +326,137 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "The reactive identity root (VISION §2 P3). Extensible -- UniFFI enums are\nNOT `#[non_exhaustive]` across the FFI boundary by default, but adding a\nvariant here is a mechanical, additive change on both sides whenever the\ngrammar itself grows one.",
+    ),
+}
+
+enum Enum {
+    name: "FfiNostrEntity",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Pubkey",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Profile",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "relays",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "EventId",
+            discr: None,
+            fields: [
+                Field {
+                    name: "id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Event",
+            discr: None,
+            fields: [
+                Field {
+                    name: "id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: Optional {
+                        inner_type: UInt16,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "relays",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Coordinate",
+            discr: None,
+            fields: [
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "identifier",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "relays",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "A decoded public NIP-19 nostr entity (#116, `nmp::NostrEntity` mirror).\nEach variant carries EXACTLY the fields NIP-19 defines for that entity --\nnever force-fit into one shared shape: `npub`/`note` carry no relay\nhints at all (the format has none to carry); `nevent`'s `author`/`kind`\nare independently optional metadata; `naddr`'s `kind`/`author`/\n`identifier` are ALL required by the format, unlike `nevent`'s. There is\ndeliberately no `nsec`/`ncryptsec` variant here -- see\n`convert::decode_nostr_entity`'s doc for why a secret-key entity is\nrefused rather than decoded.",
     ),
 }
 
@@ -1431,6 +1585,64 @@ record Record {
     ],
     docstring: Some(
         "Construction config for [`NmpEngine::new`]. See the module doc: the only\nrelay facts a caller ever supplies are the three operator-configured\nlanes -- `indexer_relays`, `app_relays`, `fallback_relays`\n(`routing-and-ownership.md` §2.1) -- everything else is discovered live.",
+    ),
+}
+
+function Function {
+    name: "decode_nostr_entity",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "input",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiNostrEntity",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_decode_nostr_entity",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "input",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiNostrEntity",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Decode a bech32 nostr entity -- `npub`/`nprofile`/`note`/`nevent`/\n`naddr` -- accepting either the bare bech32 string or a `nostr:`-\nprefixed URI (NIP-21). Pure codec: no network, no signing, no engine\nstate, callable with no `NmpEngine` constructed at all.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_nostr_entity",
+    checksum: Some(
+        43591,
     ),
 }
 
