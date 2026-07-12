@@ -32,7 +32,7 @@ use crate::health::RelayHealth;
 use super::RelayFrame;
 
 /// Outcome of the gate for one inbound [`RelayFrame`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GateVerdict {
     /// Not an `EVENT` frame (or an `EVENT`-shaped frame whose payload did
     /// not even parse as a full [`Event`]) -- passed through unchanged,
@@ -48,6 +48,90 @@ pub(super) enum GateVerdict {
     /// sight, or a signature that does not match the previously-verified
     /// value already on file for the same event id. Never forwarded.
     Reject,
+}
+
+/// Verify a translator-sized burst concurrently, then update the shared
+/// id/signature cache in input order. Parsing stays per frame; expensive
+/// schnorr checks for distinct first-seen ids run across scoped native
+/// threads. Redeliveries already in `verified` remain byte comparisons.
+pub(super) fn gate_batch(
+    verified: &mut HashMap<EventId, Signature>,
+    frames: &[&RelayFrame],
+) -> Vec<GateVerdict> {
+    let parsed: Vec<Option<Event>> = frames
+        .iter()
+        .map(|frame| {
+            let RelayFrame::Text(text) = frame else {
+                return None;
+            };
+            let event_json = sniff_event_payload(text)?;
+            Event::from_json(event_json).ok()
+        })
+        .collect();
+    let mut verdicts = vec![GateVerdict::PassThrough; frames.len()];
+    let mut unknown = Vec::new();
+    for (index, event) in parsed.iter().enumerate() {
+        let Some(event) = event else { continue };
+        if let Some(known_sig) = verified.get(&event.id) {
+            verdicts[index] = if *known_sig == event.sig {
+                GateVerdict::Accept
+            } else {
+                GateVerdict::Reject
+            };
+        } else {
+            unknown.push((index, event));
+        }
+    }
+
+    let checks = verify_unknown(&unknown);
+    for ((index, event), valid) in unknown.into_iter().zip(checks) {
+        if !valid {
+            verdicts[index] = GateVerdict::Reject;
+            continue;
+        }
+        verdicts[index] = match verified.get(&event.id) {
+            Some(known_sig) if *known_sig != event.sig => GateVerdict::Reject,
+            Some(_) => GateVerdict::Accept,
+            None => {
+                verified.insert(event.id, event.sig);
+                GateVerdict::Accept
+            }
+        };
+    }
+    verdicts
+}
+
+fn verify_unknown(events: &[(usize, &Event)]) -> Vec<bool> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if events.len() > 1 {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(events.len());
+        if workers > 1 {
+            let chunk_len = events.len().div_ceil(workers);
+            return std::thread::scope(|scope| {
+                let handles: Vec<_> = events
+                    .chunks(chunk_len)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            chunk
+                                .iter()
+                                .map(|(_index, event)| event.verify().is_ok())
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("verification worker panicked"))
+                    .collect()
+            });
+        }
+    }
+    events
+        .iter()
+        .map(|(_index, event)| event.verify().is_ok())
+        .collect()
 }
 
 /// Peek `frame`; verify at most once per distinct event id.
@@ -168,6 +252,21 @@ mod tests {
         // this is a compare and not just "always accept a known id".
         assert_eq!(gate(&mut verified, &frame), GateVerdict::Accept);
         assert_eq!(verified.len(), 1, "no new cache entry for a redelivery");
+    }
+
+    #[test]
+    fn batch_gate_accepts_and_caches_distinct_valid_events_in_order() {
+        let keys = Keys::generate();
+        let frames: Vec<_> = (0..16)
+            .map(|index| signed_event_frame(&keys, &format!("batch-{index}")).0)
+            .collect();
+        let refs: Vec<_> = frames.iter().collect();
+        let mut verified = HashMap::new();
+
+        let verdicts = gate_batch(&mut verified, &refs);
+
+        assert_eq!(verdicts, vec![GateVerdict::Accept; 16]);
+        assert_eq!(verified.len(), 16);
     }
 
     #[test]

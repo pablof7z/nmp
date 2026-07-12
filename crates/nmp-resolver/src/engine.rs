@@ -530,8 +530,10 @@ impl<S: EventStore> Engine<S> {
         let mut inserted: Vec<nostr::Event> = Vec::new();
         let mut removed: Vec<nostr::Event> = Vec::new();
         let mut satisfied_intents = Vec::new();
-        for (event, from) in events {
-            match self.store.insert(event.clone(), from)? {
+        let input_events: Vec<_> = events.iter().map(|(event, _from)| event.clone()).collect();
+        let outcomes = self.store.insert_batch(events)?;
+        for (event, outcome) in input_events.into_iter().zip(outcomes) {
+            match outcome {
                 InsertOutcome::Inserted => inserted.push(event),
                 InsertOutcome::Superseded { replaced } => {
                     inserted.push(event);

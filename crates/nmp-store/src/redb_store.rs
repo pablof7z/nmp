@@ -2475,176 +2475,234 @@ impl RedbStore {
     }
 }
 
-impl EventStore for RedbStore {
-    fn insert(
-        &mut self,
-        event: Event,
-        from: RelayObserved,
-    ) -> Result<InsertOutcome, PersistenceError> {
-        // Refused at the door FIRST: an already-expired event is never
-        // stored, so it never touches dedup or supersession at all.
-        if event.is_expired_at(&from.at) {
-            return Ok(InsertOutcome::Refused(RefuseReason::AlreadyExpired));
-        }
+#[allow(clippy::too_many_lines)]
+fn insert_in_txn(
+    write_txn: &redb::WriteTransaction,
+    event: Event,
+    from: RelayObserved,
+) -> Result<InsertOutcome, PersistenceError> {
+    // Refused at the door FIRST: an already-expired event is never
+    // stored, so it never touches dedup or supersession at all.
+    if event.is_expired_at(&from.at) {
+        return Ok(InsertOutcome::Refused(RefuseReason::AlreadyExpired));
+    }
 
-        let write_txn = self.db.begin_write().map_err(persist_err)?;
-        let outcome = {
-            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
-            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
-            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
-            let mut expiration_index = write_txn
-                .open_table(EXPIRATION_INDEX)
-                .map_err(persist_err)?;
-            let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
-            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
-            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
-            let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
-            let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
-            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
-            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
-            let mut outbox_displaced = write_txn
-                .open_table(OUTBOX_DISPLACED)
-                .map_err(persist_err)?;
-            let mut outbox_kind5_claims = write_txn
-                .open_table(OUTBOX_KIND5_CLAIMS)
-                .map_err(persist_err)?;
-            let mut outbox_suppress_by_id = write_txn
-                .open_table(OUTBOX_SUPPRESS_BY_ID)
-                .map_err(persist_err)?;
-            let mut outbox_suppress_by_addr = write_txn
-                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-                .map_err(persist_err)?;
-            let id_hex = event.id.to_hex();
+    let outcome = {
+        let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+        let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+        let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+        let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
+        let mut expiration_index = write_txn
+            .open_table(EXPIRATION_INDEX)
+            .map_err(persist_err)?;
+        let mut by_created_at = write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
+        let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+        let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+        let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
+        let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
+        let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+        let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+        let mut outbox_displaced = write_txn
+            .open_table(OUTBOX_DISPLACED)
+            .map_err(persist_err)?;
+        let mut outbox_kind5_claims = write_txn
+            .open_table(OUTBOX_KIND5_CLAIMS)
+            .map_err(persist_err)?;
+        let mut outbox_suppress_by_id = write_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ID)
+            .map_err(persist_err)?;
+        let mut outbox_suppress_by_addr = write_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+            .map_err(persist_err)?;
+        let id_hex = event.id.to_hex();
 
-            let existing_bytes = events
-                .get(id_hex.as_str())
-                .map_err(persist_err)?
-                .map(|guard| guard.value().to_vec());
+        let existing_bytes = events
+            .get(id_hex.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_vec());
 
-            if let Some(existing_bytes) = existing_bytes {
-                // Dedup-by-id FIRST: merge provenance, no index churn. Goes
-                // through `Provenance::merge_observation` (not a re-derived
-                // copy) so the persisted backend can never diverge from
-                // `MemoryStore`'s merge semantics.
-                let mut record = decode_stored_event_record(&existing_bytes);
-                let mut provenance = Provenance {
-                    seen: record.provenance,
-                    local: record.local,
-                };
-                let grew = provenance.merge_observation(&from);
-                // Architecture review requirement (issue #2 P0 correction,
-                // codex-nova ruling): a relay delivering the real signed
-                // event for a still-Pending local draft is functionally the
-                // SAME signature-adoption/fan-out invariant `promote_signed`
-                // performs explicitly — adopt it, mark every co-owner
-                // `Signed`, and fan out, rather than silently keeping our
-                // own sentinel forever (`event` here is, by this door's own
-                // contract, always a genuine relay delivery, never our OWN
-                // sentinel, so its signature is always safe to adopt).
-                let needs_adoption = provenance
+        if let Some(existing_bytes) = existing_bytes {
+            // Dedup-by-id FIRST: merge provenance, no index churn. Goes
+            // through `Provenance::merge_observation` (not a re-derived
+            // copy) so the persisted backend can never diverge from
+            // `MemoryStore`'s merge semantics.
+            let mut record = decode_stored_event_record(&existing_bytes);
+            let mut provenance = Provenance {
+                seen: record.provenance,
+                local: record.local,
+            };
+            let grew = provenance.merge_observation(&from);
+            // Architecture review requirement (issue #2 P0 correction,
+            // codex-nova ruling): a relay delivering the real signed
+            // event for a still-Pending local draft is functionally the
+            // SAME signature-adoption/fan-out invariant `promote_signed`
+            // performs explicitly — adopt it, mark every co-owner
+            // `Signed`, and fan out, rather than silently keeping our
+            // own sentinel forever (`event` here is, by this door's own
+            // contract, always a genuine relay delivery, never our OWN
+            // sentinel, so its signature is always safe to adopt).
+            let needs_adoption = provenance
+                .local
+                .as_ref()
+                .is_some_and(|l| l.sig_state == SigState::Pending);
+            let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
+            if needs_adoption {
+                let mut local = provenance
                     .local
-                    .as_ref()
-                    .is_some_and(|l| l.sig_state == SigState::Pending);
-                let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
-                if needs_adoption {
-                    let mut local = provenance
-                        .local
-                        .clone()
-                        .expect("just checked this row carries local provenance");
-                    local.sig_state = SigState::Signed;
-                    fan_out_owners = Some(local.owners.clone());
-                    provenance.local = Some(local);
-                }
-                // `merge_observation` never touches `local` (a relay echo
-                // of an already-local row keeps its local provenance,
-                // retraction doc §4.1) — `provenance.local` is otherwise
-                // unchanged, written straight back.
-                record.provenance = provenance.seen;
-                record.local = provenance.local;
-                if fan_out_owners.is_some() {
-                    record.event = event.clone();
-                }
-                let encoded = encode_stored_event_record(&record);
-                events
-                    .insert(id_hex.as_str(), encoded.as_slice())
-                    .map_err(persist_err)?;
-                let satisfied_intents = if let Some(owners) = &fan_out_owners {
-                    fan_out_signed_in_txn(
-                        &mut events,
-                        &mut addr_index,
-                        &mut tombstones,
-                        &mut addr_tombstones,
-                        &mut expiration_index,
+                    .clone()
+                    .expect("just checked this row carries local provenance");
+                local.sig_state = SigState::Signed;
+                fan_out_owners = Some(local.owners.clone());
+                provenance.local = Some(local);
+            }
+            // `merge_observation` never touches `local` (a relay echo
+            // of an already-local row keeps its local provenance,
+            // retraction doc §4.1) — `provenance.local` is otherwise
+            // unchanged, written straight back.
+            record.provenance = provenance.seen;
+            record.local = provenance.local;
+            if fan_out_owners.is_some() {
+                record.event = event.clone();
+            }
+            let encoded = encode_stored_event_record(&record);
+            events
+                .insert(id_hex.as_str(), encoded.as_slice())
+                .map_err(persist_err)?;
+            let satisfied_intents = if let Some(owners) = &fan_out_owners {
+                fan_out_signed_in_txn(
+                    &mut events,
+                    &mut addr_index,
+                    &mut tombstones,
+                    &mut addr_tombstones,
+                    &mut expiration_index,
+                    &mut by_created_at,
+                    &mut by_author,
+                    &mut by_kind,
+                    &mut by_author_kind,
+                    &mut by_tag,
+                    &mut outbox_intents,
+                    &mut outbox_receipts,
+                    &mut outbox_displaced,
+                    &mut outbox_kind5_claims,
+                    &mut outbox_suppress_by_id,
+                    &mut outbox_suppress_by_addr,
+                    owners,
+                    &event,
+                )?
+            } else {
+                Vec::new()
+            };
+            InsertOutcome::Duplicate {
+                provenance_grew: grew,
+                satisfied_intents,
+            }
+        } else if tombstone_refuses(&tombstones, &addr_tombstones, &event)? {
+            // Tombstone check, AFTER dedup-by-id, BEFORE storage
+            // (retraction-and-negative-deltas.md §2).
+            InsertOutcome::Refused(RefuseReason::Tombstoned)
+        } else {
+            let is_deletion = event.kind == Kind::EventDeletion;
+            let record = StoredEventRecord {
+                event: event.clone(),
+                provenance: {
+                    let mut m = BTreeMap::new();
+                    m.insert(from.relay.clone(), from.at);
+                    m
+                },
+                local: None,
+            };
+            let encoded = encode_stored_event_record(&record);
+
+            let outcome = match address_key_for(&event) {
+                None => {
+                    events
+                        .insert(id_hex.as_str(), encoded.as_slice())
+                        .map_err(persist_err)?;
+                    insert_query_index_rows(
                         &mut by_created_at,
                         &mut by_author,
                         &mut by_kind,
                         &mut by_author_kind,
                         &mut by_tag,
-                        &mut outbox_intents,
-                        &mut outbox_receipts,
-                        &mut outbox_displaced,
-                        &mut outbox_kind5_claims,
-                        &mut outbox_suppress_by_id,
-                        &mut outbox_suppress_by_addr,
-                        owners,
                         &event,
-                    )?
-                } else {
-                    Vec::new()
-                };
-                InsertOutcome::Duplicate {
-                    provenance_grew: grew,
-                    satisfied_intents,
-                }
-            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event)? {
-                // Tombstone check, AFTER dedup-by-id, BEFORE storage
-                // (retraction-and-negative-deltas.md §2).
-                InsertOutcome::Refused(RefuseReason::Tombstoned)
-            } else {
-                let is_deletion = event.kind == Kind::EventDeletion;
-                let record = StoredEventRecord {
-                    event: event.clone(),
-                    provenance: {
-                        let mut m = BTreeMap::new();
-                        m.insert(from.relay.clone(), from.at);
-                        m
-                    },
-                    local: None,
-                };
-                let encoded = encode_stored_event_record(&record);
-
-                let outcome = match address_key_for(&event) {
-                    None => {
-                        events
-                            .insert(id_hex.as_str(), encoded.as_slice())
+                    )
+                    .map_err(persist_err)?;
+                    if let Some(ts) = event.tags.expiration().copied() {
+                        let exp_key = expiration_key(ts, &event.id);
+                        expiration_index
+                            .insert(exp_key.as_str(), id_hex.as_str())
                             .map_err(persist_err)?;
-                        insert_query_index_rows(
-                            &mut by_created_at,
-                            &mut by_author,
-                            &mut by_kind,
-                            &mut by_author_kind,
-                            &mut by_tag,
-                            &event,
-                        )
-                        .map_err(persist_err)?;
-                        if let Some(ts) = event.tags.expiration().copied() {
-                            let exp_key = expiration_key(ts, &event.id);
-                            expiration_index
-                                .insert(exp_key.as_str(), id_hex.as_str())
-                                .map_err(persist_err)?;
-                        }
-                        InsertOutcome::Inserted
                     }
-                    Some(addr_key) => {
-                        let addr_key_str = addr_key.to_redb_key();
-                        let current_id_hex = addr_index
-                            .get(addr_key_str.as_str())
-                            .map_err(persist_err)?
-                            .map(|guard| guard.value().to_string());
+                    InsertOutcome::Inserted
+                }
+                Some(addr_key) => {
+                    let addr_key_str = addr_key.to_redb_key();
+                    let current_id_hex = addr_index
+                        .get(addr_key_str.as_str())
+                        .map_err(persist_err)?
+                        .map(|guard| guard.value().to_string());
 
-                        match current_id_hex {
-                            None => {
+                    match current_id_hex {
+                        None => {
+                            events
+                                .insert(id_hex.as_str(), encoded.as_slice())
+                                .map_err(persist_err)?;
+                            addr_index
+                                .insert(addr_key_str.as_str(), id_hex.as_str())
+                                .map_err(persist_err)?;
+                            insert_query_index_rows(
+                                &mut by_created_at,
+                                &mut by_author,
+                                &mut by_kind,
+                                &mut by_author_kind,
+                                &mut by_tag,
+                                &event,
+                            )
+                            .map_err(persist_err)?;
+                            if let Some(ts) = event.tags.expiration().copied() {
+                                let exp_key = expiration_key(ts, &event.id);
+                                expiration_index
+                                    .insert(exp_key.as_str(), id_hex.as_str())
+                                    .map_err(persist_err)?;
+                            }
+                            InsertOutcome::Inserted
+                        }
+                        Some(current_id_hex) => {
+                            let current_bytes = events
+                                .get(current_id_hex.as_str())
+                                .map_err(persist_err)?
+                                .expect("addr_index must always point at a stored event")
+                                .value()
+                                .to_vec();
+                            let current_record = decode_stored_event_record(&current_bytes);
+                            let current_event = current_record.event.clone();
+
+                            if candidate_wins(&event, &current_event) {
+                                let replaced = StoredEvent {
+                                    event: current_event,
+                                    provenance: Provenance {
+                                        seen: current_record.provenance,
+                                        local: current_record.local,
+                                    },
+                                };
+                                events
+                                    .remove(current_id_hex.as_str())
+                                    .map_err(persist_err)?;
+                                remove_query_index_rows(
+                                    &mut by_created_at,
+                                    &mut by_author,
+                                    &mut by_kind,
+                                    &mut by_author_kind,
+                                    &mut by_tag,
+                                    &replaced.event,
+                                )
+                                .map_err(persist_err)?;
+                                if let Some(ts) = replaced.event.tags.expiration().copied() {
+                                    let exp_key = expiration_key(ts, &replaced.event.id);
+                                    expiration_index
+                                        .remove(exp_key.as_str())
+                                        .map_err(persist_err)?;
+                                }
                                 events
                                     .insert(id_hex.as_str(), encoded.as_slice())
                                     .map_err(persist_err)?;
@@ -2666,106 +2724,74 @@ impl EventStore for RedbStore {
                                         .insert(exp_key.as_str(), id_hex.as_str())
                                         .map_err(persist_err)?;
                                 }
-                                InsertOutcome::Inserted
-                            }
-                            Some(current_id_hex) => {
-                                let current_bytes = events
-                                    .get(current_id_hex.as_str())
-                                    .map_err(persist_err)?
-                                    .expect("addr_index must always point at a stored event")
-                                    .value()
-                                    .to_vec();
-                                let current_record = decode_stored_event_record(&current_bytes);
-                                let current_event = current_record.event.clone();
-
-                                if candidate_wins(&event, &current_event) {
-                                    let replaced = StoredEvent {
-                                        event: current_event,
-                                        provenance: Provenance {
-                                            seen: current_record.provenance,
-                                            local: current_record.local,
-                                        },
-                                    };
-                                    events
-                                        .remove(current_id_hex.as_str())
-                                        .map_err(persist_err)?;
-                                    remove_query_index_rows(
-                                        &mut by_created_at,
-                                        &mut by_author,
-                                        &mut by_kind,
-                                        &mut by_author_kind,
-                                        &mut by_tag,
-                                        &replaced.event,
-                                    )
-                                    .map_err(persist_err)?;
-                                    if let Some(ts) = replaced.event.tags.expiration().copied() {
-                                        let exp_key = expiration_key(ts, &replaced.event.id);
-                                        expiration_index
-                                            .remove(exp_key.as_str())
-                                            .map_err(persist_err)?;
-                                    }
-                                    events
-                                        .insert(id_hex.as_str(), encoded.as_slice())
-                                        .map_err(persist_err)?;
-                                    addr_index
-                                        .insert(addr_key_str.as_str(), id_hex.as_str())
-                                        .map_err(persist_err)?;
-                                    insert_query_index_rows(
-                                        &mut by_created_at,
-                                        &mut by_author,
-                                        &mut by_kind,
-                                        &mut by_author_kind,
-                                        &mut by_tag,
-                                        &event,
-                                    )
-                                    .map_err(persist_err)?;
-                                    if let Some(ts) = event.tags.expiration().copied() {
-                                        let exp_key = expiration_key(ts, &event.id);
-                                        expiration_index
-                                            .insert(exp_key.as_str(), id_hex.as_str())
-                                            .map_err(persist_err)?;
-                                    }
-                                    InsertOutcome::Superseded {
-                                        replaced: Box::new(replaced),
-                                    }
-                                } else {
-                                    InsertOutcome::Stale
+                                InsertOutcome::Superseded {
+                                    replaced: Box::new(replaced),
                                 }
+                            } else {
+                                InsertOutcome::Stale
                             }
                         }
                     }
-                };
+                }
+            };
 
-                // kind:5 has no replaceable/addressable address (M1's set
-                // excludes it), so `outcome` above is always `Inserted`
-                // here, by construction -- process its deletions now that
-                // the event itself is durably stored (re-servable, §2).
-                if is_deletion {
-                    if let InsertOutcome::Inserted = outcome {
-                        let deleted = process_kind5_deletions(
-                            &mut events,
-                            &mut addr_index,
-                            &mut tombstones,
-                            &mut addr_tombstones,
-                            &mut expiration_index,
-                            &mut by_created_at,
-                            &mut by_author,
-                            &mut by_kind,
-                            &mut by_author_kind,
-                            &mut by_tag,
-                            &event,
-                        )?;
-                        InsertOutcome::Kind5Processed { deleted }
-                    } else {
-                        outcome
-                    }
+            // kind:5 has no replaceable/addressable address (M1's set
+            // excludes it), so `outcome` above is always `Inserted`
+            // here, by construction -- process its deletions now that
+            // the event itself is durably stored (re-servable, §2).
+            if is_deletion {
+                if let InsertOutcome::Inserted = outcome {
+                    let deleted = process_kind5_deletions(
+                        &mut events,
+                        &mut addr_index,
+                        &mut tombstones,
+                        &mut addr_tombstones,
+                        &mut expiration_index,
+                        &mut by_created_at,
+                        &mut by_author,
+                        &mut by_kind,
+                        &mut by_author_kind,
+                        &mut by_tag,
+                        &event,
+                    )?;
+                    InsertOutcome::Kind5Processed { deleted }
                 } else {
                     outcome
                 }
+            } else {
+                outcome
             }
-        };
+        }
+    };
+    Ok(outcome)
+}
+
+impl EventStore for RedbStore {
+    fn insert(
+        &mut self,
+        event: Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let outcome = insert_in_txn(&write_txn, event, from)?;
         write_txn.commit().map_err(persist_err)?;
         Ok(outcome)
+    }
+
+    fn insert_batch(
+        &mut self,
+        events: Vec<(Event, RelayObserved)>,
+    ) -> Result<Vec<InsertOutcome>, PersistenceError> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let mut outcomes = Vec::with_capacity(events.len());
+        for (event, from) in events {
+            outcomes.push(insert_in_txn(&write_txn, event, from)?);
+        }
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcomes)
     }
 
     fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
