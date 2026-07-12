@@ -1019,6 +1019,131 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     );
 }
 
+/// #107's remaining Done-when trio item: "Equal filters pinned to R1 and R2
+/// retain distinct row projections, evidence, EOSE facts, and teardown."
+/// Unlike the Agnostic/Strict test above (same pinned set, different cache
+/// mode, sharing ONE wire subscription), this is the OTHER axis: the
+/// IDENTICAL filter pinned to two DIFFERENT relay sets is a genuinely
+/// different `SourceAuthority::Pinned` value, hence a different
+/// `AcquisitionKey` -- two fully independent handles, subs, and EOSE
+/// watermarks, never sharing so much as a wire request.
+#[test]
+fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
+    let a = Keys::generate();
+    let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
+    let relay2 = RelayUrl::parse("wss://relay2.example.com").unwrap();
+    let mut core = new_core(FixtureDirectory::new());
+    connect(&mut core, 0, &relay1);
+    connect(&mut core, 1, &relay2);
+
+    let filter = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+        ..Filter::default()
+    };
+    let demand1 = nmp_grammar::Demand::new(
+        filter.clone(),
+        SourceAuthority::Pinned(BTreeSet::from([relay1.clone()])),
+        AccessContext::Public,
+    )
+    .expect("nonempty pinned relay set is legal");
+    let demand2 = nmp_grammar::Demand::new(
+        filter,
+        SourceAuthority::Pinned(BTreeSet::from([relay2.clone()])),
+        AccessContext::Public,
+    )
+    .expect("nonempty pinned relay set is legal");
+
+    let effects1 = core.handle(EngineMsg::Subscribe(
+        LiveQuery(demand1),
+        Box::new(CapturingSink::default()),
+    ));
+    let id1 = effects1
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(hid, ..) => Some(*hid),
+            _ => None,
+        })
+        .expect("subscribe must emit an initial EmitRows for its own handle");
+    let (sub1, _) = req_for(&effects1, &relay1);
+    let wire1 = wire_sub_string(sub1);
+    assert!(
+        !effects1.iter().any(
+            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay2))
+        ),
+        "demand1's Pinned({{relay1}}) atom must never touch relay2"
+    );
+
+    let effects2 = core.handle(EngineMsg::Subscribe(
+        LiveQuery(demand2),
+        Box::new(CapturingSink::default()),
+    ));
+    let id2 = effects2
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(hid, ..) => Some(*hid),
+            _ => None,
+        })
+        .expect("subscribe must emit an initial EmitRows for its own handle");
+    let (sub2, _) = req_for(&effects2, &relay2);
+    let _wire2 = wire_sub_string(sub2);
+    assert_ne!(
+        id1, id2,
+        "two distinct subscribe calls must yield distinct handles"
+    );
+    assert_ne!(
+        sub1, sub2,
+        "distinct pinned relay sets over an identical filter must never share a SubId"
+    );
+    assert!(
+        !effects2.iter().any(
+            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay1))
+        ),
+        "demand2's Pinned({{relay2}}) atom must never touch relay1 -- and must not even \
+         re-touch relay1's already-open sub, since these are independent graph nodes"
+    );
+
+    // Distinct EOSE facts: only relay1's sub finishes -- handle1's OWN
+    // relay1 entry advances; handle2's relay2 entry (a DIFFERENT handle
+    // entirely) must stay unproven.
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(10u64)));
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire1),
+    ));
+    let evidence1 = evidence_from(&effects, id1).expect("relay1's EOSE must refresh handle1");
+    let r1 = source_for(evidence1, &relay1).expect("relay1 must be a source for handle1");
+    assert_eq!(r1.reconciled_through, Some(Timestamp::from(10u64)));
+    assert!(
+        evidence_from(&effects, id2).is_none()
+            || source_for(evidence_from(&effects, id2).unwrap(), &relay2)
+                .is_none_or(|r2| r2.reconciled_through.is_none()),
+        "handle2's relay2 entry must NOT advance off handle1's relay1 EOSE"
+    );
+
+    // Distinct teardown: unsubscribing handle1 closes ONLY relay1's sub;
+    // handle2's relay2 subscription is untouched.
+    let teardown = core.handle(EngineMsg::Unsubscribe(id1));
+    let closed_relays: BTreeSet<RelayUrl> = teardown
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Wire(delta) => {
+                Some(delta.ops.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        closed_relays,
+        BTreeSet::from([relay1]),
+        "unsubscribing handle1 must close exactly relay1's sub, never touch relay2's"
+    );
+}
+
 // ---- the EOSE-overwrite-race rule (ruling §2) ---------------------------
 
 #[test]
