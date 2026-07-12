@@ -3447,6 +3447,30 @@ callback CallbackInterface {
                 47507,
             ),
         },
+        Method {
+            name: "on_closed",
+            object_name: "ReceiptObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_receiptobserver_on_closed",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_receiptobserver_on_closed",
+            checksum: Some(
+                38112,
+            ),
+        },
     ],
     ffi_init_callback: FfiFunction {
         name: "uniffi_nmp_ffi_fn_init_callback_vtable_receiptobserver",
@@ -3466,7 +3490,7 @@ callback CallbackInterface {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Drains a publish's `Receiver<WriteStatus>` (ledger #9: enqueue is not\nconverged -- this may be called many times per publish, ending only when\nthe intent reaches every relay's terminal, or never at all for an\n`Ephemeral` intent, mirroring `Handle::publish`'s own receiver).",
+        "Drains a publish's `Receiver<WriteStatus>` (ledger #9: enqueue is not\nconverged -- this may be called many times per publish, ending only when\nthe intent reaches every relay's terminal, or never at all for an\n`Ephemeral` intent, mirroring `Handle::publish`'s own receiver).\n`on_closed` fires exactly once, when the receipt's `Sender` is dropped\n(the intent has resolved or the engine has shut down) -- after which no\nfurther `on_status` call will ever occur, mirroring `RowObserver` and\n`DiagnosticsObserver`.",
     ),
 }
 
