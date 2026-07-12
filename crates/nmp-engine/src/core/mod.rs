@@ -3054,7 +3054,12 @@ fn effective_row_limit(root_atoms: &BTreeSet<ConcreteFilter>) -> Option<usize> {
     // fewer) -- so pin it here: a mixed-limit root set trips in tests rather
     // than degrading semantics in release (debug-only, zero release cost).
     debug_assert!(
-        root_atoms.iter().map(|atom| atom.limit).collect::<BTreeSet<_>>().len() <= 1,
+        root_atoms
+            .iter()
+            .map(|atom| atom.limit)
+            .collect::<BTreeSet<_>>()
+            .len()
+            <= 1,
         "root_atoms must share a single limit (NIP-01 limit is per-subscription); \
          got a mixed-limit set: {root_atoms:?}",
     );
@@ -3067,7 +3072,8 @@ fn effective_row_limit(root_atoms: &BTreeSet<ConcreteFilter>) -> Option<usize> {
 /// relay applies when it answers a limited REQ with "the `limit` most recent
 /// events". Each argument is a `(created_at_secs, &id)` pair.
 fn nip01_newest_first(a: (u64, &EventId), b: (u64, &EventId)) -> std::cmp::Ordering {
-    b.0.cmp(&a.0).then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+    b.0.cmp(&a.0)
+        .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
 }
 
 /// Parse NIP-65 `r` tags off a kind:10002 event into its WRITE relay set

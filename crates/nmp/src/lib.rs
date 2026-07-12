@@ -88,8 +88,8 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // facade surface.
 pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::WriteStatus;
-pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 pub use nmp_engine::runtime::{ReceiptReattachment, ReceiptStream};
+pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,

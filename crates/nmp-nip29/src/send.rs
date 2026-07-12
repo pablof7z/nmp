@@ -96,13 +96,17 @@ impl GroupTimelineEvidence {
     /// 8-hex-character prefixes, in the same newest-first order `ids` is
     /// already stored in.
     fn prefixes(&self) -> Vec<String> {
-        self.ids.iter().map(|id| id.to_hex()[..8].to_string()).collect()
+        self.ids
+            .iter()
+            .map(|id| id.to_hex()[..8].to_string())
+            .collect()
     }
 }
 
 fn is_member_of(tags: &[Vec<String>], group_id: &str) -> bool {
     tags.iter().any(|tag| {
-        tag.first().map(String::as_str) == Some("h") && tag.get(1).map(String::as_str) == Some(group_id)
+        tag.first().map(String::as_str) == Some("h")
+            && tag.get(1).map(String::as_str) == Some(group_id)
     })
 }
 
@@ -303,7 +307,10 @@ mod tests {
         let WritePayload::Unsigned(unsigned) = &intent.payload else {
             panic!("expected Unsigned")
         };
-        assert!(!unsigned.tags.iter().any(|t| t.kind().to_string() == "previous"));
+        assert!(!unsigned
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "previous"));
     }
 
     /// Falsifier 5(b)+(d): rows from a different group are excluded, and
@@ -312,9 +319,21 @@ mod tests {
     #[test]
     fn previous_evidence_excludes_other_groups_and_orders_newest_first() {
         let rows = vec![
-            (event_id(1), 100, vec![vec!["h".to_string(), "group-a".to_string()]]),
-            (event_id(2), 300, vec![vec!["h".to_string(), "group-a".to_string()]]),
-            (event_id(3), 200, vec![vec!["h".to_string(), "other-group".to_string()]]),
+            (
+                event_id(1),
+                100,
+                vec![vec!["h".to_string(), "group-a".to_string()]],
+            ),
+            (
+                event_id(2),
+                300,
+                vec![vec!["h".to_string(), "group-a".to_string()]],
+            ),
+            (
+                event_id(3),
+                200,
+                vec![vec!["h".to_string(), "other-group".to_string()]],
+            ),
         ];
         let evidence = GroupTimelineEvidence::from_events("group-a", rows);
         assert_eq!(evidence.ids, vec![event_id(2), event_id(1)]);

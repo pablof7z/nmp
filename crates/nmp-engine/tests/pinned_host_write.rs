@@ -276,9 +276,11 @@ async fn pinned_host_rejection_surfaces_as_a_typed_status_never_silence() {
 
     let receipt_rx = handle.publish(intent).expect("receipt id allocation");
 
-    match wait_for_status(&receipt_rx, Duration::from_secs(10), |s| {
-        matches!(s, WriteStatus::Rejected(r, _) if r == &url_host)
-    }) {
+    match wait_for_status(
+        &receipt_rx,
+        Duration::from_secs(10),
+        |s| matches!(s, WriteStatus::Rejected(r, _) if r == &url_host),
+    ) {
         Some(WriteStatus::Rejected(relay, reason)) => {
             assert_eq!(relay, url_host);
             assert!(

@@ -858,9 +858,9 @@ mod tests {
         });
         match engine.publish_composed(intent, observer_b) {
             Err(FfiError::IntentAlreadyConsumed) => {}
-            other => panic!(
-                "expected FfiError::IntentAlreadyConsumed on the second call, got {other:?}"
-            ),
+            other => {
+                panic!("expected FfiError::IntentAlreadyConsumed on the second call, got {other:?}")
+            }
         }
 
         engine.shutdown();
