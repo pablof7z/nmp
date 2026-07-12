@@ -173,6 +173,10 @@ impl PoolInner {
             .config
             .reconnect_delay_initial
             .unwrap_or(crate::backoff::RECONNECT_DELAY_INITIAL);
+        let reconnect_jitter_max = self
+            .config
+            .reconnect_jitter_max
+            .unwrap_or(crate::backoff::RECONNECT_JITTER_MAX);
         super::worker::spawn(
             slot_id,
             worker_id,
@@ -184,6 +188,7 @@ impl PoolInner {
             idle,
             pong_timeout,
             reconnect_delay_initial,
+            reconnect_jitter_max,
         )
     }
 

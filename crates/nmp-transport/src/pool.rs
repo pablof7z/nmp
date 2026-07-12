@@ -168,6 +168,16 @@ pub struct PoolConfig {
     /// Integration tests that force a reconnect pass a small value so the
     /// test doesn't wait out the production 3s+jitter schedule.
     pub reconnect_delay_initial: Option<Duration>,
+    /// Override for [`crate::backoff::jittered`]'s per-URL offset ceiling;
+    /// `None` uses the production default
+    /// ([`crate::backoff::RECONNECT_JITTER_MAX`]). The jitter is a FIXED
+    /// value per URL, re-paid on every retry against that URL until it
+    /// connects (see `jittered`'s doc) — for a same-process test relay that
+    /// reconnects in milliseconds, an unlucky URL hash can otherwise tax
+    /// every attempt up to ~5s apiece, dwarfing `reconnect_delay_initial`.
+    /// Integration tests that force a reconnect pass `Some(Duration::ZERO)`
+    /// so retries fire back-to-back instead of racing a per-URL lottery.
+    pub reconnect_jitter_max: Option<Duration>,
 }
 
 /// The generational WebSocket pool: `mio`-driven worker thread(s), one
