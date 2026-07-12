@@ -82,7 +82,7 @@ impl GroupTimelineEvidence {
             .filter(|(_, _, tags)| is_member_of(tags, group_id))
             .map(|(id, created_at, _tags)| (id, created_at))
             .collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        rows.sort_by_key(|(_id, created_at)| std::cmp::Reverse(*created_at));
         rows.truncate(PREVIOUS_MAX);
         Self {
             ids: rows.into_iter().map(|(id, _created_at)| id).collect(),
@@ -136,6 +136,11 @@ fn is_member_of(tags: &[Vec<String>], group_id: &str) -> bool {
 /// `["previous", ...]` flow through the freeze -> sign -> validate chain
 /// untouched (F1: the engine cannot and does not inject either tag after
 /// the fact).
+// The #115 ratified spec's exact signature -- 8 positional primitives,
+// matching the codebase's existing `#[allow(clippy::too_many_arguments)]`
+// precedent (`nmp-store`/`nmp-transport`) rather than bundling these into
+// an ad-hoc params struct the ruling never asked for.
+#[allow(clippy::too_many_arguments)]
 pub fn compose_group_send(
     host: RelayUrl,
     group_id: &str,

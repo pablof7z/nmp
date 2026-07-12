@@ -179,12 +179,11 @@ async fn pinned_host_send_reaches_only_the_host_and_round_trips_unchanged() {
     // widen to it.
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
-        match receipt_rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(status) => assert!(
+        if let Ok(status) = receipt_rx.recv_timeout(Duration::from_millis(50)) {
+            assert!(
                 !matches!(&status, WriteStatus::Sent(r) | WriteStatus::Acked(r) | WriteStatus::Rejected(r, _) if r == &url_other),
                 "no status may ever name the non-pinned relay (got: {status:?})"
-            ),
-            Err(_) => {}
+            );
         }
     }
 

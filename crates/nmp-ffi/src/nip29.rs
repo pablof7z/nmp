@@ -134,6 +134,11 @@ impl FfiComposedWriteIntent {
 /// `kind` is entirely the caller's choice -- this function (and everything
 /// it calls) is kind-blind. Publish the result via
 /// [`crate::facade::NmpEngine::publish_composed`].
+// Mirrors `nmp_nip29::compose_group_send`'s own ratified 8-argument
+// signature one-for-one across the FFI boundary (plus `recent_rows` in
+// place of a `&GroupTimelineEvidence` reference); same
+// `#[allow(clippy::too_many_arguments)]` precedent as that function.
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn group_send_intent(
     host: String,
