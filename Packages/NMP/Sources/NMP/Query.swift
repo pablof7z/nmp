@@ -70,8 +70,11 @@ public struct NMPQuery: AsyncSequence, Sendable {
 }
 
 /// Drains a live subscription's row-delta batches into an `AsyncStream`
-/// (M4 plan §4c). Not exposed publicly -- an implementation detail of
-/// `NMPQuery`.
+/// (M4 plan §4c). Not part of the module's PUBLIC API -- an implementation
+/// detail of `NMPQuery`. `internal` (not `private`) only so
+/// `@testable import NMP` can drive `onBatch` directly for the accumulation
+/// falsifiers (#105's `SourcesGrew` replace-in-place proof); no other
+/// consumer outside this package can ever see it.
 ///
 /// Accumulation (deltas -> the current live snapshot) happens synchronously
 /// on every `onBatch` call, so no delta is ever missed. DELIVERY into the
@@ -81,7 +84,7 @@ public struct NMPQuery: AsyncSequence, Sendable {
 /// yielded, at most once per ~60Hz tick -- the accumulated state itself is
 /// always fully caught up, only the *delivery* of intermediate states is
 /// dropped.
-private final class RowBridge: RowObserver, @unchecked Sendable {
+final class RowBridge: RowObserver, @unchecked Sendable {
     private let continuation: AsyncStream<RowBatch>.Continuation
     private let lock = NSLock()
     // Insertion-ordered accumulation: `order` tracks arrival order, `byId`
@@ -110,6 +113,13 @@ private final class RowBridge: RowObserver, @unchecked Sendable {
                     order.append(row.id)
                 }
                 byId[row.id] = row
+            case .sourcesGrew(let id, let sources):
+                // #105: the SAME row already matched; only its
+                // relay-provenance set grew. Replace it in place -- `order`
+                // is untouched, this is never an insertion.
+                if let existing = byId[id] {
+                    byId[id] = existing.withSources(sources)
+                }
             case .removed(let id):
                 if byId.removeValue(forKey: id) != nil {
                     order.removeAll { $0 == id }
