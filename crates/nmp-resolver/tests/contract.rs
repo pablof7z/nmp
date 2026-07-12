@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, IndexedTagName, Selector,
-    SetAlgebra, SetOp,
+    Binding, ConcreteFilter, Demand, DemandOp, Derived, Filter, IdentityField, IndexedTagName,
+    Selector, SetAlgebra, SetOp,
 };
 use nmp_resolver::testkit::{
     addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
@@ -64,11 +64,11 @@ fn my_follows_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -82,7 +82,7 @@ fn nip29_groups_filter() -> Filter {
     tags.insert(
         IndexedTagName::new('d').unwrap(),
         Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([39_002u16])),
                 tags: {
                     let mut inner_tags = BTreeMap::new();
@@ -93,7 +93,7 @@ fn nip29_groups_filter() -> Filter {
                     inner_tags
                 },
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("d".to_string()),
         })),
     );
@@ -108,19 +108,19 @@ fn nip29_groups_filter() -> Filter {
 /// — "follows minus mutes" (test 9, amendment #1).
 fn follows_minus_mutes_filter() -> Filter {
     let follows = Binding::Derived(Box::new(Derived {
-        inner: Filter {
+        inner: Demand::from_filter(Filter {
             kinds: Some(BTreeSet::from([3u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        },
+        }),
         project: Selector::Tag("p".to_string()),
     }));
     let mutes = Binding::Derived(Box::new(Derived {
-        inner: Filter {
+        inner: Demand::from_filter(Filter {
             kinds: Some(BTreeSet::from([10_000u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        },
+        }),
         project: Selector::Tag("p".to_string()),
     }));
     Filter {
@@ -142,11 +142,11 @@ fn follows_minus_mutes_filter() -> Filter {
 fn address_coord_filter() -> Filter {
     Filter {
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([30_003u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::AddressCoord,
         }))),
         ..Filter::default()
@@ -162,11 +162,11 @@ fn bookmarks_filter() -> Filter {
     tags.insert(
         IndexedTagName::new('e').unwrap(),
         Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([10_003u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("e".to_string()),
         })),
     );

@@ -125,7 +125,7 @@ impl NmpEngine {
         observer: Box<dyn RowObserver>,
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let filter = filter_from_ffi(query)?;
-        let subscription = self.engine.observe(nmp::LiveQuery(filter))?;
+        let subscription = self.engine.observe(nmp::LiveQuery::from_filter(filter))?;
         let cancel = subscription.cancel_handle();
 
         thread::spawn(move || {

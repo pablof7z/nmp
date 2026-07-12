@@ -16,7 +16,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    Binding, ConcreteFilter, DemandOp, Derived, Filter, IdentityField, IndexedTagName, Selector,
+    Binding, ConcreteFilter, Demand, DemandOp, Derived, Filter, IdentityField, IndexedTagName,
+    Selector,
 };
 use nmp_resolver::testkit::{accept_write_of, deletion, kind3, Harness};
 use nmp_resolver::LiveQuery;
@@ -53,11 +54,11 @@ fn my_follows_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -76,11 +77,11 @@ fn deletions_by_etag_filter() -> Filter {
     tags.insert(
         IndexedTagName::new('e').unwrap(),
         Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([5u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("e".to_string()),
         })),
     );
