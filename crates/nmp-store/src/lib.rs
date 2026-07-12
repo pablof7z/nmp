@@ -58,6 +58,7 @@
 //! stores whatever interval it is told to record).
 
 mod address_key;
+mod binary_event;
 mod coverage;
 mod memory_store;
 mod redb_store;

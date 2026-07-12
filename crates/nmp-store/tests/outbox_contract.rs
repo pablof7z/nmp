@@ -3047,8 +3047,9 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
 /// that same one row again.
 #[test]
 fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
-    const EVENTS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("events");
-    const DISPLACED_TABLE: TableDefinition<&str, &str> = TableDefinition::new("outbox_displaced");
+    const EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("events_v2");
+    const DISPLACED_TABLE: TableDefinition<&str, &[u8]> =
+        TableDefinition::new("outbox_displaced_v2");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
@@ -3099,14 +3100,12 @@ fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
     let displaced = read
         .open_table(DISPLACED_TABLE)
         .expect("open displaced rows");
-    let target_hex = target_id.to_hex();
-    let displaced_target_copies = displaced
-        .iter()
-        .expect("iterate displaced rows")
-        .map(|entry| entry.expect("read displaced entry"))
-        .filter(|(_, value)| value.value().contains(&target_hex))
-        .count();
-    assert_eq!(displaced_target_copies, 0);
+    let mut displaced_rows = 0;
+    for entry in displaced.iter().expect("iterate displaced rows") {
+        entry.expect("read displaced entry");
+        displaced_rows += 1;
+    }
+    assert_eq!(displaced_rows, 0);
     drop(displaced);
     drop(events);
     drop(read);
