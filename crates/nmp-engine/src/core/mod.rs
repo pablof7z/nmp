@@ -30,6 +30,7 @@ mod diagnostics;
 mod evidence;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 
 use nostr::{
     Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayMessage, RelayUrl, Timestamp,
@@ -48,7 +49,9 @@ use nmp_store::{
     EventStore, IntentId, IntentSigState, PromoteOutcome, ReceiptState, RelayObserved,
     WriteDurability,
 };
-use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
+use nmp_transport::{
+    AttemptCorrelation, HandoffResult, RelayFrame, RelayHandle as TransportRelayHandle,
+};
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
 use crate::outbox::{
@@ -197,6 +200,11 @@ pub enum EngineMsg {
     /// Explicit pre-signature cancellation. Once promotion has committed,
     /// cancellation cannot retract a valid signed cache row.
     CancelWrite(ReceiptId),
+    /// The one, ever, typed result of a durable `EVENT` handoff (issue
+    /// #93), translated from `PoolEvent::EventHandoff`. See
+    /// `EngineCore::on_event_handoff`'s doc for what this does and does
+    /// NOT do in this unit.
+    EventHandoff(AttemptCorrelation, HandoffResult),
     Tick(Timestamp),
 }
 
@@ -258,9 +266,12 @@ pub enum Effect {
     /// `nmp_router::WireOp` variant — `WireOp`/`WireDelta` are read-
     /// subscription vocabulary owned by `nmp-router`, out of this builder's
     /// scope to extend; this is engine-owned wire vocabulary for the write
-    /// plane). C (runtime) translates this to `Pool::send` of an `["EVENT",
-    /// …]` frame on `relay`'s current generation.
-    PublishEvent(RelayUrl, SignedEvent),
+    /// plane). C (runtime) translates this to `Pool::send_durable` of an
+    /// `["EVENT", …]` frame on `relay`'s current generation, correlated by
+    /// `AttemptCorrelation` (issue #93) — the durable handoff is generation-
+    /// scoped and reports back exactly one typed `HandoffResult`, never
+    /// silently carried into a later connection.
+    PublishEvent(RelayUrl, SignedEvent, AttemptCorrelation),
 }
 
 /// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
@@ -279,7 +290,7 @@ struct HandleState {
 }
 
 /// Per-receipt bookkeeping the reducer retains from `Publish` through to the
-/// last per-relay ack (or `Ephemeral`'s immediate post-send forget).
+/// last per-relay ack (or `Ephemeral`'s generation-scoped handoff effects).
 /// Ephemeral still owns a receipt-only record and status stream; what it
 /// lacks is a durable delivery obligation and canonical pending row.
 struct PendingWrite {
@@ -290,7 +301,7 @@ struct PendingWrite {
     routing_valid: bool,
     /// Zero or more observers. Recovery owns the obligation even before an
     /// app reattaches, and multiple observers may follow the same receipt.
-    sinks: Vec<Box<dyn ReceiptSink>>,
+    sinks: Vec<Rc<dyn ReceiptSink>>,
     /// Store-allocated durable intent id. `None` only for Ephemeral's
     /// receipt-only path, which never owns a pending row.
     intent_id: Option<IntentId>,
@@ -417,7 +428,34 @@ pub struct EngineCore<S: EventStore> {
     /// `Diagnostics` cannot see on its own — it never observes inbound
     /// frames, only what was compiled/sent.
     events_by_relay_kind: HashMap<RelayUrl, BTreeMap<u16, u64>>,
+    /// Next transport-native [`AttemptCorrelation`] to mint (issue #93).
+    /// Purely volatile/in-process — never persisted, never restart-durable
+    /// (the plan's own words: "no persistence migration" for this unit).
+    /// Checked, typed exhaustion, same discipline as
+    /// `next_unaccepted_receipt` above.
+    next_attempt_correlation: Option<u64>,
+    /// `AttemptCorrelation` -> which receipt/relay it was minted for. Engine-
+    /// owned bookkeeping only; transport never needs to understand this
+    /// mapping, only echo the correlation back unchanged. An entry is
+    /// removed the instant its one-and-only `HandoffResult` arrives — see
+    /// `Self::on_event_handoff`.
+    attempt_correlations: HashMap<AttemptCorrelation, AttemptCorrelationTarget>,
 }
+
+/// What one `AttemptCorrelation` (issue #93) resolves back to in this
+/// reducer's own bookkeeping.
+struct AttemptCorrelationTarget {
+    receipt: ReceiptId,
+    relay: RelayUrl,
+    /// Ephemeral drops its `PendingWrite` immediately after producing the
+    /// handoff effects, so each correlation snapshots the observer set that
+    /// must still receive a truthful async `Sent`. Durable/AtMostOnce leave
+    /// this empty and continue to notify through their retained pending row.
+    ephemeral_sinks: Vec<Rc<dyn ReceiptSink>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttemptCorrelationExhausted;
 
 impl<S: EventStore> EngineCore<S> {
     pub fn new(store: S, directory: Box<dyn RelayDirectory>, cap: usize) -> Self {
@@ -447,7 +485,69 @@ impl<S: EventStore> EngineCore<S> {
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
             events_by_relay_kind: HashMap::new(),
+            next_attempt_correlation: Some(0),
+            attempt_correlations: HashMap::new(),
         }
+    }
+
+    /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
+    /// exhaustion -- same discipline as [`Self::alloc_receipt_id`]'s
+    /// `next_unaccepted_receipt` counter.
+    fn alloc_attempt_correlation(
+        &mut self,
+    ) -> Result<AttemptCorrelation, AttemptCorrelationExhausted> {
+        let id = self
+            .next_attempt_correlation
+            .ok_or(AttemptCorrelationExhausted)?;
+        self.next_attempt_correlation = id.checked_add(1);
+        Ok(AttemptCorrelation(id))
+    }
+
+    #[cfg(test)]
+    fn set_next_attempt_correlation_for_test(&mut self, next: Option<u64>) {
+        self.next_attempt_correlation = next;
+    }
+
+    /// The one, ever, resolution of `correlation`'s `HandoffResult` (issue
+    /// #93). An unknown correlation (already resolved, or never minted by
+    /// this process) is a structural no-op -- this is what makes a
+    /// defensive duplicate delivery harmless even though the transport side
+    /// never actually produces one.
+    ///
+    /// `Written` is the ONLY case that emits `WriteStatus::Sent` -- the
+    /// synchronous "queue-accepted" `Sent` this reducer used to emit right
+    /// after handing a frame to the pool is gone; a claim of `Sent` is now
+    /// truthful only once transport has actually confirmed the write.
+    /// `NotHandedOff`/`Ambiguous` stay a typed INTERNAL fact only: no
+    /// receipt status, no retry action -- #96 wires governed visibility,
+    /// #95 wires the scheduler that acts on it. This unit's whole job is
+    /// making sure the fact reaches the engine at all, correlated and
+    /// generation-safe, never silently dropped or requeued by transport.
+    fn on_event_handoff(
+        &mut self,
+        correlation: AttemptCorrelation,
+        result: HandoffResult,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let Some(target) = self.attempt_correlations.remove(&correlation) else {
+            return effects;
+        };
+        if let HandoffResult::Written = result {
+            if let Some(pending) = self.pending.get(&target.receipt) {
+                Self::notify(pending, WriteStatus::Sent(target.relay.clone()));
+                effects.push(Effect::EmitReceipt(
+                    target.receipt,
+                    WriteStatus::Sent(target.relay.clone()),
+                ));
+            } else if !target.ephemeral_sinks.is_empty() {
+                let status = WriteStatus::Sent(target.relay.clone());
+                for sink in &target.ephemeral_sinks {
+                    sink.on_status(status.clone());
+                }
+                effects.push(Effect::EmitReceipt(target.receipt, status));
+            }
+        }
+        effects
     }
 
     /// Rebuild volatile ownership from the journal without reinserting a
@@ -526,6 +626,11 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 match durability {
                     Durability::Durable => {
+                        let Ok(correlation) = self.alloc_attempt_correlation() else {
+                            // No unique handoff identity means no volatile
+                            // lane bookkeeping and no wire fact.
+                            continue;
+                        };
                         if let Some(pending) = self.pending.get_mut(&id) {
                             pending.pending_relays.insert(attempt.relay.clone());
                             pending
@@ -536,9 +641,21 @@ impl<S: EventStore> EngineCore<S> {
                             .entry(attempt.event.id)
                             .or_default()
                             .insert(id);
+                        self.attempt_correlations.insert(
+                            correlation,
+                            AttemptCorrelationTarget {
+                                receipt: id,
+                                relay: attempt.relay.clone(),
+                                ephemeral_sinks: Vec::new(),
+                            },
+                        );
                         // Exact retained bytes, same ordinal. The Started row
                         // already predates this replay effect.
-                        effects.push(Effect::PublishEvent(attempt.relay, attempt.event));
+                        effects.push(Effect::PublishEvent(
+                            attempt.relay,
+                            attempt.event,
+                            correlation,
+                        ));
                     }
                     Durability::AtMostOnce => {
                         if self
@@ -608,6 +725,11 @@ impl<S: EventStore> EngineCore<S> {
             }
 
             for relay in lanes_to_start {
+                let Ok(correlation) = self.alloc_attempt_correlation() else {
+                    // Exhaustion is typed and fail-closed: do not create a
+                    // new Started lane that cannot be correlated to transport.
+                    continue;
+                };
                 let attempt = match self.resolver.store_mut().start_attempt(
                     intent.intent_id,
                     relay.clone(),
@@ -631,7 +753,19 @@ impl<S: EventStore> EngineCore<S> {
                     .entry(intent.frozen.id)
                     .or_default()
                     .insert(id);
-                effects.push(Effect::PublishEvent(relay, intent.frozen.clone()));
+                self.attempt_correlations.insert(
+                    correlation,
+                    AttemptCorrelationTarget {
+                        receipt: id,
+                        relay: relay.clone(),
+                        ephemeral_sinks: Vec::new(),
+                    },
+                );
+                effects.push(Effect::PublishEvent(
+                    relay,
+                    intent.frozen.clone(),
+                    correlation,
+                ));
             }
         }
         effects
@@ -699,7 +833,11 @@ impl<S: EventStore> EngineCore<S> {
         if receipt.intent_id.is_some() {
             for attempt in attempts {
                 let status = match attempt.outcome {
-                    AttemptOutcome::Started => WriteStatus::Sent(attempt.relay),
+                    // Started is only the crash-safe pre-wire fact. #93
+                    // deliberately moved Sent to the later transport
+                    // Written result, so replaying Started as Sent would
+                    // recreate the exact false claim this seam removes.
+                    AttemptOutcome::Started => continue,
                     AttemptOutcome::Acked => WriteStatus::Acked(attempt.relay),
                     AttemptOutcome::Rejected(reason) => {
                         WriteStatus::Rejected(attempt.relay, reason)
@@ -719,7 +857,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         if let Some(pending) = self.pending.get_mut(&id) {
-            pending.sinks.push(sink);
+            pending.sinks.push(Rc::from(sink));
         }
         ReattachOutcome::Attached
     }
@@ -874,6 +1012,9 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::SignerAttached(pk) => self.on_signer_attached(pk),
             EngineMsg::CancelWrite(id) => self.on_cancel_write(id),
+            EngineMsg::EventHandoff(correlation, result) => {
+                self.on_event_handoff(correlation, result)
+            }
             EngineMsg::Tick(now) => self.tick(now),
         }
     }
@@ -1057,7 +1198,7 @@ impl<S: EventStore> EngineCore<S> {
                 durability,
                 routing,
                 routing_valid: true,
-                sinks: vec![sink],
+                sinks: vec![Rc::from(sink)],
                 intent_id,
                 signing_pubkey,
                 frozen: frozen.clone(),
@@ -1316,6 +1457,11 @@ impl<S: EventStore> EngineCore<S> {
         let mut sent_relays = BTreeSet::new();
         let mut blocked_relays = BTreeSet::new();
         for relay in &relays {
+            let Ok(correlation) = self.alloc_attempt_correlation() else {
+                // Leave the lane and pending bookkeeping untouched. A
+                // transport EVENT without a unique correlation cannot exist.
+                continue;
+            };
             let ordinal = match self.pending.get(&id).and_then(|p| p.intent_id) {
                 Some(intent_id) => match self.resolver.store_mut().start_attempt(
                     intent_id,
@@ -1339,13 +1485,34 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
             sent_relays.insert(relay.clone());
-            effects.push(Effect::PublishEvent(relay.clone(), event.clone()));
+            let ephemeral_sinks = self
+                .pending
+                .get(&id)
+                .filter(|pending| pending.durability == Durability::Ephemeral)
+                .map(|pending| pending.sinks.clone())
+                .unwrap_or_default();
+            self.attempt_correlations.insert(
+                correlation,
+                AttemptCorrelationTarget {
+                    receipt: id,
+                    relay: relay.clone(),
+                    ephemeral_sinks,
+                },
+            );
+            effects.push(Effect::PublishEvent(
+                relay.clone(),
+                event.clone(),
+                correlation,
+            ));
         }
+        // `Sent` is no longer emitted synchronously here (issue #93): the
+        // frame being handed to the pool's outbound queue is not the same
+        // fact as the relay actually receiving it. `Self::on_event_handoff`
+        // is the ONLY place `Sent` now fires, gated on the async `Written`
+        // result. `sent_relays` above still drives `pending.pending_relays`
+        // (below) and the correlation bookkeeping -- it just no longer
+        // implies delivery on its own.
         if let Some(pending) = self.pending.get(&id) {
-            for relay in &sent_relays {
-                Self::notify(pending, WriteStatus::Sent(relay.clone()));
-                effects.push(Effect::EmitReceipt(id, WriteStatus::Sent(relay.clone())));
-            }
             for relay in &blocked_relays {
                 let status = WriteStatus::PersistenceBlocked(relay.clone());
                 Self::notify(pending, status.clone());
@@ -1358,9 +1525,8 @@ impl<S: EventStore> EngineCore<S> {
             Some(Durability::Ephemeral)
         );
         if ephemeral {
-            // Fire-and-forget delivery: the retained receipt has already
-            // observed acceptance/sign/send facts, but no ack tracking or
-            // durable publication obligation remains in this reducer.
+            // Fire-and-forget owns no ACK obligation. Each correlation has
+            // snapshotted the observers needed for its async handoff result.
             self.pending.remove(&id);
         } else if let Some(pending) = self.pending.get_mut(&id) {
             pending.pending_relays = sent_relays;
@@ -2620,6 +2786,85 @@ mod receipt_allocator_tests {
         assert_eq!(FIRST_UNACCEPTED_ID - 1, u64::MAX >> 1);
         assert!(core.pending.is_empty());
         assert!(core.resolver.store().recover_outbox().is_empty());
+    }
+
+    #[test]
+    fn last_attempt_correlation_is_issued_once_then_exhaustion_is_stable_and_typed() {
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+        core.set_next_attempt_correlation_for_test(Some(u64::MAX));
+
+        assert_eq!(
+            core.alloc_attempt_correlation(),
+            Ok(AttemptCorrelation(u64::MAX))
+        );
+        assert_eq!(
+            core.alloc_attempt_correlation(),
+            Err(AttemptCorrelationExhausted)
+        );
+        assert_eq!(
+            core.alloc_attempt_correlation(),
+            Err(AttemptCorrelationExhausted),
+            "exhaustion remains stable: no wrap, reuse, or fabricated id"
+        );
+    }
+
+    #[test]
+    fn attempt_correlation_exhaustion_precedes_lane_and_pending_mutation() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://correlation-exhausted.example").unwrap();
+        let directory =
+            FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()]);
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(93u64),
+                    Kind::TextNote,
+                    vec![],
+                    "correlation boundary",
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(Sink::default()),
+        ));
+        let (receipt, generation, unsigned) = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("accepted unsigned intent requests signing");
+        let intent = core.pending[&receipt].intent_id.unwrap();
+        core.set_next_attempt_correlation_for_test(None);
+
+        let effects = core.handle(EngineMsg::SignerCompleted(
+            receipt,
+            generation,
+            Ok(unsigned.sign_with_keys(&keys).unwrap()),
+        ));
+
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        assert!(core.attempt_correlations.is_empty());
+        assert!(core.pending[&receipt].pending_relays.is_empty());
+        assert!(core.pending[&receipt].attempt_ordinals.is_empty());
+        assert!(core
+            .resolver
+            .store()
+            .recover_attempts(intent)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            core.alloc_attempt_correlation(),
+            Err(AttemptCorrelationExhausted),
+            "the failed call must not revive or wrap the namespace"
+        );
     }
 }
 

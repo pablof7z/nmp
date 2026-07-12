@@ -28,5 +28,5 @@ serde_json = "1"
 # hood (nostr-sdk); confined to dev-dependencies and `#[tokio::test]` — the
 # production `Pool` above stays free of any imposed runtime (D8).
 nostr-relay-builder = "0.45.0-alpha.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

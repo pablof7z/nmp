@@ -373,6 +373,10 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
         PoolEvent::Disconnected { slot, .. } => Some(EngineMsg::RelayDisconnected(slot)),
         PoolEvent::Frame { handle, frame } => Some(EngineMsg::RelayFrame(handle, frame)),
         PoolEvent::Health { .. } => None,
+        PoolEvent::EventHandoff {
+            correlation,
+            result,
+        } => Some(EngineMsg::EventHandoff(correlation, result)),
     }
 }
 
@@ -657,10 +661,10 @@ fn dispatch_effect(
     match effect {
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::Replay(url, reqs) => apply_replay(&url, reqs, pool, preambles),
-        Effect::PublishEvent(url, event) => {
+        Effect::PublishEvent(url, event, correlation) => {
             let handle = pool.ensure_open(&url);
             let json = ClientMessage::event(event).as_json();
-            let _ = pool.send(handle, WireFrame::Text(json));
+            let _ = pool.send_durable(handle, correlation, WireFrame::Text(json));
         }
         // The signer frozen into this exact accepted template is looked up
         // by pubkey on every request. A later active-account switch cannot

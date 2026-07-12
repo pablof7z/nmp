@@ -37,5 +37,6 @@ mod pool;
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
 pub use pool::{
-    DisconnectReason, Pool, PoolConfig, PoolEvent, PoolEventSink, RelayFrame, WireFrame,
+    AttemptCorrelation, DisconnectReason, HandoffResult, Pool, PoolConfig, PoolEvent,
+    PoolEventSink, RelayFrame, WireFrame,
 };

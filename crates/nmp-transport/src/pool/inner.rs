@@ -189,10 +189,22 @@ impl PoolInner {
 
     pub(super) fn command_tx_for(&self, h: RelayHandle) -> Option<&WorkerHandle> {
         let state = self.slots.get(h.slot as usize)?;
-        if state.generation != h.generation {
+        if state.generation != h.generation || state.health.state == ConnState::Disconnected {
             return None;
         }
         state.worker.as_ref()
+    }
+
+    /// Clone the sink handle. Used by [`super::Pool::send_durable`] to
+    /// resolve an [`super::AttemptCorrelation`] synchronously as
+    /// `NotHandedOff` when the frame never even reaches a live worker's
+    /// command channel — the sink itself outlives every slot (dropped only
+    /// by [`Self::shutdown`], by which point no caller can still be racing
+    /// a `send_durable`, since `Pool::shutdown` joins the translator and the
+    /// pool is `Arc`-shared, so any in-flight `send_durable` call already
+    /// holds its own clone of this `Arc` before the lock is ever released).
+    pub(super) fn sink(&self) -> Arc<dyn PoolEventSink> {
+        Arc::clone(&self.sink)
     }
 
     pub(super) fn set_reconnect_preamble_for(&self, h: RelayHandle, frames: Vec<String>) -> bool {
@@ -310,6 +322,25 @@ fn translator_loop(
 ///   worker from before an explicit close+reopen), which the worker-id
 ///   check alone fully covers.
 fn apply_worker_event(inner: &mut PoolInner, event: WorkerEvent) -> Option<PoolEvent> {
+    // `EventHandoff` (issue #93) is the one exception to every generation/
+    // slot-state gate below: it is the sole, ever, resolution of a durable
+    // EVENT's `AttemptCorrelation`, decided once by the worker itself. It
+    // must reach the sink regardless of whether the pool has since closed
+    // this slot, reopened it, or moved on to a newer generation — gating it
+    // like `Frame`/`Connected` would risk silently stranding a correlation
+    // with no answer at all, which is precisely the hidden-queue failure
+    // mode this seam exists to remove.
+    if let WorkerEventKind::EventHandoff {
+        correlation,
+        result,
+    } = event.kind
+    {
+        return Some(PoolEvent::EventHandoff {
+            correlation,
+            result,
+        });
+    }
+
     let state = inner.slots.get_mut(event.slot as usize)?;
     state.worker.as_ref()?;
     let same_worker = worker_id_of(event.generation) == worker_id_of(state.generation);
@@ -393,13 +424,16 @@ fn apply_worker_event(inner: &mut PoolInner, event: WorkerEvent) -> Option<PoolE
                 }
             }
         }
+        WorkerEventKind::EventHandoff { .. } => {
+            unreachable!("EventHandoff already returned above, before any slot lookup")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::{PoolConfig, PoolEvent};
+    use crate::pool::{Pool, PoolConfig, PoolEvent, WireFrame};
     use std::sync::mpsc::Sender as StdSender;
 
     struct Collector(StdSender<PoolEvent>);
@@ -576,5 +610,148 @@ mod tests {
         nostr::EventBuilder::new(nostr::Kind::TextNote, content)
             .sign_with_keys(keys)
             .expect("test fixture must sign cleanly")
+    }
+
+    // ---- issue #93: durable EVENT handoff ---------------------------
+
+    /// The one exception to every other generation/slot gate in
+    /// `apply_worker_event`: an `EventHandoff` for a slot that was closed
+    /// and reopened under a BRAND NEW generation must still reach the sink.
+    /// Gating it like `Frame` would silently strand the correlation with no
+    /// answer at all -- exactly the failure mode #93 removes.
+    #[test]
+    fn event_handoff_from_a_closed_and_reopened_slot_still_delivers() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+
+        let h1 = guard.ensure_open(&url);
+        assert!(guard.close(h1));
+        let _h2 = guard.ensure_open(&url);
+
+        let delivered = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h1.slot,
+                generation: h1.generation,
+                kind: WorkerEventKind::EventHandoff {
+                    correlation: crate::pool::AttemptCorrelation(1),
+                    result: crate::pool::HandoffResult::NotHandedOff,
+                },
+            },
+        );
+        assert!(
+            matches!(
+                delivered,
+                Some(PoolEvent::EventHandoff {
+                    result: crate::pool::HandoffResult::NotHandedOff,
+                    ..
+                })
+            ),
+            "a durable EVENT's resolution must reach the sink even from a slot that has since \
+             closed and reopened under a new generation, got {delivered:?}"
+        );
+    }
+
+    /// `EventHandoff` delivery does not even need a valid slot index --
+    /// unlike every other `WorkerEvent` variant, it carries no slot-state
+    /// dependency at all (a correlation is engine-minted, not pool-slot-
+    /// scoped), so an "unknown" slot number still delivers. This is the
+    /// same invariant as the closed-and-reopened-slot case above, taken to
+    /// its logical extreme: NOTHING about pool/slot bookkeeping may ever
+    /// swallow a durable EVENT's one-and-only resolution.
+    #[test]
+    fn event_handoff_delivers_even_for_an_out_of_range_slot() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let outcome = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: 999,
+                generation: 0,
+                kind: WorkerEventKind::EventHandoff {
+                    correlation: crate::pool::AttemptCorrelation(7),
+                    result: crate::pool::HandoffResult::Ambiguous,
+                },
+            },
+        );
+        assert!(matches!(
+            outcome,
+            Some(PoolEvent::EventHandoff {
+                result: crate::pool::HandoffResult::Ambiguous,
+                ..
+            })
+        ));
+    }
+
+    /// `Pool::send_durable` against a stale (superseded) handle must
+    /// resolve `NotHandedOff` synchronously -- the correlation never even
+    /// reaches a live worker's command channel, so there is nothing
+    /// asynchronous left to wait for.
+    #[test]
+    fn send_durable_on_a_stale_handle_resolves_not_handed_off_synchronously() {
+        use crate::pool::{AttemptCorrelation, HandoffResult, Pool, WireFrame};
+
+        let (tx, rx) = mpsc::channel();
+        let pool = Pool::new(PoolConfig::default(), tx);
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+        let h1 = pool.ensure_open(&url);
+        pool.close(h1);
+
+        let correlation = AttemptCorrelation(42);
+        let handed_off = pool.send_durable(h1, correlation, WireFrame::Text("[]".into()));
+        assert!(!handed_off);
+
+        // Drain events until the handoff resolution shows up -- `close`
+        // also emits a synchronous `Disconnected` first.
+        let mut found = None;
+        for event in rx.iter().take(4) {
+            if let PoolEvent::EventHandoff {
+                correlation: c,
+                result,
+            } = event
+            {
+                assert_eq!(c, correlation);
+                found = Some(result);
+                break;
+            }
+        }
+        assert!(matches!(found, Some(HandoffResult::NotHandedOff)));
+        pool.shutdown();
+    }
+
+    #[test]
+    fn poisoned_pool_lock_still_resolves_durable_handoff_synchronously() {
+        let (tx, rx) = mpsc::channel();
+        let inner = PoolInner::new(PoolConfig::default(), Arc::new(Collector(tx)));
+        let pool = Pool {
+            inner: Arc::clone(&inner),
+        };
+        let poison = Arc::clone(&inner);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        let correlation = crate::pool::AttemptCorrelation(99);
+        assert!(!pool.send_durable(
+            RelayHandle {
+                slot: u32::MAX,
+                generation: 0,
+            },
+            correlation,
+            WireFrame::Text("[]".into()),
+        ));
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(PoolEvent::EventHandoff {
+                correlation: found,
+                result: crate::pool::HandoffResult::NotHandedOff,
+            }) if found == correlation
+        ));
+
+        inner.clear_poison();
+        pool.shutdown();
     }
 }

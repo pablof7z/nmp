@@ -11,10 +11,13 @@
 //! runtime here drives the test relay, not `nmp-transport`.
 
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use nmp_transport::{Pool, PoolConfig, PoolEvent, RelayFrame, WireFrame};
+use nmp_transport::{
+    AttemptCorrelation, HandoffResult, Pool, PoolConfig, PoolEvent, RelayFrame, WireFrame,
+};
 // Deliberately NOT a glob import: `nostr_relay_builder::prelude::*` re-exports
 // `nostr::prelude::*` from ITS OWN `nostr` dependency (0.45-alpha, distinct
 // from this workspace's pinned `nostr = "0.44.4"` that `nmp-transport`'s
@@ -63,9 +66,40 @@ fn frame_contains(event: &PoolEvent, needle: &str) -> bool {
 /// Reserve an ephemeral TCP port by binding then immediately dropping the
 /// listener, so the *second* relay instance in the reconnect half of this
 /// test can rebind the exact same port the first one used.
+static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(0);
+
 fn free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
-    listener.local_addr().expect("local_addr").port()
+    let base = 20_000 + (std::process::id() % 20_000) as u16;
+    let _ = NEXT_TEST_PORT.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed);
+    loop {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        if port < 20_000 {
+            NEXT_TEST_PORT.store(base, Ordering::Relaxed);
+            continue;
+        }
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}
+
+/// `LocalRelay::run` starts its listener task asynchronously. Prove the TCP
+/// accept loop is live before asking the pool to dial, so a loaded CI host
+/// cannot turn startup scheduling into a reconnect-test timeout.
+async fn wait_for_listener(port: u16) {
+    tokio::time::timeout(Duration::from_secs(5), async move {
+        loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return;
+                }
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("test relay listener did not become ready");
 }
 
 // Multi-thread flavor is load-bearing here, not a style choice: the test
@@ -91,6 +125,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
         .port(port)
         .build();
     relay_a.run().await.expect("run relay_a");
+    wait_for_listener(port).await;
     eprintln!("[test] relay_a running on port {port}");
     relay_a
         .add_event(event.clone())
@@ -177,6 +212,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     // shutdown before relay_b binds it.
     tokio::time::sleep(Duration::from_millis(100)).await;
     relay_b.run().await.expect("run relay_b");
+    wait_for_listener(port).await;
     relay_b
         .add_event(event.clone())
         .await
@@ -216,4 +252,227 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     eprintln!("[test] pool.shutdown() returned");
     relay_b.shutdown();
     eprintln!("[test] relay_b.shutdown() returned, test complete");
+}
+
+/// Issue #93's core falsifier, over REAL sockets: a durable `EVENT`
+/// submitted via [`Pool::send_durable`] must NEVER survive into a new
+/// connection generation. Unlike a REQ (which legitimately replays via the
+/// reconnect preamble -- proved in the SAME test, mirroring test 7 above,
+/// so this seam is shown orthogonal to that one, not a replacement for
+/// it), an EVENT still in flight when the connection ends resolves its
+/// `AttemptCorrelation` (never silently as if nothing happened, and never
+/// `Written` once the generation has already ended) and is never written
+/// to the NEW connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .try_init();
+    let port = free_port();
+    let keys = Keys::generate();
+
+    let relay_a = LocalRelay::builder()
+        .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .port(port)
+        .build();
+    relay_a.run().await.expect("run relay_a");
+    wait_for_listener(port).await;
+    let relay_url_str = relay_a.url().await.to_string();
+    let url = nostr::RelayUrl::parse(&relay_url_str).expect("parse relay url");
+
+    let (tx, rx) = mpsc::channel::<PoolEvent>();
+    let pool = Pool::new(
+        PoolConfig {
+            reconnect_delay_initial: Some(Duration::from_millis(20)),
+            ..PoolConfig::default()
+        },
+        tx,
+    );
+
+    let h1 = pool.ensure_open(&url);
+    let connected1 = recv_matching(&rx, Duration::from_secs(5), is_connected);
+    let PoolEvent::Connected {
+        handle: observed1, ..
+    } = connected1
+    else {
+        unreachable!("is_connected guard")
+    };
+    assert_eq!(observed1, h1);
+
+    // Register a REQ preamble, mirroring test 7 above -- proves this seam
+    // is orthogonal to the existing REQ-replay mechanism, not a
+    // replacement for it.
+    let sub_id = "sub-durable-test";
+    let req = format!(r#"["REQ","{sub_id}",{{"kinds":[1]}}]"#);
+    assert!(pool.set_reconnect_preamble(h1, vec![req]));
+
+    // The durable EVENT this test proves never survives reconnect.
+    let stranded: Event = EventBuilder::text_note("must never reach relay_b")
+        .finalize(&keys)
+        .expect("sign stranded event");
+    // Built as a raw `["EVENT", ...]` wire string, not via this crate's own
+    // pinned `nostr::ClientMessage` -- `stranded` is `nostr-relay-builder`'s
+    // OWN (0.45-alpha) `Event` type, a distinct crate version from this
+    // workspace's pinned `nostr = "0.44.4"` (see the module doc's "no glob
+    // import" note); only its own JSON serialization is safe to use here.
+    let stranded_json = format!(r#"["EVENT",{}]"#, stranded.as_json());
+    let correlation = AttemptCorrelation(1);
+
+    // Tear relay_a down and wait for the pool to actually OBSERVE the
+    // drop (`Disconnected`) before submitting the durable EVENT -- racing
+    // it against a socket that is merely in the process of closing (as
+    // `relay_a.shutdown()` alone would) is not reliable: a local write can
+    // still land in the OS send buffer before the TCP teardown completes,
+    // legitimately resolving `Written` and defeating the point of this
+    // test. Waiting for the worker's OWN detected disconnect guarantees
+    // there is no live connection left for the command to reach at all.
+    relay_a.shutdown();
+    let disconnected = recv_matching(&rx, Duration::from_secs(5), |e| {
+        matches!(e, PoolEvent::Disconnected { .. })
+    });
+    assert!(matches!(disconnected, PoolEvent::Disconnected { .. }));
+    let _ = pool.send_durable(h1, correlation, WireFrame::Text(stranded_json));
+
+    // Whatever the immediate `bool` said, the authoritative answer is the
+    // async `EventHandoff` — it must arrive (never silently dropped), and
+    // it must NEVER be `Written`: this generation had already ended (or
+    // was ending) before any relay could plausibly have kept the frame.
+    let handoff = recv_matching(
+        &rx,
+        Duration::from_secs(10),
+        |e| matches!(e, PoolEvent::EventHandoff { correlation: c, .. } if *c == correlation),
+    );
+    match handoff {
+        PoolEvent::EventHandoff { result, .. } => {
+            assert_eq!(
+                result,
+                HandoffResult::NotHandedOff,
+                "a durable EVENT submitted after the worker observed disconnect never reached \
+                 socket.write and must resolve exactly NotHandedOff"
+            );
+        }
+        other => panic!("expected EventHandoff, got {other:?}"),
+    }
+
+    // Bring relay_b up on the SAME port and let the pool reconnect.
+    let relay_b = LocalRelay::builder()
+        .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .port(port)
+        .build();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    relay_b.run().await.expect("run relay_b");
+    wait_for_listener(port).await;
+
+    let connected2 = recv_matching(&rx, Duration::from_secs(15), is_connected);
+    let PoolEvent::Connected { handle: h2, .. } = connected2 else {
+        unreachable!("is_connected guard")
+    };
+    assert_ne!(
+        h1.generation, h2.generation,
+        "reconnect must mint a fresh generation"
+    );
+
+    // The REQ preamble DID replay (untouched by this seam): relay_b
+    // receives the subscription without the test resending it — proved by
+    // seeding a FRESH matching event into relay_b and observing it flow
+    // back over the wire unprompted, exactly like test 7's own pattern.
+    let confirm: Event = EventBuilder::text_note("proves the REQ preamble replayed")
+        .finalize(&keys)
+        .expect("sign confirm event");
+    relay_b
+        .add_event(confirm.clone())
+        .await
+        .expect("seed confirm event into relay_b");
+    let confirm_frame = recv_matching(&rx, Duration::from_secs(5), |e| {
+        frame_contains(e, &confirm.id.to_hex())
+    });
+    assert!(matches!(confirm_frame, PoolEvent::Frame { .. }));
+
+    // The stranded EVENT must NEVER have reached relay_b: drain every
+    // remaining event for a bounded grace window and assert its id never
+    // appears anywhere on the wire.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(event) => assert!(
+                !frame_contains(&event, &stranded.id.to_hex()),
+                "the stranded EVENT must never appear on relay_b's connection: {event:?}"
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    pool.shutdown();
+    relay_b.shutdown();
+}
+
+/// A durable `EVENT` handed off to a live, healthy connection resolves
+/// `Written` exactly once -- never a second `EventHandoff` for the same
+/// `AttemptCorrelation`, over a real socket round trip (issue #93's
+/// "duplicate result" falsifier).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_event_resolves_written_exactly_once() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .try_init();
+    let port = free_port();
+    let keys = Keys::generate();
+
+    let relay = LocalRelay::builder()
+        .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .port(port)
+        .build();
+    relay.run().await.expect("run relay");
+    wait_for_listener(port).await;
+    let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
+
+    let (tx, rx) = mpsc::channel::<PoolEvent>();
+    let pool = Pool::new(PoolConfig::default(), tx);
+    let h = pool.ensure_open(&url);
+    recv_matching(&rx, Duration::from_secs(5), is_connected);
+
+    let event: Event = EventBuilder::text_note("resolves exactly once")
+        .finalize(&keys)
+        .expect("sign test event");
+    let json = format!(r#"["EVENT",{}]"#, event.as_json());
+    let correlation = AttemptCorrelation(1);
+    assert!(pool.send_durable(h, correlation, WireFrame::Text(json)));
+
+    let first = recv_matching(
+        &rx,
+        Duration::from_secs(5),
+        |e| matches!(e, PoolEvent::EventHandoff { correlation: c, .. } if *c == correlation),
+    );
+    assert!(matches!(
+        first,
+        PoolEvent::EventHandoff {
+            result: HandoffResult::Written,
+            ..
+        }
+    ));
+
+    // Drain everything else for a bounded grace window -- the SAME
+    // correlation must never appear a second time.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(PoolEvent::EventHandoff { correlation: c, .. }) if c == correlation => {
+                panic!("the same AttemptCorrelation must never resolve a second time")
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    pool.shutdown();
+    relay.shutdown();
 }
