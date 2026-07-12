@@ -418,25 +418,28 @@ retracts + restores predecessor; relay rejection **after** signing touches recei
 only; chained pending edits unwind correctly (§3.4); AwaitingSigner persists +
 pending row still visible; `resolver_has_no_kind_specific_branches` stays green.
 
-### U4 — Restart recovery + AwaitingSigner reattach + retry deadline fold
+### U4 — Restart recovery + AwaitingSigner/receipt reattach + attempt seed
 **Files:** `nmp-engine/src/core/mod.rs` (recover-from-journal constructor path;
-`next_deadline` folds `OUTBOX_ATTEMPTS`; signer-attach rescans AwaitingSigner),
+signer-attach rescans AwaitingSigner; durable attempts replay exact persisted bytes),
 `nmp-engine/src/runtime/mod.rs` (`engine_loop` `:364` boot calls `recover_outbox`
-and replays; `Cmd::AddSigner` `:402` triggers rescan). **TOUCHES core/mod.rs +
+and replays; `Cmd::AddSigner` `:402` triggers rescan), and `nmp-store`'s typed
+versioned attempt doors. **TOUCHES core/mod.rs +
 runtime SEAM.** **Depends U1, U3.**
 **Tests (kill/restart falsifiers — load-bearing):** accept offline → restart →
 pending row still query-visible + receipt reattachable; signer detach → restart →
 reattach → sign → publish → per-relay evidence; exact-byte resend after restart
 (frozen body unchanged); route revision append-only across restart; ambiguous
-at-most-once reloads `OutcomeUnknown`, never blindly retried; a persisted
-`next_eligible_at` fires via the deadline driver with no polling.
+at-most-once reloads `OutcomeUnknown`, never blindly retried. Route/attempt
+facts are append-only. Retry eligibility, backoff, concurrency and deadline
+folding are deliberately excluded from U4 and owned by issue #79; U4 arms no
+timer and therefore cannot busy-spin.
 
 ### U5 — Headless crash-injection / restart-recovery falsifier suite
 **Files:** new `nmp-store/tests/outbox_crash_atomicity.rs`,
 `nmp-engine/tests/durable_accepted_restart.rs`. **Depends U1–U4.** Consolidates the
 kill/restart proofs #2/#3 require: every transaction boundary, receipt replay,
 signer detach/reattach, exact-byte resend, route revision, cancellation, ambiguous
-at-most-once handoff, logical backoff without polling; plus retraction doc §5's
+at-most-once handoff; plus retraction doc §5's
 coverage falsifier (retract each way → coverage rows bit-identical, `gc` remains
 the only lowering path).
 

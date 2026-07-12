@@ -421,6 +421,9 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::GaveUp(relay) => FfiWriteStatus::GaveUp {
             relay: relay.to_string(),
         },
+        GWriteStatus::OutcomeUnknown(relay) => FfiWriteStatus::OutcomeUnknown {
+            relay: relay.to_string(),
+        },
         GWriteStatus::Failed(reason) => FfiWriteStatus::Failed {
             reason: reason.clone(),
         },
@@ -496,6 +499,24 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
 /// Newtype wrapper so `write_status_to_ffi` can take `&WriteStatus` without
 /// this crate needing a `From<&WriteStatus>` orphan impl.
 pub struct WriteStatusRef<'a>(pub &'a GWriteStatus);
+
+#[cfg(test)]
+mod write_status_tests {
+    use super::*;
+
+    #[test]
+    fn outcome_unknown_never_collapses_to_gave_up() {
+        let relay = RelayUrl::parse("wss://ambiguous.example").unwrap();
+        let mapped =
+            write_status_to_ffi(WriteStatusRef(&GWriteStatus::OutcomeUnknown(relay.clone())));
+        assert_eq!(
+            mapped,
+            FfiWriteStatus::OutcomeUnknown {
+                relay: relay.to_string()
+            }
+        );
+    }
+}
 
 pub fn parse_pubkey(hex: &str) -> Result<PublicKey, FfiError> {
     PublicKey::from_hex(hex).map_err(|_| FfiError::InvalidPublicKey {

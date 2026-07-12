@@ -35,10 +35,11 @@ use crate::coverage::{
     window_erase, ShapeRecord,
 };
 use crate::{
-    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
-    EventStore, GcReport, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError,
-    PromoteOutcome, Provenance, ReceiptState, RecoveredIntent, RecoveredReceipt, RefuseReason,
-    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
+    AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
+    CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, IntentId,
+    IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState,
+    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RefuseReason, RelayObserved,
+    RetractReason, SigState, StoredEvent, WriteDurability,
 };
 
 /// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
@@ -137,6 +138,60 @@ const NEXT_RECEIPT_ID_KEY: &str = "next_receipt_id";
 /// [`crate::ReceiptState`]'s doc for why this separation exists). Never
 /// pruned by this unit.
 const OUTBOX_RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_receipts");
+
+fn attempt_prefix(intent_id: IntentId, relay: &RelayUrl) -> String {
+    // Length-prefixing makes relay-prefix pairs (`wss://x` and
+    // `wss://x:443`) disjoint without relying on URL separator rules.
+    format!(
+        "{:020}:{:020}:{}:",
+        intent_id.0,
+        relay.as_str().len(),
+        relay.as_str()
+    )
+}
+
+fn attempt_key(intent_id: IntentId, relay: &RelayUrl, ordinal: u64) -> String {
+    format!("{}{:020}", attempt_prefix(intent_id, relay), ordinal)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OutboxAttemptRecord {
+    version: u8,
+    intent_id: IntentId,
+    relay: RelayUrl,
+    ordinal: u64,
+    event_json: String,
+    outcome: AttemptOutcome,
+}
+
+fn decode_attempt(key: &str, json: &str) -> Result<RecoveredAttempt, PersistenceError> {
+    let record: OutboxAttemptRecord = serde_json::from_str(json)
+        .map_err(|err| PersistenceError(format!("decode outbox attempt: {err}")))?;
+    if record.version != 1 {
+        return Err(PersistenceError(format!(
+            "unsupported outbox attempt record version {}",
+            record.version
+        )));
+    }
+    if attempt_key(record.intent_id, &record.relay, record.ordinal) != key {
+        return Err(PersistenceError(
+            "outbox attempt key does not match its value tuple".into(),
+        ));
+    }
+    let event = Event::from_json(&record.event_json)
+        .map_err(|err| PersistenceError(format!("decode attempt event: {err}")))?;
+    event
+        .verify()
+        .map_err(|err| PersistenceError(format!("attempt event is invalid: {err}")))?;
+    Ok(RecoveredAttempt {
+        version: record.version,
+        intent_id: record.intent_id,
+        relay: record.relay,
+        ordinal: record.ordinal,
+        event,
+        outcome: record.outcome,
+    })
+}
 /// Every still-open kind:5 intent's OWN suppression claims (architecture
 /// review requirement — codex-nova's suppression-claim model; see
 /// [`SuppressClaimRecord`]'s doc), keyed by the SAME [`intent_key`] as its
@@ -221,7 +276,13 @@ fn alloc_intent_id_in_txn(
 fn alloc_receipt_id_in_txn(
     outbox_meta: &mut redb::Table<'_, &str, &str>,
 ) -> Result<u64, PersistenceError> {
-    alloc_counter_in_txn(outbox_meta, NEXT_RECEIPT_ID_KEY)
+    let id = alloc_counter_in_txn(outbox_meta, NEXT_RECEIPT_ID_KEY)?;
+    if id >= (1u64 << 63) {
+        return Err(PersistenceError(
+            "durable receipt id namespace exhausted".into(),
+        ));
+    }
+    Ok(id)
 }
 
 /// Shared bump-and-return for one `OUTBOX_META` counter row, keyed by
@@ -234,14 +295,13 @@ fn alloc_counter_in_txn(
     let current = outbox_meta
         .get(meta_key)
         .map_err(persist_err)?
-        .map(|guard| {
-            guard
-                .value()
-                .parse::<u64>()
-                .expect("redb: parse outbox_meta counter")
-        })
+        .map(|guard| guard.value().parse::<u64>())
+        .transpose()
+        .map_err(|err| PersistenceError(format!("parse outbox_meta counter: {err}")))?
         .unwrap_or(1);
-    let next = current + 1;
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| PersistenceError("outbox id counter exhausted".into()))?;
     let encoded = next.to_string();
     outbox_meta
         .insert(meta_key, encoded.as_str())
@@ -3307,6 +3367,157 @@ impl EventStore for RedbStore {
             expected_pubkey: record.expected_pubkey,
             state: record.state,
         })
+    }
+
+    fn start_attempt(
+        &mut self,
+        intent_id: IntentId,
+        relay: RelayUrl,
+        event: Event,
+    ) -> Result<RecoveredAttempt, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let intents = read_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+        let key = intent_key(intent_id);
+        let json = intents
+            .get(key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string())
+            .ok_or_else(|| PersistenceError("attempt intent is not open".into()))?;
+        let intent: OutboxIntentRecord = serde_json::from_str(&json)
+            .map_err(|err| PersistenceError(format!("decode attempt intent: {err}")))?;
+        let frozen = Event::from_json(&intent.frozen_json)
+            .map_err(|err| PersistenceError(format!("decode attempt intent event: {err}")))?;
+        if intent.sig_state != IntentSigState::Signed || frozen != event {
+            return Err(PersistenceError(
+                "attempt bytes are not the intent's promoted signed bytes".into(),
+            ));
+        }
+        event
+            .verify()
+            .map_err(|err| PersistenceError(format!("attempt event is invalid: {err}")))?;
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let attempt = {
+            let mut attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+            let prefix = attempt_prefix(intent_id, &relay);
+            let mut last = 0;
+            for entry in attempts.iter().map_err(persist_err)? {
+                let (key, value) = entry.map_err(persist_err)?;
+                if let Some(suffix) = key.value().strip_prefix(&prefix) {
+                    let parsed = suffix.parse::<u64>().map_err(|err| {
+                        PersistenceError(format!("parse outbox attempt ordinal: {err}"))
+                    })?;
+                    if parsed != u64::MAX {
+                        let recovered = decode_attempt(key.value(), value.value())?;
+                        if recovered.intent_id != intent_id || recovered.relay != relay {
+                            return Err(PersistenceError(
+                                "outbox attempt prefix does not match its value tuple".into(),
+                            ));
+                        }
+                    }
+                    last = last.max(parsed);
+                }
+            }
+            let ordinal = last
+                .checked_add(1)
+                .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
+            let record = OutboxAttemptRecord {
+                version: 1,
+                intent_id,
+                relay: relay.clone(),
+                ordinal,
+                event_json: event.as_json(),
+                outcome: AttemptOutcome::Started,
+            };
+            let encoded = serde_json::to_string(&record)
+                .map_err(|err| PersistenceError(format!("encode outbox attempt: {err}")))?;
+            attempts
+                .insert(
+                    attempt_key(intent_id, &relay, ordinal).as_str(),
+                    encoded.as_str(),
+                )
+                .map_err(persist_err)?;
+            RecoveredAttempt {
+                version: 1,
+                intent_id,
+                relay,
+                ordinal,
+                event,
+                outcome: AttemptOutcome::Started,
+            }
+        };
+        write_txn.commit().map_err(persist_err)?;
+        Ok(attempt)
+    }
+
+    fn finish_attempt(
+        &mut self,
+        intent_id: IntentId,
+        relay: &RelayUrl,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    ) -> Result<FinishAttemptOutcome, PersistenceError> {
+        if outcome == AttemptOutcome::Started {
+            return Err(PersistenceError("Started is not a terminal outcome".into()));
+        }
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let result = {
+            let mut attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+            let key = attempt_key(intent_id, relay, ordinal);
+            let existing = attempts.get(key.as_str()).map_err(persist_err)?;
+            let json = existing
+                .map(|guard| guard.value().to_string())
+                .ok_or_else(|| PersistenceError("attempt row not found".into()))?;
+            let recovered = decode_attempt(&key, &json)?;
+            if recovered.outcome == outcome {
+                FinishAttemptOutcome::AlreadySame
+            } else if recovered.outcome == AttemptOutcome::Started {
+                let record = OutboxAttemptRecord {
+                    version: recovered.version,
+                    intent_id: recovered.intent_id,
+                    relay: recovered.relay,
+                    ordinal: recovered.ordinal,
+                    event_json: recovered.event.as_json(),
+                    outcome,
+                };
+                let encoded = serde_json::to_string(&record)
+                    .map_err(|err| PersistenceError(format!("encode outbox attempt: {err}")))?;
+                attempts
+                    .insert(key.as_str(), encoded.as_str())
+                    .map_err(persist_err)?;
+                FinishAttemptOutcome::Committed
+            } else {
+                return Err(PersistenceError(
+                    "attempt already has a conflicting terminal outcome".into(),
+                ));
+            }
+        };
+        write_txn.commit().map_err(persist_err)?;
+        Ok(result)
+    }
+
+    fn recover_attempts(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let attempts = read_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+        let prefix = format!("{:020}:", intent_id.0);
+        let mut recovered = Vec::new();
+        for entry in attempts.iter().map_err(persist_err)? {
+            let (key, value) = entry.map_err(persist_err)?;
+            if key.value().starts_with(&prefix) {
+                recovered.push(decode_attempt(key.value(), value.value())?);
+            }
+        }
+        // Table-key layout is a storage detail (currently length-prefixed
+        // relay text), not public recovery order. Match MemoryStore and the
+        // typed contract explicitly.
+        recovered.sort_by(|left, right| {
+            left.relay
+                .cmp(&right.relay)
+                .then(left.ordinal.cmp(&right.ordinal))
+        });
+        Ok(recovered)
     }
 
     fn accept_ephemeral(

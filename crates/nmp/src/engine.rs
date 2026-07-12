@@ -25,8 +25,9 @@
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 
+use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::{WriteIntent, WriteStatus};
-use nmp_engine::runtime::{EngineThread, Handle};
+use nmp_engine::runtime::{EngineThread, Handle, ReceiptStream};
 use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
@@ -152,6 +153,21 @@ impl Engine {
     /// preceding `Accepted` -- see this module's doc.
     pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, EngineError> {
         self.with_handle(|handle| handle.publish(intent))
+    }
+
+    /// Enqueue a write while retaining the stable store-issued receipt id
+    /// needed for process-later reattachment.
+    pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
+        self.with_handle(|handle| handle.publish_tracked(intent))
+    }
+
+    /// Reattach to durable receipt facts after a restart. `Ok(None)` means
+    /// the id was never issued by this store.
+    pub fn reattach_receipt(
+        &self,
+        id: ReceiptId,
+    ) -> Result<Option<Receiver<WriteStatus>>, EngineError> {
+        self.with_handle(|handle| handle.reattach_receipt(id))
     }
 
     /// Register an account from its secret key (hex or bech32 `nsec`). Does

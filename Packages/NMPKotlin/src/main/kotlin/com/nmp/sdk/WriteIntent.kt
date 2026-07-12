@@ -110,6 +110,8 @@ sealed class WriteStatus {
 
     data class GaveUp(val relay: String) : WriteStatus()
 
+    data class OutcomeUnknown(val relay: String) : WriteStatus()
+
     data class Failed(val reason: String) : WriteStatus()
 
     companion object {
@@ -123,6 +125,7 @@ sealed class WriteStatus {
                 is FfiWriteStatus.Acked -> Acked(ffi.relay)
                 is FfiWriteStatus.Rejected -> Rejected(ffi.relay, ffi.reason)
                 is FfiWriteStatus.GaveUp -> GaveUp(ffi.relay)
+                is FfiWriteStatus.OutcomeUnknown -> OutcomeUnknown(ffi.relay)
                 is FfiWriteStatus.Failed -> Failed(ffi.reason)
             }
     }

@@ -11,8 +11,16 @@ import uniffi.nmp_ffi.FfiFilterCoverage
 import uniffi.nmp_ffi.FfiShortfallFact
 import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
+import uniffi.nmp_ffi.FfiWriteStatus
 
 class EvidenceMappingTest {
+    @Test
+    fun outcomeUnknownReceiptMappingRemainsDistinctFromGaveUp() {
+        val ambiguous = WriteStatus.from(FfiWriteStatus.OutcomeUnknown("wss://ambiguous.example"))
+        assertEquals(WriteStatus.OutcomeUnknown("wss://ambiguous.example"), ambiguous)
+        assertTrue(ambiguous != WriteStatus.GaveUp("wss://ambiguous.example"))
+    }
+
     @Test
     fun everyAcquisitionEvidenceVariantMapsWithoutARollup() {
         val raw =

@@ -41,6 +41,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # restart -- a throwaway temp dir per test run, same crate `nmp-store`
 # already uses for its own `RedbStore` tests.
 tempfile = "3"
+redb = "4.1"
 # `no_deadlines_blocks_indefinitely` (runtime_integration.rs, #39) falsifies
 # D8's "no poll-loop timer thread" the only way a black-box test can:
 # measuring real process CPU time (`getrusage`) across an idle window, since
