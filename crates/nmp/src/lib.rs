@@ -72,15 +72,24 @@ pub use nmp_resolver::LiveQuery;
 pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 
 // The write plane a `WriteIntent` is built from, and its receipt stream.
-// `NarrowOnly`/`PrivateRoute` are deliberately NOT re-exported here: their
+// `Durability`/`WriteIntent`/`WritePayload`/`WriteRouting` moved to
+// `nmp-grammar` (#115 Fable ruling, Fork 3) -- a protocol module composing
+// a `WriteIntent` must not gain an engine dependency to do so.
+// `NarrowOnly`/`PrivateRoute`/`HostAuthority` are deliberately NOT
+// re-exported here even though they are `pub` in `nmp-grammar`: `NarrowOnly`'s
 // constructor validates only that a set can never widen after construction,
 // not that its initial contents are actually private (#22) -- an app must
 // not be able to place arbitrary public relays into a route that looks
-// structurally narrow. A validated, opaque private-route mint belongs in a
-// protocol module, not the default facade surface.
+// structurally narrow; `HostAuthority::from_selected_host` (#115) is
+// mintable by ANY string an app hands it, the same shape of foot-gun --
+// an app must not be able to assert its own ad-hoc "host" out of thin air.
+// A validated, opaque private-route or pinned-host mint belongs in a
+// protocol module (e.g. `nmp-nip29::compose_group_send`), not the default
+// facade surface.
 pub use nmp_engine::core::ReceiptId;
-pub use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
+pub use nmp_engine::outbox::WriteStatus;
 pub use nmp_engine::runtime::{ReceiptReattachment, ReceiptStream};
+pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,

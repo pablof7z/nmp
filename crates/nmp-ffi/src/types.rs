@@ -314,7 +314,7 @@ pub enum FfiDurability {
 }
 
 /// `nmp::WriteRouting` mirror -- `PrivateNarrow` deliberately has NO wire
-/// form here (#22/#52). `nmp_engine::outbox::NarrowOnly::new`'s
+/// form here (#22/#52). `nmp_grammar::NarrowOnly::new`'s
 /// own doc requires "the caller must already have resolved and narrowed
 /// this itself" -- i.e. a trusted protocol module's own logic, not a raw
 /// relay-URL string handed across the FFI boundary by an app with no way to
@@ -326,6 +326,16 @@ pub enum FfiDurability {
 /// validated, opaque private-route mint belongs in a protocol module built
 /// on direct Rust, not this FFI surface -- `AuthorOutbox`/`ToInboxes`
 /// remain the only FFI-constructible routing choices for now.
+///
+/// #115: `PinnedHost(HostAuthority)` gets the IDENTICAL treatment, for the
+/// IDENTICAL reason -- this enum deliberately gains NO variant for it, and
+/// no `HostAuthority` constructor is exported anywhere in this crate. An
+/// app can only ever obtain a pinned-host write transitively, through a
+/// protocol module's already-composed intent (`nip29::group_send_intent`
+/// -> the opaque `FfiComposedWriteIntent`) -- never by naming a host
+/// itself. This exhaustive two-variant match IS the enforcement: a new
+/// `WriteRouting` variant landing in `nmp-grammar` without a corresponding
+/// FfiWriteRouting decision is a compile error here, not a silent gap.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteRouting {
     AuthorOutbox,

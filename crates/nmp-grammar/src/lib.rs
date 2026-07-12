@@ -20,6 +20,7 @@ mod descriptor;
 mod indexed_tag_name;
 mod nip19;
 mod selector;
+mod write;
 
 pub use binding::{Binding, Derived, Filter, SetAlgebra, SetOp};
 pub use concrete::{fold_byte, fold_context, ConcreteFilter, ContextualAtom, DescriptorHash};
@@ -28,3 +29,6 @@ pub use descriptor::{AccessContext, CacheMode, Demand, DemandError, SourceAuthor
 pub use indexed_tag_name::IndexedTagName;
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use selector::{IdentityField, Selector};
+pub use write::{
+    Durability, HostAuthority, NarrowOnly, PrivateRoute, WriteIntent, WritePayload, WriteRouting,
+};
