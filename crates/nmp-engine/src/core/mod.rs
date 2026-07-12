@@ -2583,7 +2583,7 @@ impl<S: EventStore> EngineCore<S> {
             let backfill_sub = SubId::for_wire(
                 relay.clone(),
                 &backfill,
-                SourceAuthority::Public,
+                &SourceAuthority::Public,
                 AccessContext::Public,
             );
             self.pending_backfills.insert(backfill_sub.clone());

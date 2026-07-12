@@ -174,7 +174,7 @@ impl Graph {
     /// without re-deriving context from the `Filter` shape a second time.
     pub(crate) fn context_of(&self, filter_id: NodeId) -> (SourceAuthority, AccessContext) {
         let f = self.filter_data(filter_id);
-        (f.source, f.access)
+        (f.source.clone(), f.access)
     }
 
     /// The wide query filter for a FilterNode: base (kinds/since/until/limit)
@@ -309,7 +309,7 @@ impl Graph {
         }
         out.extend(f.cached_atoms.iter().cloned().map(|filter| ContextualAtom {
             filter,
-            source: f.source,
+            source: f.source.clone(),
             access: f.access,
         }));
     }

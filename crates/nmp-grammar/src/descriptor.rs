@@ -9,11 +9,18 @@
 //! [`SourceAuthority`]/[`AccessContext`] are CLOSED vocabularies (VISION
 //! P4-style): extend the enum, never admit a free-form config string.
 
+use std::collections::BTreeSet;
+
 use crate::binding::Filter;
 
 /// Where reads are authorized to come from — the SOURCE axis of a
 /// [`Demand`]. Closed vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// No longer `Copy` (#107): `Pinned`'s relay set makes that impossible.
+/// Every call site that used to rely on an implicit copy now clones
+/// explicitly -- a one-time, mechanical cost of carrying a real relay set
+/// in the type, not a design smell.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SourceAuthority {
     /// Content is fetched from each author's own outbox (NIP-65 write
     /// relays), discovered live — today's only real routing path for an
@@ -26,6 +33,17 @@ pub enum SourceAuthority {
     /// — today's authorless-filter heuristic, now an explicit authority
     /// rather than an emergent side effect of "no authors."
     Public,
+    /// Explicit pinned wire authority (#107): ask ONLY these relays, on the
+    /// wire, full stop — never expand to outbox/directory/app/fallback/
+    /// indexer routing, regardless of whether the selection is author-
+    /// bearing. Validated nonempty at construction (`Demand::new`);
+    /// `BTreeSet<RelayUrl>` already gives canonical sort + dedup for free
+    /// once each `RelayUrl` came through `RelayUrl::parse` (the #107
+    /// Contract's "URL-canonicalized, sorted, and deduplicated" clause).
+    /// Cache-read behavior over this pinned set (Agnostic vs Strict) is a
+    /// SIBLING axis (`Demand::cache`), never nested here — see
+    /// [`CacheMode`]'s doc.
+    Pinned(BTreeSet<nostr::RelayUrl>),
 }
 
 /// The access/AUTH context a [`Demand`] carries — a reserved slot for #8
@@ -73,16 +91,20 @@ pub struct Demand {
     pub cache: CacheMode,
 }
 
-/// The one unconstructible `Demand` combination (#106, Fable's ratified
-/// shape): `SourceAuthority::AuthorOutboxes` declared over a selection
-/// whose `authors` field is not bound AT ALL. There is no author whose
-/// outbox could possibly be chased, so `Demand::new` refuses this at
-/// construction rather than silently producing a Demand whose `classify`/
-/// outbox-solve path resolves zero candidates forever (mirrors #107's
-/// empty-pinned-fails misuse-resistance pattern).
+/// The unconstructible `Demand` combinations (#106/#107, Fable's ratified
+/// shape + the #107 Contract): `Demand::new` refuses these at construction
+/// rather than silently producing a `Demand` whose routing path resolves
+/// nothing forever.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DemandError {
+    /// `SourceAuthority::AuthorOutboxes` declared over a selection whose
+    /// `authors` field is not bound at all -- there is no author whose
+    /// outbox could possibly be chased.
     AuthorOutboxesRequiresBoundAuthors,
+    /// `SourceAuthority::Pinned` declared with an empty relay set (#107
+    /// Contract: "the pinned relay set must be nonempty") -- there is
+    /// nothing for the wire to ask.
+    PinnedRequiresNonemptyRelaySet,
 }
 
 impl std::fmt::Display for DemandError {
@@ -92,6 +114,9 @@ impl std::fmt::Display for DemandError {
                 f,
                 "SourceAuthority::AuthorOutboxes requires a selection whose `authors` field is bound"
             ),
+            DemandError::PinnedRequiresNonemptyRelaySet => {
+                write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
+            }
         }
     }
 }
@@ -136,8 +161,14 @@ impl Demand {
         source: SourceAuthority,
         access: AccessContext,
     ) -> Result<Self, DemandError> {
-        if matches!(source, SourceAuthority::AuthorOutboxes) && selection.authors.is_none() {
-            return Err(DemandError::AuthorOutboxesRequiresBoundAuthors);
+        match &source {
+            SourceAuthority::AuthorOutboxes if selection.authors.is_none() => {
+                return Err(DemandError::AuthorOutboxesRequiresBoundAuthors);
+            }
+            SourceAuthority::Pinned(relays) if relays.is_empty() => {
+                return Err(DemandError::PinnedRequiresNonemptyRelaySet);
+            }
+            _ => {}
         }
         Ok(Self {
             selection,
@@ -153,7 +184,7 @@ impl Demand {
     /// [`CacheMode`]'s doc), which is what makes #107's addition of that
     /// field a one-line, identity-neutral change.
     pub fn atom_context(&self) -> (SourceAuthority, AccessContext) {
-        (self.source, self.access)
+        (self.source.clone(), self.access)
     }
 }
 
@@ -236,6 +267,40 @@ mod tests {
         )
         .expect("Public over an author-bearing selection is legal");
         assert_eq!(demand.source, SourceAuthority::Public);
+    }
+
+    /// #107's Contract falsifier (Fable's empty-pinned-fails pattern):
+    /// `Pinned` with an empty relay set is unconstructible.
+    #[test]
+    fn new_rejects_pinned_with_an_empty_relay_set() {
+        let err = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(BTreeSet::new()),
+            AccessContext::Public,
+        )
+        .unwrap_err();
+        assert_eq!(err, DemandError::PinnedRequiresNonemptyRelaySet);
+    }
+
+    #[test]
+    fn new_allows_pinned_with_a_nonempty_relay_set() {
+        let relay = nostr::RelayUrl::parse("wss://relay.example").unwrap();
+        let demand = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            AccessContext::Public,
+        )
+        .expect("a nonempty pinned relay set is legal");
+        assert_eq!(
+            demand.source,
+            SourceAuthority::Pinned(BTreeSet::from([relay]))
+        );
     }
 
     #[test]

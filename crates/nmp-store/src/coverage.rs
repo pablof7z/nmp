@@ -86,7 +86,7 @@ pub(crate) fn window_erase(filter: &ConcreteFilter) -> ConcreteFilter {
 pub fn coverage_key(atom: &ContextualAtom) -> CoverageKey {
     let windowed = ContextualAtom {
         filter: window_erase(&atom.filter),
-        source: atom.source,
+        source: atom.source.clone(),
         access: atom.access,
     };
     CoverageKey(fold_byte(windowed.hash(), COVERAGE_KEY_VERSION))

@@ -30,6 +30,9 @@ pub struct RouteProvenance {
 pub enum RouteKind {
     OutboxSolved,
     Pinned,
+    /// Query-declared (#107) -- routed directly to the Demand's own relay
+    /// set, no directory lookup, no additive lane applied alongside it.
+    ExplicitPinned,
 }
 
 /// A demand atom with its routable (author) dimension projected OUT.
@@ -84,6 +87,12 @@ pub(crate) enum AtomClass {
     },
     /// No authors: relays come directly from a lane fact (pinned).
     Pinned,
+    /// Explicit, query-declared pinned wire authority (#107,
+    /// `SourceAuthority::Pinned`): route ONLY to this relay set, bypassing
+    /// the outbox solve, the directory pinned-lookup, AND every additive
+    /// lane (indexer/app/fallback) entirely -- regardless of whether the
+    /// selection is author-bearing.
+    ExplicitPinned(BTreeSet<RelayUrl>),
 }
 
 /// Classify a demand atom by its DECLARED [`SourceAuthority`] (#106), never
@@ -98,13 +107,14 @@ pub(crate) enum AtomClass {
 /// its selection constrains `authors` (e.g. NIP-29-tagged content routed via
 /// the group host, not each author's own outbox) — SourceAuthority, not
 /// filter shape, is now authoritative.
-pub(crate) fn classify(atom: &ConcreteFilter, source: SourceAuthority) -> AtomClass {
+pub(crate) fn classify(atom: &ConcreteFilter, source: &SourceAuthority) -> AtomClass {
     match source {
         SourceAuthority::AuthorOutboxes => {
             let (skeleton, authors) = Skeleton::of(atom);
             AtomClass::Outbox { skeleton, authors }
         }
         SourceAuthority::Public => AtomClass::Pinned,
+        SourceAuthority::Pinned(relays) => AtomClass::ExplicitPinned(relays.clone()),
     }
 }
 
@@ -288,6 +298,34 @@ pub(crate) fn provenance_for_pinned(
         .collect()
 }
 
+/// Explicit pinned-route lookup (#107): route DIRECTLY to the Demand's own
+/// declared relay set -- no directory lookup, mirroring
+/// [`provenance_for_pinned`]'s shape but sourcing relays from
+/// `SourceAuthority::Pinned`'s own payload instead of a fixture fact. Callers
+/// MUST NOT layer any additive lane (indexer/app/fallback) on top of this
+/// route set -- that's the #107 Contract's core guarantee, enforced at the
+/// `Router::compile` call site by routing `AtomClass::ExplicitPinned` through
+/// a dedicated step that never touches `indexer_lane_routes`/
+/// `app_lane_routes`/`fallback_lane_routes`.
+pub(crate) fn provenance_for_explicit_pinned(
+    relays: &BTreeSet<RelayUrl>,
+) -> Vec<(RelayUrl, RouteProvenance)> {
+    relays
+        .iter()
+        .map(|relay| {
+            (
+                relay.clone(),
+                RouteProvenance {
+                    relay: relay.clone(),
+                    lane: Lane::ExplicitPinned,
+                    covers_authors: BTreeSet::new(),
+                    route_kind: RouteKind::ExplicitPinned,
+                },
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,12 +365,12 @@ mod tests {
         assert!(matches!(
             classify(
                 &cf_kind1(Some(BTreeSet::from([pk('a')]))),
-                SourceAuthority::AuthorOutboxes
+                &SourceAuthority::AuthorOutboxes
             ),
             AtomClass::Outbox { .. }
         ));
         assert!(matches!(
-            classify(&cf_kind1(None), SourceAuthority::Public),
+            classify(&cf_kind1(None), &SourceAuthority::Public),
             AtomClass::Pinned
         ));
     }
@@ -345,7 +383,7 @@ mod tests {
     fn classify_honors_declared_source_over_filter_shape() {
         let author_bearing = cf_kind1(Some(BTreeSet::from([pk('a')])));
         assert!(matches!(
-            classify(&author_bearing, SourceAuthority::Public),
+            classify(&author_bearing, &SourceAuthority::Public),
             AtomClass::Pinned
         ));
     }

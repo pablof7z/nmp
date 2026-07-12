@@ -38,7 +38,7 @@ type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
 fn push_routes(
     bag: &mut BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>>,
     filter: &ConcreteFilter,
-    source: SourceAuthority,
+    source: &SourceAuthority,
     access: AccessContext,
     routes: Vec<(RelayUrl, RouteProvenance)>,
 ) {
@@ -47,13 +47,13 @@ fn push_routes(
     }
     let key = coverage_key(&ContextualAtom {
         filter: filter.clone(),
-        source,
+        source: source.clone(),
         access,
     });
     for (relay, prov) in routes {
         bag.entry(relay)
             .or_default()
-            .entry((source, access))
+            .entry((source.clone(), access))
             .or_default()
             .push((filter.clone(), vec![prov], BTreeSet::from([key])));
     }
@@ -99,8 +99,14 @@ impl Router {
         let mut outbox_groups: BTreeMap<(Skeleton, AccessContext), BTreeSet<PubkeyHex>> =
             BTreeMap::new();
         let mut pinned_atoms: BTreeSet<ConcreteFilter> = BTreeSet::new();
+        // #107: query-declared `SourceAuthority::Pinned(relays)` atoms — kept
+        // in their OWN collection, never merged into `pinned_atoms` (the
+        // directory-fact `Public`-sourced kind), since these must skip every
+        // additive lane (indexer/app/fallback) below, not just the solve.
+        let mut explicit_pinned_atoms: Vec<(ConcreteFilter, AccessContext, BTreeSet<RelayUrl>)> =
+            Vec::new();
         for atom in demand {
-            match route::classify(&atom.filter, atom.source) {
+            match route::classify(&atom.filter, &atom.source) {
                 AtomClass::Outbox { skeleton, authors } => {
                     outbox_groups
                         .entry((skeleton, atom.access))
@@ -109,6 +115,9 @@ impl Router {
                 }
                 AtomClass::Pinned => {
                     pinned_atoms.insert(atom.filter.clone());
+                }
+                AtomClass::ExplicitPinned(relays) => {
+                    explicit_pinned_atoms.push((atom.filter.clone(), atom.access, relays));
                 }
             }
         }
@@ -143,12 +152,12 @@ impl Router {
                 let filter = skeleton.with_authors(prov.covers_authors.clone());
                 let key = coverage_key(&ContextualAtom {
                     filter: filter.clone(),
-                    source,
+                    source: source.clone(),
                     access,
                 });
                 bag.entry(relay)
                     .or_default()
-                    .entry((source, access))
+                    .entry((source.clone(), access))
                     .or_default()
                     .push((filter, vec![prov], BTreeSet::from([key])));
             }
@@ -160,7 +169,7 @@ impl Router {
             push_routes(
                 &mut bag,
                 &skeleton.with_authors(authors.clone()),
-                source,
+                &source,
                 access,
                 additive,
             );
@@ -175,30 +184,30 @@ impl Router {
             push_routes(
                 &mut bag,
                 &skeleton.with_authors(shortfall_authors),
-                source,
+                &source,
                 access,
                 fallback,
             );
         }
 
         for atom in &pinned_atoms {
-            // #106's closed vocabulary has only one non-outbox source
-            // (`Public`) and one `AccessContext` (`Public`), so a fixed
-            // context here is exact today, not a placeholder — #107's
-            // `SourceAuthority::Pinned(relays)` lands as a NEW `AtomClass`
-            // (a third branch above), not a variant tracked through this
-            // one.
+            // #106's closed vocabulary has only one directory-fact non-outbox
+            // source (`Public`) and one `AccessContext` (`Public`), so a
+            // fixed context here is exact today, not a placeholder — #107's
+            // `SourceAuthority::Pinned(relays)` is query-declared, not a
+            // directory fact, and is routed entirely separately below
+            // (`explicit_pinned_atoms`), never through this loop.
             let source = SourceAuthority::Public;
             let access = AccessContext::Public;
             let key = coverage_key(&ContextualAtom {
                 filter: atom.clone(),
-                source,
+                source: source.clone(),
                 access,
             });
             for (relay, prov) in route::provenance_for_pinned(atom, dir) {
                 bag.entry(relay)
                     .or_default()
-                    .entry((source, access))
+                    .entry((source.clone(), access))
                     .or_default()
                     .push((atom.clone(), vec![prov], BTreeSet::from([key])));
             }
@@ -206,7 +215,28 @@ impl Router {
             // App lane routes every atom, including authorless/pinned ones
             // (closes #7 — the authorless-routing-lane gap).
             let app = route::app_lane_routes(dir, &BTreeSet::new());
-            push_routes(&mut bag, atom, source, access, app);
+            push_routes(&mut bag, atom, &source, access, app);
+        }
+
+        // #107: explicit, query-declared pinned wire authority — route
+        // DIRECTLY to the Demand's own relay set. NO additive lane
+        // (indexer/app/fallback) is ever applied here: that's the #107
+        // Contract's core guarantee ("Pinned author filters never contact
+        // directory, author-outbox, app, fallback, or indexer relays").
+        for (filter, access, relays) in &explicit_pinned_atoms {
+            let source = SourceAuthority::Pinned(relays.clone());
+            let key = coverage_key(&ContextualAtom {
+                filter: filter.clone(),
+                source: source.clone(),
+                access: *access,
+            });
+            for (relay, prov) in route::provenance_for_explicit_pinned(relays) {
+                bag.entry(relay)
+                    .or_default()
+                    .entry((source.clone(), *access))
+                    .or_default()
+                    .push((filter.clone(), vec![prov], BTreeSet::from([key])));
+            }
         }
 
         // Step 4 + 5: per relay, PER CONTEXT PARTITION, dedup + widen-only
@@ -222,7 +252,7 @@ impl Router {
             for ((source, access), entries) in by_context {
                 let merged = self.rules.coalesce_with(entries);
                 relay_reqs.extend(merged.into_iter().map(|(filter, provenance, absorbed)| {
-                    let sub_id = SubId::for_wire(relay.clone(), &filter, source, access);
+                    let sub_id = SubId::for_wire(relay.clone(), &filter, &source, access);
                     WireReq {
                         sub_id,
                         filter,
