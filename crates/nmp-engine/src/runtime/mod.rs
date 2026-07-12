@@ -77,7 +77,8 @@ use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
     ReattachOutcome, ReceiptId, RelayAdmissionPolicy, RowDelta, RowSink,
 };
-use crate::outbox::{ReceiptSink, WriteIntent, WriteStatus};
+use crate::outbox::{ReceiptSink, WriteStatus};
+use nmp_grammar::WriteIntent;
 
 pub use diagnostics_channel::LatestReceiver;
 use diagnostics_channel::{latest_channel, LatestSender};

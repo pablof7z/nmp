@@ -21,9 +21,10 @@ use std::time::{Duration, Instant};
 use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta};
-use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
+use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsMsg};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
 use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory, RelayUrl};
 use nmp_signer::LocalKeySigner;

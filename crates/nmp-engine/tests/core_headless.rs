@@ -14,12 +14,10 @@ use nmp_engine::core::{
     AcquisitionEvidence, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta, RowSink,
     ShortfallFact, SourceEvidence, SourceStatus,
 };
-use nmp_engine::outbox::{
-    Durability, NarrowOnly, PrivateRoute, ReceiptSink, WriteIntent, WritePayload, WriteRouting,
-    WriteStatus,
-};
+use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, SourceAuthority,
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, NarrowOnly,
+    PrivateRoute, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};

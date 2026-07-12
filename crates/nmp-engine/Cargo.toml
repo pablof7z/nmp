@@ -65,3 +65,8 @@ serde_json = "1"
 # integration proof, not something nmp-nip51 itself (deliberately
 # engine-free) can assert on its own.
 nmp-nip51.workspace = true
+# #115: proves nmp-nip29's compose_group_send/group_content_demand route
+# correctly against a REAL engine and a real relay (PinnedHost delivery,
+# read-back loop) -- the identical cross-crate integration-proof rationale
+# as the nmp-nip51 dependency directly above.
+nmp-nip29.workspace = true
