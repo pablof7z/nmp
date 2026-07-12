@@ -24,9 +24,15 @@ about current code:
   rebuilds ownership without reinsertion, resumes the frozen signer, persists
   versioned exact-byte `(intent, relay, ordinal)` Started facts before wire,
   replays Durable in-flight bytes, and converts AtMostOnce ambiguity to
-  `OutcomeUnknown` without resend. Retry eligibility, backoff, caps, terminal
-  lane cleanup and the single deadline fold remain issue #79; there is no
-  polling/busy-spin placeholder.
+  `OutcomeUnknown` without resend. A failure to persist `Started` retains the
+  relay as an explicit nonterminal owned lane, emits `PersistenceBlocked`
+  without emitting an untracked wire EVENT. Exact dynamically-resolved relay
+  sets are first committed as append-only route revisions, so restart owns
+  their union even if the live directory is empty or changed. Failure to
+  persist the route revision is reported separately and makes no false claim
+  that the exact URL survived a crash. Retry eligibility, backoff, caps,
+  terminal lane cleanup and the single deadline fold remain issue #79; there
+  is no polling/busy-spin placeholder.
 - **Signer selection is frozen for accepted writes, but standard platform
   providers are unbuilt.** Missing Rust capabilities survive restart and resume
   only for the exact persisted pubkey. Per-write identity override and secure

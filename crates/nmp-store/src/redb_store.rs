@@ -38,8 +38,8 @@ use crate::{
     AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
     CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, IntentId,
     IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState,
-    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RefuseReason, RelayObserved,
-    RetractReason, SigState, StoredEvent, WriteDurability,
+    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RefuseReason,
+    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
 };
 
 /// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
@@ -120,6 +120,9 @@ const OUTBOX_DISPLACED: TableDefinition<&str, &str> = TableDefinition::new("outb
 /// read it — it is created purely for forward schema compatibility.
 #[allow(dead_code)]
 const OUTBOX_ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
+/// Append-only exact resolved-route snapshots, keyed by `(intent, ordinal)`.
+const OUTBOX_ROUTE_REVISIONS: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_route_revisions");
 /// Store-owned outbox metadata — two rows, `"next_intent_id"` and
 /// `"next_receipt_id"`, each the next id of its kind to allocate (decimal
 /// `u64`, defaulting to 1 if the row has never been written). Both are
@@ -162,6 +165,43 @@ struct OutboxAttemptRecord {
     ordinal: u64,
     event_json: String,
     outcome: AttemptOutcome,
+}
+
+fn route_revision_key(intent_id: IntentId, ordinal: u64) -> String {
+    format!("{:020}:{:020}", intent_id.0, ordinal)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OutboxRouteRevisionRecord {
+    version: u8,
+    intent_id: IntentId,
+    ordinal: u64,
+    relays: BTreeSet<RelayUrl>,
+}
+
+fn decode_route_revision(
+    key: &str,
+    json: &str,
+) -> Result<RecoveredRouteRevision, PersistenceError> {
+    let record: OutboxRouteRevisionRecord = serde_json::from_str(json)
+        .map_err(|err| PersistenceError(format!("decode route revision: {err}")))?;
+    if record.version != 1 {
+        return Err(PersistenceError(format!(
+            "unsupported route revision version {}",
+            record.version
+        )));
+    }
+    if route_revision_key(record.intent_id, record.ordinal) != key {
+        return Err(PersistenceError(
+            "route revision key does not match its value tuple".into(),
+        ));
+    }
+    Ok(RecoveredRouteRevision {
+        version: record.version,
+        intent_id: record.intent_id,
+        ordinal: record.ordinal,
+        relays: record.relays,
+    })
 }
 
 fn decode_attempt(key: &str, json: &str) -> Result<RecoveredAttempt, PersistenceError> {
@@ -1464,6 +1504,7 @@ enum RedbCrashPoint {
     AcceptBeforeCommit,
     PromoteBeforeCommit,
     CompensateBeforeCommit,
+    RouteRevisionBeforeCommit,
     StartAttemptBeforeCommit,
     FinishAttemptBeforeCommit,
 }
@@ -1500,6 +1541,7 @@ impl RedbStore {
             write_txn.open_table(OUTBOX_INTENTS)?;
             write_txn.open_table(OUTBOX_DISPLACED)?;
             write_txn.open_table(OUTBOX_ATTEMPTS)?;
+            write_txn.open_table(OUTBOX_ROUTE_REVISIONS)?;
             write_txn.open_table(OUTBOX_META)?;
             write_txn.open_table(OUTBOX_KIND5_CLAIMS)?;
             write_txn.open_table(OUTBOX_SUPPRESS_BY_ID)?;
@@ -3415,6 +3457,83 @@ impl EventStore for RedbStore {
             expected_pubkey: record.expected_pubkey,
             state: record.state,
         })
+    }
+
+    fn record_route_revision(
+        &mut self,
+        intent_id: IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let revision = {
+            let intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+            let intent_key = intent_key(intent_id);
+            if intents
+                .get(intent_key.as_str())
+                .map_err(persist_err)?
+                .is_none()
+            {
+                return Err(PersistenceError("route revision intent is not open".into()));
+            }
+            let mut revisions = write_txn
+                .open_table(OUTBOX_ROUTE_REVISIONS)
+                .map_err(persist_err)?;
+            let mut last = 0;
+            for entry in revisions.iter().map_err(persist_err)? {
+                let (key, value) = entry.map_err(persist_err)?;
+                let recovered = decode_route_revision(key.value(), value.value())?;
+                if recovered.intent_id == intent_id {
+                    last = last.max(recovered.ordinal);
+                }
+            }
+            let ordinal = last
+                .checked_add(1)
+                .ok_or_else(|| PersistenceError("route revision ordinal exhausted".into()))?;
+            let record = OutboxRouteRevisionRecord {
+                version: 1,
+                intent_id,
+                ordinal,
+                relays: relays.clone(),
+            };
+            let encoded = serde_json::to_string(&record)
+                .map_err(|err| PersistenceError(format!("encode route revision: {err}")))?;
+            revisions
+                .insert(
+                    route_revision_key(intent_id, ordinal).as_str(),
+                    encoded.as_str(),
+                )
+                .map_err(persist_err)?;
+            RecoveredRouteRevision {
+                version: 1,
+                intent_id,
+                ordinal,
+                relays,
+            }
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::RouteRevisionBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok(revision)
+    }
+
+    fn recover_route_revisions(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let revisions = read_txn
+            .open_table(OUTBOX_ROUTE_REVISIONS)
+            .map_err(persist_err)?;
+        let mut recovered = Vec::new();
+        for entry in revisions.iter().map_err(persist_err)? {
+            let (key, value) = entry.map_err(persist_err)?;
+            let revision = decode_route_revision(key.value(), value.value())?;
+            if revision.intent_id == intent_id {
+                recovered.push(revision);
+            }
+        }
+        recovered.sort_by_key(|revision| revision.ordinal);
+        Ok(recovered)
     }
 
     fn start_attempt(

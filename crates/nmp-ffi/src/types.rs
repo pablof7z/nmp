@@ -385,6 +385,8 @@ pub enum FfiWriteStatus {
     Acked { relay: String },
     Rejected { relay: String, reason: String },
     GaveUp { relay: String },
+    PersistenceBlocked { relay: String },
+    RoutePersistenceBlocked { relay: String },
     OutcomeUnknown { relay: String },
     Failed { reason: String },
 }

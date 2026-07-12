@@ -99,6 +99,8 @@ public enum WriteStatus: Sendable, Hashable {
     case acked(relay: String)
     case rejected(relay: String, reason: String)
     case gaveUp(relay: String)
+    case persistenceBlocked(relay: String)
+    case routePersistenceBlocked(relay: String)
     case outcomeUnknown(relay: String)
     case failed(reason: String)
 
@@ -112,6 +114,8 @@ public enum WriteStatus: Sendable, Hashable {
         case .acked(let relay): self = .acked(relay: relay)
         case .rejected(let relay, let reason): self = .rejected(relay: relay, reason: reason)
         case .gaveUp(let relay): self = .gaveUp(relay: relay)
+        case .persistenceBlocked(let relay): self = .persistenceBlocked(relay: relay)
+        case .routePersistenceBlocked(let relay): self = .routePersistenceBlocked(relay: relay)
         case .outcomeUnknown(let relay): self = .outcomeUnknown(relay: relay)
         case .failed(let reason): self = .failed(reason: reason)
         }

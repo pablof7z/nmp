@@ -421,6 +421,12 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::GaveUp(relay) => FfiWriteStatus::GaveUp {
             relay: relay.to_string(),
         },
+        GWriteStatus::PersistenceBlocked(relay) => FfiWriteStatus::PersistenceBlocked {
+            relay: relay.to_string(),
+        },
+        GWriteStatus::RoutePersistenceBlocked(relay) => FfiWriteStatus::RoutePersistenceBlocked {
+            relay: relay.to_string(),
+        },
         GWriteStatus::OutcomeUnknown(relay) => FfiWriteStatus::OutcomeUnknown {
             relay: relay.to_string(),
         },
@@ -503,18 +509,83 @@ pub struct WriteStatusRef<'a>(pub &'a GWriteStatus);
 #[cfg(test)]
 mod write_status_tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
-    fn outcome_unknown_never_collapses_to_gave_up() {
-        let relay = RelayUrl::parse("wss://ambiguous.example").unwrap();
-        let mapped =
-            write_status_to_ffi(WriteStatusRef(&GWriteStatus::OutcomeUnknown(relay.clone())));
-        assert_eq!(
-            mapped,
-            FfiWriteStatus::OutcomeUnknown {
-                relay: relay.to_string()
-            }
-        );
+    fn every_write_status_variant_maps_without_terminal_rollup() {
+        let relay = RelayUrl::parse("wss://status.example").unwrap();
+        let event_id = EventId::from_hex(&"00".repeat(32)).unwrap();
+        let cases = vec![
+            (GWriteStatus::Accepted, FfiWriteStatus::Accepted),
+            (
+                GWriteStatus::AwaitingCapability,
+                FfiWriteStatus::AwaitingCapability,
+            ),
+            (
+                GWriteStatus::Signed(event_id),
+                FfiWriteStatus::Signed {
+                    event_id: event_id.to_hex(),
+                },
+            ),
+            (
+                GWriteStatus::Routed(BTreeSet::from([relay.clone()])),
+                FfiWriteStatus::Routed {
+                    relays: vec![relay.to_string()],
+                },
+            ),
+            (
+                GWriteStatus::Sent(relay.clone()),
+                FfiWriteStatus::Sent {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::Acked(relay.clone()),
+                FfiWriteStatus::Acked {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::Rejected(relay.clone(), "no".into()),
+                FfiWriteStatus::Rejected {
+                    relay: relay.to_string(),
+                    reason: "no".into(),
+                },
+            ),
+            (
+                GWriteStatus::GaveUp(relay.clone()),
+                FfiWriteStatus::GaveUp {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::PersistenceBlocked(relay.clone()),
+                FfiWriteStatus::PersistenceBlocked {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::RoutePersistenceBlocked(relay.clone()),
+                FfiWriteStatus::RoutePersistenceBlocked {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::OutcomeUnknown(relay.clone()),
+                FfiWriteStatus::OutcomeUnknown {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::Failed("failed".into()),
+                FfiWriteStatus::Failed {
+                    reason: "failed".into(),
+                },
+            ),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(write_status_to_ffi(WriteStatusRef(&source)), expected);
+        }
     }
 }
 

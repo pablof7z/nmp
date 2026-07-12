@@ -14,6 +14,19 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
+    func testPersistenceBlockedReceiptMappingRemainsNonterminal() {
+        let blocked = WriteStatus(.persistenceBlocked(relay: "wss://blocked.example"))
+        XCTAssertEqual(blocked, .persistenceBlocked(relay: "wss://blocked.example"))
+        XCTAssertNotEqual(blocked, .gaveUp(relay: "wss://blocked.example"))
+        XCTAssertNotEqual(blocked, .failed(reason: "persistence"))
+    }
+
+    func testRoutePersistenceBlockedDoesNotClaimDurableAttemptOwnership() {
+        let blocked = WriteStatus(.routePersistenceBlocked(relay: "wss://volatile.example"))
+        XCTAssertEqual(blocked, .routePersistenceBlocked(relay: "wss://volatile.example"))
+        XCTAssertNotEqual(blocked, .persistenceBlocked(relay: "wss://volatile.example"))
+    }
+
     func testEveryAcquisitionEvidenceVariantMapsWithoutARollup() {
         let raw = FfiAcquisitionEvidence(
             sources: [

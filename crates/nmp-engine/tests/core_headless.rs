@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::{
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, RowDelta, RowSink, ShortfallFact,
-    SourceEvidence, SourceStatus,
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta, RowSink,
+    ShortfallFact, SourceEvidence, SourceStatus,
 };
 use nmp_engine::outbox::{
     Durability, NarrowOnly, PrivateRoute, ReceiptSink, WriteIntent, WritePayload, WriteRouting,
@@ -25,7 +25,7 @@ use nmp_store::{
     AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
     CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, MemoryStore,
     PersistenceError, PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt,
-    RelayObserved, RetractReason, StoredEvent,
+    RecoveredRouteRevision, RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
@@ -172,6 +172,19 @@ impl EventStore for FailOnceCompensationStore {
     fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
         self.inner.reattach_receipt(receipt_id)
     }
+    fn record_route_revision(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+        self.inner.record_route_revision(intent_id, relays)
+    }
+    fn recover_route_revisions(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+        self.inner.recover_route_revisions(intent_id)
+    }
     fn start_attempt(
         &mut self,
         intent_id: nmp_store::IntentId,
@@ -191,6 +204,267 @@ impl EventStore for FailOnceCompensationStore {
             self.fail_next_attempt_finish = false;
             return Err(PersistenceError("injected attempt finish failure".into()));
         }
+        self.inner
+            .finish_attempt(intent_id, relay, ordinal, outcome)
+    }
+    fn recover_attempts(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+        self.inner.recover_attempts(intent_id)
+    }
+    fn accept_ephemeral(
+        &mut self,
+        frozen_id: nostr::EventId,
+        expected_pubkey: nostr::PublicKey,
+    ) -> Result<u64, PersistenceError> {
+        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
+    }
+}
+
+#[derive(Clone)]
+struct SharedFailStartStore {
+    inner: Arc<Mutex<MemoryStore>>,
+    failed_relays: Arc<Mutex<BTreeSet<RelayUrl>>>,
+}
+
+impl SharedFailStartStore {
+    fn new(failed_relays: impl IntoIterator<Item = RelayUrl>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(MemoryStore::new())),
+            failed_relays: Arc::new(Mutex::new(failed_relays.into_iter().collect())),
+        }
+    }
+}
+
+impl EventStore for SharedFailStartStore {
+    fn insert(&mut self, event: nostr::Event, from: RelayObserved) -> InsertOutcome {
+        self.inner.lock().unwrap().insert(event, from)
+    }
+    fn query(&self, filter: &nostr::Filter) -> Vec<StoredEvent> {
+        self.inner.lock().unwrap().query(filter)
+    }
+    fn remove(&mut self, id: nostr::EventId, reason: RetractReason) -> Option<StoredEvent> {
+        self.inner.lock().unwrap().remove(id, reason)
+    }
+    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
+        self.inner.lock().unwrap().expire_due(now)
+    }
+    fn next_expiration(&self) -> Option<Timestamp> {
+        self.inner.lock().unwrap().next_expiration()
+    }
+    fn record_coverage(
+        &mut self,
+        filter: &ConcreteFilter,
+        relay: &RelayUrl,
+        proven: CoverageInterval,
+    ) {
+        self.inner
+            .lock()
+            .unwrap()
+            .record_coverage(filter, relay, proven);
+    }
+    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+        self.inner.lock().unwrap().get_coverage(key, relay)
+    }
+    fn gc(&mut self, claims: &ClaimSet) -> GcReport {
+        self.inner.lock().unwrap().gc(claims)
+    }
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
+        self.inner.lock().unwrap().accept_write(accept)
+    }
+    fn promote_signed(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        sig: nostr::secp256k1::schnorr::Signature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        self.inner.lock().unwrap().promote_signed(intent_id, sig)
+    }
+    fn compensate_write(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.lock().unwrap().compensate_write(intent_id)
+    }
+    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+        self.inner.lock().unwrap().recover_outbox()
+    }
+    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+        self.inner.lock().unwrap().reattach_receipt(receipt_id)
+    }
+    fn record_route_revision(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .record_route_revision(intent_id, relays)
+    }
+    fn recover_route_revisions(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .recover_route_revisions(intent_id)
+    }
+    fn start_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: RelayUrl,
+        event: nostr::Event,
+    ) -> Result<RecoveredAttempt, PersistenceError> {
+        if self.failed_relays.lock().unwrap().contains(&relay) {
+            return Err(PersistenceError("injected attempt start failure".into()));
+        }
+        self.inner
+            .lock()
+            .unwrap()
+            .start_attempt(intent_id, relay, event)
+    }
+    fn finish_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: &RelayUrl,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    ) -> Result<FinishAttemptOutcome, PersistenceError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .finish_attempt(intent_id, relay, ordinal, outcome)
+    }
+    fn recover_attempts(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+        self.inner.lock().unwrap().recover_attempts(intent_id)
+    }
+    fn accept_ephemeral(
+        &mut self,
+        frozen_id: nostr::EventId,
+        expected_pubkey: nostr::PublicKey,
+    ) -> Result<u64, PersistenceError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .accept_ephemeral(frozen_id, expected_pubkey)
+    }
+}
+
+struct RedbFailStartStore {
+    inner: RedbStore,
+    failed_relays: BTreeSet<RelayUrl>,
+    fail_route_revisions: bool,
+}
+
+impl RedbFailStartStore {
+    fn open(path: &std::path::Path, failed_relays: impl IntoIterator<Item = RelayUrl>) -> Self {
+        Self {
+            inner: RedbStore::open(path).expect("open redb failure fixture"),
+            failed_relays: failed_relays.into_iter().collect(),
+            fail_route_revisions: false,
+        }
+    }
+
+    fn open_with_route_failure(path: &std::path::Path) -> Self {
+        Self {
+            inner: RedbStore::open(path).expect("open redb route-failure fixture"),
+            failed_relays: BTreeSet::new(),
+            fail_route_revisions: true,
+        }
+    }
+}
+
+impl EventStore for RedbFailStartStore {
+    fn insert(&mut self, event: nostr::Event, from: RelayObserved) -> InsertOutcome {
+        self.inner.insert(event, from)
+    }
+    fn query(&self, filter: &nostr::Filter) -> Vec<StoredEvent> {
+        self.inner.query(filter)
+    }
+    fn remove(&mut self, id: nostr::EventId, reason: RetractReason) -> Option<StoredEvent> {
+        self.inner.remove(id, reason)
+    }
+    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
+        self.inner.expire_due(now)
+    }
+    fn next_expiration(&self) -> Option<Timestamp> {
+        self.inner.next_expiration()
+    }
+    fn record_coverage(
+        &mut self,
+        filter: &ConcreteFilter,
+        relay: &RelayUrl,
+        proven: CoverageInterval,
+    ) {
+        self.inner.record_coverage(filter, relay, proven);
+    }
+    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+        self.inner.get_coverage(key, relay)
+    }
+    fn gc(&mut self, claims: &ClaimSet) -> GcReport {
+        self.inner.gc(claims)
+    }
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
+        self.inner.accept_write(accept)
+    }
+    fn promote_signed(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        sig: nostr::secp256k1::schnorr::Signature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        self.inner.promote_signed(intent_id, sig)
+    }
+    fn compensate_write(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write(intent_id)
+    }
+    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+        self.inner.recover_outbox()
+    }
+    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+        self.inner.reattach_receipt(receipt_id)
+    }
+    fn record_route_revision(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+        if self.fail_route_revisions {
+            return Err(PersistenceError("injected route revision failure".into()));
+        }
+        self.inner.record_route_revision(intent_id, relays)
+    }
+    fn recover_route_revisions(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+        self.inner.recover_route_revisions(intent_id)
+    }
+    fn start_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: RelayUrl,
+        event: nostr::Event,
+    ) -> Result<RecoveredAttempt, PersistenceError> {
+        if self.failed_relays.contains(&relay) {
+            return Err(PersistenceError("injected attempt start failure".into()));
+        }
+        self.inner.start_attempt(intent_id, relay, event)
+    }
+    fn finish_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: &RelayUrl,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    ) -> Result<FinishAttemptOutcome, PersistenceError> {
         self.inner
             .finish_attempt(intent_id, relay, ordinal, outcome)
     }
@@ -240,6 +514,33 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec
         },
         url.clone(),
     ))
+}
+
+fn publish_private<S: EventStore>(
+    core: &mut EngineCore<S>,
+    author: &Keys,
+    relays: impl IntoIterator<Item = RelayUrl>,
+    sink: CapturingReceiptSink,
+) -> (ReceiptId, nostr::Event, Vec<Effect>) {
+    activate(core, author);
+    let accepted = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(author, 85, "attempt-start failure")),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new(relays),
+            }),
+        },
+        Box::new(sink),
+    ));
+    let (id, generation, unsigned) = find_sign_request(&accepted);
+    let signed = unsigned.sign_with_keys(author).expect("sign fixture event");
+    let effects = core.handle(EngineMsg::SignerCompleted(
+        id,
+        generation,
+        Ok(signed.clone()),
+    ));
+    (id, signed, effects)
 }
 
 fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
@@ -1996,6 +2297,393 @@ fn private_route_fails_closed() {
 /// one OKs and one NACKs -- the receipt stream reaches `Acked(R_ok)` and
 /// `Rejected(R_bad, reason)` independently; "is it sent?" is only readable
 /// from the stream, never a single bool.
+#[test]
+fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
+    let author = Keys::generate();
+    let good = RelayUrl::parse("wss://persisted.example").unwrap();
+    let blocked = RelayUrl::parse("wss://blocked.example").unwrap();
+    let store = SharedFailStartStore::new([blocked.clone()]);
+    let sink = CapturingReceiptSink::default();
+    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+
+    let (id, _, effects) = publish_private(
+        &mut core,
+        &author,
+        [good.clone(), blocked.clone()],
+        sink.clone(),
+    );
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &good)));
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _) if relay == &blocked)));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(receipt, WriteStatus::PersistenceBlocked(relay))
+            if *receipt == id && relay == &blocked
+    )));
+    let replay = CapturingReceiptSink::default();
+    assert!(core.reattach_receipt(id, Box::new(replay.clone())));
+    assert!(replay
+        .0
+        .lock()
+        .unwrap()
+        .contains(&WriteStatus::PersistenceBlocked(blocked)));
+}
+
+#[test]
+fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel() {
+    let author = Keys::generate();
+    let a = RelayUrl::parse("wss://blocked-a.example").unwrap();
+    let b = RelayUrl::parse("wss://blocked-b.example").unwrap();
+    let store = SharedFailStartStore::new([a.clone(), b.clone()]);
+    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let sink = CapturingReceiptSink::default();
+
+    let (id, _, effects) =
+        publish_private(&mut core, &author, [a.clone(), b.clone()], sink.clone());
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::PublishEvent(..)))
+            .count(),
+        0
+    );
+    let statuses = sink.0.lock().unwrap();
+    assert!(statuses.contains(&WriteStatus::PersistenceBlocked(a.clone())));
+    assert!(statuses.contains(&WriteStatus::PersistenceBlocked(b.clone())));
+    drop(statuses);
+    let replay = CapturingReceiptSink::default();
+    assert!(core.reattach_receipt(id, Box::new(replay.clone())));
+    let replayed = replay.0.lock().unwrap();
+    assert!(replayed.contains(&WriteStatus::PersistenceBlocked(a)));
+    assert!(replayed.contains(&WriteStatus::PersistenceBlocked(b)));
+}
+
+#[test]
+fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
+    let author = Keys::generate();
+    let good = RelayUrl::parse("wss://ack-persisted.example").unwrap();
+    let blocked = RelayUrl::parse("wss://still-blocked.example").unwrap();
+    let store = SharedFailStartStore::new([blocked.clone()]);
+    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        good.clone(),
+    ));
+    let (id, signed, _) = publish_private(
+        &mut core,
+        &author,
+        [good.clone(), blocked.clone()],
+        CapturingReceiptSink::default(),
+    );
+    let acked = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        RelayFrame::Text(RelayMessage::ok(signed.id, true, "").as_json()),
+    ));
+    assert!(acked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(receipt, WriteStatus::Acked(relay))
+            if *receipt == id && relay == &good
+    )));
+    let replay = CapturingReceiptSink::default();
+    assert!(core.reattach_receipt(id, Box::new(replay.clone())));
+    assert!(replay
+        .0
+        .lock()
+        .unwrap()
+        .contains(&WriteStatus::PersistenceBlocked(blocked)));
+}
+
+#[test]
+fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://recover-blocked.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("start-failure.redb");
+    let receipt = {
+        let mut first = EngineCore::new(
+            RedbFailStartStore::open(&path, [relay.clone()]),
+            Box::new(FixtureDirectory::new()),
+            10,
+        );
+        let (id, _, effects) = publish_private(
+            &mut first,
+            &author,
+            [relay.clone()],
+            CapturingReceiptSink::default(),
+        );
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        id
+    };
+
+    let mut still_blocked = EngineCore::new(
+        RedbFailStartStore::open(&path, [relay.clone()]),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    assert!(still_blocked.recover_on_boot().is_empty());
+    let replay = CapturingReceiptSink::default();
+    assert!(still_blocked.reattach_receipt(receipt, Box::new(replay.clone())));
+    assert!(replay
+        .0
+        .lock()
+        .unwrap()
+        .contains(&WriteStatus::PersistenceBlocked(relay.clone())));
+    drop(still_blocked);
+
+    let mut recovered = EngineCore::new(
+        RedbFailStartStore::open(&path, []),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    let effects = recovered.recover_on_boot();
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &relay))
+            .count(),
+        1
+    );
+    drop(recovered);
+    let store = RedbStore::open(&path).expect("inspect recovered redb");
+    let intent = store.recover_outbox()[0].intent_id;
+    let attempts = store.recover_attempts(intent).unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].relay, relay);
+    assert_eq!(attempts[0].outcome, AttemptOutcome::Started);
+}
+
+#[test]
+fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://durable-author-route.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("author-route.redb");
+    let receipt = {
+        let directory =
+            FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+        let mut core = EngineCore::new(
+            RedbFailStartStore::open(&path, [relay.clone()]),
+            Box::new(directory),
+            10,
+        );
+        activate(&mut core, &author);
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(&author, 86, "dynamic author route")),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(CapturingReceiptSink::default()),
+        ));
+        let (id, generation, unsigned) = find_sign_request(&accepted);
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::PersistenceBlocked(r)) if r == &relay
+        )));
+        id
+    };
+
+    {
+        let store = RedbStore::open(&path).unwrap();
+        let intent = store.recover_outbox()[0].intent_id;
+        let revisions = store.recover_route_revisions(intent).unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].relays, BTreeSet::from([relay.clone()]));
+        assert!(store.recover_attempts(intent).unwrap().is_empty());
+    }
+
+    let mut recovered = EngineCore::new(
+        RedbFailStartStore::open(&path, []),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    let effects = recovered.recover_on_boot();
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &relay))
+            .count(),
+        1
+    );
+    assert!(recovered.reattach_receipt(receipt, Box::new(CapturingReceiptSink::default())));
+}
+
+#[test]
+fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_volatile() {
+    let author = Keys::generate();
+    let recipient = Keys::generate();
+    let old = RelayUrl::parse("wss://old-inbox.example").unwrap();
+    let new = RelayUrl::parse("wss://new-inbox.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("inbox-route.redb");
+    let receipt = {
+        let directory =
+            FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [old.clone()]);
+        let mut core = EngineCore::new(
+            RedbFailStartStore::open(&path, [old.clone()]),
+            Box::new(directory),
+            10,
+        );
+        activate(&mut core, &author);
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic inbox route")),
+                durability: Durability::Durable,
+                routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
+            },
+            Box::new(CapturingReceiptSink::default()),
+        ));
+        let (id, generation, unsigned) = find_sign_request(&accepted);
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        id
+    };
+
+    // Directory removal/replacement cannot subtract `old`. Failure to append
+    // the newly resolved `new` revision blocks only that volatile lane; the
+    // already-durable old obligation may still start and publish.
+    {
+        let changed =
+            FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [new.clone()]);
+        let mut core = EngineCore::new(
+            RedbFailStartStore::open_with_route_failure(&path),
+            Box::new(changed),
+            10,
+        );
+        let effects = core.recover_on_boot();
+        let old_event = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PublishEvent(relay, event) if relay == &old => Some(event.clone()),
+                _ => None,
+            })
+            .expect("durable old lane publishes");
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &old)));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &new)));
+        core.handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            old.clone(),
+        ));
+        let acked = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            RelayFrame::Text(RelayMessage::ok(old_event.id, true, "").as_json()),
+        ));
+        assert!(acked.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::Acked(r)) if r == &old
+        )));
+        let replay = CapturingReceiptSink::default();
+        assert!(core.reattach_receipt(receipt, Box::new(replay.clone())));
+        assert!(replay
+            .0
+            .lock()
+            .unwrap()
+            .contains(&WriteStatus::RoutePersistenceBlocked(new.clone())));
+    }
+
+    {
+        let store = RedbStore::open(&path).unwrap();
+        let intent = store.recover_outbox()[0].intent_id;
+        let durable = store
+            .recover_route_revisions(intent)
+            .unwrap()
+            .into_iter()
+            .flat_map(|revision| revision.relays)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(durable, BTreeSet::from([old.clone()]));
+    }
+
+    // Once a later boot can persist the changed revision, `new` starts. The
+    // old lane is retained in route history but is already terminal (Acked),
+    // so it is correctly not published again.
+    let changed = FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [new.clone()]);
+    let mut core = EngineCore::new(RedbFailStartStore::open(&path, []), Box::new(changed), 10);
+    let effects = core.recover_on_boot();
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &old)));
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(r, _) if r == &new)));
+}
+
+#[test]
+fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_url() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://volatile-route.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("route-failure.redb");
+    {
+        let directory =
+            FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+        let mut core = EngineCore::new(
+            RedbFailStartStore::open_with_route_failure(&path),
+            Box::new(directory),
+            10,
+        );
+        activate(&mut core, &author);
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(&author, 88, "volatile route")),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(CapturingReceiptSink::default()),
+        ));
+        let (id, generation, unsigned) = find_sign_request(&accepted);
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::RoutePersistenceBlocked(r)) if r == &relay
+        )));
+    }
+    let store = RedbStore::open(&path).unwrap();
+    let intent = store.recover_outbox()[0].intent_id;
+    assert!(store.recover_route_revisions(intent).unwrap().is_empty());
+    assert!(store.recover_attempts(intent).unwrap().is_empty());
+    drop(store);
+
+    let mut recovered = EngineCore::new(
+        RedbFailStartStore::open(&path, []),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    assert!(recovered.recover_on_boot().is_empty());
+}
+
 #[test]
 fn write_ack_per_relay() {
     let a = Keys::generate();

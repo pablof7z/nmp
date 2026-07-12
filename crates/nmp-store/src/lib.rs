@@ -36,9 +36,11 @@
 //! tombstone — the row was never validly signed) plus a compensating
 //! re-`insert` of whatever it displaced, through the same one door.
 //! [`EventStore::recover_outbox`] replays every still-open intent after a
-//! restart. Every policy decision (retry ownership, deadline scheduling,
-//! signer orchestration) stays in `nmp-engine`; the store exposes only these
-//! typed doors — never raw table/transaction access.
+//! restart. Exact resolved relay sets use a separate append-only route-
+//! revision door which commits before any corresponding attempt. Every policy
+//! decision (retry ownership, deadline scheduling, signer orchestration) stays
+//! in `nmp-engine`; the store exposes only typed doors — never raw table/
+//! transaction access.
 //!
 //! Two architecture-review corrections load-bear on the above: (1)
 //! [`IntentId`] is allocated by the STORE from a durable high-water mark
@@ -738,6 +740,18 @@ pub struct RecoveredAttempt {
     pub outcome: AttemptOutcome,
 }
 
+/// One append-only snapshot of the exact relay set resolved for an intent.
+/// It is committed before any corresponding attempt may start, so a failed
+/// `start_attempt` cannot erase the lane across restart when dynamic directory
+/// state is empty or has changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredRouteRevision {
+    pub version: u8,
+    pub intent_id: IntentId,
+    pub ordinal: u64,
+    pub relays: BTreeSet<RelayUrl>,
+}
+
 /// Persisted attempt state. `Started` is committed before the engine emits
 /// `PublishEvent`; every other value is an append-only terminal fact for that
 /// ordinal. Retry eligibility/deadlines deliberately do not live here yet
@@ -945,6 +959,21 @@ pub trait EventStore {
     /// that carve-out is specifically about surviving a REAL crash, which
     /// this door never claims to do for a volatile backend).
     fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt>;
+
+    /// Append the next canonical resolved-route revision for an open intent.
+    /// This must commit before any `start_attempt` or wire publication for a
+    /// relay in the revision.
+    fn record_route_revision(
+        &mut self,
+        intent_id: IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<RecoveredRouteRevision, PersistenceError>;
+
+    /// Recover every resolved-route revision in ascending ordinal order.
+    fn recover_route_revisions(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError>;
 
     /// Atomically append the next attempt ordinal for `(intent, relay)` and
     /// its exact signed bytes. This door must return successfully before a

@@ -22,6 +22,21 @@ class EvidenceMappingTest {
     }
 
     @Test
+    fun persistenceBlockedReceiptMappingRemainsNonterminal() {
+        val blocked = WriteStatus.from(FfiWriteStatus.PersistenceBlocked("wss://blocked.example"))
+        assertEquals(WriteStatus.PersistenceBlocked("wss://blocked.example"), blocked)
+        assertTrue(blocked != WriteStatus.GaveUp("wss://blocked.example"))
+        assertTrue(blocked != WriteStatus.Failed("persistence"))
+    }
+
+    @Test
+    fun routePersistenceBlockedDoesNotClaimDurableAttemptOwnership() {
+        val blocked = WriteStatus.from(FfiWriteStatus.RoutePersistenceBlocked("wss://volatile.example"))
+        assertEquals(WriteStatus.RoutePersistenceBlocked("wss://volatile.example"), blocked)
+        assertTrue(blocked != WriteStatus.PersistenceBlocked("wss://volatile.example"))
+    }
+
+    @Test
     fun everyAcquisitionEvidenceVariantMapsWithoutARollup() {
         val raw =
             FfiAcquisitionEvidence(
