@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash};
+use nmp_grammar::{fold_context, AccessContext, ConcreteFilter, DescriptorHash, SourceAuthority};
 use nmp_store::CoverageKey;
 
 use crate::facts::RelayUrl;
@@ -19,14 +19,27 @@ pub struct SubId(pub RelayUrl, pub SkeletonHash);
 
 impl SubId {
     /// Derive the sub-id for `filter` on `relay` from the filter's OWN
-    /// skeleton (authors erased). An `AuthorUnion` merge never changes a
-    /// filter's skeleton (it only touches `authors`), so this is
-    /// automatically stable across author churn without any external
-    /// bookkeeping; a `KindUnion` merge produces a new, but still
-    /// deterministically reproducible, skeleton.
-    pub fn for_filter(relay: RelayUrl, filter: &ConcreteFilter) -> Self {
+    /// skeleton (authors erased) folded with its [`SourceAuthority`]/
+    /// [`AccessContext`] (#106, atlas's 3rd proof floor). An `AuthorUnion`
+    /// merge never changes a filter's skeleton (it only touches `authors`),
+    /// so this is automatically stable across author churn without any
+    /// external bookkeeping; a `KindUnion` merge produces a new, but still
+    /// deterministically reproducible, skeleton. Folding in context is what
+    /// keeps two DIFFERENT-context atoms sharing a relay+skeleton from
+    /// colliding onto the SAME sub-id: under equal-context-only coalescing
+    /// (Fable D) they never coalesce into one wire filter, so they must not
+    /// collapse onto one `SubId` either — doing so would re-alias their
+    /// inflight attribution FIFO (`nmp-engine::core::attribution
+    /// ::AttributionState`) exactly the way the per-context `CoverageKey`
+    /// widening was built to prevent.
+    pub fn for_wire(
+        relay: RelayUrl,
+        filter: &ConcreteFilter,
+        source: SourceAuthority,
+        access: AccessContext,
+    ) -> Self {
         let (skeleton, _) = Skeleton::of(filter);
-        SubId(relay, skeleton.hash())
+        SubId(relay, fold_context(skeleton.hash(), source, access))
     }
 }
 
@@ -142,7 +155,12 @@ mod tests {
     }
 
     fn plan_of(relay: RelayUrl, filter: ConcreteFilter) -> RelayPlan {
-        let sub_id = SubId::for_filter(relay.clone(), &filter);
+        let sub_id = SubId::for_wire(
+            relay.clone(),
+            &filter,
+            SourceAuthority::AuthorOutboxes,
+            AccessContext::Public,
+        );
         let req = WireReq {
             sub_id,
             filter,
@@ -198,7 +216,12 @@ mod tests {
         next.reqs.insert(
             relay(1),
             vec![WireReq {
-                sub_id: SubId::for_filter(relay(1), &cf(1, &["bb", "cc"])),
+                sub_id: SubId::for_wire(
+                    relay(1),
+                    &cf(1, &["bb", "cc"]),
+                    SourceAuthority::AuthorOutboxes,
+                    AccessContext::Public,
+                ),
                 filter: cf(1, &["bb", "cc"]),
                 provenance: Vec::new(),
                 absorbed: BTreeSet::new(),
@@ -208,5 +231,41 @@ mod tests {
         let delta = diff_plans(&prev, &next);
         assert_eq!(delta.ops.len(), 1);
         assert_eq!(delta.ops[0].0, relay(1));
+    }
+
+    /// #106/atlas's 3rd proof floor: the identical relay+filter under
+    /// DIFFERENT `SourceAuthority` must mint DIFFERENT `SubId`s. Before this
+    /// fix, `SubId::for_filter` keyed purely on (relay, skeleton), so two
+    /// distinct-context atoms sharing a filter would collapse onto ONE
+    /// inflight attribution FIFO (`nmp-engine::core::attribution`),
+    /// crediting one context's EOSE to the other's `AcquisitionEvidence` --
+    /// the wire-layer twin of the store-side `CoverageKey` anti-alias.
+    #[test]
+    fn for_wire_distinguishes_identical_filters_under_different_source_authority() {
+        let filter = cf(1, &["aa"]);
+        let outbox_sub = SubId::for_wire(
+            relay(0),
+            &filter,
+            SourceAuthority::AuthorOutboxes,
+            AccessContext::Public,
+        );
+        let public_sub = SubId::for_wire(relay(0), &filter, SourceAuthority::Public, AccessContext::Public);
+        assert_ne!(
+            outbox_sub, public_sub,
+            "identical relay+filter under different SourceAuthority must never share a SubId"
+        );
+    }
+
+    /// Author churn under a FIXED context still reuses the same `SubId`
+    /// (the property `for_wire`'s doc promises is unchanged by folding in
+    /// context) -- context-folding widens WHAT distinguishes two subs, it
+    /// never narrows the existing skeleton-stability guarantee.
+    #[test]
+    fn for_wire_author_churn_same_context_reuses_sub_id() {
+        let a = cf(1, &["aa", "bb"]);
+        let b = cf(1, &["aa", "cc"]);
+        let sub_a = SubId::for_wire(relay(0), &a, SourceAuthority::AuthorOutboxes, AccessContext::Public);
+        let sub_b = SubId::for_wire(relay(0), &b, SourceAuthority::AuthorOutboxes, AccessContext::Public);
+        assert_eq!(sub_a, sub_b);
     }
 }

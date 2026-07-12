@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::descriptor::{AccessContext, SourceAuthority};
 use crate::indexed_tag_name::IndexedTagName;
 
 /// A fully-resolved filter — NO bindings. The unit of the demand set and
@@ -186,30 +187,43 @@ impl ConcreteFilter {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextualAtom {
     pub filter: ConcreteFilter,
-    pub source: crate::descriptor::SourceAuthority,
-    pub access: crate::descriptor::AccessContext,
+    pub source: SourceAuthority,
+    pub access: AccessContext,
 }
 
 impl ContextualAtom {
     /// Canonical, stable, collision-resistant hash — built from the
     /// filter's OWN already-collision-resistant 32-byte digest plus one
-    /// discriminant byte per context axis. Framing-unambiguous by
-    /// construction (fixed-width fields, no delimiter needed): unlike
-    /// concatenating variable-length strings, there is no byte sequence
-    /// that could be reinterpreted as a different (filter-hash, source,
-    /// access) triple.
+    /// discriminant byte per context axis, via [`fold_context`].
     pub fn hash(&self) -> DescriptorHash {
-        let mut bytes = Vec::with_capacity(34);
-        bytes.extend_from_slice(self.filter.hash().as_bytes());
-        bytes.push(match self.source {
-            crate::descriptor::SourceAuthority::AuthorOutboxes => 0,
-            crate::descriptor::SourceAuthority::Public => 1,
-        });
-        bytes.push(match self.access {
-            crate::descriptor::AccessContext::Public => 0,
-        });
-        DescriptorHash(*blake3::hash(&bytes).as_bytes())
+        fold_context(self.filter.hash(), self.source, self.access)
     }
+}
+
+/// Fold `source`/`access` context onto an existing hash, producing a NEW,
+/// still framing-unambiguous digest (fixed-width tag bytes, no delimiter
+/// needed). [`ContextualAtom::hash`] is the primary caller; exposed
+/// publicly so a caller with its OWN base hash that isn't a bare
+/// `ConcreteFilter::hash()` -- e.g. `nmp-router`'s `Skeleton` hash
+/// (authors already erased, for sub-id stability across author churn) or
+/// `nmp-store`'s window-erased `CoverageKey` hash -- can derive a
+/// context-aware hash without duplicating the tagging scheme or
+/// reconstructing a `ContextualAtom` it doesn't otherwise need.
+pub fn fold_context(
+    base: DescriptorHash,
+    source: SourceAuthority,
+    access: AccessContext,
+) -> DescriptorHash {
+    let mut bytes = Vec::with_capacity(34);
+    bytes.extend_from_slice(base.as_bytes());
+    bytes.push(match source {
+        SourceAuthority::AuthorOutboxes => 0,
+        SourceAuthority::Public => 1,
+    });
+    bytes.push(match access {
+        AccessContext::Public => 0,
+    });
+    DescriptorHash(*blake3::hash(&bytes).as_bytes())
 }
 
 #[cfg(test)]

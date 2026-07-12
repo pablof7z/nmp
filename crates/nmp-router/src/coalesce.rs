@@ -9,10 +9,27 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash};
+use nmp_grammar::{fold_context, AccessContext, ConcreteFilter, SourceAuthority};
 use nmp_store::CoverageKey;
 
 use crate::route::RouteProvenance;
+
+/// One entry in a relay's not-yet-coalesced bag (#106-widened): a
+/// materialized atom's filter, its ORIGIN context, a single-lane
+/// provenance, and absorbed coverage keys. `source`/`access` are the
+/// equal-context-only coalescing gate (Fable D): two entries never merge
+/// -- not even at the exact-canonical dedup floor -- unless their FULL
+/// context matches, closing the exact alias atlas flagged (two different-
+/// authority atoms sharing a filter must never collapse into one wire REQ
+/// / one attribution FIFO).
+#[derive(Clone)]
+pub(crate) struct CoalesceEntry {
+    pub(crate) filter: ConcreteFilter,
+    pub(crate) source: SourceAuthority,
+    pub(crate) access: AccessContext,
+    pub(crate) provenance: Vec<RouteProvenance>,
+    pub(crate) absorbed: BTreeSet<CoverageKey>,
+}
 
 /// A widen-only, INTROSPECTABLE merge rule.
 pub trait MergeRule {
@@ -182,15 +199,25 @@ impl RuleRegistry {
     }
 
     /// Exact-canonical dedup, then fixed-point pairwise merge across every
-    /// registered rule.
+    /// registered rule. Context-free convenience for this module's own
+    /// property tests: every entry gets a uniform fixed context
+    /// (`AuthorOutboxes`/`Public`), so equal-context-only gating never
+    /// fires here and every existing filter-only test keeps its exact
+    /// prior behavior.
     pub fn coalesce(&self, filters: BTreeSet<ConcreteFilter>) -> Vec<ConcreteFilter> {
         let entries = filters
             .into_iter()
-            .map(|f| (f, Vec::new(), BTreeSet::new()))
+            .map(|filter| CoalesceEntry {
+                filter,
+                source: SourceAuthority::AuthorOutboxes,
+                access: AccessContext::Public,
+                provenance: Vec::new(),
+                absorbed: BTreeSet::new(),
+            })
             .collect();
         self.coalesce_with(entries)
             .into_iter()
-            .map(|(f, _, _)| f)
+            .map(|entry| entry.filter)
             .collect()
     }
 
@@ -208,43 +235,62 @@ impl RuleRegistry {
     /// atoms' `absorbed` sets is still soundly contained in the merged
     /// filter's matches — the SAME real mechanism that already threads
     /// `provenance` through a merge.
-    pub(crate) fn coalesce_with(
-        &self,
-        entries: Vec<(ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>)>,
-    ) -> Vec<(ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>)> {
-        // 1. Exact-canonical dedup by hash (the trivially-correct floor).
-        type Entry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
-        let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
-        for (f, prov, absorbed) in entries {
-            let h = f.hash();
+    pub(crate) fn coalesce_with(&self, entries: Vec<CoalesceEntry>) -> Vec<CoalesceEntry> {
+        // 1. Exact-canonical dedup, keyed on (filter, source, access) via
+        // `fold_context` -- context-aware from the FIRST step, so two
+        // entries sharing an identical `ConcreteFilter` but different
+        // `SourceAuthority`/`AccessContext` never collapse together even at
+        // this trivially-correct floor (#106 anti-alias; Fable D).
+        let mut by_hash: BTreeMap<_, CoalesceEntry> = BTreeMap::new();
+        for entry in entries {
+            let h = fold_context(entry.filter.hash(), entry.source, entry.access);
             by_hash
                 .entry(h)
-                .and_modify(|(_, p, a)| {
-                    p.extend(prov.clone());
-                    a.extend(absorbed.clone());
+                .and_modify(|existing| {
+                    existing.provenance.extend(entry.provenance.clone());
+                    existing.absorbed.extend(entry.absorbed.clone());
                 })
-                .or_insert((f, prov, absorbed));
+                .or_insert(entry);
         }
-        let mut current: Vec<Entry> = by_hash.into_values().collect();
+        let mut current: Vec<CoalesceEntry> = by_hash.into_values().collect();
 
-        // 2. Fixed-point pairwise merge across every registered rule.
+        // 2. Fixed-point pairwise merge across every registered rule --
+        // EQUAL-CONTEXT-ONLY (Fable D): two entries are never even offered
+        // to a `MergeRule` unless their full context already matches, so
+        // every rule's own widen-only proof (which reasons about
+        // `ConcreteFilter` pairs alone) stays sound without needing to know
+        // about context itself.
         loop {
             let mut merged_once = false;
             'search: for i in 0..current.len() {
                 for j in (i + 1)..current.len() {
+                    if current[i].source != current[j].source
+                        || current[i].access != current[j].access
+                    {
+                        continue;
+                    }
                     for rule in &self.rules {
-                        if let Some(merged) = rule.try_merge(&current[i].0, &current[j].0) {
-                            let mut prov = current[i].1.clone();
-                            prov.extend(current[j].1.clone());
-                            let mut absorbed = current[i].2.clone();
-                            absorbed.extend(current[j].2.clone());
+                        if let Some(merged) = rule.try_merge(&current[i].filter, &current[j].filter)
+                        {
+                            let mut provenance = current[i].provenance.clone();
+                            provenance.extend(current[j].provenance.clone());
+                            let mut absorbed = current[i].absorbed.clone();
+                            absorbed.extend(current[j].absorbed.clone());
+                            let source = current[i].source;
+                            let access = current[i].access;
                             let mut next = Vec::with_capacity(current.len() - 1);
                             for (k, entry) in current.into_iter().enumerate() {
                                 if k != i && k != j {
                                     next.push(entry);
                                 }
                             }
-                            next.push((merged, prov, absorbed));
+                            next.push(CoalesceEntry {
+                                filter: merged,
+                                source,
+                                access,
+                                provenance,
+                                absorbed,
+                            });
                             current = next;
                             merged_once = true;
                             break 'search;
@@ -411,5 +457,64 @@ mod tests {
         let filters = Set::from([cf_since(&[1], 100), cf_since(&[1], 200)]);
         let out = registry.coalesce(filters);
         assert_eq!(out.len(), 2, "dropped rule must not fire");
+    }
+
+    /// #106/Fable D's headline falsifier: two entries that are IDENTICAL as
+    /// `ConcreteFilter`s but carry DIFFERENT `SourceAuthority` must ship as
+    /// TWO separate wire entries, never merged -- not even at the exact-
+    /// canonical dedup floor (the cheapest possible merge). Coalescing is
+    /// equal-context-only; this is the exact alias atlas flagged (two
+    /// different-authority atoms for the same filter must never share one
+    /// wire REQ / one attribution FIFO).
+    #[test]
+    fn coalesce_with_never_merges_identical_filters_under_different_source_authority() {
+        let filter = cf(&[1], &["aa"]);
+        let entries = vec![
+            CoalesceEntry {
+                filter: filter.clone(),
+                source: SourceAuthority::AuthorOutboxes,
+                access: AccessContext::Public,
+                provenance: Vec::new(),
+                absorbed: BTreeSet::new(),
+            },
+            CoalesceEntry {
+                filter,
+                source: SourceAuthority::Public,
+                access: AccessContext::Public,
+                provenance: Vec::new(),
+                absorbed: BTreeSet::new(),
+            },
+        ];
+        let out = RuleRegistry::default_widen_only().coalesce_with(entries);
+        assert_eq!(
+            out.len(),
+            2,
+            "identical filters under different SourceAuthority must never coalesce"
+        );
+    }
+
+    /// Same filter, same context: the existing exact-dedup floor still
+    /// applies unchanged (equal-context-only doesn't mean never-coalesce).
+    #[test]
+    fn coalesce_with_still_dedups_identical_filter_and_context() {
+        let filter = cf(&[1], &["aa"]);
+        let entries = vec![
+            CoalesceEntry {
+                filter: filter.clone(),
+                source: SourceAuthority::AuthorOutboxes,
+                access: AccessContext::Public,
+                provenance: Vec::new(),
+                absorbed: BTreeSet::new(),
+            },
+            CoalesceEntry {
+                filter,
+                source: SourceAuthority::AuthorOutboxes,
+                access: AccessContext::Public,
+                provenance: Vec::new(),
+                absorbed: BTreeSet::new(),
+            },
+        ];
+        let out = RuleRegistry::default_widen_only().coalesce_with(entries);
+        assert_eq!(out.len(), 1, "same filter, same context: still dedups");
     }
 }

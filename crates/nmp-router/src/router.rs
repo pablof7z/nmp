@@ -8,29 +8,27 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::ConcreteFilter;
-use nmp_store::{coverage_key, CoverageKey};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_store::coverage_key;
 
-use crate::coalesce::RuleRegistry;
+use crate::coalesce::{CoalesceEntry, RuleRegistry};
 use crate::diag::{self, Diagnostics};
 use crate::facts::{DiscoveryKinds, PubkeyHex, RelayDirectory, RelayLimits, RelayUrl};
 use crate::plan::{diff_plans, RelayPlan, SubId, WireDelta, WireReq};
 use crate::route::{self, AtomClass, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall};
 
-/// One relay's not-yet-coalesced bag entry: a materialized (filter,
-/// single-lane provenance, absorbed coverage-key) triple. Every lane
-/// (outbox-solved, indexer, app, fallback, pinned) produces these on its way
-/// into the coalesce/wire pipeline (`compile`, step 4-5).
-type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
-
 /// Push `(filter, provenance, coverage_key(filter))` into `bag[relay]` for
-/// every `(relay, provenance)` pair in `routes` — the shared materialization
-/// step `compile` uses for every lane. A no-op when `routes` is empty (no
-/// configured relays for that lane, or the lane's gate didn't fire).
+/// every `(relay, provenance)` pair in `routes`, tagged with `source`/
+/// `access` (#106: equal-context-only coalescing, Fable D) — the shared
+/// materialization step `compile` uses for every lane. A no-op when
+/// `routes` is empty (no configured relays for that lane, or the lane's
+/// gate didn't fire).
 fn push_routes(
-    bag: &mut BTreeMap<RelayUrl, Vec<BagEntry>>,
+    bag: &mut BTreeMap<RelayUrl, Vec<CoalesceEntry>>,
     filter: &ConcreteFilter,
+    source: SourceAuthority,
+    access: AccessContext,
     routes: Vec<(RelayUrl, RouteProvenance)>,
 ) {
     if routes.is_empty() {
@@ -38,9 +36,13 @@ fn push_routes(
     }
     let key = coverage_key(filter);
     for (relay, prov) in routes {
-        bag.entry(relay)
-            .or_default()
-            .push((filter.clone(), vec![prov], BTreeSet::from([key])));
+        bag.entry(relay).or_default().push(CoalesceEntry {
+            filter: filter.clone(),
+            source,
+            access,
+            provenance: vec![prov],
+            absorbed: BTreeSet::from([key]),
+        });
     }
 }
 
@@ -69,20 +71,31 @@ impl Router {
     /// the surgical wire delta.
     pub fn compile(
         &mut self,
-        demand: &BTreeSet<ConcreteFilter>,
+        demand: &BTreeSet<ContextualAtom>,
         dir: &dyn RelayDirectory,
         cap: usize,
     ) -> WireDelta {
-        // Step 1: group demand by Skeleton (outbox) / classify pinned.
-        let mut outbox_groups: BTreeMap<Skeleton, BTreeSet<PubkeyHex>> = BTreeMap::new();
+        // Step 1: group demand by (Skeleton, AccessContext) (outbox) /
+        // classify pinned -- classification is now by DECLARED
+        // `SourceAuthority` (#106), never by filter shape alone. Grouping by
+        // `AccessContext` alongside the skeleton keeps the seam ready for a
+        // future non-`Public` access variant (#8's NIP-42 AUTH) without
+        // needing a second widening later; every atom reaching this branch
+        // shares `source: AuthorOutboxes` by construction (that's the
+        // `classify` arm that produced it), so it isn't tracked per-group.
+        let mut outbox_groups: BTreeMap<(Skeleton, AccessContext), BTreeSet<PubkeyHex>> =
+            BTreeMap::new();
         let mut pinned_atoms: BTreeSet<ConcreteFilter> = BTreeSet::new();
         for atom in demand {
-            match route::classify(atom) {
+            match route::classify(&atom.filter, atom.source) {
                 AtomClass::Outbox { skeleton, authors } => {
-                    outbox_groups.entry(skeleton).or_default().extend(authors);
+                    outbox_groups
+                        .entry((skeleton, atom.access))
+                        .or_default()
+                        .extend(authors);
                 }
                 AtomClass::Pinned => {
-                    pinned_atoms.insert(atom.clone());
+                    pinned_atoms.insert(atom.filter.clone());
                 }
             }
         }
@@ -91,17 +104,20 @@ impl Router {
         // apply the additive indexer/app/fallback lanes OUTSIDE the solve
         // (Unit B, `routing-and-ownership.md` §2.1/§2.2 — never counted
         // toward `k`), and materialize each relay's bag of (filter,
-        // provenance, absorbed) entries. `absorbed` is the coverage-
-        // attribution ruling's per-atom `CoverageKey` (§2): each entry here
-        // is exactly one pre-coalesce demand atom (one author, for outbox;
-        // the full/shortfall author set, for an additive lane; the pinned
-        // atom itself, for pinned), so it contributes exactly one key, later
-        // unioned by `coalesce_with` alongside provenance as same-skeleton
-        // atoms merge.
-        let mut bag: BTreeMap<RelayUrl, Vec<BagEntry>> = BTreeMap::new();
+        // context, single-lane provenance, absorbed) entries. `absorbed` is
+        // the coverage-attribution ruling's per-atom `CoverageKey` (§2):
+        // each entry here is exactly one pre-coalesce demand atom (one
+        // author, for outbox; the full/shortfall author set, for an
+        // additive lane; the pinned atom itself, for pinned), so it
+        // contributes exactly one key, later unioned by `coalesce_with`
+        // alongside provenance as same-skeleton, SAME-CONTEXT atoms merge
+        // (Fable D: equal-context-only).
+        let mut bag: BTreeMap<RelayUrl, Vec<CoalesceEntry>> = BTreeMap::new();
         let mut uncovered_authors: BTreeMap<PubkeyHex, Shortfall> = BTreeMap::new();
 
-        for (skeleton, authors) in &outbox_groups {
+        for ((skeleton, access), authors) in &outbox_groups {
+            let access = *access;
+            let source = SourceAuthority::AuthorOutboxes;
             let candidates = route::build_candidates(authors, dir);
             let coverage = solver::solve(&CoverageInput {
                 candidates: candidates.clone(),
@@ -113,16 +129,26 @@ impl Router {
             for (relay, prov) in route::provenance_for_outbox(&coverage, &candidates) {
                 let filter = skeleton.with_authors(prov.covers_authors.clone());
                 let key = coverage_key(&filter);
-                bag.entry(relay)
-                    .or_default()
-                    .push((filter, vec![prov], BTreeSet::from([key])));
+                bag.entry(relay).or_default().push(CoalesceEntry {
+                    filter,
+                    source,
+                    access,
+                    provenance: vec![prov],
+                    absorbed: BTreeSet::from([key]),
+                });
             }
 
             // Additive indexer + app lanes: both route the group's FULL
             // author set, so they share the same (filter, key).
             let mut additive = route::indexer_lane_routes(dir, &self.discovery, skeleton, authors);
             additive.extend(route::app_lane_routes(dir, authors));
-            push_routes(&mut bag, &skeleton.with_authors(authors.clone()), additive);
+            push_routes(
+                &mut bag,
+                &skeleton.with_authors(authors.clone()),
+                source,
+                access,
+                additive,
+            );
 
             // Additive fallback lane: routes exactly the shortfall authors,
             // iff no appRelay is configured. `Coverage.shortfall` above has
@@ -134,40 +160,54 @@ impl Router {
             push_routes(
                 &mut bag,
                 &skeleton.with_authors(shortfall_authors),
+                source,
+                access,
                 fallback,
             );
         }
 
         for atom in &pinned_atoms {
+            // #106's closed vocabulary has only one non-outbox source
+            // (`Public`) and one `AccessContext` (`Public`), so a fixed
+            // context here is exact today, not a placeholder — #107's
+            // `SourceAuthority::Pinned(relays)` lands as a NEW `AtomClass`
+            // (a third branch above), not a variant tracked through this
+            // one.
+            let source = SourceAuthority::Public;
+            let access = AccessContext::Public;
             let key = coverage_key(atom);
             for (relay, prov) in route::provenance_for_pinned(atom, dir) {
-                bag.entry(relay).or_default().push((
-                    atom.clone(),
-                    vec![prov],
-                    BTreeSet::from([key]),
-                ));
+                bag.entry(relay).or_default().push(CoalesceEntry {
+                    filter: atom.clone(),
+                    source,
+                    access,
+                    provenance: vec![prov],
+                    absorbed: BTreeSet::from([key]),
+                });
             }
 
             // App lane routes every atom, including authorless/pinned ones
             // (closes #7 — the authorless-routing-lane gap).
             let app = route::app_lane_routes(dir, &BTreeSet::new());
-            push_routes(&mut bag, atom, app);
+            push_routes(&mut bag, atom, source, access, app);
         }
 
-        // Step 4 + 5: per relay, dedup + widen-only coalesce, then assign
-        // stable sub-ids.
+        // Step 4 + 5: per relay, dedup + widen-only coalesce (equal-context-
+        // only, Fable D), then assign stable sub-ids (context-folded,
+        // `SubId::for_wire` — atlas's 3rd proof floor).
         let mut reqs: BTreeMap<RelayUrl, Vec<WireReq>> = BTreeMap::new();
         for (relay, entries) in bag {
             let merged = self.rules.coalesce_with(entries);
             let mut relay_reqs: Vec<WireReq> = merged
                 .into_iter()
-                .map(|(filter, provenance, absorbed)| {
-                    let sub_id = SubId::for_filter(relay.clone(), &filter);
+                .map(|entry| {
+                    let sub_id =
+                        SubId::for_wire(relay.clone(), &entry.filter, entry.source, entry.access);
                     WireReq {
                         sub_id,
-                        filter,
-                        provenance,
-                        absorbed,
+                        filter: entry.filter,
+                        provenance: entry.provenance,
+                        absorbed: entry.absorbed,
                     }
                 })
                 .collect();
@@ -216,6 +256,30 @@ mod tests {
         }
     }
 
+    /// Wrap an already-built filter into a demand atom under `source` (fixed
+    /// `access: Public` -- these tests don't exercise the access axis).
+    fn as_atom(filter: ConcreteFilter, source: SourceAuthority) -> ContextualAtom {
+        ContextualAtom {
+            filter,
+            source,
+            access: AccessContext::Public,
+        }
+    }
+
+    /// An `AuthorOutboxes`-sourced demand atom -- what `Demand::from_filter`
+    /// would produce for any `cf(...)` above (its `authors` is always
+    /// `Some`), spelled out explicitly since these tests build
+    /// `ContextualAtom`s directly rather than through a `Demand`.
+    fn outbox(kind: u16, authors: &[&str]) -> ContextualAtom {
+        as_atom(cf(kind, authors), SourceAuthority::AuthorOutboxes)
+    }
+
+    /// A `Public`-sourced demand atom for an already-built (typically
+    /// authorless) filter.
+    fn pinned(filter: ConcreteFilter) -> ContextualAtom {
+        as_atom(filter, SourceAuthority::Public)
+    }
+
     #[test]
     fn outbox_maps_authors_to_own_write_relays() {
         let dir = FixtureDirectory::new()
@@ -226,7 +290,7 @@ mod tests {
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
-        let demand = BTreeSet::from([cf(1, &[pk('a').as_str()]), cf(1, &[pk('b').as_str()])]);
+        let demand = BTreeSet::from([outbox(1, &[pk('a').as_str()]), outbox(1, &[pk('b').as_str()])]);
         let _ = router.compile(&demand, &dir, 10);
         let plan = router.plan();
         assert!(plan.reqs.contains_key(&test_relay(0)));
@@ -251,16 +315,16 @@ mod tests {
             RuleRegistry::default_widen_only(),
         );
         let demand1 = BTreeSet::from([
-            cf(1, &[pk('a').as_str()]),
-            cf(1, &[pk('b').as_str()]),
-            cf(1, &[pk('c').as_str()]),
+            outbox(1, &[pk('a').as_str()]),
+            outbox(1, &[pk('b').as_str()]),
+            outbox(1, &[pk('c').as_str()]),
         ]);
         let _ = router.compile(&demand1, &dir, 10);
 
         let demand2 = BTreeSet::from([
-            cf(1, &[pk('a').as_str()]),
-            cf(1, &[pk('b').as_str()]),
-            cf(1, &[pk('d').as_str()]),
+            outbox(1, &[pk('a').as_str()]),
+            outbox(1, &[pk('b').as_str()]),
+            outbox(1, &[pk('d').as_str()]),
         ]);
         let delta = router.compile(&demand2, &dir, 10);
 
@@ -279,7 +343,7 @@ mod tests {
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
-        let demand = BTreeSet::from([cf(1, &[pk('a').as_str()])]);
+        let demand = BTreeSet::from([outbox(1, &[pk('a').as_str()])]);
         let _ = router.compile(&demand, &dir, 10);
         for reqs in router.plan().reqs.values() {
             for req in reqs {
@@ -311,7 +375,7 @@ mod tests {
         );
         // kind:1 (content, never discovery-eligible) + kind:3 (discovery)
         // for the SAME author -- both must route to `shared`.
-        let demand = BTreeSet::from([cf(1, &[pk('a').as_str()]), cf(3, &[pk('a').as_str()])]);
+        let demand = BTreeSet::from([outbox(1, &[pk('a').as_str()]), outbox(3, &[pk('a').as_str()])]);
         let _ = router.compile(&demand, &dir, 10);
         let plan = router.plan();
 
@@ -407,7 +471,7 @@ mod tests {
 
         // kind:0 -- discovery-kind, the only shape under which the OLD code
         // ever folded the indexer into the candidate list at all.
-        let demand = BTreeSet::from([cf(0, &[a.as_str()])]);
+        let demand = BTreeSet::from([outbox(0, &[a.as_str()])]);
         let _ = router.compile(&demand, &dir, 10);
 
         let shortfall = router
@@ -449,7 +513,10 @@ mod tests {
             kinds: Some(BTreeSet::from([39_000u16])),
             ..ConcreteFilter::default()
         };
-        let demand = BTreeSet::from([authored.clone(), authorless.clone()]);
+        let demand = BTreeSet::from([
+            as_atom(authored.clone(), SourceAuthority::AuthorOutboxes),
+            pinned(authorless.clone()),
+        ]);
         let _ = router.compile(&demand, &dir, 10);
 
         let app_reqs = &router.plan().reqs[&app_relay];
@@ -479,7 +546,7 @@ mod tests {
     fn fallback_fires_for_under_min_authors_and_is_suppressed_by_apprelay() {
         let a = pk('a');
         let fallback_relay = test_relay(60);
-        let demand = BTreeSet::from([cf(1, &[a.as_str()])]);
+        let demand = BTreeSet::from([outbox(1, &[a.as_str()])]);
 
         // Branch 1: no appRelay configured -- fallback fires.
         let dir = FixtureDirectory::new()
@@ -551,7 +618,10 @@ mod tests {
 
         let discovery_atom = cf(3, &[a.as_str()]);
         let content_atom = cf(1, &[a.as_str()]);
-        let demand = BTreeSet::from([discovery_atom.clone(), content_atom.clone()]);
+        let demand = BTreeSet::from([
+            as_atom(discovery_atom.clone(), SourceAuthority::AuthorOutboxes),
+            as_atom(content_atom.clone(), SourceAuthority::AuthorOutboxes),
+        ]);
         let _ = router.compile(&demand, &dir, 10);
 
         let plan = router.plan();

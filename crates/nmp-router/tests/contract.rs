@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_router::{
     test_relay, DiscoveryKinds, FixtureDirectory, Lane, RelayLimits, RouteKind, Router,
     RuleRegistry, ShortfallReason,
@@ -19,6 +19,28 @@ fn cf_kind_authors(kind: u16, authors: &[&str]) -> ConcreteFilter {
         kinds: Some(BTreeSet::from([kind])),
         authors: Some(authors.iter().map(|s| s.to_string()).collect()),
         ..ConcreteFilter::default()
+    }
+}
+
+/// An `AuthorOutboxes`-sourced demand atom -- what `Demand::from_filter`
+/// would produce for any `outbox(...)` call (its `authors` is
+/// always `Some`), spelled out explicitly since these tests build
+/// `ContextualAtom`s directly rather than through a `Demand`.
+fn outbox(kind: u16, authors: &[&str]) -> ContextualAtom {
+    ContextualAtom {
+        filter: cf_kind_authors(kind, authors),
+        source: SourceAuthority::AuthorOutboxes,
+        access: AccessContext::Public,
+    }
+}
+
+/// A `Public`-sourced demand atom for an already-built (typically
+/// authorless) filter.
+fn pinned(filter: ConcreteFilter) -> ContextualAtom {
+    ContextualAtom {
+        filter,
+        source: SourceAuthority::Public,
+        access: AccessContext::Public,
     }
 }
 
@@ -40,7 +62,7 @@ fn outbox_maps_authors_to_write_relays() {
         .with_write(b.clone(), [test_relay(2), test_relay(3)]);
     let mut router = new_router();
 
-    let demand = BTreeSet::from([cf_kind_authors(1, &[&a]), cf_kind_authors(1, &[&b])]);
+    let demand = BTreeSet::from([outbox(1, &[&a]), outbox(1, &[&b])]);
     router.compile(&demand, &dir, 10);
 
     let plan = router.plan();
@@ -71,9 +93,9 @@ fn coverage_gives_each_author_min_two_relays() {
     let dir = FixtureDirectory::shared_pool_mailboxes(&authors, &pool);
     let mut router = new_router();
 
-    let demand: BTreeSet<ConcreteFilter> = authors
+    let demand: BTreeSet<ContextualAtom> = authors
         .iter()
-        .map(|a| cf_kind_authors(1, &[a.as_str()]))
+        .map(|a| outbox(1, &[a.as_str()]))
         .collect();
     router.compile(&demand, &dir, 10);
 
@@ -106,9 +128,9 @@ fn coverage_respects_cap_under_disjoint_mailboxes() {
     let dir = FixtureDirectory::disjoint_mailboxes(&authors);
     let mut router = new_router();
 
-    let demand: BTreeSet<ConcreteFilter> = authors
+    let demand: BTreeSet<ContextualAtom> = authors
         .iter()
-        .map(|a| cf_kind_authors(1, &[a.as_str()]))
+        .map(|a| outbox(1, &[a.as_str()]))
         .collect();
     let cap = 6;
     router.compile(&demand, &dir, cap);
@@ -127,7 +149,7 @@ fn coverage_single_prolific_author_capped_at_k() {
     let dir = FixtureDirectory::prolific_author(a.clone(), 50);
     let mut router = new_router();
 
-    let demand = BTreeSet::from([cf_kind_authors(1, &[&a])]);
+    let demand = BTreeSet::from([outbox(1, &[&a])]);
     router.compile(&demand, &dir, 100);
 
     let relays_serving_a: BTreeSet<_> = router
@@ -151,7 +173,7 @@ fn coverage_author_with_one_relay_clamps_k() {
     let dir = FixtureDirectory::new().with_write(a.clone(), [test_relay(0)]);
     let mut router = new_router();
 
-    let demand = BTreeSet::from([cf_kind_authors(1, &[&a])]);
+    let demand = BTreeSet::from([outbox(1, &[&a])]);
     router.compile(&demand, &dir, 10);
 
     let shortfall = router.diagnostics().uncovered_authors[&a];
@@ -166,7 +188,7 @@ fn content_atom_uncovered_author_never_uses_indexer() {
     let dir = FixtureDirectory::new().with_indexer(test_relay(99));
     let mut router = new_router();
 
-    let demand = BTreeSet::from([cf_kind_authors(1, &[&a])]); // content kind
+    let demand = BTreeSet::from([outbox(1, &[&a])]); // content kind
     router.compile(&demand, &dir, 10);
 
     assert_eq!(
@@ -183,8 +205,8 @@ fn indexer_lane_only_for_discovery_kinds() {
     let dir = FixtureDirectory::new().with_indexer(test_relay(99));
     let mut router = new_router();
 
-    let discovery_atom = cf_kind_authors(3, &[&a]); // kind:3 -- discovery
-    let content_atom = cf_kind_authors(1, &[&a]); // kind:1 -- content
+    let discovery_atom = outbox(3, &[&a]); // kind:3 -- discovery
+    let content_atom = outbox(1, &[&a]); // kind:1 -- content
     let demand = BTreeSet::from([discovery_atom, content_atom]);
     router.compile(&demand, &dir, 10);
 
@@ -207,7 +229,7 @@ fn exact_canonical_dedup_one_req_per_relay() {
 
     // Two demand atoms that resolve to the IDENTICAL ConcreteFilter (as if
     // two different subscriptions produced the same atom).
-    let demand = BTreeSet::from([cf_kind_authors(1, &[&a])]);
+    let demand = BTreeSet::from([outbox(1, &[&a])]);
     router.compile(&demand, &dir, 10);
 
     assert_eq!(router.plan().reqs[&test_relay(0)].len(), 1);
@@ -225,9 +247,9 @@ fn author_union_coalesces_shards_into_one_req() {
     let mut router = new_router();
 
     let demand = BTreeSet::from([
-        cf_kind_authors(1, &[&a]),
-        cf_kind_authors(1, &[&b]),
-        cf_kind_authors(1, &[&d]),
+        outbox(1, &[&a]),
+        outbox(1, &[&b]),
+        outbox(1, &[&d]),
     ]);
     router.compile(&demand, &dir, 10);
 
@@ -249,16 +271,16 @@ fn per_relay_diff_is_surgical() {
     let mut router = new_router();
 
     let demand1 = BTreeSet::from([
-        cf_kind_authors(1, &[&a]),
-        cf_kind_authors(1, &[&b]),
-        cf_kind_authors(1, &[&c]),
+        outbox(1, &[&a]),
+        outbox(1, &[&b]),
+        outbox(1, &[&c]),
     ]);
     router.compile(&demand1, &dir, 10);
 
     let demand2 = BTreeSet::from([
-        cf_kind_authors(1, &[&a]),
-        cf_kind_authors(1, &[&b]),
-        cf_kind_authors(1, &[&d]),
+        outbox(1, &[&a]),
+        outbox(1, &[&b]),
+        outbox(1, &[&d]),
     ]);
     let delta = router.compile(&demand2, &dir, 10);
 
@@ -283,7 +305,7 @@ fn every_wire_req_traces_to_a_route() {
     let a = pk('a');
     let dir = FixtureDirectory::new().with_write(a.clone(), [test_relay(0), test_relay(1)]);
     let mut router = new_router();
-    let demand = BTreeSet::from([cf_kind_authors(1, &[&a])]);
+    let demand = BTreeSet::from([outbox(1, &[&a])]);
     router.compile(&demand, &dir, 10);
 
     for reqs in router.plan().reqs.values() {
@@ -301,7 +323,7 @@ fn diagnostics_reverse_coverage_and_lanes() {
         .with_write(a.clone(), [test_relay(0), test_relay(1)])
         .with_write(b.clone(), [test_relay(0)]); // b: FewerCandidatesThanK
     let mut router = new_router();
-    let demand = BTreeSet::from([cf_kind_authors(1, &[&a]), cf_kind_authors(1, &[&b])]);
+    let demand = BTreeSet::from([outbox(1, &[&a]), outbox(1, &[&b])]);
     router.compile(&demand, &dir, 10);
 
     let diag = router.diagnostics();
@@ -338,7 +360,7 @@ fn nip29_non_author_atom_routes_via_group_host() {
     let dir = FixtureDirectory::new().with_group_host(group_atom.clone(), host.clone());
     let mut router = new_router();
 
-    let demand = BTreeSet::from([group_atom.clone()]);
+    let demand = BTreeSet::from([pinned(group_atom.clone())]);
     router.compile(&demand, &dir, 10);
 
     let reqs = &router.plan().reqs[&host];

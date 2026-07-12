@@ -21,7 +21,7 @@ mod indexed_tag_name;
 mod selector;
 
 pub use binding::{Binding, Derived, Filter, SetAlgebra, SetOp};
-pub use concrete::{ConcreteFilter, ContextualAtom, DescriptorHash};
+pub use concrete::{fold_context, ConcreteFilter, ContextualAtom, DescriptorHash};
 pub use demand::{DemandDelta, DemandOp};
 pub use descriptor::{AccessContext, CacheMode, Demand, SourceAuthority};
 pub use indexed_tag_name::IndexedTagName;

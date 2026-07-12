@@ -132,7 +132,7 @@ fn accept_local_seeds_the_derived_add_path() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     let inner = cf_kinds_authors(&[3], &[&a.public_key().to_hex()]);
     let atom_a = cf_kinds_authors(&[1], &[&a.public_key().to_hex()]);
@@ -205,7 +205,7 @@ fn superseding_local_edit_adds_and_removes_through_one_react() {
     let d = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     // First optimistic edit: follows = {a, b, c}.
     h.accept(accept_write_of(
@@ -280,7 +280,7 @@ fn older_local_edit_is_stale_and_yields_empty_delta() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     // Winner at t=101: follows = {a, b}.
     h.accept(accept_write_of(
@@ -331,7 +331,7 @@ fn duplicate_local_accept_yields_empty_delta() {
     let b = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
 
     let follow_list = kind3(&a, &[a.public_key(), b.public_key()], 100);
     h.accept(accept_write_of(follow_list.clone(), 100));
@@ -382,8 +382,8 @@ fn local_kind5_processed_inserts_row_and_removes_hidden_targets_in_one_react() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_h_follows, _d1) = h.subscribe(LiveQuery(my_follows_filter()));
-    let (_h_dels, _d2) = h.subscribe(LiveQuery(deletions_by_etag_filter()));
+    let (_h_follows, _d1) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
+    let (_h_dels, _d2) = h.subscribe(LiveQuery::from_filter(deletions_by_etag_filter()));
 
     // A pending local kind:3 => my_follows resolves to {b, c}.
     let follow_list = kind3(&a, &[b.public_key(), c.public_key()], 100);

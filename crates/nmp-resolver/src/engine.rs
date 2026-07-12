@@ -7,7 +7,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::{Rc, Weak};
 
-use nmp_grammar::{Binding, ConcreteFilter, DemandDelta, DemandOp, DescriptorHash, Filter};
+use nmp_grammar::{
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, DemandDelta, DemandOp,
+    DescriptorHash, Filter, SourceAuthority,
+};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, EventStore, InsertOutcome, PersistenceError,
     RelayObserved,
@@ -28,10 +31,46 @@ use crate::graph::{
 };
 use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 
-/// The descriptor value of a live query: a `nmp_grammar::Filter` whose
-/// `Binding`s may reference the identity register and/or other filters.
+/// The descriptor value of a live query: a full [`Demand`] (#106) --
+/// `selection + source + access + cache`, not a bare `Filter`. Two `Demand`s
+/// with the same `Filter` but different `source`/`access` are DIFFERENT
+/// subscriptions with distinct atom/wire/coverage identity (bug-class ledger
+/// #18); `cache` does NOT participate in that identity (see
+/// [`AcquisitionKey`]) -- it is a per-handle row-projection flag only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LiveQuery(pub Filter);
+pub struct LiveQuery(pub Demand);
+
+impl LiveQuery {
+    /// Convenience constructor applying `Demand`'s static default
+    /// (`Demand::from_filter`) to a bare `Filter` -- the common case,
+    /// unchanged in outward behavior from M1's `LiveQuery(Filter)`.
+    pub fn from_filter(selection: Filter) -> Self {
+        Self(Demand::from_filter(selection))
+    }
+}
+
+/// The cache-FREE portion of a [`Demand`] that determines graph/atom/wire/
+/// coverage sharing (#106, atlas's resolver-threading forward-note): two
+/// `Demand`s differing ONLY in `cache` dedup onto the SAME graph node, the
+/// SAME atoms, and the SAME wire/coverage history -- `cache` never widens
+/// what's shared, it only selects which cached rows a given HANDLE's own
+/// projection later serves (`nmp-engine`'s `rows_and_evidence_for`, #107).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct AcquisitionKey {
+    selection: Filter,
+    source: SourceAuthority,
+    access: AccessContext,
+}
+
+impl From<&Demand> for AcquisitionKey {
+    fn from(d: &Demand) -> Self {
+        Self {
+            selection: d.selection.clone(),
+            source: d.source,
+            access: d.access,
+        }
+    }
+}
 
 /// Opaque identifier for a live subscription handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,12 +85,21 @@ pub struct HandleId(u64);
 /// explicitly deferred M4 concern, not built here).
 pub struct QueryHandle {
     id: HandleId,
+    /// This handle's OWN `CacheMode` (#106) -- never shared with sibling
+    /// handles on the same (cache-free-deduped) graph node; read by
+    /// `nmp-engine`'s row-projection layer (#107), not consumed inside the
+    /// resolver itself.
+    cache: nmp_grammar::CacheMode,
     pending_drops: Weak<RefCell<Vec<HandleId>>>,
 }
 
 impl QueryHandle {
     pub fn id(&self) -> HandleId {
         self.id
+    }
+
+    pub fn cache(&self) -> nmp_grammar::CacheMode {
+        self.cache
     }
 }
 
@@ -136,7 +184,7 @@ fn merge_deltas(mut first: DemandDelta, second: DemandDelta) -> DemandDelta {
 }
 
 struct GraphEntry {
-    descriptor: LiveQuery,
+    descriptor: AcquisitionKey,
     refcount: u32,
 }
 
@@ -145,14 +193,17 @@ struct GraphEntry {
 pub struct Engine<S: EventStore> {
     store: S,
     graph: Graph,
-    descriptor_to_root: BTreeMap<LiveQuery, NodeId>,
+    descriptor_to_root: BTreeMap<AcquisitionKey, NodeId>,
     graph_entries: HashMap<NodeId, GraphEntry>,
     handle_to_root: HashMap<HandleId, NodeId>,
     next_handle: u64,
-    /// The demand truth (M1 plan §3.2): every `ConcreteFilter` any live
+    /// The demand truth (M1 plan §3.2, re-keyed on [`ContextualAtom`] per
+    /// #106): every atom -- selection + source + access -- any live
     /// FilterNode currently contributes, refcounted. Open fires on 0->1,
-    /// close on 1->0.
-    atoms: BTreeMap<DescriptorHash, (ConcreteFilter, u32)>,
+    /// close on 1->0. Two atoms with identical `ConcreteFilter` but
+    /// different context refcount INDEPENDENTLY (Fable D: coalescing is
+    /// equal-context-only).
+    atoms: BTreeMap<DescriptorHash, (ContextualAtom, u32)>,
     /// Every `Reactive` BindingNode id currently in the graph, across all
     /// live subscriptions — the re-root seed set (M1 plan §3.6).
     reactive_nodes: BTreeSet<NodeId>,
@@ -182,8 +233,8 @@ impl<S: EventStore> Engine<S> {
         &self.metrics
     }
 
-    pub fn active_demand(&self) -> BTreeSet<ConcreteFilter> {
-        self.atoms.values().map(|(cf, _)| cf.clone()).collect()
+    pub fn active_demand(&self) -> BTreeSet<ContextualAtom> {
+        self.atoms.values().map(|(atom, _)| atom.clone()).collect()
     }
 
     /// Read access to the underlying store. `EngineCore` (M3 step B) needs
@@ -236,7 +287,7 @@ impl<S: EventStore> Engine<S> {
     /// itself settled while an inner expansion (e.g. the kind:3 follow-list
     /// atom under a `$myFollows`-shaped query) is still entirely unproven.
     /// Empty for an unknown handle.
-    pub fn subtree_atoms(&self, id: HandleId) -> BTreeSet<ConcreteFilter> {
+    pub fn subtree_atoms(&self, id: HandleId) -> BTreeSet<ContextualAtom> {
         let Some(&root) = self.handle_to_root.get(&id) else {
             return BTreeSet::new();
         };
@@ -278,10 +329,15 @@ impl<S: EventStore> Engine<S> {
     pub fn subscribe(&mut self, q: LiveQuery) -> (QueryHandle, DemandDelta) {
         let drop_delta = self.drain_pending_drops();
         let handle_id = self.alloc_handle();
+        let key = AcquisitionKey::from(&q.0);
+        let cache = q.0.cache;
 
-        if let Some(&root) = self.descriptor_to_root.get(&q) {
-            // Identical whole-descriptor LiveQuery already has a graph:
-            // graph-level dedup (M1 plan §3.2/§4). Bump the graph refcount
+        if let Some(&root) = self.descriptor_to_root.get(&key) {
+            // Identical cache-free acquisition identity already has a
+            // graph: graph-level dedup (M1 plan §3.2/§4; #106 widens the
+            // key to selection+source+access, still cache-free per atlas's
+            // forward-note -- two Demands differing only in `cache` share
+            // this same graph/atoms/wire/coverage). Bump the graph refcount
             // and this handle's own claim on every atom the (shared) graph
             // currently owns; none of these can cross 0->1 (they're already
             // open), so this always yields an empty delta.
@@ -296,17 +352,18 @@ impl<S: EventStore> Engine<S> {
             }
             let handle = QueryHandle {
                 id: handle_id,
+                cache,
                 pending_drops: Rc::downgrade(&self.pending_drops),
             };
             return (handle, merge_deltas(drop_delta, acc.into_delta()));
         }
 
-        let root = self.build_filter_node(&q.0, ParentLink::Root, 0);
-        self.descriptor_to_root.insert(q.clone(), root);
+        let root = self.build_filter_node(&q.0.selection, q.0.source, q.0.access, ParentLink::Root, 0);
+        self.descriptor_to_root.insert(key.clone(), root);
         self.graph_entries.insert(
             root,
             GraphEntry {
-                descriptor: q,
+                descriptor: key,
                 refcount: 1,
             },
         );
@@ -318,6 +375,7 @@ impl<S: EventStore> Engine<S> {
         }
         let handle = QueryHandle {
             id: handle_id,
+            cache,
             pending_drops: Rc::downgrade(&self.pending_drops),
         };
         (handle, merge_deltas(drop_delta, acc.into_delta()))
@@ -719,11 +777,26 @@ impl<S: EventStore> Engine<S> {
                 if old_atoms == new_atoms {
                     return false;
                 }
+                let (source, access) = self.graph.context_of(id);
                 for a in old_atoms.difference(&new_atoms) {
-                    self.unref_atom(a, acc);
+                    self.unref_atom(
+                        &ContextualAtom {
+                            filter: a.clone(),
+                            source,
+                            access,
+                        },
+                        acc,
+                    );
                 }
                 for a in new_atoms.difference(&old_atoms) {
-                    self.ref_atom(a, acc);
+                    self.ref_atom(
+                        &ContextualAtom {
+                            filter: a.clone(),
+                            source,
+                            access,
+                        },
+                        acc,
+                    );
                 }
                 true
             }
@@ -732,31 +805,52 @@ impl<S: EventStore> Engine<S> {
 
     // ---- atom refcounting (M1 plan §3.2/§4) -----------------------------
 
-    fn ref_atom(&mut self, atom: &ConcreteFilter, acc: &mut DeltaAcc) {
+    /// Refcounts a [`ContextualAtom`] (identity domain), but pushes only its
+    /// bare `ConcreteFilter` into the wire-facing `DemandDelta` (two-hash-
+    /// domains: the wire REQ never carries context, per atlas's #106/#107
+    /// seam ruling). Two atoms with the same `filter` but different
+    /// `source`/`access` refcount in SEPARATE buckets, so BOTH can surface
+    /// an `Open` with an identical `ConcreteFilter` payload -- the router/
+    /// transport layer (`SubId::for_wire`) is responsible for not re-
+    /// aliasing those two REQs' attribution.
+    fn ref_atom(&mut self, atom: &ContextualAtom, acc: &mut DeltaAcc) {
         let hash = atom.hash();
         let entry = self.atoms.entry(hash).or_insert_with(|| (atom.clone(), 0));
         entry.1 += 1;
         if entry.1 == 1 {
             self.metrics.atoms_opened += 1;
-            acc.push_open(atom.clone());
+            acc.push_open(atom.filter.clone());
         }
     }
 
-    fn unref_atom(&mut self, atom: &ConcreteFilter, acc: &mut DeltaAcc) {
+    fn unref_atom(&mut self, atom: &ContextualAtom, acc: &mut DeltaAcc) {
         let hash = atom.hash();
         if let Some(entry) = self.atoms.get_mut(&hash) {
             entry.1 -= 1;
             if entry.1 == 0 {
                 self.atoms.remove(&hash);
                 self.metrics.atoms_closed += 1;
-                acc.push_close(atom.clone());
+                acc.push_close(atom.filter.clone());
             }
         }
     }
 
     // ---- graph construction (M1 plan §3.1) ------------------------------
 
-    fn build_filter_node(&mut self, filter: &Filter, parent: ParentLink, depth: u32) -> NodeId {
+    /// `source`/`access` are the OWNING `Demand`'s context (#106), threaded
+    /// in from the caller rather than re-derived here -- this FilterNode may
+    /// be the root of a top-level `LiveQuery`'s `Demand` or the `inner` of a
+    /// `Binding::Derived`'s OWN (independent) `Demand`; either way, by the
+    /// time we're building the FilterNode the context has already been
+    /// decided one level up.
+    fn build_filter_node(
+        &mut self,
+        filter: &Filter,
+        source: SourceAuthority,
+        access: AccessContext,
+        parent: ParentLink,
+        depth: u32,
+    ) -> NodeId {
         let id = self.graph.alloc_id();
 
         let mut bound = Vec::new();
@@ -780,6 +874,8 @@ impl<S: EventStore> Engine<S> {
             limit: filter.limit,
             bound,
             cached_atoms: BTreeSet::new(),
+            source,
+            access,
         };
         self.graph.insert(id, Node::Filter(data), parent, depth);
         let atoms = self.graph.compute_atoms(id);
@@ -813,8 +909,17 @@ impl<S: EventStore> Engine<S> {
             }
             Binding::Derived(d) => {
                 let id = self.graph.alloc_id();
-                let inner =
-                    self.build_filter_node(&d.inner, ParentLink::DerivedInner(id), depth + 1);
+                // `d.inner` is its OWN `Demand` (#106): its `source`/
+                // `access` come from ITSELF, never from the enclosing
+                // FilterNode's context -- a Demand's context is never
+                // inherited across a `Binding::Derived` boundary.
+                let inner = self.build_filter_node(
+                    &d.inner.selection,
+                    d.inner.source,
+                    d.inner.access,
+                    ParentLink::DerivedInner(id),
+                    depth + 1,
+                );
                 let cached = match self.graph.wide_concrete(inner) {
                     Some(cf) => {
                         let events: Vec<nostr::Event> = self

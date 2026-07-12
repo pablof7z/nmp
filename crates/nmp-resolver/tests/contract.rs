@@ -196,7 +196,7 @@ fn depth1_myfollows_surgical_delta() {
     let d = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
     h.deliver(vec![kind3(
         &a,
         &[a.public_key(), b.public_key(), c.public_key()],
@@ -254,7 +254,7 @@ fn depth2_nip29_groups_cascade_one_level() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(nip29_groups_filter()));
     h.deliver(vec![
         kind39002(&a, "g1", &[a.public_key()], 100),
         kind39002(&a, "g2", &[a.public_key()], 100),
@@ -311,7 +311,7 @@ fn identity_reroot_closes_old_before_new() {
     let f = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
     h.deliver(vec![kind3(&a, &[a.public_key(), b.public_key()], 100)]);
 
     let old_inner = cf_kinds_authors(&[3], &[&a.public_key().to_hex()]);
@@ -375,7 +375,7 @@ fn stale_older_kind3_rejected_without_firing() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
     h.deliver(vec![kind3(
         &a,
         &[
@@ -408,7 +408,7 @@ fn duplicate_delivery_no_fire() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
     let ev = kind3(&a, &[a.public_key()], 100);
     h.deliver(vec![ev.clone()]);
 
@@ -429,7 +429,7 @@ fn unchanged_set_ingest_empty_delta() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
     h.deliver(vec![kind3(
         &a,
         &[a.public_key(), b.public_key(), c.public_key()],
@@ -459,7 +459,7 @@ fn concurrent_depth2_changes_batch_one_delta() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(nip29_groups_filter()));
     h.deliver(vec![kind39002(&a, "g1", &[a.public_key()], 100)]);
 
     let before = h.metrics();
@@ -491,8 +491,8 @@ fn identical_descriptors_share_graph() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (handle1, _delta1) = h.subscribe(LiveQuery(my_follows_filter()));
-    let (handle2, delta2) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (handle1, _delta1) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
+    let (handle2, delta2) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
     assert!(
         delta2.is_empty(),
         "second subscribe to an identical descriptor shares the graph"
@@ -524,7 +524,7 @@ fn follows_minus_mutes_surgical() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(follows_minus_mutes_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(follows_minus_mutes_filter()));
     h.deliver(vec![kind3(
         &a,
         &[a.public_key(), b.public_key(), c.public_key()],
@@ -565,7 +565,7 @@ fn address_coord_fans_out_per_coordinate() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(address_coord_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(address_coord_filter()));
     h.deliver(vec![
         addressable(&a, 30_003, "g1", 100),
         addressable(&a, 30_003, "g2", 100),
@@ -614,7 +614,7 @@ fn arbitrary_depth1_shape_needs_no_engine_change() {
     let e2 = dummy_event_id("bookmark-2");
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(bookmarks_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(bookmarks_filter()));
     let delta = h.deliver(vec![kind10003_bookmarks(&a, &[e1, e2], 100)]);
 
     let atom_e1 = cf_kinds_tag(&[1], 'e', &[&e1.to_hex()]);
@@ -643,7 +643,7 @@ fn derived_set_retracts_deleted_member_that_new_winner_does_not_match() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(nip29_groups_filter()));
     let g1_event = kind39002(&a, "g1", &[a.public_key()], 100);
     let g1_id = g1_event.id;
     h.deliver(vec![g1_event, kind39002(&a, "g2", &[a.public_key()], 100)]);
@@ -681,7 +681,7 @@ fn metrics_witness_only_retracted_member_atoms_churn() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(nip29_groups_filter()));
     let g1_event = kind39002(&a, "g1", &[a.public_key()], 100);
     let g1_id = g1_event.id;
     h.deliver(vec![

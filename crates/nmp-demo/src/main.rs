@@ -34,9 +34,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, Filter, IdentityField,
-    Kind, LiveQuery, PublicKey, RowDelta, RowsMsg, Selector, Timestamp, UnsignedEvent, WriteIntent,
-    WritePayload, WriteRouting,
+    Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, Filter,
+    IdentityField, Kind, LiveQuery, PublicKey, RowDelta, RowsMsg, Selector, SourceAuthority,
+    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::Keys;
 
@@ -443,14 +443,14 @@ fn signer_pubkey_if_real(nsec: &Option<String>) -> Option<PublicKey> {
 /// (projected through the `p` tag) -- identical shape to
 /// `nmp-engine`'s own `runtime_integration.rs` test.
 fn build_follow_feed_query() -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -502,13 +502,15 @@ mod tests {
 
     #[test]
     fn follow_feed_query_is_kind1_derived_from_active_pubkeys_kind3_contacts() {
-        let LiveQuery(filter) = build_follow_feed_query();
+        let LiveQuery(demand) = build_follow_feed_query();
+        let filter = demand.selection;
         assert_eq!(filter.kinds, Some(BTreeSet::from([1u16])));
+        assert_eq!(demand.source, SourceAuthority::AuthorOutboxes);
         match filter.authors {
             Some(Binding::Derived(derived)) => {
-                assert_eq!(derived.inner.kinds, Some(BTreeSet::from([3u16])));
+                assert_eq!(derived.inner.selection.kinds, Some(BTreeSet::from([3u16])));
                 assert_eq!(
-                    derived.inner.authors,
+                    derived.inner.selection.authors,
                     Some(Binding::Reactive(IdentityField::ActivePubkey))
                 );
                 assert_eq!(derived.project, Selector::Tag("p".to_string()));

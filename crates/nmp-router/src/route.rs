@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash};
+use nmp_grammar::{ConcreteFilter, DescriptorHash, SourceAuthority};
 
 use crate::facts::{DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayUrl};
 use crate::solver::Coverage;
@@ -86,12 +86,25 @@ pub(crate) enum AtomClass {
     Pinned,
 }
 
-pub(crate) fn classify(atom: &ConcreteFilter) -> AtomClass {
-    let (skeleton, authors) = Skeleton::of(atom);
-    if authors.is_empty() {
-        AtomClass::Pinned
-    } else {
-        AtomClass::Outbox { skeleton, authors }
+/// Classify a demand atom by its DECLARED [`SourceAuthority`] (#106), never
+/// by incidentally inferring routing intent from whether `atom.authors`
+/// happens to be populated. Before #106, `authors.is_empty()` alone decided
+/// Outbox vs Pinned; that inference is byte-identical to this for every
+/// atom `Demand::from_filter`'s static default produces (an `AuthorOutboxes`
+/// atom's `authors` is never empty in practice — an empty-resolving authors
+/// binding yields zero atoms at all, never a materialized atom with empty
+/// `authors`), so today's regression floor holds unchanged. The seam this
+/// opens: a caller MAY construct a `Demand` with `source: Public` even when
+/// its selection constrains `authors` (e.g. NIP-29-tagged content routed via
+/// the group host, not each author's own outbox) — SourceAuthority, not
+/// filter shape, is now authoritative.
+pub(crate) fn classify(atom: &ConcreteFilter, source: SourceAuthority) -> AtomClass {
+    match source {
+        SourceAuthority::AuthorOutboxes => {
+            let (skeleton, authors) = Skeleton::of(atom);
+            AtomClass::Outbox { skeleton, authors }
+        }
+        SourceAuthority::Public => AtomClass::Pinned,
     }
 }
 
@@ -312,10 +325,29 @@ mod tests {
     #[test]
     fn classify_distinguishes_outbox_and_pinned() {
         assert!(matches!(
-            classify(&cf_kind1(Some(BTreeSet::from([pk('a')])))),
+            classify(
+                &cf_kind1(Some(BTreeSet::from([pk('a')]))),
+                SourceAuthority::AuthorOutboxes
+            ),
             AtomClass::Outbox { .. }
         ));
-        assert!(matches!(classify(&cf_kind1(None)), AtomClass::Pinned));
+        assert!(matches!(
+            classify(&cf_kind1(None), SourceAuthority::Public),
+            AtomClass::Pinned
+        ));
+    }
+
+    /// The seam #106 opens: DECLARED `SourceAuthority` decides, not filter
+    /// shape -- an author-bearing atom explicitly declared `Public` routes
+    /// Pinned (e.g. NIP-29-tagged content routed via the group host, not
+    /// each author's own outbox).
+    #[test]
+    fn classify_honors_declared_source_over_filter_shape() {
+        let author_bearing = cf_kind1(Some(BTreeSet::from([pk('a')])));
+        assert!(matches!(
+            classify(&author_bearing, SourceAuthority::Public),
+            AtomClass::Pinned
+        ));
     }
 
     /// `build_candidates` no longer folds indexers into the per-author
