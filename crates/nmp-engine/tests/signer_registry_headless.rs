@@ -45,9 +45,10 @@ fn wait_for_rows(
             Ok((deltas, _coverage)) => {
                 for delta in deltas {
                     match delta {
-                        RowDelta::Added(event) => {
-                            current.insert(event.id);
+                        RowDelta::Added(row) => {
+                            current.insert(row.event.id);
                         }
+                        RowDelta::SourcesGrew { .. } => {}
                         RowDelta::Removed(id) => {
                             current.remove(&id);
                         }

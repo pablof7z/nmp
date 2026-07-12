@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, CoverageInterval, DiagnosticsSnapshot,
-    Durability as GDurability, FilterCoverageEntry, Lane, RelayDiagnosticsSnapshot, RowDelta,
+    Durability as GDurability, FilterCoverageEntry, Lane, RelayDiagnosticsSnapshot, Row, RowDelta,
     ShortfallFact, SourceEvidence, SourceStatus, WriteIntent as GWriteIntent,
     WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
@@ -332,7 +332,10 @@ pub fn filter_to_ffi(f: GFilter) -> FfiFilter {
 }
 
 /// Raw tokens only (ledger #12) -- no formatted field is ever built here.
-pub fn event_to_ffi_row(e: &nostr::Event) -> FfiRow {
+/// `sources` (#105) is likewise raw: the row's relay-observation set,
+/// verbatim URLs, sorted (the caller's `BTreeSet<RelayUrl>` iteration order).
+pub fn row_to_ffi_row(row: &Row) -> FfiRow {
+    let e = &row.event;
     FfiRow {
         id: e.id.to_hex(),
         pubkey: e.pubkey.to_hex(),
@@ -341,13 +344,18 @@ pub fn event_to_ffi_row(e: &nostr::Event) -> FfiRow {
         tags: e.tags.iter().map(|t| t.clone().to_vec()).collect(),
         content: e.content.clone(),
         sig: e.sig.to_string(),
+        sources: row.sources.iter().map(RelayUrl::to_string).collect(),
     }
 }
 
 pub fn row_delta_to_ffi(d: &RowDelta) -> FfiRowDelta {
     match d {
-        RowDelta::Added(event) => FfiRowDelta::Added {
-            row: event_to_ffi_row(event),
+        RowDelta::Added(row) => FfiRowDelta::Added {
+            row: row_to_ffi_row(row),
+        },
+        RowDelta::SourcesGrew { id, sources } => FfiRowDelta::SourcesGrew {
+            id: id.to_hex(),
+            sources: sources.iter().map(RelayUrl::to_string).collect(),
         },
         RowDelta::Removed(id) => FfiRowDelta::Removed { id: id.to_hex() },
     }

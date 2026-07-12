@@ -100,9 +100,13 @@ impl FeedState {
     fn apply(&mut self, deltas: Vec<RowDelta>, evidence: AcquisitionEvidence) {
         for delta in deltas {
             match delta {
-                RowDelta::Added(event) => {
-                    self.rows.insert(event.id, event);
+                RowDelta::Added(row) => {
+                    self.rows.insert(row.event.id, row.event);
                 }
+                // #105: no scenario in this catalog asserts on relay
+                // provenance yet -- the row's event/membership is unchanged,
+                // so there is nothing for this world to update.
+                RowDelta::SourcesGrew { .. } => {}
                 RowDelta::Removed(id) => {
                     self.rows.remove(&id);
                 }

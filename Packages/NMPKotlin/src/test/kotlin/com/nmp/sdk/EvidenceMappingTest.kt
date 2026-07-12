@@ -15,8 +15,40 @@ import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
 import uniffi.nmp_ffi.FfiWriteStatus
 import uniffi.nmp_ffi.FfiReceiptReattachment
+import uniffi.nmp_ffi.FfiRow
+import uniffi.nmp_ffi.FfiRowDelta
 
 class EvidenceMappingTest {
+    @Test
+    fun sourcesGrewReplacesRowInPlaceWithoutDuplicating() {
+        // #105: `SourcesGrew` must replace the row's provenance IN PLACE --
+        // never a second `Added` for the same id. Drives `applyRowDelta`
+        // directly (the same accumulator step `observeQuery` uses).
+        val order = mutableListOf<String>()
+        val byId = mutableMapOf<String, Row>()
+        val ffiRow =
+            FfiRow(
+                id = "abc",
+                pubkey = "pk",
+                createdAt = 1uL,
+                kind = 1u,
+                tags = emptyList(),
+                content = "hi",
+                sig = "sig",
+                sources = listOf("wss://r0.example"),
+            )
+
+        applyRowDelta(order, byId, FfiRowDelta.Added(ffiRow))
+        applyRowDelta(
+            order,
+            byId,
+            FfiRowDelta.SourcesGrew("abc", listOf("wss://r0.example", "wss://r1.example")),
+        )
+
+        assertEquals(1, order.size, "SourcesGrew must never insert a second row for the same id")
+        assertEquals(listOf("wss://r0.example", "wss://r1.example"), byId["abc"]?.sources)
+    }
+
     @Test
     fun receiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
         assertTrue(

@@ -22,6 +22,11 @@ data class Row(
     val tags: List<List<String>>,
     val content: String,
     val sig: String,
+    /**
+     * Sorted, deduplicated relay URLs that have delivered this event id
+     * (#105) -- raw tokens, not a formatted/display field either.
+     */
+    val sources: List<String>,
 ) {
     companion object {
         fun from(ffi: FfiRow): Row =
@@ -33,6 +38,7 @@ data class Row(
                 tags = ffi.tags,
                 content = ffi.content,
                 sig = ffi.sig,
+                sources = ffi.sources,
             )
     }
 }

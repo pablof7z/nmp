@@ -16,6 +16,9 @@ public struct Row: Sendable, Identifiable, Hashable {
     public let tags: [[String]]
     public let content: String
     public let sig: String
+    /// Sorted, deduplicated relay URLs that have delivered this event id
+    /// (#105) -- raw tokens, not a formatted/display field either.
+    public let sources: [String]
 
     init(_ ffi: FfiRow) {
         id = ffi.id
@@ -25,6 +28,31 @@ public struct Row: Sendable, Identifiable, Hashable {
         tags = ffi.tags
         content = ffi.content
         sig = ffi.sig
+        sources = ffi.sources
+    }
+
+    private init(
+        id: String, pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]],
+        content: String, sig: String, sources: [String]
+    ) {
+        self.id = id
+        self.pubkey = pubkey
+        self.createdAt = createdAt
+        self.kind = kind
+        self.tags = tags
+        self.content = content
+        self.sig = sig
+        self.sources = sources
+    }
+
+    /// A copy of this row with `sources` replaced -- the accumulator's own
+    /// update when the SAME row's provenance grows (`RowDelta.sourcesGrew`,
+    /// #105) with no new event to reconstruct the rest of the row from.
+    func withSources(_ sources: [String]) -> Row {
+        Row(
+            id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags,
+            content: content, sig: sig, sources: sources
+        )
     }
 }
 
