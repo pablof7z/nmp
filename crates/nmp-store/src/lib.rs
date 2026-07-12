@@ -68,7 +68,7 @@ pub use redb_store::RedbStore;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::ContextualAtom;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, PublicKey, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -985,12 +985,16 @@ pub trait EventStore {
     /// minimum of the same persistent expiration index `expire_due` drains.
     fn next_expiration(&self) -> Option<Timestamp>;
 
-    /// Record that `relay` has proven `proven` for `filter`'s window-erased
-    /// shape (ruling §1/§3). Merge-only: no public lowering path exists
-    /// outside `gc`.
+    /// Record that `relay` has proven `proven` for `atom`'s window-erased
+    /// shape UNDER its declared `source`/`access` (ruling §1/§3, #106-
+    /// widened: the coverage identity is now the full [`ContextualAtom`],
+    /// never a bare `ConcreteFilter` alone -- the caller, which knows the
+    /// atom's `Demand` context, must supply it; the store has no notion of
+    /// `SourceAuthority`/`AccessContext` of its own). Merge-only: no public
+    /// lowering path exists outside `gc`.
     fn record_coverage(
         &mut self,
-        filter: &ConcreteFilter,
+        atom: &ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
     );

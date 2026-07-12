@@ -16,11 +16,13 @@
 mod binding;
 mod concrete;
 mod demand;
+mod descriptor;
 mod indexed_tag_name;
 mod selector;
 
 pub use binding::{Binding, Derived, Filter, SetAlgebra, SetOp};
-pub use concrete::{ConcreteFilter, DescriptorHash};
+pub use concrete::{fold_byte, fold_context, ConcreteFilter, ContextualAtom, DescriptorHash};
 pub use demand::{DemandDelta, DemandOp};
+pub use descriptor::{AccessContext, CacheMode, Demand, DemandError, SourceAuthority};
 pub use indexed_tag_name::IndexedTagName;
 pub use selector::{IdentityField, Selector};

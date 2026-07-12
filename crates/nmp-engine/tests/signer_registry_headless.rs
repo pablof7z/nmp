@@ -85,7 +85,7 @@ fn wait_for_status(
 }
 
 fn reactive_kind1() -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
         ..Filter::default()

@@ -200,6 +200,17 @@ impl RuleRegistry {
     /// both the provenance list AND the `absorbed` coverage-key set of every
     /// filter folded into a merge.
     ///
+    /// Deliberately PURE selection-only (#106, Fable D "locus fixed"): this
+    /// engine never learns about `SourceAuthority`/`AccessContext` at all --
+    /// equal-context-only coalescing is enforced one level up, by
+    /// `Router::compile` partitioning its per-relay bag by `ContextKey`
+    /// BEFORE calling this on each partition separately. Two atoms that
+    /// happen to land in the same partition (same relay, same context)
+    /// coalesce exactly as they always did; atoms in different partitions
+    /// are never even offered to this function together, so its own
+    /// widen-only proof (which reasons about `ConcreteFilter` pairs alone)
+    /// and property tests stay untouched.
+    ///
     /// `absorbed` threading is what discharges the coverage-attribution
     /// ruling's containment rule
     /// (`docs/consults/2026-07-11-fable-coverage-attribution.md` §2) at

@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_store::{
     coverage_key, sentinel_signature, AcceptWrite, ClaimSet, CoverageInterval, EventStore,
     InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore, RefuseReason, RelayObserved,
@@ -82,6 +82,20 @@ fn shape(kinds: &[u16], authors: Option<&Keys>) -> ConcreteFilter {
         since: None,
         until: None,
         limit: None,
+    }
+}
+
+/// Wrap a filter into a fixed-context (`AuthorOutboxes`/`Public`) demand
+/// atom (#106): `coverage_key`/`record_coverage` now take a full
+/// `ContextualAtom`, not a bare `ConcreteFilter` -- this contract suite
+/// exercises the SELECTION/interval-merge axis, so every atom here shares a
+/// uniform context (a dedicated context-anti-alias falsifier lives in
+/// `nmp-store/src/coverage.rs`, closer to the identity it's proving).
+fn atom(filter: &ConcreteFilter) -> ContextualAtom {
+    ContextualAtom {
+        filter: filter.clone(),
+        source: SourceAuthority::AuthorOutboxes,
+        access: AccessContext::Public,
     }
 }
 
@@ -347,12 +361,12 @@ fn record_coverage_then_get_coverage_roundtrip() {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
         );
 
-        let key = coverage_key(&s);
+        let key = coverage_key(&atom(&s));
         let interval = store.get_coverage(key, &r).expect("row should exist");
         assert_eq!(interval.from, Timestamp::from(0u64));
         assert_eq!(interval.through, Timestamp::from(100u64));
@@ -363,7 +377,7 @@ fn record_coverage_then_get_coverage_roundtrip() {
 fn get_coverage_returns_none_when_no_row_recorded() {
     for_each_backend(|store| {
         let s = shape(&[1], None);
-        let key = coverage_key(&s);
+        let key = coverage_key(&atom(&s));
         assert!(store.get_coverage(key, &relay("wss://r1")).is_none());
     });
 }
@@ -374,7 +388,7 @@ fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
         let unfloored = shape(&[1], None);
         let r = relay("wss://r1");
         store.record_coverage(
-            &unfloored,
+            &atom(&unfloored),
             &r,
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
         );
@@ -386,8 +400,8 @@ fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
             limit: Some(50),
             ..unfloored.clone()
         };
-        let key = coverage_key(&floored);
-        assert_eq!(key, coverage_key(&unfloored));
+        let key = coverage_key(&atom(&floored));
+        assert_eq!(key, coverage_key(&atom(&unfloored)));
         let interval = store
             .get_coverage(key, &r)
             .expect("same row, found via the floored atom's key");
@@ -410,7 +424,7 @@ fn limited_fetch_that_never_calls_record_coverage_leaves_get_coverage_none() {
         };
         // The engine never calls `record_coverage` here — that's the whole
         // point. We only assert the store's side: nothing was ever recorded.
-        let key = coverage_key(&limited_shape);
+        let key = coverage_key(&atom(&limited_shape));
         assert!(store.get_coverage(key, &relay("wss://r1")).is_none());
     });
 }
@@ -421,19 +435,19 @@ fn coverage_merge_extends_across_two_record_coverage_calls() {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
         );
         // Planner floors the next REQ at covered_through + 1 — the common
         // contiguous-extension path.
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(101u64), Timestamp::from(200u64)),
         );
 
-        let key = coverage_key(&s);
+        let key = coverage_key(&atom(&s));
         let interval = store.get_coverage(key, &r).unwrap();
         assert_eq!(interval.from, Timestamp::from(0u64));
         assert_eq!(interval.through, Timestamp::from(200u64));
@@ -446,18 +460,18 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(300u64), Timestamp::from(400u64)),
         );
         // A disjoint, strictly-older interval must never overwrite it.
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(50u64)),
         );
 
-        let key = coverage_key(&s);
+        let key = coverage_key(&atom(&s));
         let interval = store.get_coverage(key, &r).unwrap();
         assert_eq!(interval.from, Timestamp::from(300u64));
         assert_eq!(interval.through, Timestamp::from(400u64));
@@ -479,7 +493,7 @@ fn gc_evicts_unclaimed_regular_event_and_shrinks_covering_watermark() {
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
         );
@@ -490,7 +504,7 @@ fn gc_evicts_unclaimed_regular_event_and_shrinks_covering_watermark() {
         assert_eq!(report.coverage_rows_shrunk, 1);
         assert_eq!(report.coverage_rows_deleted, 0);
 
-        let key = coverage_key(&s);
+        let key = coverage_key(&atom(&s));
         let interval = store
             .get_coverage(key, &r)
             .expect("row should survive, shrunk");
@@ -512,7 +526,7 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(100u64)),
         );
@@ -523,7 +537,7 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
         assert_eq!(report.coverage_rows_deleted, 1);
         assert_eq!(report.coverage_rows_shrunk, 0);
 
-        let key = coverage_key(&s);
+        let key = coverage_key(&atom(&s));
         assert!(store.get_coverage(key, &r).is_none());
     });
 }
@@ -694,7 +708,7 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
 
     let s = shape(&[1], Some(&k));
     let r = relay("wss://r1");
-    let key = coverage_key(&s);
+    let key = coverage_key(&atom(&s));
 
     {
         let mut store = RedbStore::open(&path).expect("open");
@@ -702,7 +716,7 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
         store.insert(newer, observed("wss://r1", 2));
         store.insert(regular, observed("wss://r1", 3));
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64)),
         );
@@ -1061,12 +1075,12 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         store.insert(expiring_target, observed("wss://r1", 1));
         store.insert(old_replaceable, observed("wss://r1", 1));
         store.record_coverage(
-            &s,
+            &atom(&s),
             &r,
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
         );
 
-        let key = coverage_key(&s);
+        let key = coverage_key(&atom(&s));
         let before = store.get_coverage(key, &r).expect("row exists");
 
         assert!(matches!(

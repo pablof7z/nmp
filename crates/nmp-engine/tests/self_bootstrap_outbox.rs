@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
-use nmp_grammar::{Binding, ConcreteFilter, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{Binding, ConcreteFilter, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::{LiveDirectory, SubId, WireOp};
 use nmp_store::MemoryStore;
@@ -138,14 +138,14 @@ fn kind10002_with_read_relay(
 /// kind:3 contact list currently names (identical shape to `nmp-demo`'s
 /// `build_follow_feed_query`).
 fn follow_feed_query() -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()

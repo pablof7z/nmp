@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::descriptor::{AccessContext, SourceAuthority};
 use crate::indexed_tag_name::IndexedTagName;
 
 /// A fully-resolved filter — NO bindings. The unit of the demand set and
@@ -168,6 +169,82 @@ impl ConcreteFilter {
     }
 }
 
+/// A resolved demand atom paired with its full identity context (#106):
+/// the same [`ConcreteFilter`] requested under two different
+/// [`SourceAuthority`]/[`AccessContext`] pairs is TWO distinct atoms —
+/// distinct refcount entries, distinct [`DescriptorHash`]es, distinct
+/// coverage/attribution identity. This is the anti-alias fix bug-class
+/// ledger #18 names: `ConcreteFilter::hash()` alone can never distinguish
+/// them (identical bytes hash identically by design), so identity has to
+/// widen one level up, here, rather than by mutating `ConcreteFilter`
+/// itself (which stays pure selection — untouched by this type).
+///
+/// Deliberately does NOT carry [`crate::CacheMode`]: cache mode governs the
+/// LOCAL row-projection read (#107), never wire/coverage identity, so it is
+/// excluded from `hash()`'s input on purpose (atlas's #106/#107 seam
+/// ruling) — two `Demand`s differing ONLY in `cache` must still hash
+/// (and therefore coalesce) identically.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextualAtom {
+    pub filter: ConcreteFilter,
+    pub source: SourceAuthority,
+    pub access: AccessContext,
+}
+
+impl ContextualAtom {
+    /// Canonical, stable, collision-resistant hash — built from the
+    /// filter's OWN already-collision-resistant 32-byte digest plus one
+    /// discriminant byte per context axis, via [`fold_context`].
+    pub fn hash(&self) -> DescriptorHash {
+        fold_context(self.filter.hash(), self.source, self.access)
+    }
+}
+
+/// Fold `source`/`access` context onto an existing hash, producing a NEW,
+/// still framing-unambiguous digest (fixed-width tag bytes, no delimiter
+/// needed). [`ContextualAtom::hash`] is the primary caller; exposed
+/// publicly so a caller with its OWN base hash that isn't a bare
+/// `ConcreteFilter::hash()` -- e.g. `nmp-router`'s `Skeleton` hash
+/// (authors already erased, for sub-id stability across author churn) or
+/// `nmp-store`'s window-erased `CoverageKey` hash -- can derive a
+/// context-aware hash without duplicating the tagging scheme or
+/// reconstructing a `ContextualAtom` it doesn't otherwise need.
+pub fn fold_context(
+    base: DescriptorHash,
+    source: SourceAuthority,
+    access: AccessContext,
+) -> DescriptorHash {
+    let tagged = fold_byte(
+        base,
+        match source {
+            SourceAuthority::AuthorOutboxes => 0,
+            SourceAuthority::Public => 1,
+        },
+    );
+    fold_byte(
+        tagged,
+        match access {
+            AccessContext::Public => 0,
+        },
+    )
+}
+
+/// Fold one arbitrary tag byte onto an existing hash, producing a NEW,
+/// still framing-unambiguous digest (fixed-width, no delimiter needed).
+/// [`fold_context`] is built from two calls to this; exposed publicly so a
+/// caller needing a differently-shaped tag -- e.g. `nmp-store`'s durable
+/// `CoverageKey` schema VERSION tag (Fable's #106 refinement of atlas's C
+/// recommendation: a version tag inside the hashed encoding, on top of the
+/// context fold, so a future schema change is distinguishable at the hash
+/// level too, not just via an outer key prefix) -- can derive one without
+/// depending on `blake3` directly itself.
+pub fn fold_byte(base: DescriptorHash, tag: u8) -> DescriptorHash {
+    let mut bytes = Vec::with_capacity(33);
+    bytes.extend_from_slice(base.as_bytes());
+    bytes.push(tag);
+    DescriptorHash(*blake3::hash(&bytes).as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +325,31 @@ mod tests {
             "expected an avalanche (>20/32 bytes differing) for a one-character \
              change, got only {differing_bytes}/32 -- weak diffusion is exactly \
              the property that makes a hash offline-collidable"
+        );
+    }
+
+    /// #106's anti-alias core: the identical `ConcreteFilter` under two
+    /// distinct `SourceAuthority`s must hash to two distinct
+    /// `ContextualAtom` identities -- this is precisely the bug-class #18
+    /// collapse (same selection, different intended authority, same atom)
+    /// the whole `Demand`/`ContextualAtom` widening exists to close.
+    #[test]
+    fn contextual_atom_hash_distinguishes_identical_filters_under_different_source_authority() {
+        let filter = cf(vec!["aa"], vec![]);
+        let outbox = ContextualAtom {
+            filter: filter.clone(),
+            source: crate::descriptor::SourceAuthority::AuthorOutboxes,
+            access: crate::descriptor::AccessContext::Public,
+        };
+        let public = ContextualAtom {
+            filter,
+            source: crate::descriptor::SourceAuthority::Public,
+            access: crate::descriptor::AccessContext::Public,
+        };
+        assert_ne!(
+            outbox.hash(),
+            public.hash(),
+            "same selection under different SourceAuthority must never alias"
         );
     }
 

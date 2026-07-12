@@ -42,9 +42,10 @@ fn dropped_handle_close_reaches_wire() {
     );
 
     let mut h = Harness::new();
-    let (handle, _open_delta) = h.subscribe(LiveQuery(literal_author_filter(&author_hex)));
+    let (handle, _open_delta) =
+        h.subscribe(LiveQuery::from_filter(literal_author_filter(&author_hex)));
 
-    let demand_open = h.demand();
+    let demand_open = h.demand_with_context();
     assert_eq!(demand_open.len(), 1);
     let opening_delta = router.compile(&demand_open, &dir, 10);
     assert!(
@@ -72,14 +73,14 @@ fn dropped_handle_close_reaches_wire() {
         drop_delta
             .closed()
             .iter()
-            .any(|cf| cf.authors.as_ref() == Some(&BTreeSet::from([author_hex.clone()]))),
+            .any(|atom| atom.filter.authors.as_ref() == Some(&BTreeSet::from([author_hex.clone()]))),
         "the resolver's own delta must surface the dropped atom's Close"
     );
 
     // The atom is already absent from `active_demand()` -- the router's
     // full-recompile-then-diff design means the NEXT compile emits the
     // withdrawal as a real wire Close, without any special-casing.
-    let demand_after_drop = h.demand();
+    let demand_after_drop = h.demand_with_context();
     assert!(demand_after_drop.is_empty());
 
     let closing_delta = router.compile(&demand_after_drop, &dir, 10);

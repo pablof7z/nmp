@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nmp_router::SubId;
 use nmp_store::{coverage_key, CoverageInterval, CoverageKey};
 use nostr::{RelayUrl, Timestamp};
@@ -43,15 +43,17 @@ pub(crate) struct AttributionState {
     /// `wire_sub_id_string` below) and is the only reader of it, via this
     /// map — never by re-parsing the string back into a hash.
     sub_id_by_wire: HashMap<(RelayUrl, String), SubId>,
-    /// `CoverageKey -> the window-erased ConcreteFilter shape it came from.
-    /// The store's `record_coverage` takes a `&ConcreteFilter` (it computes
-    /// the key AND retains the shape itself internally); `EngineCore` only
-    /// ever has a `CoverageKey` at attribution time (from `WireReq::
-    /// absorbed`), so it must retain the shape separately to be able to
-    /// call that door at all. Grows monotonically; a stale entry for a
-    /// shape no longer in demand is harmless (worst case: an unreachable
-    /// key that is never looked up again).
-    shape_by_key: HashMap<CoverageKey, ConcreteFilter>,
+    /// `CoverageKey -> the ContextualAtom it came from (#106 -- widened
+    /// from a bare `ConcreteFilter`: the store's `record_coverage` now
+    /// takes a `&ContextualAtom`, since `CoverageKey` itself is a
+    /// context-inclusive hash, so retaining only the selection shape would
+    /// no longer be enough to reconstruct the right key at EOSE time).
+    /// `EngineCore` only ever has a `CoverageKey` at attribution time (from
+    /// `WireReq::absorbed`), so it must retain the FULL atom separately to
+    /// be able to call that door at all. Grows monotonically; a stale
+    /// entry for a shape no longer in demand is harmless (worst case: an
+    /// unreachable key that is never looked up again).
+    shape_by_key: HashMap<CoverageKey, ContextualAtom>,
 }
 
 impl AttributionState {
@@ -59,13 +61,15 @@ impl AttributionState {
         Self::default()
     }
 
-    /// Learn the window-erased shape behind every atom in `demand` (called
-    /// once per recompile, from the resolver's full current `active_demand
-    /// ()` — cheap, and the only way `EngineCore` ever sees the atoms'
-    /// shapes at all).
+    /// Learn the ContextualAtom behind every atom in `demand` (called once
+    /// per recompile, from the resolver's full current `active_demand()` —
+    /// cheap, and the only way `EngineCore` ever sees the atoms' shapes at
+    /// all). `demand` carries each atom's full `ContextualAtom` identity
+    /// (#106) so the retained value is keyed AND populated the SAME way
+    /// `record_send`/`attribute_eose`'s `CoverageKey`s already are.
     pub(crate) fn observe_demand<'a>(
         &mut self,
-        demand: impl IntoIterator<Item = &'a ConcreteFilter>,
+        demand: impl IntoIterator<Item = &'a ContextualAtom>,
     ) {
         for atom in demand {
             self.shape_by_key
@@ -74,9 +78,9 @@ impl AttributionState {
         }
     }
 
-    /// The retained shape for `key`, if any atom carrying it has ever been
+    /// The retained atom for `key`, if any atom carrying it has ever been
     /// observed via [`Self::observe_demand`].
-    pub(crate) fn shape_of(&self, key: CoverageKey) -> Option<ConcreteFilter> {
+    pub(crate) fn shape_of(&self, key: CoverageKey) -> Option<ContextualAtom> {
         self.shape_by_key.get(&key).cloned()
     }
 

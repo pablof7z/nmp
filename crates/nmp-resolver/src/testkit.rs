@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, DemandDelta};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, DemandDelta};
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, IntentSigState, MemoryStore, WriteDurability,
 };
@@ -78,7 +78,22 @@ impl Harness {
             .expect("accept_write persistence (MemoryStore never fails a door)")
     }
 
+    /// The wire-facing demand set (selection-only, two-hash-domains): what
+    /// existing M1/M2 contract tests already assert against, unchanged in
+    /// shape by #106.
     pub fn demand(&self) -> BTreeSet<ConcreteFilter> {
+        self.engine
+            .active_demand()
+            .into_iter()
+            .map(|atom| atom.filter)
+            .collect()
+    }
+
+    /// The context-aware demand set (#106): identity-domain atoms, source/
+    /// access included -- for tests that need to assert on
+    /// `SourceAuthority`/`AccessContext`, e.g. equal-context-only
+    /// coalescing (Fable D).
+    pub fn demand_with_context(&self) -> BTreeSet<ContextualAtom> {
         self.engine.active_demand()
     }
 

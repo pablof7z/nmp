@@ -3,10 +3,14 @@
 # rust toolchain: nightly-2026-07-07
 # crate: nmp
 pub mod nmp
+pub use nmp::AccessContext
 pub use nmp::AcquisitionEvidence
 pub use nmp::AuthPhase
 pub use nmp::Binding
+pub use nmp::CacheMode
 pub use nmp::CoverageInterval
+pub use nmp::Demand
+pub use nmp::DemandError
 pub use nmp::Derived
 pub use nmp::DiagnosticsSnapshot
 pub use nmp::Durability
@@ -32,6 +36,7 @@ pub use nmp::Selector
 pub use nmp::SetAlgebra
 pub use nmp::SetOp
 pub use nmp::ShortfallFact
+pub use nmp::SourceAuthority
 pub use nmp::SourceEvidence
 pub use nmp::SourceStatus
 pub use nmp::Tag
@@ -147,6 +152,34 @@ impl !core::panic::unwind_safe::RefUnwindSafe for nmp::Subscription
 impl !core::panic::unwind_safe::UnwindSafe for nmp::Subscription
 
 # resolved dependency-owned reexports (rustdoc JSON format 60)
+reexport nmp::AccessContext => nmp_grammar::descriptor::AccessContext
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Public",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "AccessContext",
+  "visibility": "public"
+}
 reexport nmp::AcquisitionEvidence => nmp_engine::core::evidence::AcquisitionEvidence
 {
   "attrs": [],
@@ -3246,7 +3279,7 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                         "struct_field": {
                                                           "resolved_path": {
                                                             "args": null,
-                                                            "path": "Filter",
+                                                            "path": "crate::descriptor::Demand",
                                                             "resolved_item": {
                                                               "definition": {
                                                                 "attrs": [],
@@ -3274,7 +3307,23 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                               "is_unsafe": false
                                                                             },
                                                                             "sig": {
-                                                                              "inputs": [],
+                                                                              "inputs": [
+                                                                                [
+                                                                                  "selection",
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "Filter",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::binding::Filter"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::binding::Filter"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ]
+                                                                              ],
                                                                               "is_c_variadic": false,
                                                                               "output": {
                                                                                 "generic": "Self"
@@ -3282,7 +3331,202 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                             }
                                                                           }
                                                                         },
+                                                                        "name": "from_filter",
+                                                                        "visibility": "public"
+                                                                      },
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "function": {
+                                                                            "default_unstable": null,
+                                                                            "generics": {
+                                                                              "params": [],
+                                                                              "where_predicates": []
+                                                                            },
+                                                                            "has_body": true,
+                                                                            "header": {
+                                                                              "abi": "Rust",
+                                                                              "is_async": false,
+                                                                              "is_const": false,
+                                                                              "is_unsafe": false
+                                                                            },
+                                                                            "sig": {
+                                                                              "inputs": [
+                                                                                [
+                                                                                  "selection",
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "Filter",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::binding::Filter"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::binding::Filter"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ],
+                                                                                [
+                                                                                  "source",
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "SourceAuthority",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ],
+                                                                                [
+                                                                                  "access",
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "AccessContext",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::AccessContext"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::AccessContext"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ]
+                                                                              ],
+                                                                              "is_c_variadic": false,
+                                                                              "output": {
+                                                                                "resolved_path": {
+                                                                                  "args": {
+                                                                                    "angle_bracketed": {
+                                                                                      "args": [
+                                                                                        {
+                                                                                          "type": {
+                                                                                            "generic": "Self"
+                                                                                          }
+                                                                                        },
+                                                                                        {
+                                                                                          "type": {
+                                                                                            "resolved_path": {
+                                                                                              "args": null,
+                                                                                              "path": "DemandError",
+                                                                                              "resolved_item": {
+                                                                                                "definition": {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "enum": {
+                                                                                                      "generics": {
+                                                                                                        "params": [],
+                                                                                                        "where_predicates": []
+                                                                                                      },
+                                                                                                      "has_stripped_variants": false,
+                                                                                                      "variants": [
+                                                                                                        {
+                                                                                                          "attrs": [],
+                                                                                                          "inner": {
+                                                                                                            "variant": {
+                                                                                                              "discriminant": null,
+                                                                                                              "kind": "plain"
+                                                                                                            }
+                                                                                                          },
+                                                                                                          "name": "AuthorOutboxesRequiresBoundAuthors",
+                                                                                                          "visibility": "default"
+                                                                                                        }
+                                                                                                      ]
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "DemandError",
+                                                                                                  "visibility": "public"
+                                                                                                },
+                                                                                                "path": "nmp_grammar::descriptor::DemandError"
+                                                                                              }
+                                                                                            }
+                                                                                          }
+                                                                                        }
+                                                                                      ],
+                                                                                      "constraints": []
+                                                                                    }
+                                                                                  },
+                                                                                  "path": "Result",
+                                                                                  "resolved_item": {
+                                                                                    "path": "core::result::Result"
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        },
                                                                         "name": "new",
+                                                                        "visibility": "public"
+                                                                      },
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "function": {
+                                                                            "default_unstable": null,
+                                                                            "generics": {
+                                                                              "params": [],
+                                                                              "where_predicates": []
+                                                                            },
+                                                                            "has_body": true,
+                                                                            "header": {
+                                                                              "abi": "Rust",
+                                                                              "is_async": false,
+                                                                              "is_const": false,
+                                                                              "is_unsafe": false
+                                                                            },
+                                                                            "sig": {
+                                                                              "inputs": [
+                                                                                [
+                                                                                  "self",
+                                                                                  {
+                                                                                    "borrowed_ref": {
+                                                                                      "is_mutable": false,
+                                                                                      "lifetime": null,
+                                                                                      "type": {
+                                                                                        "generic": "Self"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ]
+                                                                              ],
+                                                                              "is_c_variadic": false,
+                                                                              "output": {
+                                                                                "tuple": [
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "SourceAuthority",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                      }
+                                                                                    }
+                                                                                  },
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "AccessContext",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::AccessContext"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::AccessContext"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ]
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        },
+                                                                        "name": "atom_context",
                                                                         "visibility": "public"
                                                                       }
                                                                     ]
@@ -3302,165 +3546,320 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                             "inner": {
                                                                               "struct_field": {
                                                                                 "resolved_path": {
-                                                                                  "args": {
-                                                                                    "angle_bracketed": {
-                                                                                      "args": [
+                                                                                  "args": null,
+                                                                                  "path": "crate::binding::Filter",
+                                                                                  "resolved_item": {
+                                                                                    "definition": {
+                                                                                      "attrs": [],
+                                                                                      "inherent_impls": [
                                                                                         {
-                                                                                          "type": {
-                                                                                            "resolved_path": {
-                                                                                              "args": {
-                                                                                                "angle_bracketed": {
-                                                                                                  "args": [
-                                                                                                    {
-                                                                                                      "type": {
-                                                                                                        "primitive": "u16"
-                                                                                                      }
+                                                                                          "generics": {
+                                                                                            "params": [],
+                                                                                            "where_predicates": []
+                                                                                          },
+                                                                                          "items": [
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "function": {
+                                                                                                  "default_unstable": null,
+                                                                                                  "generics": {
+                                                                                                    "params": [],
+                                                                                                    "where_predicates": []
+                                                                                                  },
+                                                                                                  "has_body": true,
+                                                                                                  "header": {
+                                                                                                    "abi": "Rust",
+                                                                                                    "is_async": false,
+                                                                                                    "is_const": false,
+                                                                                                    "is_unsafe": false
+                                                                                                  },
+                                                                                                  "sig": {
+                                                                                                    "inputs": [],
+                                                                                                    "is_c_variadic": false,
+                                                                                                    "output": {
+                                                                                                      "generic": "Self"
                                                                                                     }
-                                                                                                  ],
-                                                                                                  "constraints": []
+                                                                                                  }
                                                                                                 }
                                                                                               },
-                                                                                              "path": "std::collections::BTreeSet",
-                                                                                              "resolved_item": {
-                                                                                                "path": "alloc::collections::btree::set::BTreeSet"
-                                                                                              }
+                                                                                              "name": "new",
+                                                                                              "visibility": "public"
                                                                                             }
-                                                                                          }
+                                                                                          ]
                                                                                         }
                                                                                       ],
-                                                                                      "constraints": []
-                                                                                    }
-                                                                                  },
-                                                                                  "path": "Option",
-                                                                                  "resolved_item": {
-                                                                                    "path": "core::option::Option"
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            },
-                                                                            "name": "kinds",
-                                                                            "visibility": "public"
-                                                                          },
-                                                                          {
-                                                                            "attrs": [],
-                                                                            "inner": {
-                                                                              "struct_field": {
-                                                                                "resolved_path": {
-                                                                                  "args": {
-                                                                                    "angle_bracketed": {
-                                                                                      "args": [
-                                                                                        {
-                                                                                          "type": {
-                                                                                            "resolved_path": {
-                                                                                              "args": null,
-                                                                                              "path": "Binding",
-                                                                                              "resolved_item": {
-                                                                                                "definition": {
-                                                                                                  "recursive_item": "nmp_grammar::binding::Binding"
+                                                                                      "inner": {
+                                                                                        "struct": {
+                                                                                          "generics": {
+                                                                                            "params": [],
+                                                                                            "where_predicates": []
+                                                                                          },
+                                                                                          "kind": {
+                                                                                            "plain": {
+                                                                                              "fields": [
+                                                                                                {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "struct_field": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": {
+                                                                                                          "angle_bracketed": {
+                                                                                                            "args": [
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "resolved_path": {
+                                                                                                                    "args": {
+                                                                                                                      "angle_bracketed": {
+                                                                                                                        "args": [
+                                                                                                                          {
+                                                                                                                            "type": {
+                                                                                                                              "primitive": "u16"
+                                                                                                                            }
+                                                                                                                          }
+                                                                                                                        ],
+                                                                                                                        "constraints": []
+                                                                                                                      }
+                                                                                                                    },
+                                                                                                                    "path": "std::collections::BTreeSet",
+                                                                                                                    "resolved_item": {
+                                                                                                                      "path": "alloc::collections::btree::set::BTreeSet"
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "constraints": []
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "path": "Option",
+                                                                                                        "resolved_item": {
+                                                                                                          "path": "core::option::Option"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "kinds",
+                                                                                                  "visibility": "public"
                                                                                                 },
-                                                                                                "path": "nmp_grammar::binding::Binding"
-                                                                                              }
-                                                                                            }
-                                                                                          }
-                                                                                        }
-                                                                                      ],
-                                                                                      "constraints": []
-                                                                                    }
-                                                                                  },
-                                                                                  "path": "Option",
-                                                                                  "resolved_item": {
-                                                                                    "path": "core::option::Option"
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            },
-                                                                            "name": "authors",
-                                                                            "visibility": "public"
-                                                                          },
-                                                                          {
-                                                                            "attrs": [],
-                                                                            "inner": {
-                                                                              "struct_field": {
-                                                                                "resolved_path": {
-                                                                                  "args": {
-                                                                                    "angle_bracketed": {
-                                                                                      "args": [
-                                                                                        {
-                                                                                          "type": {
-                                                                                            "resolved_path": {
-                                                                                              "args": null,
-                                                                                              "path": "Binding",
-                                                                                              "resolved_item": {
-                                                                                                "definition": {
-                                                                                                  "recursive_item": "nmp_grammar::binding::Binding"
+                                                                                                {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "struct_field": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": {
+                                                                                                          "angle_bracketed": {
+                                                                                                            "args": [
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "resolved_path": {
+                                                                                                                    "args": null,
+                                                                                                                    "path": "Binding",
+                                                                                                                    "resolved_item": {
+                                                                                                                      "definition": {
+                                                                                                                        "recursive_item": "nmp_grammar::binding::Binding"
+                                                                                                                      },
+                                                                                                                      "path": "nmp_grammar::binding::Binding"
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "constraints": []
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "path": "Option",
+                                                                                                        "resolved_item": {
+                                                                                                          "path": "core::option::Option"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "authors",
+                                                                                                  "visibility": "public"
                                                                                                 },
-                                                                                                "path": "nmp_grammar::binding::Binding"
-                                                                                              }
-                                                                                            }
-                                                                                          }
-                                                                                        }
-                                                                                      ],
-                                                                                      "constraints": []
-                                                                                    }
-                                                                                  },
-                                                                                  "path": "Option",
-                                                                                  "resolved_item": {
-                                                                                    "path": "core::option::Option"
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            },
-                                                                            "name": "ids",
-                                                                            "visibility": "public"
-                                                                          },
-                                                                          {
-                                                                            "attrs": [],
-                                                                            "inner": {
-                                                                              "struct_field": {
-                                                                                "resolved_path": {
-                                                                                  "args": {
-                                                                                    "angle_bracketed": {
-                                                                                      "args": [
-                                                                                        {
-                                                                                          "type": {
-                                                                                            "resolved_path": {
-                                                                                              "args": null,
-                                                                                              "path": "crate::indexed_tag_name::IndexedTagName",
-                                                                                              "resolved_item": {
-                                                                                                "definition": {
-                                                                                                  "previously_defined": "nmp_grammar::indexed_tag_name::IndexedTagName"
+                                                                                                {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "struct_field": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": {
+                                                                                                          "angle_bracketed": {
+                                                                                                            "args": [
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "resolved_path": {
+                                                                                                                    "args": null,
+                                                                                                                    "path": "Binding",
+                                                                                                                    "resolved_item": {
+                                                                                                                      "definition": {
+                                                                                                                        "recursive_item": "nmp_grammar::binding::Binding"
+                                                                                                                      },
+                                                                                                                      "path": "nmp_grammar::binding::Binding"
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "constraints": []
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "path": "Option",
+                                                                                                        "resolved_item": {
+                                                                                                          "path": "core::option::Option"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "ids",
+                                                                                                  "visibility": "public"
                                                                                                 },
-                                                                                                "path": "nmp_grammar::indexed_tag_name::IndexedTagName"
-                                                                                              }
-                                                                                            }
-                                                                                          }
-                                                                                        },
-                                                                                        {
-                                                                                          "type": {
-                                                                                            "resolved_path": {
-                                                                                              "args": null,
-                                                                                              "path": "Binding",
-                                                                                              "resolved_item": {
-                                                                                                "definition": {
-                                                                                                  "recursive_item": "nmp_grammar::binding::Binding"
+                                                                                                {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "struct_field": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": {
+                                                                                                          "angle_bracketed": {
+                                                                                                            "args": [
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "resolved_path": {
+                                                                                                                    "args": null,
+                                                                                                                    "path": "crate::indexed_tag_name::IndexedTagName",
+                                                                                                                    "resolved_item": {
+                                                                                                                      "definition": {
+                                                                                                                        "previously_defined": "nmp_grammar::indexed_tag_name::IndexedTagName"
+                                                                                                                      },
+                                                                                                                      "path": "nmp_grammar::indexed_tag_name::IndexedTagName"
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              },
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "resolved_path": {
+                                                                                                                    "args": null,
+                                                                                                                    "path": "Binding",
+                                                                                                                    "resolved_item": {
+                                                                                                                      "definition": {
+                                                                                                                        "recursive_item": "nmp_grammar::binding::Binding"
+                                                                                                                      },
+                                                                                                                      "path": "nmp_grammar::binding::Binding"
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "constraints": []
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "path": "std::collections::BTreeMap",
+                                                                                                        "resolved_item": {
+                                                                                                          "path": "alloc::collections::btree::map::BTreeMap"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "tags",
+                                                                                                  "visibility": "public"
                                                                                                 },
-                                                                                                "path": "nmp_grammar::binding::Binding"
-                                                                                              }
+                                                                                                {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "struct_field": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": {
+                                                                                                          "angle_bracketed": {
+                                                                                                            "args": [
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "primitive": "u64"
+                                                                                                                }
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "constraints": []
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "path": "Option",
+                                                                                                        "resolved_item": {
+                                                                                                          "path": "core::option::Option"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "since",
+                                                                                                  "visibility": "public"
+                                                                                                },
+                                                                                                {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "struct_field": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": {
+                                                                                                          "angle_bracketed": {
+                                                                                                            "args": [
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "primitive": "u64"
+                                                                                                                }
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "constraints": []
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "path": "Option",
+                                                                                                        "resolved_item": {
+                                                                                                          "path": "core::option::Option"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "until",
+                                                                                                  "visibility": "public"
+                                                                                                },
+                                                                                                {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "struct_field": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": {
+                                                                                                          "angle_bracketed": {
+                                                                                                            "args": [
+                                                                                                              {
+                                                                                                                "type": {
+                                                                                                                  "primitive": "usize"
+                                                                                                                }
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "constraints": []
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "path": "Option",
+                                                                                                        "resolved_item": {
+                                                                                                          "path": "core::option::Option"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "limit",
+                                                                                                  "visibility": "public"
+                                                                                                }
+                                                                                              ],
+                                                                                              "has_stripped_fields": false
                                                                                             }
                                                                                           }
                                                                                         }
-                                                                                      ],
-                                                                                      "constraints": []
-                                                                                    }
-                                                                                  },
-                                                                                  "path": "std::collections::BTreeMap",
-                                                                                  "resolved_item": {
-                                                                                    "path": "alloc::collections::btree::map::BTreeMap"
+                                                                                      },
+                                                                                      "name": "Filter",
+                                                                                      "visibility": "public"
+                                                                                    },
+                                                                                    "path": "nmp_grammar::binding::Filter"
                                                                                   }
                                                                                 }
                                                                               }
                                                                             },
-                                                                            "name": "tags",
+                                                                            "name": "selection",
                                                                             "visibility": "public"
                                                                           },
                                                                           {
@@ -3468,26 +3867,53 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                             "inner": {
                                                                               "struct_field": {
                                                                                 "resolved_path": {
-                                                                                  "args": {
-                                                                                    "angle_bracketed": {
-                                                                                      "args": [
-                                                                                        {
-                                                                                          "type": {
-                                                                                            "primitive": "u64"
-                                                                                          }
-                                                                                        }
-                                                                                      ],
-                                                                                      "constraints": []
-                                                                                    }
-                                                                                  },
-                                                                                  "path": "Option",
+                                                                                  "args": null,
+                                                                                  "path": "SourceAuthority",
                                                                                   "resolved_item": {
-                                                                                    "path": "core::option::Option"
+                                                                                    "definition": {
+                                                                                      "attrs": [],
+                                                                                      "inner": {
+                                                                                        "enum": {
+                                                                                          "generics": {
+                                                                                            "params": [],
+                                                                                            "where_predicates": []
+                                                                                          },
+                                                                                          "has_stripped_variants": false,
+                                                                                          "variants": [
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": "plain"
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "AuthorOutboxes",
+                                                                                              "visibility": "default"
+                                                                                            },
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": "plain"
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "Public",
+                                                                                              "visibility": "default"
+                                                                                            }
+                                                                                          ]
+                                                                                        }
+                                                                                      },
+                                                                                      "name": "SourceAuthority",
+                                                                                      "visibility": "public"
+                                                                                    },
+                                                                                    "path": "nmp_grammar::descriptor::SourceAuthority"
                                                                                   }
                                                                                 }
                                                                               }
                                                                             },
-                                                                            "name": "since",
+                                                                            "name": "source",
                                                                             "visibility": "public"
                                                                           },
                                                                           {
@@ -3495,26 +3921,18 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                             "inner": {
                                                                               "struct_field": {
                                                                                 "resolved_path": {
-                                                                                  "args": {
-                                                                                    "angle_bracketed": {
-                                                                                      "args": [
-                                                                                        {
-                                                                                          "type": {
-                                                                                            "primitive": "u64"
-                                                                                          }
-                                                                                        }
-                                                                                      ],
-                                                                                      "constraints": []
-                                                                                    }
-                                                                                  },
-                                                                                  "path": "Option",
+                                                                                  "args": null,
+                                                                                  "path": "AccessContext",
                                                                                   "resolved_item": {
-                                                                                    "path": "core::option::Option"
+                                                                                    "definition": {
+                                                                                      "previously_defined": "nmp_grammar::descriptor::AccessContext"
+                                                                                    },
+                                                                                    "path": "nmp_grammar::descriptor::AccessContext"
                                                                                   }
                                                                                 }
                                                                               }
                                                                             },
-                                                                            "name": "until",
+                                                                            "name": "access",
                                                                             "visibility": "public"
                                                                           },
                                                                           {
@@ -3522,26 +3940,53 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                             "inner": {
                                                                               "struct_field": {
                                                                                 "resolved_path": {
-                                                                                  "args": {
-                                                                                    "angle_bracketed": {
-                                                                                      "args": [
-                                                                                        {
-                                                                                          "type": {
-                                                                                            "primitive": "usize"
-                                                                                          }
-                                                                                        }
-                                                                                      ],
-                                                                                      "constraints": []
-                                                                                    }
-                                                                                  },
-                                                                                  "path": "Option",
+                                                                                  "args": null,
+                                                                                  "path": "CacheMode",
                                                                                   "resolved_item": {
-                                                                                    "path": "core::option::Option"
+                                                                                    "definition": {
+                                                                                      "attrs": [],
+                                                                                      "inner": {
+                                                                                        "enum": {
+                                                                                          "generics": {
+                                                                                            "params": [],
+                                                                                            "where_predicates": []
+                                                                                          },
+                                                                                          "has_stripped_variants": false,
+                                                                                          "variants": [
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": "plain"
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "Agnostic",
+                                                                                              "visibility": "default"
+                                                                                            },
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": "plain"
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "Strict",
+                                                                                              "visibility": "default"
+                                                                                            }
+                                                                                          ]
+                                                                                        }
+                                                                                      },
+                                                                                      "name": "CacheMode",
+                                                                                      "visibility": "public"
+                                                                                    },
+                                                                                    "path": "nmp_grammar::descriptor::CacheMode"
                                                                                   }
                                                                                 }
                                                                               }
                                                                             },
-                                                                            "name": "limit",
+                                                                            "name": "cache",
                                                                             "visibility": "public"
                                                                           }
                                                                         ],
@@ -3550,10 +3995,10 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                     }
                                                                   }
                                                                 },
-                                                                "name": "Filter",
+                                                                "name": "Demand",
                                                                 "visibility": "public"
                                                               },
-                                                              "path": "nmp_grammar::binding::Filter"
+                                                              "path": "nmp_grammar::descriptor::Demand"
                                                             }
                                                           }
                                                         }
@@ -3865,6 +4310,10 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
   "name": "Binding",
   "visibility": "public"
 }
+reexport nmp::CacheMode => nmp_grammar::descriptor::CacheMode
+{
+  "previously_defined": "nmp_grammar::descriptor::CacheMode"
+}
 reexport nmp::CoverageInterval => nmp_store::coverage::CoverageInterval
 {
   "attrs": [],
@@ -3992,6 +4441,14 @@ reexport nmp::CoverageInterval => nmp_store::coverage::CoverageInterval
   },
   "name": "CoverageInterval",
   "visibility": "public"
+}
+reexport nmp::Demand => nmp_grammar::descriptor::Demand
+{
+  "previously_defined": "nmp_grammar::descriptor::Demand"
+}
+reexport nmp::DemandError => nmp_grammar::descriptor::DemandError
+{
+  "previously_defined": "nmp_grammar::descriptor::DemandError"
 }
 reexport nmp::Derived => nmp_grammar::binding::Derived
 {
@@ -18987,6 +19444,60 @@ reexport nmp::Lane => nmp_router::facts::Lane
 reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
 {
   "attrs": [],
+  "inherent_impls": [
+    {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "items": [
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "selection",
+                    {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "Filter",
+                        "resolved_item": {
+                          "definition": {
+                            "previously_defined": "nmp_grammar::binding::Filter"
+                          },
+                          "path": "nmp_grammar::binding::Filter"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "generic": "Self"
+                }
+              }
+            }
+          },
+          "name": "from_filter",
+          "visibility": "public"
+        }
+      ]
+    }
+  ],
   "inner": {
     "struct": {
       "generics": {
@@ -19001,12 +19512,12 @@ reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
               "struct_field": {
                 "resolved_path": {
                   "args": null,
-                  "path": "nmp_grammar::Filter",
+                  "path": "nmp_grammar::Demand",
                   "resolved_item": {
                     "definition": {
-                      "previously_defined": "nmp_grammar::binding::Filter"
+                      "previously_defined": "nmp_grammar::descriptor::Demand"
                     },
-                    "path": "nmp_grammar::binding::Filter"
+                    "path": "nmp_grammar::descriptor::Demand"
                   }
                 }
               }
@@ -20059,6 +20570,10 @@ reexport nmp::SetOp => nmp_grammar::binding::SetOp
 reexport nmp::ShortfallFact => nmp_engine::core::evidence::ShortfallFact
 {
   "previously_defined": "nmp_engine::core::evidence::ShortfallFact"
+}
+reexport nmp::SourceAuthority => nmp_grammar::descriptor::SourceAuthority
+{
+  "previously_defined": "nmp_grammar::descriptor::SourceAuthority"
 }
 reexport nmp::SourceEvidence => nmp_engine::core::evidence::SourceEvidence
 {

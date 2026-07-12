@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{Binding, ConcreteFilter, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{Binding, ConcreteFilter, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::testkit::{kind1, kind3, Harness};
 use nmp_resolver::LiveQuery;
 use nostr::filter::MatchEventOptions;
@@ -30,11 +30,11 @@ fn my_follows_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -65,11 +65,12 @@ fn differential_oracle_identical_delivery() {
 
     let mut h = Harness::new();
     h.set_active(Some(me.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
     let follow_pks: Vec<_> = follows.iter().map(|k| k.public_key()).collect();
     h.deliver(vec![kind3(&me, &follow_pks, 100)]);
 
     let demand = h.demand();
+    let demand_ctx = h.demand_with_context();
     // One per-author atom per follow (the kind:1 fan-out) PLUS the inner
     // kind:3 atom itself (the follow-list subscription that makes the
     // fan-out reactive) -- `me` has no write relays in `dir` below, so that
@@ -103,10 +104,10 @@ fn differential_oracle_identical_delivery() {
 
     // ---- Act: compile both paths over the identical demand/facts -------
     let mut router_a = Router::new(limits, discovery.clone(), RuleRegistry::dedup_only());
-    router_a.compile(&demand, &dir, cap);
+    router_a.compile(&demand_ctx, &dir, cap);
 
     let mut router_b = Router::new(limits, discovery, RuleRegistry::default_widen_only());
-    router_b.compile(&demand, &dir, cap);
+    router_b.compile(&demand_ctx, &dir, cap);
 
     // ---- Path A: one WireReq per (author, relay), no merge --------------
     let mut delivered_a: BTreeMap<ConcreteFilter, BTreeSet<EventId>> = demand

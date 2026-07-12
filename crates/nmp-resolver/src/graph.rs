@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 
 use crate::eval::merge_element_into;
 use crate::types::{FieldSlot, NodeId, ParentLink, ResolvedSet};
@@ -60,6 +60,14 @@ pub(crate) struct FilterNodeData {
     pub(crate) limit: Option<usize>,
     pub(crate) bound: Vec<(FieldSlot, NodeId)>,
     pub(crate) cached_atoms: BTreeSet<ConcreteFilter>,
+    /// This FilterNode's OWN Demand's source/access -- set once at
+    /// construction (#106) and never mutated. Uniform for every atom this
+    /// node ever produces; a nested `Derived`'s inner FilterNode carries its
+    /// OWN (possibly different) context, never this one's (a Demand's
+    /// source/access is never inherited across a `Binding::Derived`
+    /// boundary -- see `nmp_grammar::Derived`'s doc).
+    pub(crate) source: SourceAuthority,
+    pub(crate) access: AccessContext,
 }
 
 /// One graph node: a `BindingNode` variant or a `FilterNode`.
@@ -158,6 +166,15 @@ impl Graph {
     /// subscription's OWN descriptor resolves to.
     pub(crate) fn cached_atoms_of(&self, filter_id: NodeId) -> &BTreeSet<ConcreteFilter> {
         &self.filter_data(filter_id).cached_atoms
+    }
+
+    /// A FilterNode's own `(source, access)` context (#106) -- the axes its
+    /// `cached_atoms` all share, needed by the engine's ref/unref-counting
+    /// layer to wrap a bare `ConcreteFilter` diff into `ContextualAtom`s
+    /// without re-deriving context from the `Filter` shape a second time.
+    pub(crate) fn context_of(&self, filter_id: NodeId) -> (SourceAuthority, AccessContext) {
+        let f = self.filter_data(filter_id);
+        (f.source, f.access)
     }
 
     /// The wide query filter for a FilterNode: base (kinds/since/until/limit)
@@ -279,21 +296,25 @@ impl Graph {
     /// that order. Used both to build the initial-open sequence (subscribe)
     /// and — reversed — the teardown/re-root close sequence (M1 plan
     /// §3.6/§4: "closes in reverse-of-open order").
-    pub(crate) fn atoms_in_structural_order(&self, root: NodeId) -> Vec<ConcreteFilter> {
+    pub(crate) fn atoms_in_structural_order(&self, root: NodeId) -> Vec<ContextualAtom> {
         let mut out = Vec::new();
         self.walk_filter_postorder(root, &mut out);
         out
     }
 
-    fn walk_filter_postorder(&self, filter_id: NodeId, out: &mut Vec<ConcreteFilter>) {
+    fn walk_filter_postorder(&self, filter_id: NodeId, out: &mut Vec<ContextualAtom>) {
         let f = self.filter_data(filter_id);
         for (_, binding_id) in &f.bound {
             self.walk_binding_postorder(*binding_id, out);
         }
-        out.extend(f.cached_atoms.iter().cloned());
+        out.extend(f.cached_atoms.iter().cloned().map(|filter| ContextualAtom {
+            filter,
+            source: f.source,
+            access: f.access,
+        }));
     }
 
-    fn walk_binding_postorder(&self, binding_id: NodeId, out: &mut Vec<ConcreteFilter>) {
+    fn walk_binding_postorder(&self, binding_id: NodeId, out: &mut Vec<ContextualAtom>) {
         match self.node(binding_id) {
             Node::Derived(d) => self.walk_filter_postorder(d.inner, out),
             Node::SetOp(s) => {

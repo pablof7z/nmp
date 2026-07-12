@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nmp_router::RelayPlan;
 use nmp_store::{coverage_key, EventStore};
 use nostr::{RelayUrl, Timestamp};
@@ -156,7 +156,11 @@ pub enum ShortfallFact {
 /// - `subtree_atoms` must include every atom in the query's FULL subtree
 ///   (`nmp_resolver::Engine::subtree_atoms`), not just its root atoms (#12)
 ///   — an interior `Derived`'s inner-filter atom's covering relay is
-///   consulted exactly like a root atom's would be.
+///   consulted exactly like a root atom's would be. Each atom carries its
+///   own `source`/`access` (#106) so `coverage_key` can look up the
+///   correctly-scoped row; `ShortfallFact`'s own `atom` field stays a bare
+///   `ConcreteFilter` (unchanged public surface) since it's reporting
+///   which SELECTION lacks a source, not a context distinction.
 /// - An empty `subtree_atoms` as a WHOLE is `ShortfallFact::NoResolvedDemand`
 ///   (never a silently-empty `sources`/`shortfall` pair).
 /// - A subtree atom with an EMPTY covering set contributes
@@ -169,7 +173,7 @@ pub enum ShortfallFact {
 ///   connected now, else `Connecting` (planned but never yet connected).
 /// - Sources are returned sorted by relay URL for deterministic equality.
 pub(crate) fn acquisition_evidence<S: EventStore>(
-    subtree_atoms: &BTreeSet<ConcreteFilter>,
+    subtree_atoms: &BTreeSet<ContextualAtom>,
     plan: &RelayPlan,
     store: &S,
     connected: &BTreeSet<RelayUrl>,
@@ -199,11 +203,13 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
             .collect();
 
         if covering.is_empty() {
-            shortfall.push(ShortfallFact::NoPlannedSource { atom: atom.clone() });
+            shortfall.push(ShortfallFact::NoPlannedSource {
+                atom: atom.filter.clone(),
+            });
             continue;
         }
 
-        let window_start = Timestamp::from(atom.since.unwrap_or(0));
+        let window_start = Timestamp::from(atom.filter.since.unwrap_or(0));
         for relay in covering {
             let entry = per_relay.entry(relay.clone()).or_insert((true, None));
             match store.get_coverage(key, relay) {
