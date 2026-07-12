@@ -989,7 +989,6 @@ impl Handle {
     /// no durable delivery obligation or query-visible pending row. If no
     /// pre-acceptance correlation id remains, this returns a typed error and
     /// creates no receipt stream.
-    #[must_use]
     pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, PublishError> {
         self.publish_tracked(intent).map(|receipt| receipt.statuses)
     }
@@ -998,7 +997,6 @@ impl Handle {
     /// round trip waits only for the local crash-atomic acceptance door,
     /// never for signing, routing, network I/O, or ACKs. Correlation-id
     /// exhaustion is returned before any stream or identity is fabricated.
-    #[must_use]
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
         let (tx, rx) = mpsc::channel();
         let sink: Box<dyn ReceiptSink> = Box::new(ChannelReceiptSink(tx));
