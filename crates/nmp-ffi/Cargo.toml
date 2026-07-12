@@ -28,3 +28,10 @@ nostr.workspace = true
 nmp-grammar.workspace = true
 nmp.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
+
+# #99: the corrupt-retained-receipt reattach falsifier needs to write a
+# genuinely undecodable row directly into a real `RedbStore` file, the same
+# technique `nmp-engine`'s own restart/corruption tests use -- test-only.
+[dev-dependencies]
+redb = "4.1"
+tempfile = "3"
