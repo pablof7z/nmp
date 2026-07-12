@@ -17,6 +17,7 @@ members = [
     "crates/nmp-parity",
     "crates/nmp-nip51",
     "crates/nmp-nip29",
+    "crates/nmp-content",
 ]
 
 [workspace.package]
@@ -47,5 +48,6 @@ nmp-ffi = { path = "crates/nmp-ffi" }
 nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
+nmp-content = { path = "crates/nmp-content" }
 proptest = "1"
 uniffi = "0.29"

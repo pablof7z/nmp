@@ -132,6 +132,98 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiBlockKind",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Paragraph",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Heading",
+            discr: None,
+            fields: [
+                Field {
+                    name: "level",
+                    type_: UInt8,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Quote",
+            discr: None,
+            fields: [
+                Field {
+                    name: "depth",
+                    type_: UInt8,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ListItem",
+            discr: None,
+            fields: [
+                Field {
+                    name: "ordered",
+                    type_: Boolean,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "ordinal",
+                    type_: Optional {
+                        inner_type: UInt64,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "depth",
+                    type_: UInt8,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Code",
+            discr: None,
+            fields: [
+                Field {
+                    name: "language",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ThematicBreak",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiCacheMode",
     module_path: "nmp_ffi",
     remote: false,
@@ -155,6 +247,171 @@ enum Enum {
     docstring: Some(
         "`nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside\n`FfiSourceAuthority::Pinned` -- see that type's doc.",
     ),
+}
+
+enum Enum {
+    name: "FfiContentClaimDecision",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Acquire",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Cycle",
+            discr: None,
+            fields: [
+                Field {
+                    name: "target_key",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "DepthLimit",
+            discr: None,
+            fields: [
+                Field {
+                    name: "maximum",
+                    type_: UInt8,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ActiveLimit",
+            discr: None,
+            fields: [
+                Field {
+                    name: "maximum",
+                    type_: UInt32,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiContentDiagnostic",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InputTruncated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "original_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "parsed_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedReference",
+            discr: None,
+            fields: [
+                Field {
+                    name: "original",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "source",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSourceRange",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiContentResolutionDecision",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Accept",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ResolvedLimit",
+            discr: None,
+            fields: [
+                Field {
+                    name: "maximum",
+                    type_: UInt32,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiContentSyntax",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "PlainText",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Markdown",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
 }
 
 enum Enum {
@@ -415,6 +672,224 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiInlineNode",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Text",
+            discr: None,
+            fields: [
+                Field {
+                    name: "text",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "source",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSourceRange",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "styles",
+                    type_: Sequence {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiInlineStyle",
+                        },
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Reference",
+            discr: None,
+            fields: [
+                Field {
+                    name: "occurrence",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiReferenceOccurrence",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "styles",
+                    type_: Sequence {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiInlineStyle",
+                        },
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Hashtag",
+            discr: None,
+            fields: [
+                Field {
+                    name: "hashtag",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "original",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "source",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSourceRange",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "styles",
+                    type_: Sequence {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiInlineStyle",
+                        },
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Link",
+            discr: None,
+            fields: [
+                Field {
+                    name: "destination",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "label",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "source",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSourceRange",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "styles",
+                    type_: Sequence {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiInlineStyle",
+                        },
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SoftBreak",
+            discr: None,
+            fields: [
+                Field {
+                    name: "source",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSourceRange",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "HardBreak",
+            discr: None,
+            fields: [
+                Field {
+                    name: "source",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSourceRange",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiInlineStyle",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Emphasis",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Strong",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Strikethrough",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Code",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiNostrEntity",
     module_path: "nmp_ffi",
     remote: false,
@@ -575,6 +1050,133 @@ enum Enum {
     docstring: Some(
         "Result of looking up a stable retained receipt id.",
     ),
+}
+
+enum Enum {
+    name: "FfiReferencePlacement",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Inline",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Standalone",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiReferenceTarget",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Profile",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "relay_hints",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Event",
+            discr: None,
+            fields: [
+                Field {
+                    name: "id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author_hint",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind_hint",
+                    type_: Optional {
+                        inner_type: UInt16,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "relay_hints",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Address",
+            discr: None,
+            fields: [
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "identifier",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "relay_hints",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
 }
 
 enum Enum {
@@ -1210,6 +1812,188 @@ record Record {
 }
 
 record Record {
+    name: "FfiArticle",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "event_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "author",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "created_at",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "identifier",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "title",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "summary",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "image",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "published_at",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "content",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
+    name: "FfiContentBlock",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "id",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "kind",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBlockKind",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "source",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiSourceRange",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "inlines",
+            type_: Sequence {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiInlineNode",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
+    name: "FfiContentDocument",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "syntax",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiContentSyntax",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "blocks",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiContentBlock",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "diagnostics",
+            type_: Sequence {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiContentDiagnostic",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
+    name: "FfiContentHydrationPolicy",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "max_active_references",
+            type_: UInt32,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_resolved_references",
+            type_: UInt32,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_depth",
+            type_: UInt8,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
     name: "FfiCoverageInterval",
     module_path: "nmp_ffi",
     remote: false,
@@ -1516,6 +2300,168 @@ record Record {
 }
 
 record Record {
+    name: "FfiProfileMetadata",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "pubkey",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "name",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "display_name",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "about",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "picture",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "banner",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "nip05",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "lud06",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "lud16",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
+    name: "FfiReferenceDemandPlan",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "target_key",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "canonical",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiDemand",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "helpers",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiDemand",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
+    name: "FfiReferenceOccurrence",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "id",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "original",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "target",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiReferenceTarget",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "source",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiSourceRange",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "placement",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiReferencePlacement",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
     name: "FfiRelayDiagnostics",
     module_path: "nmp_ffi",
     remote: false,
@@ -1758,6 +2704,27 @@ record Record {
 }
 
 record Record {
+    name: "FfiSourceRange",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "start",
+            type_: UInt32,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "end",
+            type_: UInt32,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
     name: "FfiWriteIntent",
     module_path: "nmp_ffi",
     remote: false,
@@ -1909,6 +2876,124 @@ function Function {
 }
 
 function Function {
+    name: "content_reference_demand_plan",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "target",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiReferenceTarget",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiReferenceDemandPlan",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_content_reference_demand_plan",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiReferenceTarget",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiReferenceDemandPlan",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: None,
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_content_reference_demand_plan",
+    checksum: Some(
+        44542,
+    ),
+}
+
+function Function {
+    name: "decode_article_resource",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "row",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiArticle",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_decode_article_resource",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "row",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiArticle",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: None,
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_article_resource",
+    checksum: Some(
+        8275,
+    ),
+}
+
+function Function {
     name: "decode_nostr_entity",
     module_path: "nmp_ffi",
     is_async: false,
@@ -1963,6 +3048,65 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_nostr_entity",
     checksum: Some(
         43591,
+    ),
+}
+
+function Function {
+    name: "decode_profile_resource",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "row",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiProfileMetadata",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_decode_profile_resource",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "row",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiProfileMetadata",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: None,
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_profile_resource",
+    checksum: Some(
+        15024,
     ),
 }
 
@@ -2024,6 +3168,196 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_remembered_groups",
     checksum: Some(
         13946,
+    ),
+}
+
+function Function {
+    name: "evaluate_content_claim",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "target_key",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "path",
+            type_: Sequence {
+                inner_type: String,
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "depth",
+            type_: UInt8,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "active_references",
+            type_: UInt32,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "policy",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiContentHydrationPolicy",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiContentClaimDecision",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_evaluate_content_claim",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target_key",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "path",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "depth",
+                type_: UInt8,
+            },
+            FfiArgument {
+                name: "active_references",
+                type_: UInt32,
+            },
+            FfiArgument {
+                name: "policy",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiContentHydrationPolicy",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiContentClaimDecision",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: None,
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_evaluate_content_claim",
+    checksum: Some(
+        20168,
+    ),
+}
+
+function Function {
+    name: "evaluate_content_resolution",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "target_already_resolved",
+            type_: Boolean,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "resolved_references",
+            type_: UInt32,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "policy",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiContentHydrationPolicy",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiContentResolutionDecision",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_evaluate_content_resolution",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target_already_resolved",
+                type_: Int8,
+            },
+            FfiArgument {
+                name: "resolved_references",
+                type_: UInt32,
+            },
+            FfiArgument {
+                name: "policy",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiContentHydrationPolicy",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiContentResolutionDecision",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: None,
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_evaluate_content_resolution",
+    checksum: Some(
+        55739,
     ),
 }
 
@@ -2303,6 +3637,78 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_group_send_intent",
     checksum: Some(
         28994,
+    ),
+}
+
+function Function {
+    name: "parse_nostr_content",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "content",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "syntax",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiContentSyntax",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiContentDocument",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_parse_nostr_content",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "content",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "syntax",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiContentSyntax",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiContentDocument",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: None,
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_nostr_content",
+    checksum: Some(
+        18165,
     ),
 }
 

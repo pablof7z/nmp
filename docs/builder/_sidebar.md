@@ -28,6 +28,7 @@
 - **Extend**
   - [Protocol declarations and operations](27-recipes-and-choosing.md)
   - [Protocol modules](32-extending.md)
+  - [Mixed Nostr content](34-content.md)
   - [Kind-diverse examples](31-gallery.md)
 - **Integrate**
   - [Native platform shapes](06-first-app.md)
