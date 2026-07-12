@@ -626,6 +626,18 @@ impl<S: EventStore> EngineCore<S> {
             Ok(None) => return ReattachOutcome::NotFound,
             Err(_) => return ReattachOutcome::RetainedButUnreadable,
         };
+        if self
+            .pending
+            .get(&id)
+            .is_some_and(|pending| !pending.routing_valid)
+        {
+            // Boot retained the obligation but could not interpret its
+            // frozen routing policy. Replaying even the readable receipt
+            // prefix would falsely imply that this observer is attached to
+            // actionable live work, and registering it would leak later
+            // signer facts from an obligation whose destination is unknown.
+            return ReattachOutcome::RetainedButUnreadable;
+        }
         let attempts = match receipt.intent_id {
             Some(intent_id) => {
                 let attempts = match self.resolver.store().recover_attempts(intent_id) {

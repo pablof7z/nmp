@@ -336,7 +336,6 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
             .unwrap();
         let intent_id = outcome.journaled_intent_id().unwrap();
         let receipt_id = ReceiptId(outcome.journaled_receipt_id().unwrap());
-        store.promote_signed(intent_id, event.sig).unwrap();
         (intent_id, receipt_id)
     };
 
@@ -346,9 +345,45 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-    assert!(core
-        .reattach_receipt(receipt_id, Box::new(Sink::default()))
-        .is_attached());
+    let unreadable = Sink::default();
+    assert_eq!(
+        core.reattach_receipt(receipt_id, Box::new(unreadable.clone())),
+        ReattachOutcome::RetainedButUnreadable
+    );
+    assert!(
+        unreadable.0.lock().unwrap().is_empty(),
+        "unreadable routing must replay no receipt prefix"
+    );
+
+    let sign_request = core.handle(EngineMsg::SignerAttached(keys.public_key()));
+    let generation = sign_request
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::RequestSign(id, generation, unsigned) if *id == receipt_id => {
+                assert_eq!(unsigned.pubkey, keys.public_key());
+                Some(*generation)
+            }
+            _ => None,
+        })
+        .expect("the retained unsigned obligation must remain signer-owned");
+    let completed = core.handle(EngineMsg::SignerCompleted(
+        receipt_id,
+        generation,
+        Ok(event),
+    ));
+    assert!(!completed
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    assert!(
+        unreadable.0.lock().unwrap().is_empty(),
+        "an unreadable reattach must not register for later signer facts"
+    );
+    let second = Sink::default();
+    assert_eq!(
+        core.reattach_receipt(receipt_id, Box::new(second.clone())),
+        ReattachOutcome::RetainedButUnreadable
+    );
+    assert!(second.0.lock().unwrap().is_empty());
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
