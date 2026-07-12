@@ -101,6 +101,42 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
+    /// #105: `SourcesGrew` must replace the row's provenance IN PLACE --
+    /// never a second `Added` for the same id. Drives `RowBridge` directly
+    /// (the same accumulator `NMPQuery` uses internally) since the coalescer
+    /// underneath it is already proven separately by `FrameCoalescerTests`.
+    func testRowBridgeSourcesGrewReplacesRowInPlaceWithoutDuplicating() async throws {
+        var continuation: AsyncStream<RowBatch>.Continuation!
+        let stream = AsyncStream<RowBatch> { continuation = $0 }
+        let bridge = RowBridge(continuation: continuation)
+        let emptyEvidence = FfiAcquisitionEvidence(sources: [], shortfall: [])
+
+        let ffiRow = FfiRow(
+            id: "abc",
+            pubkey: "pk",
+            createdAt: 1,
+            kind: 1,
+            tags: [],
+            content: "hi",
+            sig: "sig",
+            sources: ["wss://r0.example"]
+        )
+        bridge.onBatch(deltas: [.added(row: ffiRow)], evidence: emptyEvidence)
+        bridge.onBatch(
+            deltas: [.sourcesGrew(id: "abc", sources: ["wss://r0.example", "wss://r1.example"])],
+            evidence: emptyEvidence
+        )
+        bridge.onClosed()
+
+        var lastBatch: RowBatch?
+        for await batch in stream {
+            lastBatch = batch
+        }
+        let rows = try XCTUnwrap(lastBatch).rows
+        XCTAssertEqual(rows.count, 1, "SourcesGrew must never insert a second row for the same id")
+        XCTAssertEqual(rows.first?.sources, ["wss://r0.example", "wss://r1.example"])
+    }
+
     func testDiagnosticsIntervalIsDistinctFromQueryEvidence() {
         let interval = CoverageInterval(FfiCoverageInterval(from: 4, through: 9))
         XCTAssertEqual(interval.from, 4)

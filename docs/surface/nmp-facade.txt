@@ -25,6 +25,7 @@ pub use nmp::ReceiptReattachment
 pub use nmp::ReceiptStream
 pub use nmp::RelayDiagnosticsSnapshot
 pub use nmp::RelayUrl
+pub use nmp::Row
 pub use nmp::RowDelta
 pub use nmp::RowsMsg
 pub use nmp::Selector
@@ -19620,6 +19621,82 @@ reexport nmp::RelayUrl => nostr::types::url::RelayUrl
 {
   "previously_defined": "nostr::types::url::RelayUrl"
 }
+reexport nmp::Row => nmp_engine::core::Row
+{
+  "attrs": [],
+  "inner": {
+    "struct": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "kind": {
+        "plain": {
+          "fields": [
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": null,
+                    "path": "nostr::Event",
+                    "resolved_item": {
+                      "definition": {
+                        "previously_defined": "nostr::event::Event"
+                      },
+                      "path": "nostr::event::Event"
+                    }
+                  }
+                }
+              },
+              "name": "event",
+              "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "nostr::RelayUrl",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nostr::types::url::RelayUrl"
+                                  },
+                                  "path": "nostr::types::url::RelayUrl"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "std::collections::BTreeSet",
+                    "resolved_item": {
+                      "path": "alloc::collections::btree::set::BTreeSet"
+                    }
+                  }
+                }
+              },
+              "name": "sources",
+              "visibility": "public"
+            }
+          ],
+          "has_stripped_fields": false
+        }
+      }
+    }
+  },
+  "name": "Row",
+  "visibility": "public"
+}
 reexport nmp::RowDelta => nmp_engine::core::RowDelta
 {
   "attrs": [],
@@ -19777,12 +19854,12 @@ reexport nmp::RowDelta => nmp_engine::core::RowDelta
                       "struct_field": {
                         "resolved_path": {
                           "args": null,
-                          "path": "nostr::Event",
+                          "path": "Row",
                           "resolved_item": {
                             "definition": {
-                              "previously_defined": "nostr::event::Event"
+                              "previously_defined": "nmp_engine::core::Row"
                             },
-                            "path": "nostr::event::Event"
+                            "path": "nmp_engine::core::Row"
                           }
                         }
                       }
@@ -19795,6 +19872,78 @@ reexport nmp::RowDelta => nmp_engine::core::RowDelta
             }
           },
           "name": "Added",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "nostr::EventId",
+                            "resolved_item": {
+                              "definition": {
+                                "previously_defined": "nostr::event::id::EventId"
+                              },
+                              "path": "nostr::event::id::EventId"
+                            }
+                          }
+                        }
+                      },
+                      "name": "id",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": {
+                              "angle_bracketed": {
+                                "args": [
+                                  {
+                                    "type": {
+                                      "resolved_path": {
+                                        "args": null,
+                                        "path": "nostr::RelayUrl",
+                                        "resolved_item": {
+                                          "definition": {
+                                            "previously_defined": "nostr::types::url::RelayUrl"
+                                          },
+                                          "path": "nostr::types::url::RelayUrl"
+                                        }
+                                      }
+                                    }
+                                  }
+                                ],
+                                "constraints": []
+                              }
+                            },
+                            "path": "std::collections::BTreeSet",
+                            "resolved_item": {
+                              "path": "alloc::collections::btree::set::BTreeSet"
+                            }
+                          }
+                        }
+                      },
+                      "name": "sources",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "SourcesGrew",
           "visibility": "default"
         },
         {

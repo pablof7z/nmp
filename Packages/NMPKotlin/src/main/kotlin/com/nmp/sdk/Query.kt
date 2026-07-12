@@ -72,18 +72,7 @@ fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> 
                 override fun onBatch(deltas: List<FfiRowDelta>, evidence: FfiAcquisitionEvidence) {
                     val snapshot =
                         lock.withLock {
-                            for (delta in deltas) {
-                                when (delta) {
-                                    is FfiRowDelta.Added -> {
-                                        val row = Row.from(delta.row)
-                                        if (!byId.containsKey(row.id)) order.add(row.id)
-                                        byId[row.id] = row
-                                    }
-                                    is FfiRowDelta.Removed -> {
-                                        if (byId.remove(delta.id) != null) order.remove(delta.id)
-                                    }
-                                }
-                            }
+                            for (delta in deltas) applyRowDelta(order, byId, delta)
                             order.mapNotNull { byId[it] }
                         }
                     trySendBlocking(RowBatch(snapshot, AcquisitionEvidence.from(evidence)))
@@ -98,3 +87,35 @@ fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> 
 
         awaitClose { handle.cancel() }
     }.conflate()
+
+/**
+ * The accumulator's per-delta step, extracted as a pure function so it is
+ * directly unit-testable (#105's `SourcesGrew` replace-in-place proof)
+ * without driving the coroutine/`callbackFlow` machinery around it. Mutates
+ * `order`/`byId` in place -- identical semantics to `RowBridge.onBatch`'s
+ * Swift counterpart.
+ */
+internal fun applyRowDelta(
+    order: MutableList<String>,
+    byId: MutableMap<String, Row>,
+    delta: FfiRowDelta,
+) {
+    when (delta) {
+        is FfiRowDelta.Added -> {
+            val row = Row.from(delta.row)
+            if (!byId.containsKey(row.id)) order.add(row.id)
+            byId[row.id] = row
+        }
+        is FfiRowDelta.SourcesGrew -> {
+            // #105: the SAME row already matched; only its relay-provenance
+            // set grew. Replace in place -- `order` is untouched, this is
+            // never an insertion.
+            byId[delta.id]?.let { existing ->
+                byId[delta.id] = existing.copy(sources = delta.sources)
+            }
+        }
+        is FfiRowDelta.Removed -> {
+            if (byId.remove(delta.id) != null) order.remove(delta.id)
+        }
+    }
+}

@@ -361,6 +361,29 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "SourcesGrew",
+            discr: None,
+            fields: [
+                Field {
+                    name: "id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "sources",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#105: the SAME row already matched; its relay-provenance set grew.\nCarries the FULL current source set (matching `Added`'s own\n\"whole value, not a patch\" shape), never the event body again.",
+            ),
+        },
+        Variant {
             name: "Removed",
             discr: None,
             fields: [
@@ -1243,9 +1266,19 @@ record Record {
             default: None,
             docstring: None,
         },
+        Field {
+            name: "sources",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: Some(
+                "Sorted, deduplicated relay URLs that have delivered this event id.",
+            ),
+        },
     ],
     docstring: Some(
-        "One delivered row -- RAW tokens only (ledger #12). Mirrors\n`nostr::Event`'s wire shape, never a formatted/localized field.",
+        "One delivered row -- RAW tokens only (ledger #12). Mirrors\n`nostr::Event`'s wire shape, never a formatted/localized field, plus\n`nmp::Row::sources` (#105): the sorted, deduplicated relay-observation\nset for this exact event id -- not a formatted/display field either,\njust the raw relay URLs that have delivered it.",
     ),
 }
 
