@@ -7,6 +7,26 @@
 namespace "nmp_ffi"
 
 enum Enum {
+    name: "FfiAccessContext",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Public",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_grammar::AccessContext` mirror. Single-variant today (#106's closed\nvocabulary); extensible the same way [`FfiIdentityField`] is.",
+    ),
+}
+
+enum Enum {
     name: "FfiAuthPhase",
     module_path: "nmp_ffi",
     remote: false,
@@ -108,6 +128,32 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "Every bindable filter-field value (`nmp_grammar::Binding` mirror).\nRecursive through `FfiDerived`/`FfiSetOp` -- both are UniFFI **objects**\n(`Arc`-handles), not records: UniFFI's proc-macro mode lowers/lifts\n`Arc<T>` only when `T` is itself an exported object (an opaque handle),\nnever a plain `Box<T>`/`Arc<T>`-wrapped record -- and a record directly\ncontaining itself is a compile-time infinite-size error in Rust regardless\nof UniFFI. Making the recursive point an object (constructor + getters,\nsee each type's `impl`) is the standard UniFFI idiom for a recursive value\ntype; it mirrors `nmp_grammar::Binding`'s own `Box<Derived>`/`Box<SetOp>`\nindirection, just via an opaque handle instead of a boxed value. `SetOp`'s\n`operands: Vec<FfiBinding>` needs no such indirection -- `Vec` is already\nheap-allocated, breaking the cycle on its own.",
+    ),
+}
+
+enum Enum {
+    name: "FfiCacheMode",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Agnostic",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Strict",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside\n`FfiSourceAuthority::Pinned` -- see that type's doc.",
     ),
 }
 
@@ -297,6 +343,22 @@ enum Enum {
             fields: [],
             docstring: Some(
                 "`decode_nostr_entity`'s input decoded to `nsec`/`ncryptsec` -- refused\nrather than decoded, since a secret-key entity is never a valid\ntarget for a display/mention codec (#116).",
+            ),
+        },
+        Variant {
+            name: "AuthorOutboxesRequiresBoundAuthors",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "An `FfiDemand` declared `source: AuthorOutboxes` over a selection\nwhose `authors` field is unbound (`nmp_grammar::DemandError::\nAuthorOutboxesRequiresBoundAuthors` mirror, #107's `demand_from_ffi`\nboundary).",
+            ),
+        },
+        Variant {
+            name: "EmptyPinnedRelaySet",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "An `FfiDemand` declared `source: Pinned` with an empty relay set\n(`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,\n#107 Contract: \"the pinned relay set must be nonempty\").",
             ),
         },
     ],
@@ -680,6 +742,47 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp::ShortfallFact` mirror -- an explicit, never-silent shortfall in a\nquery's subtree acquisition (never folded into `sources`).",
+    ),
+}
+
+enum Enum {
+    name: "FfiSourceAuthority",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "AuthorOutboxes",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Public",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Pinned",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relays",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Which authority resolves a [`FfiDemand`]'s relay set\n(`nmp_grammar::SourceAuthority` mirror, #107). `relays` is a raw URL\nstring list -- `convert::demand_from_ffi` parses/canonicalizes/\ndedupes/sorts each one and rejects an empty set with a typed\n[`crate::convert::FfiError`], never a panic.",
     ),
 }
 
@@ -1103,6 +1206,53 @@ record Record {
     ],
     docstring: Some(
         "`nmp::CoverageInterval` mirror -- a proven, retained `[from, through]`\ninterval (`nmp_store::coverage::CoverageInterval`). This is the\nengine-global DIAGNOSTICS watermark, deliberately distinct from the\nscoped, per-query [`FfiAcquisitionEvidence`] surface above (M5 plan §1\nvs. `docs/design/scoped-evidence-49-12-plan.md` §4) -- never reused as a\nquery-level verdict.",
+    ),
+}
+
+record Record {
+    name: "FfiDemand",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "selection",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiFilter",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "source",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiSourceAuthority",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "access",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiAccessContext",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "cache",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCacheMode",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "The full live-query identity an app declares -- `selection + source +\naccess + cache` (`nmp_grammar::Demand` mirror, #106/#107). `NmpEngine::\nobserve` still accepts a bare [`FfiFilter`] for the common case (the\nstatic `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);\nthis is the explicit constructor an app reaches for once it needs to\ndeclare `Pinned` wire authority or a non-`Agnostic` cache mode.",
     ),
 }
 
@@ -2359,6 +2509,90 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe",
             checksum: Some(
                 4480,
+            ),
+        },
+        Method {
+            name: "observe_demand",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "query",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiDemand",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "RowObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpQueryHandle",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_observe_demand",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "query",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiDemand",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpQueryHandle",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Open a live subscription over an explicit [`FfiDemand`] (#107) --\nthe constructor an app reaches for once [`Self::observe`]'s bare\n`FfiFilter` (which always takes `Demand::from_filter`'s static\ndefault) isn't enough: declaring `Pinned` wire authority, a non-\ndefault `AccessContext`, or a non-`Agnostic` `CacheMode`. Same\ndrain-thread/cancel-handle shape as `observe` in every other respect.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_demand",
+            checksum: Some(
+                36486,
             ),
         },
         Method {
