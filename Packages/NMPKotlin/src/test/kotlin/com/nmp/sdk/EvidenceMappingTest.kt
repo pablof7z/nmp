@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import kotlinx.coroutines.flow.emptyFlow
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
 import uniffi.nmp_ffi.FfiCoverageInterval
@@ -12,8 +13,26 @@ import uniffi.nmp_ffi.FfiShortfallFact
 import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
 import uniffi.nmp_ffi.FfiWriteStatus
+import uniffi.nmp_ffi.FfiReceiptReattachment
 
 class EvidenceMappingTest {
+    @Test
+    fun everyReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
+        val attached = mapReceiptReattachment(FfiReceiptReattachment.ATTACHED, 42uL, emptyFlow())
+        assertEquals(42uL, (attached as ReceiptReattachment.Attached).receipt.id)
+        assertTrue(
+            mapReceiptReattachment(FfiReceiptReattachment.NOT_FOUND, 42uL, emptyFlow()) ===
+                ReceiptReattachment.NotFound,
+        )
+        assertTrue(
+            mapReceiptReattachment(
+                FfiReceiptReattachment.RETAINED_BUT_UNREADABLE,
+                42uL,
+                emptyFlow(),
+            ) === ReceiptReattachment.RetainedButUnreadable,
+        )
+    }
+
     @Test
     fun outcomeUnknownReceiptMappingRemainsDistinctFromGaveUp() {
         val ambiguous = WriteStatus.from(FfiWriteStatus.OutcomeUnknown("wss://ambiguous.example"))

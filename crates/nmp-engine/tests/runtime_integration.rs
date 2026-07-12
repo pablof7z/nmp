@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
-use nmp_engine::runtime::{EngineThread, RowsMsg};
+use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -45,6 +45,16 @@ use nostr_relay_builder::prelude::{
     Event as RelayEvent, EventBuilder as RelayEventBuilder, FinalizeEvent, Keys as RelayKeys,
     Tag as RelayTag, Timestamp as RelayTimestamp,
 };
+
+fn expect_attached(result: ReceiptReattachment) -> Receiver<WriteStatus> {
+    match result {
+        ReceiptReattachment::Attached(statuses) => statuses,
+        ReceiptReattachment::NotFound => panic!("known receipt was not found"),
+        ReceiptReattachment::RetainedButUnreadable => {
+            panic!("known receipt evidence was unreadable")
+        }
+    }
+}
 
 use tungstenite::Message;
 
@@ -953,8 +963,8 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     );
     assert_eq!(tracked.statuses.recv().unwrap(), WriteStatus::Accepted);
 
-    let first = handle.reattach_receipt(tracked.id).expect("known receipt");
-    let second = handle.reattach_receipt(tracked.id).expect("known receipt");
+    let first = expect_attached(handle.reattach_receipt(tracked.id));
+    let second = expect_attached(handle.reattach_receipt(tracked.id));
     assert_eq!(
         first.recv_timeout(Duration::from_secs(1)).unwrap(),
         WriteStatus::Accepted
@@ -982,9 +992,10 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         Duration::from_secs(2),
         |status| matches!(status, WriteStatus::Signed(_))
     ));
-    assert!(handle
-        .reattach_receipt(nmp_engine::core::ReceiptId(999_999))
-        .is_none());
+    assert!(matches!(
+        handle.reattach_receipt(nmp_engine::core::ReceiptId(999_999)),
+        ReceiptReattachment::NotFound
+    ));
 
     handle.shutdown();
     thread.join();
@@ -1039,9 +1050,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         PoolConfig::default(),
     );
     // This is literally the first command sent to the new engine thread.
-    let statuses = handle
-        .reattach_receipt(receipt)
-        .expect("boot rebuilt receipt");
+    let statuses = expect_attached(handle.reattach_receipt(receipt));
     assert_eq!(
         statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
         WriteStatus::Accepted

@@ -74,8 +74,8 @@ use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timest
 use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, ReceiptId,
-    RowDelta, RowSink,
+    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, ReattachOutcome,
+    ReceiptId, RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteIntent, WriteStatus};
 
@@ -100,6 +100,18 @@ pub struct QueryHandle(HandleId);
 pub struct ReceiptStream {
     pub id: ReceiptId,
     pub statuses: Receiver<WriteStatus>,
+}
+
+/// Result of looking up retained receipt facts by stable id.
+pub enum ReceiptReattachment {
+    /// The observer is attached and this channel is already primed with all
+    /// readable retained facts.
+    Attached(Receiver<WriteStatus>),
+    /// No retained receipt with this id exists.
+    NotFound,
+    /// The id is retained, but durable receipt or attempt evidence is corrupt
+    /// or unreadable. The obligation remains untouched and nothing publishes.
+    RetainedButUnreadable,
 }
 
 /// A `RowSink` that intentionally does nothing: rows+coverage are delivered
@@ -149,7 +161,7 @@ enum Cmd {
     ReattachReceipt {
         id: ReceiptId,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<bool>,
+        reply: Sender<ReattachOutcome>,
     },
     /// Register a new signing capability (M4 §5: `SignerRegistry`). The
     /// reply carries the pubkey the engine thread's registry keyed it under
@@ -970,9 +982,9 @@ impl Handle {
     }
 
     /// Attach an additional observer to a retained receipt. The returned
-    /// channel is primed with durable receipt/attempt facts; `None` means
-    /// the id was never issued by this store.
-    pub fn reattach_receipt(&self, id: ReceiptId) -> Option<Receiver<WriteStatus>> {
+    /// channel is primed with durable receipt/attempt facts. Missing and
+    /// retained-but-unreadable evidence are distinct outcomes.
+    pub fn reattach_receipt(&self, id: ReceiptId) -> ReceiptReattachment {
         let (tx, rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
@@ -981,8 +993,15 @@ impl Handle {
                 sink: Box::new(ChannelReceiptSink(tx)),
                 reply: reply_tx,
             })
-            .ok()?;
-        reply_rx.recv().ok()?.then_some(rx)
+            .expect("nmp-engine: reattach called after shutdown");
+        match reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped reattach reply")
+        {
+            ReattachOutcome::Attached => ReceiptReattachment::Attached(rx),
+            ReattachOutcome::NotFound => ReceiptReattachment::NotFound,
+            ReattachOutcome::RetainedButUnreadable => ReceiptReattachment::RetainedButUnreadable,
+        }
     }
 
     /// Open a live diagnostics stream (M5 plan §1.2 step 4) — see

@@ -1647,11 +1647,14 @@ impl EventStore for MemoryStore {
         Vec::new()
     }
 
-    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         // NOT a Q4 "always empty" door: retention (not crash-survival) is
         // the contract here, and `MemoryStore` retains faithfully for the
         // life of the process — see `EventStore::reattach_receipt`'s doc.
-        self.outbox_receipts.get(&receipt_id).cloned()
+        Ok(self.outbox_receipts.get(&receipt_id).cloned())
     }
 
     fn record_route_revision(

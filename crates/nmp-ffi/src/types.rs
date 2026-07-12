@@ -390,3 +390,11 @@ pub enum FfiWriteStatus {
     OutcomeUnknown { relay: String },
     Failed { reason: String },
 }
+
+/// Result of looking up a stable retained receipt id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiReceiptReattachment {
+    Attached,
+    NotFound,
+    RetainedButUnreadable,
+}

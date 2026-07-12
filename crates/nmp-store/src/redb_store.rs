@@ -421,8 +421,13 @@ fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &st
     let mut to_abandon: Vec<(String, OutboxReceiptRecord)> = Vec::new();
     for entry in outbox_receipts.iter().expect("redb: iter outbox_receipts") {
         let (key, value) = entry.expect("redb: read outbox_receipts entry");
-        let record: OutboxReceiptRecord =
-            serde_json::from_str(value.value()).expect("redb: decode outbox receipt");
+        let Ok(record) = serde_json::from_str::<OutboxReceiptRecord>(value.value()) else {
+            // Preserve corrupt durable evidence verbatim. Reconciliation is
+            // only allowed to advance a decodable ephemeral receipt; the
+            // checked reattach path will report this retained identity as
+            // `RetainedButUnreadable` rather than erasing or publishing it.
+            continue;
+        };
         if record.intent_id.is_none() && record.state == ReceiptState::Accepted {
             to_abandon.push((key.value().to_string(), record));
         }
@@ -3476,27 +3481,31 @@ impl EventStore for RedbStore {
         out
     }
 
-    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         // NOT a Q4 "always empty" door: retention (not crash-survival) is
         // the contract — `OUTBOX_RECEIPTS` rows are never deleted by this
         // unit, so this is an ordinary durable read.
-        let read_txn = self.db.begin_read().expect("redb: begin_read");
-        let outbox_receipts = read_txn
-            .open_table(OUTBOX_RECEIPTS)
-            .expect("redb: open outbox_receipts");
-        let json = outbox_receipts
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let outbox_receipts = read_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+        let Some(json) = outbox_receipts
             .get(receipt_key(receipt_id).as_str())
-            .expect("redb: get outbox_receipts")
-            .map(|guard| guard.value().to_string())?;
-        let record: OutboxReceiptRecord =
-            serde_json::from_str(&json).expect("redb: decode outbox receipt");
-        Some(RecoveredReceipt {
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string())
+        else {
+            return Ok(None);
+        };
+        let record: OutboxReceiptRecord = serde_json::from_str(&json)
+            .map_err(|err| PersistenceError(format!("decode retained receipt: {err}")))?;
+        Ok(Some(RecoveredReceipt {
             receipt_id,
             intent_id: record.intent_id,
             frozen_id: record.frozen_id,
             expected_pubkey: record.expected_pubkey,
             state: record.state,
-        })
+        }))
     }
 
     fn record_route_revision(

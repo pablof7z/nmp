@@ -958,7 +958,10 @@ pub trait EventStore {
     /// for the life of the process (no Q4 "always empty" carve-out here —
     /// that carve-out is specifically about surviving a REAL crash, which
     /// this door never claims to do for a volatile backend).
-    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt>;
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<RecoveredReceipt>, PersistenceError>;
 
     /// Append the next canonical resolved-route revision for an open intent.
     /// This must commit before any `start_attempt` or wire publication for a

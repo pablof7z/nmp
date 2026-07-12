@@ -1063,9 +1063,9 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
         // remain durably RETAINED — the exact surviving-retained-set trap
         // a naive allocator could otherwise be seeded from.
         assert!(store.recover_outbox().is_empty());
-        assert!(store.reattach_receipt(receipt1).is_some());
-        assert!(store.reattach_receipt(receipt2).is_some());
-        assert!(store.reattach_receipt(receipt3).is_some());
+        assert!(store.reattach_receipt(receipt1).unwrap().is_some());
+        assert!(store.reattach_receipt(receipt2).unwrap().is_some());
+        assert!(store.reattach_receipt(receipt3).unwrap().is_some());
 
         (receipt1, receipt2, receipt3)
     };
@@ -1073,9 +1073,12 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
     // Restart — the retained receipts still answer, the open set is empty.
     let mut store = RedbStore::open(&path).expect("reopen redb store");
     assert!(store.recover_outbox().is_empty());
-    assert!(store.reattach_receipt(receipt1).is_some());
-    assert!(store.reattach_receipt(receipt2).is_some());
-    assert!(store.reattach_receipt(receipt3_ephemeral).is_some());
+    assert!(store.reattach_receipt(receipt1).unwrap().is_some());
+    assert!(store.reattach_receipt(receipt2).unwrap().is_some());
+    assert!(store
+        .reattach_receipt(receipt3_ephemeral)
+        .unwrap()
+        .is_some());
 
     let (frozen4, _signed4) = compose(&k, Kind::TextNote, "four", 300);
     let outcome4 = do_accept(&mut store, accept(frozen4, k.public_key(), 300));
@@ -1158,6 +1161,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
 
     let receipt_signed = store
         .reattach_receipt(receipt_signed_id)
+        .expect("receipt lookup must be readable")
         .expect("signed receipt must still be reattachable");
     assert_eq!(receipt_signed.intent_id, Some(intent_signed));
     assert_eq!(receipt_signed.frozen_id, frozen_signed_id);
@@ -1165,13 +1169,14 @@ fn terminal_receipt_still_reattachable_after_recover() {
 
     let receipt_comp = store
         .reattach_receipt(receipt_comp_id)
+        .expect("receipt lookup must be readable")
         .expect("compensated receipt must still be reattachable");
     assert_eq!(receipt_comp.intent_id, Some(intent_comp));
     assert_eq!(receipt_comp.frozen_id, frozen_comp_id);
     assert_eq!(receipt_comp.state, ReceiptState::Compensated);
 
     assert!(
-        store.reattach_receipt(99_999).is_none(),
+        store.reattach_receipt(99_999).unwrap().is_none(),
         "an unknown receipt id must reattach to nothing"
     );
 
@@ -1185,6 +1190,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
     let receipt_fresh_id = outcome_fresh.journaled_receipt_id().expect("journaled");
     let receipt_fresh = mem
         .reattach_receipt(receipt_fresh_id)
+        .expect("receipt lookup must be readable")
         .expect("fresh receipt reattachable on MemoryStore too");
     assert_eq!(receipt_fresh.intent_id, Some(intent_fresh));
     assert_eq!(receipt_fresh.state, ReceiptState::Accepted);
@@ -1225,6 +1231,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
         // The receipt itself IS there, `Accepted`, receipt-only.
         let receipt = store
             .reattach_receipt(receipt_id)
+            .expect("receipt lookup must be readable")
             .expect("ephemeral receipt persists immediately");
         assert_eq!(receipt.intent_id, None, "receipt-only: nothing backs it");
         assert_eq!(receipt.frozen_id, frozen_id);
@@ -1245,6 +1252,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
     // boot-time reconciliation `RedbStore::open()` runs.
     let receipt = store
         .reattach_receipt(receipt_id)
+        .expect("receipt lookup must be readable")
         .expect("ephemeral receipt still reattachable after reopen");
     assert_eq!(receipt.intent_id, None);
     assert_eq!(receipt.frozen_id, frozen_id);
@@ -1264,6 +1272,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
     assert!(mem.recover_outbox().is_empty());
     let mem_receipt = mem
         .reattach_receipt(receipt2_id)
+        .expect("receipt lookup must be readable")
         .expect("ephemeral receipt reattachable on MemoryStore too");
     assert_eq!(mem_receipt.intent_id, None);
     assert_eq!(mem_receipt.state, ReceiptState::Accepted);
@@ -3142,7 +3151,10 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
 
         // C's own receipt must ALREADY be Signed -- nothing left to sign,
         // no obligation strands.
-        let receipt = store.reattach_receipt(receipt_c).expect("receipt retained");
+        let receipt = store
+            .reattach_receipt(receipt_c)
+            .expect("receipt lookup readable")
+            .expect("receipt retained");
         assert_eq!(receipt.state, ReceiptState::Signed);
 
         // C's own compensation/promotion attempts are both correctly
@@ -3202,7 +3214,10 @@ fn duplicate_of_already_signed_relay_row_starts_signed() {
             other => panic!("expected Duplicate, got {other:?}"),
         }
 
-        let receipt = store.reattach_receipt(receipt_d).expect("receipt retained");
+        let receipt = store
+            .reattach_receipt(receipt_d)
+            .expect("receipt lookup readable")
+            .expect("receipt retained");
         assert_eq!(receipt.state, ReceiptState::Signed);
     });
 }

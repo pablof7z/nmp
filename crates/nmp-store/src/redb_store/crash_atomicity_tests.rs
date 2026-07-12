@@ -205,7 +205,7 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         let (frozen, _) = event_pair();
         assert!(reopened.query(&Filter::new().id(frozen.id)).is_empty());
         assert!(reopened.recover_outbox().is_empty());
-        assert!(reopened.reattach_receipt(1).is_none());
+        assert!(reopened.reattach_receipt(1).unwrap().is_none());
 
         let outcome = reopened
             .accept_write(accept(frozen))
@@ -257,7 +257,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
             sentinel_signature()
         );
         assert_eq!(
-            store.reattach_receipt(receipt).unwrap().state,
+            store.reattach_receipt(receipt).unwrap().unwrap().state,
             ReceiptState::Accepted
         );
         store
@@ -270,7 +270,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
         signed.as_json()
     );
     assert_eq!(
-        store.reattach_receipt(receipt).unwrap().state,
+        store.reattach_receipt(receipt).unwrap().unwrap().state,
         ReceiptState::Signed
     );
 
@@ -304,7 +304,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     assert_eq!(store.query(&Filter::new().id(older_id)).len(), 1);
     assert_eq!(store.recover_outbox().len(), 1);
     assert_eq!(
-        store.reattach_receipt(receipt).unwrap().state,
+        store.reattach_receipt(receipt).unwrap().unwrap().state,
         ReceiptState::Compensated
     );
 }
