@@ -138,6 +138,47 @@ pub struct FfiFilter {
     pub limit: Option<u32>,
 }
 
+/// Which authority resolves a [`FfiDemand`]'s relay set
+/// (`nmp_grammar::SourceAuthority` mirror, #107). `relays` is a raw URL
+/// string list -- `convert::demand_from_ffi` parses/canonicalizes/
+/// dedupes/sorts each one and rejects an empty set with a typed
+/// [`crate::convert::FfiError`], never a panic.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiSourceAuthority {
+    AuthorOutboxes,
+    Public,
+    Pinned { relays: Vec<String> },
+}
+
+/// `nmp_grammar::AccessContext` mirror. Single-variant today (#106's closed
+/// vocabulary); extensible the same way [`FfiIdentityField`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiAccessContext {
+    Public,
+}
+
+/// `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
+/// `FfiSourceAuthority::Pinned` -- see that type's doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiCacheMode {
+    Agnostic,
+    Strict,
+}
+
+/// The full live-query identity an app declares -- `selection + source +
+/// access + cache` (`nmp_grammar::Demand` mirror, #106/#107). `NmpEngine::
+/// observe` still accepts a bare [`FfiFilter`] for the common case (the
+/// static `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);
+/// this is the explicit constructor an app reaches for once it needs to
+/// declare `Pinned` wire authority or a non-`Agnostic` cache mode.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiDemand {
+    pub selection: FfiFilter,
+    pub source: FfiSourceAuthority,
+    pub access: FfiAccessContext,
+    pub cache: FfiCacheMode,
+}
+
 /// One delivered row -- RAW tokens only (ledger #12). Mirrors
 /// `nostr::Event`'s wire shape, never a formatted/localized field, plus
 /// `nmp::Row::sources` (#105): the sorted, deduplicated relay-observation

@@ -17,9 +17,10 @@ use nmp::{
     WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
-    Binding as GBinding, Demand as GDemand, Derived as GDerived, Filter as GFilter,
+    AccessContext as GAccessContext, Binding as GBinding, CacheMode as GCacheMode,
+    Demand as GDemand, DemandError as GDemandError, Derived as GDerived, Filter as GFilter,
     IdentityField as GIdentityField, IndexedTagName, Selector as GSelector,
-    SetAlgebra as GSetAlgebra, SetOp as GSetOp,
+    SetAlgebra as GSetAlgebra, SetOp as GSetOp, SourceAuthority as GSourceAuthority,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{
@@ -27,11 +28,12 @@ use nostr::{
 };
 
 use crate::types::{
-    FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCoverageInterval, FfiDerived,
-    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiFilterCoverage, FfiIdentityField,
-    FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow, FfiRowDelta, FfiSelector,
-    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSourceEvidence, FfiSourceStatus, FfiWriteIntent,
-    FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCacheMode,
+    FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
+    FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
+    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSourceAuthority,
+    FfiSourceEvidence, FfiSourceStatus, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -102,6 +104,15 @@ pub enum FfiError {
     /// rather than decoded, since a secret-key entity is never a valid
     /// target for a display/mention codec (#116).
     NostrEntitySecretKeyRejected,
+    /// An `FfiDemand` declared `source: AuthorOutboxes` over a selection
+    /// whose `authors` field is unbound (`nmp_grammar::DemandError::
+    /// AuthorOutboxesRequiresBoundAuthors` mirror, #107's `demand_from_ffi`
+    /// boundary).
+    AuthorOutboxesRequiresBoundAuthors,
+    /// An `FfiDemand` declared `source: Pinned` with an empty relay set
+    /// (`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,
+    /// #107 Contract: "the pinned relay set must be nonempty").
+    EmptyPinnedRelaySet,
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -137,11 +148,29 @@ impl std::fmt::Display for FfiError {
             Self::NostrEntitySecretKeyRejected => {
                 write!(f, "refusing to decode a secret-key entity")
             }
+            Self::AuthorOutboxesRequiresBoundAuthors => write!(
+                f,
+                "SourceAuthority::AuthorOutboxes requires a selection whose `authors` field is bound"
+            ),
+            Self::EmptyPinnedRelaySet => {
+                write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
+            }
         }
     }
 }
 
 impl std::error::Error for FfiError {}
+
+impl From<GDemandError> for FfiError {
+    fn from(err: GDemandError) -> Self {
+        match err {
+            GDemandError::AuthorOutboxesRequiresBoundAuthors => {
+                Self::AuthorOutboxesRequiresBoundAuthors
+            }
+            GDemandError::PinnedRequiresNonemptyRelaySet => Self::EmptyPinnedRelaySet,
+        }
+    }
+}
 
 #[cfg(test)]
 mod engine_error_tests {
@@ -352,6 +381,85 @@ pub fn filter_to_ffi(f: GFilter) -> FfiFilter {
         since: f.since,
         until: f.until,
         limit: f.limit.map(|l| l as u32),
+    }
+}
+
+/// Parse+canonicalize a `FfiSourceAuthority::Pinned`'s raw URL strings --
+/// `nostr::RelayUrl::parse` gives the canonicalization (#107 Contract:
+/// "URL-canonicalized"), and collecting into a `BTreeSet` gives sort +
+/// dedup for free (the rest of the Contract's clause).
+fn source_authority_from_ffi(s: FfiSourceAuthority) -> Result<GSourceAuthority, FfiError> {
+    Ok(match s {
+        FfiSourceAuthority::AuthorOutboxes => GSourceAuthority::AuthorOutboxes,
+        FfiSourceAuthority::Public => GSourceAuthority::Public,
+        FfiSourceAuthority::Pinned { relays } => GSourceAuthority::Pinned(
+            relays
+                .into_iter()
+                .map(|url| {
+                    RelayUrl::parse(&url).map_err(|_| FfiError::InvalidRelayUrl { got: url })
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+    })
+}
+
+fn source_authority_to_ffi(s: GSourceAuthority) -> FfiSourceAuthority {
+    match s {
+        GSourceAuthority::AuthorOutboxes => FfiSourceAuthority::AuthorOutboxes,
+        GSourceAuthority::Public => FfiSourceAuthority::Public,
+        GSourceAuthority::Pinned(relays) => FfiSourceAuthority::Pinned {
+            relays: relays.into_iter().map(|r| r.to_string()).collect(),
+        },
+    }
+}
+
+fn access_context_from_ffi(a: FfiAccessContext) -> GAccessContext {
+    match a {
+        FfiAccessContext::Public => GAccessContext::Public,
+    }
+}
+
+fn access_context_to_ffi(a: GAccessContext) -> FfiAccessContext {
+    match a {
+        GAccessContext::Public => FfiAccessContext::Public,
+    }
+}
+
+fn cache_mode_from_ffi(c: FfiCacheMode) -> GCacheMode {
+    match c {
+        FfiCacheMode::Agnostic => GCacheMode::Agnostic,
+        FfiCacheMode::Strict => GCacheMode::Strict,
+    }
+}
+
+fn cache_mode_to_ffi(c: GCacheMode) -> FfiCacheMode {
+    match c {
+        GCacheMode::Agnostic => FfiCacheMode::Agnostic,
+        GCacheMode::Strict => FfiCacheMode::Strict,
+    }
+}
+
+/// `FfiDemand -> nmp_grammar::Demand` -- the explicit, validating
+/// constructor (#107). Unlike `Demand::from_filter`'s total static default,
+/// this can fail: an unbound-author `AuthorOutboxes` selection or an empty
+/// `Pinned` relay set is rejected here with a typed [`FfiError`], never a
+/// panic, mirroring `Demand::new`'s own `DemandError` exactly.
+pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
+    let mut demand = GDemand::new(
+        filter_from_ffi(d.selection)?,
+        source_authority_from_ffi(d.source)?,
+        access_context_from_ffi(d.access),
+    )?;
+    demand.cache = cache_mode_from_ffi(d.cache);
+    Ok(demand)
+}
+
+pub fn demand_to_ffi(d: GDemand) -> FfiDemand {
+    FfiDemand {
+        selection: filter_to_ffi(d.selection),
+        source: source_authority_to_ffi(d.source),
+        access: access_context_to_ffi(d.access),
+        cache: cache_mode_to_ffi(d.cache),
     }
 }
 
@@ -1322,6 +1430,125 @@ mod tests {
             Err(FfiError::InvalidSignature { got }) => assert_eq!(got, "not-hex"),
             Err(other) => panic!("expected InvalidSignature, got a different FfiError: {other:?}"),
             Ok(_) => panic!("an unparseable sig must fail closed, not parse"),
+        }
+    }
+
+    fn ffi_filter_kind1_author(author_hex: &str) -> FfiFilter {
+        FfiFilter {
+            kinds: Some(vec![1]),
+            authors: Some(FfiBinding::Literal {
+                values: vec![author_hex.to_string()],
+            }),
+            ..FfiFilter::default()
+        }
+    }
+
+    /// #107: an `FfiDemand` declaring `Pinned` relays round-trips through
+    /// `demand_from_ffi`/`demand_to_ffi` with the relay set canonicalized
+    /// (parsed via `RelayUrl::parse`, sorted+deduped via `BTreeSet`) and
+    /// every other field preserved -- including `cache: Strict`, which
+    /// `Demand::new` itself never sets (it always starts `Agnostic`; this
+    /// proves the FFI boundary applies it as a second, explicit step).
+    #[test]
+    fn demand_round_trips_pinned_source_and_strict_cache() {
+        let demand = FfiDemand {
+            selection: ffi_filter_kind1_author(&pk_hex()),
+            source: FfiSourceAuthority::Pinned {
+                relays: vec![
+                    "wss://b.example.com".to_string(),
+                    "wss://a.example.com".to_string(),
+                ],
+            },
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Strict,
+        };
+
+        let g = demand_from_ffi(demand).expect("nonempty pinned relay set is legal");
+        assert_eq!(g.cache, GCacheMode::Strict);
+        match &g.source {
+            GSourceAuthority::Pinned(relays) => {
+                // BTreeSet<RelayUrl> is canonically sorted regardless of the
+                // FFI caller's own insertion order.
+                let urls: Vec<String> = relays.iter().map(|r| r.to_string()).collect();
+                assert_eq!(urls, vec!["wss://a.example.com", "wss://b.example.com"]);
+            }
+            other => panic!("expected SourceAuthority::Pinned, got {other:?}"),
+        }
+
+        let back = demand_to_ffi(g);
+        assert_eq!(back.cache, FfiCacheMode::Strict);
+        match back.source {
+            FfiSourceAuthority::Pinned { relays } => {
+                assert_eq!(relays, vec!["wss://a.example.com", "wss://b.example.com"]);
+            }
+            other => panic!("expected FfiSourceAuthority::Pinned, got {other:?}"),
+        }
+    }
+
+    /// #107 Contract: an empty pinned relay set fails closed with a typed
+    /// `FfiError`, never a panic -- mirroring `Demand::new`'s own
+    /// `DemandError::PinnedRequiresNonemptyRelaySet` exactly.
+    #[test]
+    fn demand_from_ffi_rejects_an_empty_pinned_relay_set() {
+        let demand = FfiDemand {
+            selection: ffi_filter_kind1_author(&pk_hex()),
+            source: FfiSourceAuthority::Pinned { relays: vec![] },
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+        };
+
+        match demand_from_ffi(demand) {
+            Err(FfiError::EmptyPinnedRelaySet) => {}
+            Err(other) => {
+                panic!("expected EmptyPinnedRelaySet, got a different FfiError: {other:?}")
+            }
+            Ok(_) => panic!("an empty pinned relay set must fail closed, not construct"),
+        }
+    }
+
+    /// An unparseable relay URL inside `FfiSourceAuthority::Pinned` is a
+    /// distinct, earlier failure mode from the empty-set case -- same typed
+    /// error every other relay-URL boundary in this file uses.
+    #[test]
+    fn demand_from_ffi_rejects_an_unparseable_pinned_relay_url() {
+        let demand = FfiDemand {
+            selection: ffi_filter_kind1_author(&pk_hex()),
+            source: FfiSourceAuthority::Pinned {
+                relays: vec!["not-a-url".to_string()],
+            },
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+        };
+
+        match demand_from_ffi(demand) {
+            Err(FfiError::InvalidRelayUrl { got }) => assert_eq!(got, "not-a-url"),
+            Err(other) => panic!("expected InvalidRelayUrl, got a different FfiError: {other:?}"),
+            Ok(_) => panic!("an unparseable relay url must fail closed, not construct"),
+        }
+    }
+
+    /// #107: `SourceAuthority::AuthorOutboxes` declared over an unbound-
+    /// author selection is the OTHER unconstructible `Demand` combination
+    /// (#106) -- must also fail closed through the FFI boundary, not just
+    /// the Pinned one.
+    #[test]
+    fn demand_from_ffi_rejects_author_outboxes_over_an_unbound_selection() {
+        let demand = FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::AuthorOutboxes,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+        };
+
+        match demand_from_ffi(demand) {
+            Err(FfiError::AuthorOutboxesRequiresBoundAuthors) => {}
+            Err(other) => panic!(
+                "expected AuthorOutboxesRequiresBoundAuthors, got a different FfiError: {other:?}"
+            ),
+            Ok(_) => panic!("must fail closed, not construct"),
         }
     }
 }

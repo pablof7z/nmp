@@ -49,6 +49,16 @@ sealed class NMPError(message: String) : Exception(message) {
     object NostrEntitySecretKeyRejected :
         NMPError("refusing to decode a secret-key entity")
 
+    /** An `NMPDemand` declared `NMPSourceAuthority.AuthorOutboxes` over a
+     * selection whose `authors` field is unbound (#107). */
+    object AuthorOutboxesRequiresBoundAuthors :
+        NMPError("SourceAuthority.AuthorOutboxes requires a selection whose authors field is bound")
+
+    /** An `NMPDemand` declared `NMPSourceAuthority.Pinned` with an empty
+     * relay set (#107 Contract: "the pinned relay set must be nonempty"). */
+    object EmptyPinnedRelaySet :
+        NMPError("SourceAuthority.Pinned requires a nonempty relay set")
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -64,6 +74,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.EngineClosed -> EngineClosed
                 is FfiException.InvalidNostrEntity -> InvalidNostrEntity(ffi.reason)
                 is FfiException.NostrEntitySecretKeyRejected -> NostrEntitySecretKeyRejected
+                is FfiException.AuthorOutboxesRequiresBoundAuthors -> AuthorOutboxesRequiresBoundAuthors
+                is FfiException.EmptyPinnedRelaySet -> EmptyPinnedRelaySet
             }
     }
 }

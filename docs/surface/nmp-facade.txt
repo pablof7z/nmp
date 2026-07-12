@@ -3438,6 +3438,17 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                                                           },
                                                                                                           "name": "AuthorOutboxesRequiresBoundAuthors",
                                                                                                           "visibility": "default"
+                                                                                                        },
+                                                                                                        {
+                                                                                                          "attrs": [],
+                                                                                                          "inner": {
+                                                                                                            "variant": {
+                                                                                                              "discriminant": null,
+                                                                                                              "kind": "plain"
+                                                                                                            }
+                                                                                                          },
+                                                                                                          "name": "PinnedRequiresNonemptyRelaySet",
+                                                                                                          "visibility": "default"
                                                                                                         }
                                                                                                       ]
                                                                                                     }
@@ -3903,6 +3914,56 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                                                 }
                                                                                               },
                                                                                               "name": "Public",
+                                                                                              "visibility": "default"
+                                                                                            },
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": {
+                                                                                                    "tuple": [
+                                                                                                      {
+                                                                                                        "attrs": [],
+                                                                                                        "inner": {
+                                                                                                          "struct_field": {
+                                                                                                            "resolved_path": {
+                                                                                                              "args": {
+                                                                                                                "angle_bracketed": {
+                                                                                                                  "args": [
+                                                                                                                    {
+                                                                                                                      "type": {
+                                                                                                                        "resolved_path": {
+                                                                                                                          "args": null,
+                                                                                                                          "path": "nostr::RelayUrl",
+                                                                                                                          "resolved_item": {
+                                                                                                                            "definition": {
+                                                                                                                              "previously_defined": "nostr::types::url::RelayUrl"
+                                                                                                                            },
+                                                                                                                            "path": "nostr::types::url::RelayUrl"
+                                                                                                                          }
+                                                                                                                        }
+                                                                                                                      }
+                                                                                                                    }
+                                                                                                                  ],
+                                                                                                                  "constraints": []
+                                                                                                                }
+                                                                                                              },
+                                                                                                              "path": "std::collections::BTreeSet",
+                                                                                                              "resolved_item": {
+                                                                                                                "path": "alloc::collections::btree::set::BTreeSet"
+                                                                                                              }
+                                                                                                            }
+                                                                                                          }
+                                                                                                        },
+                                                                                                        "name": "0",
+                                                                                                        "visibility": "default"
+                                                                                                      }
+                                                                                                    ]
+                                                                                                  }
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "Pinned",
                                                                                               "visibility": "default"
                                                                                             }
                                                                                           ]
@@ -4667,6 +4728,17 @@ reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsS
                                                                                     }
                                                                                   },
                                                                                   "name": "Fallback",
+                                                                                  "visibility": "default"
+                                                                                },
+                                                                                {
+                                                                                  "attrs": [],
+                                                                                  "inner": {
+                                                                                    "variant": {
+                                                                                      "discriminant": null,
+                                                                                      "kind": "plain"
+                                                                                    }
+                                                                                  },
+                                                                                  "name": "ExplicitPinned",
                                                                                   "visibility": "default"
                                                                                 }
                                                                               ]
