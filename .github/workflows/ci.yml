@@ -25,7 +25,11 @@ jobs:
         run: |
           mkdir -p \
             "$TRUSTED_DIR/scripts" \
-            "$TRUSTED_DIR/tools/component-interface-snapshot/src"
+            "$TRUSTED_DIR/tools/component-interface-snapshot/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/facade/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src"
           paths=(
             scripts/check-surface-governance.sh
             scripts/install-surface-tools.sh
@@ -36,6 +40,17 @@ jobs:
             tools/component-interface-snapshot/Cargo.toml
             tools/component-interface-snapshot/Cargo.lock
             tools/component-interface-snapshot/src/main.rs
+            tools/rust-facade-snapshot/Cargo.toml
+            tools/rust-facade-snapshot/Cargo.lock
+            tools/rust-facade-snapshot/src/main.rs
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/Cargo.lock
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/facade/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/facade/src/lib.rs
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src/lib.rs
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src/lib.rs
           )
           if git cat-file -e "$BASE_SHA:scripts/check-surface-governance.sh" 2>/dev/null; then
             for path in "${paths[@]}"; do
@@ -59,6 +74,9 @@ jobs:
         run: |
           ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-surface-governance.sh
           ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-install-surface-tools.sh
+          source ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
+          RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \
+            --manifest-path ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot/Cargo.toml
 
       - name: Compute changed projection context
         id: projections
@@ -79,6 +97,7 @@ jobs:
           SURFACE_REGEN_CMD: ${{ runner.temp }}/nmp-surface-regeneration/scripts/regenerate-surface-snapshots.sh
           SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
           SURFACE_COMPONENT_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/component-interface-snapshot
+          SURFACE_RUST_FACADE_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot
           # Only effective while the base genuinely lacks the trusted program.
           SURFACE_BOOTSTRAP: 1
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh

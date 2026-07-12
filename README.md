@@ -98,8 +98,10 @@ implementation and repository-test seams, not alternate application APIs.
 `nmp-ffi` projects that same facade into Swift and Kotlin through UniFFI
 proc-macro metadata; NMP does not maintain a UDL contract.
 
-Public shapes are provisional but governed. Pinned, reproducible Rust and
-UniFFI component baselines live in [`docs/surface/`](docs/surface/), and every
+Public shapes are provisional but governed. Pinned, reproducible Rust
+(including the reachable shapes behind dependency-owned explicit reexports)
+and UniFFI component baselines
+live in [`docs/surface/`](docs/surface/), and every
 baseline, native public-wrapper, or consumer package-manifest change requires
 an append-only evidence/signoff entry in the
 [surface change log](docs/surface-change-log.md).

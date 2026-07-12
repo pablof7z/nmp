@@ -57,6 +57,13 @@ about current code:
   introduction is necessarily a manually reviewed bootstrap because no such
   default-branch workflow exists yet; after merge, enabling its required status
   is repository-settings issue #81.
+  The Rust baseline also resolves definitions of dependency-owned types
+  explicitly re-exported by `nmp` (#89), recursively including dependency-owned
+  types reachable through variants, fields, aliases, and signatures, so those
+  shapes—and public inherent constructors/methods on the explicitly re-exported
+  root definitions—cannot move behind an unchanged opaque `pub use`; unrelated
+  mechanism APIs, nested helper impls, and trait/auto/blanket impls remain
+  outside the supported snapshot.
 
 ## Load-bearing for M5 (the falsifier app) — must close before M5 claims pass
 
