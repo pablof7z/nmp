@@ -75,10 +75,11 @@ class NMPEngine(config: NMPConfig) : AutoCloseable {
 
     // MARK: - Write noun
 
-    /** Enqueue a write. Returns a `Flow<WriteStatus>` streaming everything
-     * that happens to it after acceptance -- same states as Swift's
-     * `Receipt.status`. */
-    fun publish(intent: WriteIntent): Flow<WriteStatus> = publishReceipt(ffi, intent)
+    /** Enqueue a write and return its stable id plus status stream. */
+    fun publish(intent: WriteIntent): Receipt = publishReceipt(ffi, intent)
+
+    /** Attach to retained facts without conflating corruption with absence. */
+    fun reattachReceipt(id: ULong): ReceiptReattachment = reattachReceipt(ffi, id)
 
     // MARK: - Lifecycle
 

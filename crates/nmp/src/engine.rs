@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::{WriteIntent, WriteStatus};
-use nmp_engine::runtime::{EngineThread, Handle, ReceiptStream};
+use nmp_engine::runtime::{EngineThread, Handle, ReceiptReattachment, ReceiptStream};
 use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
@@ -161,12 +161,9 @@ impl Engine {
         self.with_handle(|handle| handle.publish_tracked(intent))
     }
 
-    /// Reattach to durable receipt facts after a restart. `Ok(None)` means
-    /// the id was never issued by this store.
-    pub fn reattach_receipt(
-        &self,
-        id: ReceiptId,
-    ) -> Result<Option<Receiver<WriteStatus>>, EngineError> {
+    /// Reattach to durable receipt facts after a restart. Missing ids and
+    /// retained obligations with unreadable evidence are distinct outcomes.
+    pub fn reattach_receipt(&self, id: ReceiptId) -> Result<ReceiptReattachment, EngineError> {
         self.with_handle(|handle| handle.reattach_receipt(id))
     }
 

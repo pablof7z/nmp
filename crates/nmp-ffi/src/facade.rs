@@ -31,7 +31,16 @@ use crate::convert::{
     write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
 };
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
-use crate::types::{FfiFilter, FfiWriteIntent};
+use crate::types::{FfiFilter, FfiReceiptReattachment, FfiWriteIntent};
+use nmp::ReceiptReattachment;
+
+fn reattachment_to_ffi(value: &ReceiptReattachment) -> FfiReceiptReattachment {
+    match value {
+        ReceiptReattachment::Attached(_) => FfiReceiptReattachment::Attached,
+        ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
+        ReceiptReattachment::RetainedButUnreadable => FfiReceiptReattachment::RetainedButUnreadable,
+    }
+}
 
 /// Construction config for [`NmpEngine::new`]. See the module doc: the only
 /// relay facts a caller ever supplies are the three operator-configured
@@ -143,9 +152,11 @@ impl NmpEngine {
         &self,
         intent: FfiWriteIntent,
         observer: Box<dyn ReceiptObserver>,
-    ) -> Result<(), FfiError> {
+    ) -> Result<u64, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
-        let receipt_rx = self.engine.publish(write_intent)?;
+        let receipt = self.engine.publish_tracked(write_intent)?;
+        let receipt_id = receipt.id.0;
+        let receipt_rx = receipt.statuses;
 
         thread::spawn(move || {
             while let Ok(status) = receipt_rx.recv() {
@@ -153,7 +164,29 @@ impl NmpEngine {
             }
         });
 
-        Ok(())
+        Ok(receipt_id)
+    }
+
+    /// Attach to a retained receipt without collapsing corrupt durable
+    /// evidence into the same result as an unknown id.
+    pub fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+        observer: Box<dyn ReceiptObserver>,
+    ) -> Result<FfiReceiptReattachment, FfiError> {
+        let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
+        let ffi_result = reattachment_to_ffi(&result);
+        match result {
+            ReceiptReattachment::Attached(receipt_rx) => {
+                thread::spawn(move || {
+                    while let Ok(status) = receipt_rx.recv() {
+                        observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
+                    }
+                });
+            }
+            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {}
+        }
+        Ok(ffi_result)
     }
 
     /// Open a live diagnostics stream (M5 plan §1.2 step 5) -- "the
@@ -253,6 +286,23 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    #[test]
+    fn reattachment_mapping_is_exhaustive_and_distinct() {
+        let (_tx, rx) = mpsc::channel();
+        assert_eq!(
+            reattachment_to_ffi(&ReceiptReattachment::Attached(rx)),
+            FfiReceiptReattachment::Attached
+        );
+        assert_eq!(
+            reattachment_to_ffi(&ReceiptReattachment::NotFound),
+            FfiReceiptReattachment::NotFound
+        );
+        assert_eq!(
+            reattachment_to_ffi(&ReceiptReattachment::RetainedButUnreadable),
+            FfiReceiptReattachment::RetainedButUnreadable
+        );
+    }
+
     struct ChannelReceiptObserver {
         tx: Mutex<mpsc::Sender<FfiWriteStatus>>,
     }
@@ -300,9 +350,10 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
 
-        engine
+        let receipt_id = engine
             .publish(intent, observer)
             .expect("a well-formed (if tampered) Signed payload must parse at the FFI boundary");
+        assert!(receipt_id > 0, "publish must expose its stable receipt id");
 
         match rx
             .recv_timeout(Duration::from_secs(5))

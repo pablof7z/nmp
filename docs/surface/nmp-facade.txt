@@ -21,6 +21,7 @@ pub use nmp::Lane
 pub use nmp::LiveQuery
 pub use nmp::PublicKey
 pub use nmp::ReceiptId
+pub use nmp::ReceiptReattachment
 pub use nmp::ReceiptStream
 pub use nmp::RelayDiagnosticsSnapshot
 pub use nmp::RelayUrl
@@ -86,7 +87,7 @@ pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery) -> core::res
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
 pub fn nmp::Engine::publish(&self, nmp_engine::outbox::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
 pub fn nmp::Engine::publish_tracked(&self, nmp_engine::outbox::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
-pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<core::option::Option<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>>, nmp::EngineError>
+pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
 impl core::ops::drop::Drop for nmp::Engine
@@ -19050,6 +19051,490 @@ reexport nmp::ReceiptId => nmp_engine::core::ReceiptId
   "name": "ReceiptId",
   "visibility": "public"
 }
+reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "tuple": [
+                  {
+                    "attrs": [],
+                    "inner": {
+                      "struct_field": {
+                        "resolved_path": {
+                          "args": {
+                            "angle_bracketed": {
+                              "args": [
+                                {
+                                  "type": {
+                                    "resolved_path": {
+                                      "args": null,
+                                      "path": "crate::outbox::WriteStatus",
+                                      "resolved_item": {
+                                        "definition": {
+                                          "attrs": [],
+                                          "inner": {
+                                            "enum": {
+                                              "generics": {
+                                                "params": [],
+                                                "where_predicates": []
+                                              },
+                                              "has_stripped_variants": false,
+                                              "variants": [
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": "plain"
+                                                    }
+                                                  },
+                                                  "name": "Accepted",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": "plain"
+                                                    }
+                                                  },
+                                                  "name": "AwaitingCapability",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::EventId",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::event::id::EventId"
+                                                                    },
+                                                                    "path": "nostr::event::id::EventId"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "Signed",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": {
+                                                                    "angle_bracketed": {
+                                                                      "args": [
+                                                                        {
+                                                                          "type": {
+                                                                            "resolved_path": {
+                                                                              "args": null,
+                                                                              "path": "nostr::RelayUrl",
+                                                                              "resolved_item": {
+                                                                                "definition": {
+                                                                                  "previously_defined": "nostr::types::url::RelayUrl"
+                                                                                },
+                                                                                "path": "nostr::types::url::RelayUrl"
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      ],
+                                                                      "constraints": []
+                                                                    }
+                                                                  },
+                                                                  "path": "std::collections::BTreeSet",
+                                                                  "resolved_item": {
+                                                                    "path": "alloc::collections::btree::set::BTreeSet"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "Routed",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::RelayUrl",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::types::url::RelayUrl"
+                                                                    },
+                                                                    "path": "nostr::types::url::RelayUrl"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "Sent",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::RelayUrl",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::types::url::RelayUrl"
+                                                                    },
+                                                                    "path": "nostr::types::url::RelayUrl"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "Acked",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::RelayUrl",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::types::url::RelayUrl"
+                                                                    },
+                                                                    "path": "nostr::types::url::RelayUrl"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          },
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "String",
+                                                                  "resolved_item": {
+                                                                    "path": "alloc::string::String"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "1",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "Rejected",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::RelayUrl",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::types::url::RelayUrl"
+                                                                    },
+                                                                    "path": "nostr::types::url::RelayUrl"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "GaveUp",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::RelayUrl",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::types::url::RelayUrl"
+                                                                    },
+                                                                    "path": "nostr::types::url::RelayUrl"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "PersistenceBlocked",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::RelayUrl",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::types::url::RelayUrl"
+                                                                    },
+                                                                    "path": "nostr::types::url::RelayUrl"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "RoutePersistenceBlocked",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "nostr::RelayUrl",
+                                                                  "resolved_item": {
+                                                                    "definition": {
+                                                                      "previously_defined": "nostr::types::url::RelayUrl"
+                                                                    },
+                                                                    "path": "nostr::types::url::RelayUrl"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "OutcomeUnknown",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
+                                                        "tuple": [
+                                                          {
+                                                            "attrs": [],
+                                                            "inner": {
+                                                              "struct_field": {
+                                                                "resolved_path": {
+                                                                  "args": null,
+                                                                  "path": "String",
+                                                                  "resolved_item": {
+                                                                    "path": "alloc::string::String"
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "name": "0",
+                                                            "visibility": "default"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "Failed",
+                                                  "visibility": "default"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "name": "WriteStatus",
+                                          "visibility": "public"
+                                        },
+                                        "path": "nmp_engine::outbox::WriteStatus"
+                                      }
+                                    }
+                                  }
+                                }
+                              ],
+                              "constraints": []
+                            }
+                          },
+                          "path": "std::sync::mpsc::Receiver",
+                          "resolved_item": {
+                            "path": "std::sync::mpsc::Receiver"
+                          }
+                        }
+                      }
+                    },
+                    "name": "0",
+                    "visibility": "default"
+                  }
+                ]
+              }
+            }
+          },
+          "name": "Attached",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "NotFound",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "RetainedButUnreadable",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "ReceiptReattachment",
+  "visibility": "public"
+}
 reexport nmp::ReceiptStream => nmp_engine::runtime::ReceiptStream
 {
   "attrs": [],
@@ -19096,402 +19581,7 @@ reexport nmp::ReceiptStream => nmp_engine::runtime::ReceiptStream
                                 "path": "crate::outbox::WriteStatus",
                                 "resolved_item": {
                                   "definition": {
-                                    "attrs": [],
-                                    "inner": {
-                                      "enum": {
-                                        "generics": {
-                                          "params": [],
-                                          "where_predicates": []
-                                        },
-                                        "has_stripped_variants": false,
-                                        "variants": [
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": "plain"
-                                              }
-                                            },
-                                            "name": "Accepted",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": "plain"
-                                              }
-                                            },
-                                            "name": "AwaitingCapability",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::EventId",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::event::id::EventId"
-                                                              },
-                                                              "path": "nostr::event::id::EventId"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "Signed",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": {
-                                                              "angle_bracketed": {
-                                                                "args": [
-                                                                  {
-                                                                    "type": {
-                                                                      "resolved_path": {
-                                                                        "args": null,
-                                                                        "path": "nostr::RelayUrl",
-                                                                        "resolved_item": {
-                                                                          "definition": {
-                                                                            "previously_defined": "nostr::types::url::RelayUrl"
-                                                                          },
-                                                                          "path": "nostr::types::url::RelayUrl"
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                ],
-                                                                "constraints": []
-                                                              }
-                                                            },
-                                                            "path": "std::collections::BTreeSet",
-                                                            "resolved_item": {
-                                                              "path": "alloc::collections::btree::set::BTreeSet"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "Routed",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::RelayUrl",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::types::url::RelayUrl"
-                                                              },
-                                                              "path": "nostr::types::url::RelayUrl"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "Sent",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::RelayUrl",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::types::url::RelayUrl"
-                                                              },
-                                                              "path": "nostr::types::url::RelayUrl"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "Acked",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::RelayUrl",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::types::url::RelayUrl"
-                                                              },
-                                                              "path": "nostr::types::url::RelayUrl"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    },
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "String",
-                                                            "resolved_item": {
-                                                              "path": "alloc::string::String"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "1",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "Rejected",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::RelayUrl",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::types::url::RelayUrl"
-                                                              },
-                                                              "path": "nostr::types::url::RelayUrl"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "GaveUp",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::RelayUrl",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::types::url::RelayUrl"
-                                                              },
-                                                              "path": "nostr::types::url::RelayUrl"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "PersistenceBlocked",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::RelayUrl",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::types::url::RelayUrl"
-                                                              },
-                                                              "path": "nostr::types::url::RelayUrl"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "RoutePersistenceBlocked",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "nostr::RelayUrl",
-                                                            "resolved_item": {
-                                                              "definition": {
-                                                                "previously_defined": "nostr::types::url::RelayUrl"
-                                                              },
-                                                              "path": "nostr::types::url::RelayUrl"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "OutcomeUnknown",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": {
-                                                  "tuple": [
-                                                    {
-                                                      "attrs": [],
-                                                      "inner": {
-                                                        "struct_field": {
-                                                          "resolved_path": {
-                                                            "args": null,
-                                                            "path": "String",
-                                                            "resolved_item": {
-                                                              "path": "alloc::string::String"
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "0",
-                                                      "visibility": "default"
-                                                    }
-                                                  ]
-                                                }
-                                              }
-                                            },
-                                            "name": "Failed",
-                                            "visibility": "default"
-                                          }
-                                        ]
-                                      }
-                                    },
-                                    "name": "WriteStatus",
-                                    "visibility": "public"
+                                    "previously_defined": "nmp_engine::outbox::WriteStatus"
                                   },
                                   "path": "nmp_engine::outbox::WriteStatus"
                                 }

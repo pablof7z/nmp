@@ -299,6 +299,38 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiReceiptReattachment",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Attached",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "NotFound",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "RetainedButUnreadable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Result of looking up a stable retained receipt id.",
+    ),
+}
+
+enum Enum {
     name: "FfiRowDelta",
     module_path: "nmp_ffi",
     remote: false,
@@ -2167,7 +2199,9 @@ object Object {
                     default: None,
                 },
             ],
-            return_type: None,
+            return_type: Some(
+                UInt64,
+            ),
             ffi_func: FfiFunction {
                 name: "uniffi_nmp_ffi_fn_method_nmpengine_publish",
                 is_async: false,
@@ -2194,7 +2228,9 @@ object Object {
                         type_: UInt64,
                     },
                 ],
-                return_type: None,
+                return_type: Some(
+                    UInt64,
+                ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
@@ -2210,7 +2246,85 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish",
             checksum: Some(
-                34155,
+                24329,
+            ),
+        },
+        Method {
+            name: "reattach_receipt",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "ReceiptObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiReceiptReattachment",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_reattach_receipt",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "receipt_id",
+                        type_: UInt64,
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiReceiptReattachment",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Attach to a retained receipt without collapsing corrupt durable\nevidence into the same result as an unknown id.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_receipt",
+            checksum: Some(
+                39241,
             ),
         },
         Method {
