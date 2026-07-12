@@ -32,6 +32,13 @@ private final class ReceiptBridge: ReceiptObserver, @unchecked Sendable {
     func onStatus(status: FfiWriteStatus) {
         continuation.yield(WriteStatus(status))
     }
+
+    func onClosed() {
+        // The receipt `Sender` was dropped (intent resolved / engine shut
+        // down) -- finish the stream so a consumer awaiting it is never left
+        // hanging, mirroring `RowBridge`/`DiagnosticsBridge`.
+        continuation.finish()
+    }
 }
 
 func mapReceiptReattachment(
