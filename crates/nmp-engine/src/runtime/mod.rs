@@ -74,8 +74,8 @@ use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timest
 use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, ReattachOutcome,
-    ReceiptId, RowDelta, RowSink,
+    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
+    ReattachOutcome, ReceiptId, RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteIntent, WriteStatus};
 
@@ -137,6 +137,39 @@ impl ReceiptSink for ChannelReceiptSink {
     }
 }
 
+fn publish_result(effects: &[Effect]) -> Result<ReceiptId, PublishError> {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitReceipt(id, _) => Some(Ok(*id)),
+            Effect::PublishFailed(err) => Some(Err(*err)),
+            _ => None,
+        })
+        .expect("every publish produces a receipt id or typed allocation failure")
+}
+
+#[cfg(test)]
+mod publish_result_tests {
+    use super::*;
+
+    #[test]
+    fn typed_pre_receipt_failure_is_the_publish_reply() {
+        assert_eq!(
+            publish_result(&[Effect::PublishFailed(
+                PublishError::ReceiptCorrelationIdExhausted,
+            )]),
+            Err(PublishError::ReceiptCorrelationIdExhausted)
+        );
+        assert_eq!(
+            publish_result(&[Effect::EmitReceipt(
+                ReceiptId(1u64 << 63),
+                WriteStatus::Failed("rejected".to_string()),
+            )]),
+            Ok(ReceiptId(1u64 << 63))
+        );
+    }
+}
+
 /// The runtime-private envelope the engine thread's blocking recv loop reads.
 /// `Engine` carries the plain reducer vocabulary (`core::EngineMsg`) exactly
 /// as-is — this is what pool-translated relay events, signer completions,
@@ -156,7 +189,7 @@ enum Cmd {
     PublishTracked {
         intent: WriteIntent,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<ReceiptId>,
+        reply: Sender<Result<ReceiptId, PublishError>>,
     },
     ReattachReceipt {
         id: ReceiptId,
@@ -474,15 +507,10 @@ fn engine_loop<S, D>(
                 reply,
             } => {
                 let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
-                effects.extend(core.handle(EngineMsg::Publish(intent, sink)));
-                let id = effects
-                    .iter()
-                    .find_map(|effect| match effect {
-                        Effect::EmitReceipt(id, _) => Some(*id),
-                        _ => None,
-                    })
-                    .expect("every publish produces a receipt correlation id");
-                let _ = reply.send(id);
+                let publish_effects = core.handle(EngineMsg::Publish(intent, sink));
+                let result = publish_result(&publish_effects);
+                let _ = reply.send(result);
+                effects.extend(publish_effects);
                 dispatch_effects(
                     effects,
                     &pool,
@@ -702,6 +730,10 @@ fn dispatch_effect(
             // exact `WriteStatus` synchronously inside `EngineCore` (see the
             // module doc's "two delivery channels" note) -- redelivering
             // here would just duplicate it.
+        }
+        Effect::PublishFailed(..) => {
+            // `PublishTracked` consumes this typed pre-receipt failure for
+            // its synchronous reply. There is no receipt stream to fan out.
         }
         Effect::StartProbe(url, sub_id, filter, initial_hex) => {
             let handle = pool.ensure_open(&url);
@@ -956,15 +988,15 @@ impl Handle {
     /// at-most-once intent. `Ephemeral` also yields receipt facts, but owns
     /// no durable delivery obligation or query-visible pending row.
     #[must_use]
-    pub fn publish(&self, intent: WriteIntent) -> Receiver<WriteStatus> {
-        self.publish_tracked(intent).statuses
+    pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, PublishError> {
+        self.publish_tracked(intent).map(|receipt| receipt.statuses)
     }
 
     /// Enqueue a write and expose its stable receipt id. This synchronous
     /// round trip waits only for the local crash-atomic acceptance door,
     /// never for signing, routing, network I/O, or ACKs.
     #[must_use]
-    pub fn publish_tracked(&self, intent: WriteIntent) -> ReceiptStream {
+    pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
         let (tx, rx) = mpsc::channel();
         let sink: Box<dyn ReceiptSink> = Box::new(ChannelReceiptSink(tx));
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -977,8 +1009,8 @@ impl Handle {
             .expect("nmp-engine: publish called after shutdown");
         let id = reply_rx
             .recv()
-            .expect("nmp-engine: engine dropped publish receipt reply");
-        ReceiptStream { id, statuses: rx }
+            .expect("nmp-engine: engine dropped publish receipt reply")?;
+        Ok(ReceiptStream { id, statuses: rx })
     }
 
     /// Attach an additional observer to a retained receipt. The returned

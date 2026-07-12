@@ -152,13 +152,15 @@ impl Engine {
     /// boundary and surfaces here as a `WriteStatus::Failed` with no
     /// preceding `Accepted` -- see this module's doc.
     pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, EngineError> {
-        self.with_handle(|handle| handle.publish(intent))
+        self.with_handle(|handle| handle.publish(intent))?
+            .map_err(EngineError::from)
     }
 
     /// Enqueue a write while retaining the stable store-issued receipt id
     /// needed for process-later reattachment.
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
-        self.with_handle(|handle| handle.publish_tracked(intent))
+        self.with_handle(|handle| handle.publish_tracked(intent))?
+            .map_err(EngineError::from)
     }
 
     /// Reattach to durable receipt facts after a restart. Missing ids and

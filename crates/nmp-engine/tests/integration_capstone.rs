@@ -479,11 +479,13 @@ async fn write_ack_per_relay_over_real_relays() {
         vec![],
         "durable publish, two relays, one rejects",
     );
-    let receipt_rx = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let receipt_rx = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
 
     let mut seen: Vec<WriteStatus> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -635,11 +637,13 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
         ],
         "",
     );
-    let contact_receipt_rx = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(contact_list),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let contact_receipt_rx = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(contact_list),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(
         wait_for_status(&contact_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
@@ -656,11 +660,13 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
         vec![Tag::public_key(c.public_key())],
         "",
     );
-    let mute_receipt_rx = handle.publish(WriteIntent {
-        payload: WritePayload::Unsigned(mute_list),
-        durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
-    });
+    let mute_receipt_rx = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(mute_list),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
     assert!(
         wait_for_status(&mute_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,

@@ -29,6 +29,7 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidRelayUrl(String)
     case invalidTag([String])
     case invalidSecretKey
+    case receiptCorrelationIdExhausted
     case storeOpenFailed(String)
     case invalidSignature(String)
     case engineClosed
@@ -41,6 +42,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
         case .InvalidTag(let got): self = .invalidTag(got)
         case .InvalidSecretKey: self = .invalidSecretKey
+        case .ReceiptCorrelationIdExhausted: self = .receiptCorrelationIdExhausted
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed

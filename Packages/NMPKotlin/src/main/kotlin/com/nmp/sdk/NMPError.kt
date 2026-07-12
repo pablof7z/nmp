@@ -34,6 +34,8 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
+    object ReceiptCorrelationIdExhausted :
+        NMPError("receipt correlation id namespace exhausted")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
@@ -47,6 +49,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
                 is FfiException.InvalidSecretKey -> InvalidSecretKey
+                is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed

@@ -68,6 +68,9 @@ pub enum FfiError {
     /// `add_account`'s secret key did not parse as a valid nostr key (hex or
     /// bech32 `nsec`).
     InvalidSecretKey,
+    /// No upper-half correlation id remains for a publish rejected before
+    /// durable acceptance. No receipt or status stream was created.
+    ReceiptCorrelationIdExhausted,
     /// `NmpEngine::new`'s `store_path` pointed at a file `RedbStore::open`
     /// could not open.
     StoreOpenFailed {
@@ -96,6 +99,7 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
+            nmp::EngineError::ReceiptCorrelationIdExhausted => Self::ReceiptCorrelationIdExhausted,
             nmp::EngineError::EngineClosed => Self::EngineClosed,
         }
     }
@@ -112,6 +116,9 @@ impl std::fmt::Display for FfiError {
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
+            Self::ReceiptCorrelationIdExhausted => {
+                write!(f, "receipt correlation id namespace exhausted")
+            }
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
@@ -120,6 +127,21 @@ impl std::fmt::Display for FfiError {
 }
 
 impl std::error::Error for FfiError {}
+
+#[cfg(test)]
+mod engine_error_tests {
+    use super::*;
+
+    #[test]
+    fn receipt_correlation_exhaustion_remains_a_typed_ffi_error() {
+        let error = FfiError::from(nmp::EngineError::ReceiptCorrelationIdExhausted);
+        assert_eq!(error, FfiError::ReceiptCorrelationIdExhausted);
+        assert_eq!(
+            error.to_string(),
+            "receipt correlation id namespace exhausted"
+        );
+    }
+}
 
 /// Parse an `FfiFilter.tags` key -- the wire/local INDEXED filter alphabet
 /// only. Exactly one ASCII letter (`a`-`z`/`A`-`Z`) is accepted; anything
