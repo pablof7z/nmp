@@ -49,8 +49,8 @@ use nmp_router::{
 use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, CompensateOutcome, CoverageKey,
-    EventStore, IntentId, IntentSigState, PromoteOutcome, ReceiptState, RelayObserved,
-    WriteDurability,
+    EventStore, IntentId, IntentSigState, PersistenceError, PromoteOutcome, ReceiptState,
+    RelayObserved, WriteDurability,
 };
 use nmp_transport::{
     AttemptCorrelation, HandoffResult, RelayFrame, RelayHandle as TransportRelayHandle,
@@ -497,6 +497,16 @@ pub struct EngineCore<S: EventStore> {
     /// (`nmp_transport::Pool::admission_rejections`) and is folded in by the
     /// runtime.
     discovered_private_relays_rejected: u64,
+    /// Read-only degrade flag (issue #122): set once the first time an
+    /// ingest/read [`EventStore`] door returns [`PersistenceError`] (disk
+    /// full, I/O error). The reducer NEVER panics on such a failure — it
+    /// records the error message here, skips the affected reactive step
+    /// (leaving already-delivered state untouched rather than fabricating a
+    /// phantom retraction), and surfaces it on the read-only diagnostics
+    /// snapshot. A minimal, honest "the local cache went read-only" signal;
+    /// a richer failure-mode framework (recovery, reopen, per-door policy)
+    /// is deliberately out of scope — see the issue's priority note.
+    store_degraded: Option<String>,
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
@@ -546,6 +556,7 @@ impl<S: EventStore> EngineCore<S> {
             attempt_correlations: HashMap::new(),
             admission: RelayAdmissionPolicy::default(),
             discovered_private_relays_rejected: 0,
+            store_degraded: None,
         }
     }
 
@@ -558,6 +569,17 @@ impl<S: EventStore> EngineCore<S> {
     pub fn with_relay_admission(mut self, admission: RelayAdmissionPolicy) -> Self {
         self.admission = admission;
         self
+    }
+
+    /// Record an ingest/read persistence failure (issue #122) without
+    /// panicking: latch the first error message (read-only degrade) and push
+    /// a fresh diagnostics snapshot so an observer sees the degraded state
+    /// immediately. Idempotent — a later failure keeps the first message.
+    fn degrade_store(&mut self, err: PersistenceError, effects: &mut Vec<Effect>) {
+        if self.store_degraded.is_none() {
+            self.store_degraded = Some(err.to_string());
+        }
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
     }
 
     /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
@@ -980,13 +1002,18 @@ impl<S: EventStore> EngineCore<S> {
     /// routing/delivery; every number here is real state this reducer
     /// already tracks for other reasons, never fabricated/estimated.
     pub fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
-        diagnostics::build(
+        let mut snapshot = diagnostics::build(
             self.router.diagnostics(),
             self.router.plan(),
             &self.events_by_relay_kind,
             self.discovered_private_relays_rejected,
             |relay, key| self.resolver.store().get_coverage(key, relay),
-        )
+        );
+        // Surface the read-only degrade signal (issue #122) if an ingest/read
+        // door has failed — the one persistence-health fact `build` cannot
+        // see on its own.
+        snapshot.store_degraded = self.store_degraded.clone();
+        snapshot
     }
 
     /// A pure clock update PLUS two deadline sweeps: NIP-40 expiry
@@ -1021,12 +1048,19 @@ impl<S: EventStore> EngineCore<S> {
         // seeds dirty-marks from `removed` alone, `recompile` + `refresh_
         // all_handles` do the rest, and `RowDelta::Removed` falls out the
         // ordinary way.
-        let expired = self.resolver.store_mut().expire_due(now);
-        if !expired.is_empty() {
-            let removed: Vec<_> = expired.into_iter().map(|se| se.event).collect();
-            let _delta = self.resolver.retract(removed);
-            self.recompile(&mut effects);
-            self.refresh_all_handles(&mut effects);
+        match self.resolver.store_mut().expire_due(now) {
+            Ok(expired) if !expired.is_empty() => {
+                let removed: Vec<_> = expired.into_iter().map(|se| se.event).collect();
+                match self.resolver.retract(removed) {
+                    Ok(_delta) => {
+                        self.recompile(&mut effects);
+                        self.refresh_all_handles(&mut effects);
+                    }
+                    Err(e) => self.degrade_store(e, &mut effects),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => self.degrade_store(e, &mut effects),
         }
 
         // `>=` against the EXACT `Timestamp` threshold `next_deadline()`
@@ -1112,9 +1146,19 @@ impl<S: EventStore> EngineCore<S> {
     // ---- subscribe / unsubscribe / re-root ------------------------------
 
     fn on_subscribe(&mut self, query: LiveQuery, sink: Box<dyn RowSink>) -> Vec<Effect> {
-        let (qh, _delta) = self.resolver.subscribe(query);
-        let id = qh.id();
         let mut effects = Vec::new();
+        // Graph construction can read the store (a `Derived` binding resolves
+        // its inner query). On a persistence failure (issue #122) degrade to
+        // read-only and install NO handle rather than panic — the observer
+        // simply receives no rows.
+        let (qh, _delta) = match self.resolver.subscribe(query) {
+            Ok(v) => v,
+            Err(e) => {
+                self.degrade_store(e, &mut effects);
+                return effects;
+            }
+        };
+        let id = qh.id();
         self.recompile(&mut effects);
         // A new query can change the capped greedy source plan for EVERY
         // existing query, even when their rows are unchanged. Refresh the
@@ -1148,8 +1192,14 @@ impl<S: EventStore> EngineCore<S> {
 
     fn on_set_active_pubkey(&mut self, pk: Option<PublicKey>) -> Vec<Effect> {
         self.active_pubkey = pk;
-        let _delta = self.resolver.set_active_pubkey(pk);
         let mut effects = Vec::new();
+        // Re-rooting reactive nodes can re-query the store (a `Derived`
+        // binding over a reactive field). Degrade to read-only on a
+        // persistence failure (issue #122) rather than panic.
+        if let Err(e) = self.resolver.set_active_pubkey(pk) {
+            self.degrade_store(e, &mut effects);
+            return effects;
+        }
         self.recompile(&mut effects);
         self.refresh_all_handles(&mut effects);
         if let Some(pk) = pk {
@@ -1763,11 +1813,19 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(intent_id) = pending.intent_id {
             match self.resolver.store_mut().compensate_write(intent_id) {
                 Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
-                    let _delta = self
+                    // The store compensation already committed; reacting only
+                    // re-reads to recompute the graph. A read failure here
+                    // (issue #122) degrades to read-only rather than panics.
+                    match self
                         .resolver
-                        .react_to_compensation(pending.frozen.clone(), &outcome);
-                    self.recompile(effects);
-                    self.refresh_all_handles(effects);
+                        .react_to_compensation(pending.frozen.clone(), &outcome)
+                    {
+                        Ok(_delta) => {
+                            self.recompile(effects);
+                            self.refresh_all_handles(effects);
+                        }
+                        Err(e) => self.degrade_store(e, effects),
+                    }
                 }
                 Ok(CompensateOutcome::NotFound) => {
                     // Promotion already made the row valid. Never retract a
@@ -2154,36 +2212,56 @@ impl<S: EventStore> EngineCore<S> {
                 let relay_list_author =
                     (event.kind == nostr::Kind::RelayList).then_some(event.pubkey);
                 let observed = RelayObserved::new(relay, self.clock);
-                let ingest = self
+                // The ingest door runs on EVERY relay EVENT frame. On a
+                // persistence failure (disk full, I/O error — issue #122)
+                // degrade the local cache to read-only and emit a diagnostic
+                // instead of panicking the host app; this frame is dropped
+                // and no reactive refresh runs.
+                match self
                     .resolver
-                    .ingest_observed_detailed(vec![(event, observed)]);
-                let _delta = ingest.delta;
-                for (intent_id, canonical) in ingest.satisfied_intents {
-                    if let Some((receipt_id, pending)) = self
-                        .pending
-                        .iter_mut()
-                        .find(|(_, pending)| pending.intent_id == Some(intent_id))
-                    {
-                        pending.already_signed = true;
-                        pending.sign_request_in_flight = false;
-                        let receipt_id = *receipt_id;
-                        self.on_signed(receipt_id, canonical, &mut effects);
+                    .ingest_observed_detailed(vec![(event, observed)])
+                {
+                    Err(e) => self.degrade_store(e, &mut effects),
+                    Ok(ingest) => {
+                        let _delta = ingest.delta;
+                        for (intent_id, canonical) in ingest.satisfied_intents {
+                            if let Some((receipt_id, pending)) = self
+                                .pending
+                                .iter_mut()
+                                .find(|(_, pending)| pending.intent_id == Some(intent_id))
+                            {
+                                pending.already_signed = true;
+                                pending.sign_request_in_flight = false;
+                                let receipt_id = *receipt_id;
+                                self.on_signed(receipt_id, canonical, &mut effects);
+                            }
+                        }
+                        if let Some(author) = relay_list_author {
+                            self.ingest_relay_list_winner(author, &mut effects);
+                        }
+                        self.recompile(&mut effects);
+                        self.refresh_all_handles(&mut effects);
                     }
                 }
-                if let Some(author) = relay_list_author {
-                    self.ingest_relay_list_winner(author);
-                }
-                self.recompile(&mut effects);
-                self.refresh_all_handles(&mut effects);
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 let wire_id = sub_id.as_str();
                 let attributed = self.attribution.attribute_eose(&relay, wire_id, self.clock);
                 for (key, interval) in attributed {
                     if let Some(atom) = self.attribution.shape_of(key) {
-                        self.resolver
+                        if let Err(e) = self
+                            .resolver
                             .store_mut()
-                            .record_coverage(&atom, &relay, interval);
+                            .record_coverage(&atom, &relay, interval)
+                        {
+                            // Persisting a coverage watermark failed (issue
+                            // #122): degrade rather than panic. The
+                            // in-memory `Effect::RecordCoverage` is skipped
+                            // too — no watermark is claimed that did not
+                            // durably land.
+                            self.degrade_store(e, &mut effects);
+                            continue;
+                        }
                         effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
                     }
                 }
@@ -2278,7 +2356,7 @@ impl<S: EventStore> EngineCore<S> {
     /// has no token to pass, so its `Req` arm always falls through to the
     /// plain-REQ branch below, every time.
     fn recompile(&mut self, effects: &mut Vec<Effect>) {
-        self.sync_discovery();
+        self.sync_discovery(effects);
         let demand = self.resolver.active_demand();
         self.attribution.observe_demand(demand.iter());
         let wire_delta: WireDelta = self
@@ -2392,7 +2470,7 @@ impl<S: EventStore> EngineCore<S> {
     /// at all. A content atom for an author with no known write relays
     /// simply routes nowhere in the meantime (never an indexer fallback --
     /// "indexers are never a content fallback").
-    fn sync_discovery(&mut self) {
+    fn sync_discovery(&mut self, effects: &mut Vec<Effect>) {
         let needed: BTreeSet<PubkeyHex> = self
             .resolver
             .active_demand()
@@ -2440,8 +2518,13 @@ impl<S: EventStore> EngineCore<S> {
             authors: Some(Binding::Literal(self.discovery_authors.clone())),
             ..Filter::default()
         });
-        let (handle, _delta) = self.resolver.subscribe(query);
-        self.discovery_handle = Some(handle);
+        // Building the internal discovery subscription can read the store.
+        // On a persistence failure (issue #122) degrade to read-only and
+        // open no discovery sub rather than panic.
+        match self.resolver.subscribe(query) {
+            Ok((handle, _delta)) => self.discovery_handle = Some(handle),
+            Err(e) => self.degrade_store(e, effects),
+        }
     }
 
     /// After ingesting a possible kind:10002 event for `author`, re-read the
@@ -2452,19 +2535,23 @@ impl<S: EventStore> EngineCore<S> {
     /// older copy that already lost the replaceable race at `insert` time
     /// can never overwrite the directory with worse data than what the
     /// store itself considers authoritative.
-    fn ingest_relay_list_winner(&mut self, author: nostr::PublicKey) {
+    fn ingest_relay_list_winner(&mut self, author: nostr::PublicKey, effects: &mut Vec<Effect>) {
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
             authors: Some(BTreeSet::from([author.to_hex()])),
             ..ConcreteFilter::default()
         };
-        let Some(winner) = self
-            .resolver
-            .store()
-            .query(&filter.to_nostr())
-            .into_iter()
-            .next()
-        else {
+        // Re-reading the store's current relay-list winner can fail on I/O
+        // (issue #122): degrade to read-only rather than panic. The
+        // directory simply isn't updated for this author on this frame.
+        let winner = match self.resolver.store().query(&filter.to_nostr()) {
+            Ok(rows) => rows.into_iter().next(),
+            Err(e) => {
+                self.degrade_store(e, effects);
+                return;
+            }
+        };
+        let Some(winner) = winner else {
             return;
         };
         // Relay admission (issue #121): these relays are DISCOVERED — parsed
@@ -2530,10 +2617,18 @@ impl<S: EventStore> EngineCore<S> {
             limit: None,
             ..filter
         };
-        let local_ids: Vec<(u64, EventId)> = self
-            .resolver
-            .store()
-            .query(&neg_filter.to_nostr())
+        // Seeding the reconciler reads the local store's holdings for this
+        // shape. On an I/O failure (issue #122) degrade to read-only and do
+        // not open the session rather than panic — the `Close` pushed above
+        // still stands, so the sub-id is simply released.
+        let local_rows = match self.resolver.store().query(&neg_filter.to_nostr()) {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.degrade_store(e, effects);
+                return;
+            }
+        };
+        let local_ids: Vec<(u64, EventId)> = local_rows
             .into_iter()
             .map(|se| (se.event.created_at.as_secs(), se.event.id))
             .collect();
@@ -2681,9 +2776,17 @@ impl<S: EventStore> EngineCore<S> {
                 .attribute_eose(relay, &wire_sub_id_string(sub_id), self.clock);
         for (key, interval) in attributed {
             if let Some(shape) = self.attribution.shape_of(key) {
-                self.resolver
+                if let Err(e) = self
+                    .resolver
                     .store_mut()
-                    .record_coverage(&shape, relay, interval);
+                    .record_coverage(&shape, relay, interval)
+                {
+                    // Coverage-watermark persistence failed (issue #122):
+                    // degrade to read-only, claim no watermark that did not
+                    // land, and do not panic.
+                    self.degrade_store(e, effects);
+                    continue;
+                }
                 effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
             }
         }
@@ -2741,7 +2844,17 @@ impl<S: EventStore> EngineCore<S> {
     /// unsubscribe) can never spuriously emit a `SourcesGrew` for a row
     /// whose provenance did not actually change.
     fn refresh_handle(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
-        let (current, evidence) = self.rows_and_evidence_for(id);
+        // A read failure while snapshotting this handle's rows (issue #122)
+        // degrades to read-only: leave the handle's LAST delivered rows
+        // untouched (never fabricate a phantom retraction from a failed
+        // read) and surface the degrade on diagnostics instead of panicking.
+        let (current, evidence) = match self.rows_and_evidence_for(id) {
+            Ok(v) => v,
+            Err(e) => {
+                self.degrade_store(e, effects);
+                return;
+            }
+        };
         let Some(state) = self.handles.get_mut(&id) else {
             return;
         };
@@ -2807,7 +2920,10 @@ impl<S: EventStore> EngineCore<S> {
     /// source identity") -- over any other source there is no pinned relay
     /// set to intersect against, so Strict is a no-op there, identical to
     /// Agnostic.
-    fn rows_and_evidence_for(&self, id: HandleId) -> (BTreeMap<EventId, Row>, AcquisitionEvidence) {
+    fn rows_and_evidence_for(
+        &self,
+        id: HandleId,
+    ) -> Result<(BTreeMap<EventId, Row>, AcquisitionEvidence), PersistenceError> {
         let subtree_atoms = self.resolver.subtree_atoms(id);
         let pinned_relays: Option<&BTreeSet<RelayUrl>> = self
             .handles
@@ -2823,7 +2939,7 @@ impl<S: EventStore> EngineCore<S> {
         let root_atoms = self.resolver.root_atoms(id);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
-            for se in self.resolver.store().query(&atom.to_nostr()) {
+            for se in self.resolver.store().query(&atom.to_nostr())? {
                 if let Some(relays) = pinned_relays {
                     if !se
                         .provenance
@@ -2847,7 +2963,7 @@ impl<S: EventStore> EngineCore<S> {
             &self.connected_relays,
             &self.ever_connected_relays,
         );
-        (by_id, evidence)
+        Ok((by_id, evidence))
     }
 }
 

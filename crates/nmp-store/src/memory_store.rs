@@ -566,7 +566,10 @@ impl MemoryStore {
                 .get(&target_id)
                 .is_some_and(|se| se.event.pubkey == deleting.pubkey);
             if authorized_and_held {
-                if let Some(removed) = self.remove(target_id, RetractReason::Deleted) {
+                if let Some(removed) = self
+                    .remove(target_id, RetractReason::Deleted)
+                    .expect("MemoryStore remove is infallible")
+                {
                     deleted.push(removed);
                 }
             }
@@ -610,7 +613,10 @@ impl MemoryStore {
                     .get(&current_id)
                     .is_some_and(|se| se.event.created_at <= deleting.created_at);
                 if held_at_or_before {
-                    if let Some(removed) = self.remove(current_id, RetractReason::Deleted) {
+                    if let Some(removed) = self
+                        .remove(current_id, RetractReason::Deleted)
+                        .expect("MemoryStore remove is infallible")
+                    {
                         deleted.push(removed);
                     }
                 }
@@ -841,11 +847,15 @@ fn is_open_local_intent(se: &StoredEvent) -> bool {
 }
 
 impl EventStore for MemoryStore {
-    fn insert(&mut self, event: Event, from: RelayObserved) -> InsertOutcome {
+    fn insert(
+        &mut self,
+        event: Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
         // Refused at the door FIRST: an already-expired event is never
         // stored, so it never touches dedup or supersession at all.
         if event.is_expired_at(&from.at) {
-            return InsertOutcome::Refused(RefuseReason::AlreadyExpired);
+            return Ok(InsertOutcome::Refused(RefuseReason::AlreadyExpired));
         }
 
         // Dedup-by-id FIRST: merge provenance, no index churn, before any
@@ -891,16 +901,16 @@ impl EventStore for MemoryStore {
             } else {
                 Vec::new()
             };
-            return InsertOutcome::Duplicate {
+            return Ok(InsertOutcome::Duplicate {
                 provenance_grew: grew,
                 satisfied_intents,
-            };
+            });
         }
 
         // Tombstone check, AFTER dedup-by-id, BEFORE storage
         // (retraction-and-negative-deltas.md §2).
         if self.tombstone_refuses(&event) {
-            return InsertOutcome::Refused(RefuseReason::Tombstoned);
+            return Ok(InsertOutcome::Refused(RefuseReason::Tombstoned));
         }
 
         let is_deletion = event.kind == Kind::EventDeletion;
@@ -960,15 +970,21 @@ impl EventStore for MemoryStore {
         if is_deletion {
             if let InsertOutcome::Inserted = outcome {
                 let deleted = self.process_kind5_deletions(&event);
-                return InsertOutcome::Kind5Processed { deleted };
+                return Ok(InsertOutcome::Kind5Processed { deleted });
             }
         }
 
-        outcome
+        Ok(outcome)
     }
 
-    fn remove(&mut self, id: EventId, _reason: RetractReason) -> Option<StoredEvent> {
-        let removed = self.by_id.remove(&id)?;
+    fn remove(
+        &mut self,
+        id: EventId,
+        _reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
+        let Some(removed) = self.by_id.remove(&id) else {
+            return Ok(None);
+        };
         // Clear the address index too, but ONLY if it still points at the
         // row we just removed — `id` may be a non-addressed regular event
         // (no entry to clear), or a stale/superseded id that never held the
@@ -979,26 +995,32 @@ impl EventStore for MemoryStore {
             }
         }
         self.unindex_expiration(&removed);
-        Some(removed)
+        Ok(Some(removed))
     }
 
-    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         let due: Vec<EventId> = self
             .expiration_index
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect();
 
-        due.into_iter()
-            .filter_map(|id| self.remove(id, RetractReason::Expired))
-            .collect()
+        // `remove` is infallible for `MemoryStore`; unwrap the never-`Err`
+        // `Result` here so the drain keeps its `filter_map` shape.
+        Ok(due
+            .into_iter()
+            .filter_map(|id| {
+                self.remove(id, RetractReason::Expired)
+                    .expect("MemoryStore remove is infallible")
+            })
+            .collect())
     }
 
     fn next_expiration(&self) -> Option<Timestamp> {
         self.expiration_index.keys().next().copied()
     }
 
-    fn query(&self, filter: &Filter) -> Vec<StoredEvent> {
+    fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
         // `by_id` holds exactly the current winners (regular events, plus
         // the one live event per replaceable/addressable address) — so
         // iterating it and matching is "current winners only" by
@@ -1008,12 +1030,13 @@ impl EventStore for MemoryStore {
         // kind:5 intent has provisionally claimed (architecture review
         // requirement — see `SuppressClaim`'s doc): the row stays fully
         // present in `by_id`, only hidden from this read path.
-        self.by_id
+        Ok(self
+            .by_id
             .values()
             .filter(|se| !self.is_suppressed(se))
             .filter(|se| filter.match_event(&se.event, MatchEventOptions::new()))
             .cloned()
-            .collect()
+            .collect())
     }
 
     fn record_coverage(
@@ -1021,7 +1044,7 @@ impl EventStore for MemoryStore {
         atom: &ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
-    ) {
+    ) -> Result<(), PersistenceError> {
         let key = coverage_key(atom);
         let shape = window_erase(&atom.filter);
         let entry_key = (key, relay.clone());
@@ -1034,6 +1057,7 @@ impl EventStore for MemoryStore {
                 interval: merged,
             },
         );
+        Ok(())
     }
 
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
@@ -1042,7 +1066,7 @@ impl EventStore for MemoryStore {
             .map(|row| row.interval)
     }
 
-    fn gc(&mut self, claims: &ClaimSet) -> GcReport {
+    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
         let mut report = GcReport::default();
 
         // Regular events (no address key) matched by no live claim, AND not
@@ -1099,7 +1123,7 @@ impl EventStore for MemoryStore {
             }
         }
 
-        report
+        Ok(report)
     }
 
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -1607,7 +1631,8 @@ impl EventStore for MemoryStore {
                 && local.sig_state == SigState::Pending
                 && se.provenance.seen.is_empty();
             if should_retract {
-                self.remove(frozen_id, RetractReason::Rejected);
+                self.remove(frozen_id, RetractReason::Rejected)
+                    .expect("MemoryStore remove is infallible");
             }
         } else {
             // Not live. If sitting in someone else's displaced stash
