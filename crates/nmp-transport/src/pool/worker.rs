@@ -164,6 +164,7 @@ pub(super) fn spawn(
     keepalive_idle: Duration,
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
+    reconnect_jitter_max: Duration,
 ) -> WorkerHandle {
     let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
     let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
@@ -181,6 +182,7 @@ pub(super) fn spawn(
                 keepalive_idle,
                 keepalive_pong_timeout,
                 reconnect_delay_initial,
+                reconnect_jitter_max,
             );
         })
         .expect("relay worker thread spawn must succeed");
@@ -209,6 +211,7 @@ fn run_worker(
     keepalive_idle: Duration,
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
+    reconnect_jitter_max: Duration,
 ) {
     let mut pending: VecDeque<String> = VecDeque::new();
     let mut preamble: Vec<String> = Vec::new();
@@ -283,7 +286,7 @@ fn run_worker(
                             return;
                         }
                         let base = retry_in.expect("retry_in set above for non-permanent");
-                        let delay = backoff::jittered(base, &url);
+                        let delay = backoff::jittered(base, &url, reconnect_jitter_max);
                         attempt = attempt.wrapping_add(1);
                         if !wait_before_reconnect(
                             &command_rx,
@@ -321,7 +324,7 @@ fn run_worker(
                     return;
                 }
                 let base = retry_in.expect("retry_in set above for non-permanent");
-                let delay = backoff::jittered(base, &url);
+                let delay = backoff::jittered(base, &url, reconnect_jitter_max);
                 attempt = attempt.wrapping_add(1);
                 if !wait_before_reconnect(
                     &command_rx,

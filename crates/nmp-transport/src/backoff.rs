@@ -27,6 +27,18 @@ pub const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(300);
 /// a maxed-out backoff from a stale prior failure streak).
 pub const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(300);
 
+/// Production default ceiling for [`jittered`]'s per-URL offset. Anti-
+/// thundering-herd jitter is deliberately a FIXED (not re-rolled) value per
+/// URL — see [`jittered`]'s doc — so every retry against a given URL pays
+/// the same tax until it connects. Real relay outages are measured in
+/// seconds, so a `[0, 5s)` spread is negligible there; an in-process test
+/// relay that flips ports in milliseconds is exactly where that same tax
+/// becomes the dominant (and, per-URL, effectively random) cost. Tests that
+/// force a reconnect against a same-process mock relay should override this
+/// ceiling low via `PoolConfig::reconnect_jitter_max` rather than padding
+/// their own timeout to absorb it.
+pub const RECONNECT_JITTER_MAX: Duration = Duration::from_secs(5);
+
 /// Advance the exponential backoff schedule for one disconnect and return the
 /// (pre-jitter) delay to wait before the next reconnect attempt.
 ///
@@ -45,14 +57,23 @@ pub fn advance(current: &mut Duration, connected_for: Option<Duration>) -> Durat
 }
 
 /// Per-URL deterministic jitter so simultaneously-failing relays don't
-/// thunder-herd their reconnects. Same URL always yields the same offset;
-/// distinct URLs spread across a `[0, 5s)` window.
+/// thunder-herd their reconnects. Same URL always yields the same offset,
+/// RE-PAID ON EVERY RETRY against that URL (the offset depends only on
+/// `url`, never on the attempt count or `base`) — so a URL unlucky enough
+/// to hash near `jitter_max` pays that near-`jitter_max` tax on every
+/// single reconnect attempt until one finally succeeds, not just once.
+/// `jitter_max` of `Duration::ZERO` disables jitter entirely (returns
+/// `base` unchanged) rather than panicking on a degenerate modulus.
 #[must_use]
-pub fn jittered(base: Duration, url: &str) -> Duration {
+pub fn jittered(base: Duration, url: &str, jitter_max: Duration) -> Duration {
+    let bound_ms = u64::try_from(jitter_max.as_millis()).unwrap_or(u64::MAX);
+    if bound_ms == 0 {
+        return base;
+    }
     let hash = url.bytes().fold(0u64, |acc, b| {
         acc.wrapping_mul(31).wrapping_add(u64::from(b))
     });
-    let jitter_ms = hash % 5000;
+    let jitter_ms = hash % bound_ms;
     base + Duration::from_millis(jitter_ms)
 }
 
@@ -100,8 +121,8 @@ mod tests {
     fn jittered_backoff_is_deterministic_per_url() {
         let base = Duration::from_secs(3);
         assert_eq!(
-            jittered(base, "wss://relay.example"),
-            jittered(base, "wss://relay.example")
+            jittered(base, "wss://relay.example", RECONNECT_JITTER_MAX),
+            jittered(base, "wss://relay.example", RECONNECT_JITTER_MAX)
         );
     }
 
@@ -109,17 +130,37 @@ mod tests {
     fn jittered_backoff_spreads_across_distinct_urls() {
         let base = Duration::from_secs(3);
         let urls = ["wss://a.example", "wss://b.example", "wss://c.example"];
-        let offsets: std::collections::HashSet<_> =
-            urls.iter().map(|u| jittered(base, u) - base).collect();
+        let offsets: std::collections::HashSet<_> = urls
+            .iter()
+            .map(|u| jittered(base, u, RECONNECT_JITTER_MAX) - base)
+            .collect();
         assert!(offsets.len() >= 2, "expected spread, got {offsets:?}");
     }
 
     #[test]
-    fn jittered_backoff_bounded_by_five_seconds() {
+    fn jittered_backoff_bounded_by_configured_max() {
         let base = Duration::from_secs(3);
         for url in ["wss://r.example", "wss://very-long.example/path", ""] {
-            let delay = jittered(base, url);
-            assert!(delay >= base && delay < base + Duration::from_secs(5));
+            let delay = jittered(base, url, RECONNECT_JITTER_MAX);
+            assert!(delay >= base && delay < base + RECONNECT_JITTER_MAX);
+        }
+    }
+
+    /// The falsifier this fix is built to satisfy: a `jitter_max` of zero
+    /// must return `base` UNCHANGED for every URL, never panic on a
+    /// degenerate modulus and never silently keep some nonzero offset.
+    /// This is what lets a test disable the per-URL tax entirely instead of
+    /// padding its own timeout to absorb it.
+    #[test]
+    fn jittered_backoff_disabled_by_zero_max_returns_base_unchanged() {
+        let base = Duration::from_millis(20);
+        for url in [
+            "ws://127.0.0.1:54321",
+            "wss://a.example",
+            "wss://very-long.example/path",
+            "",
+        ] {
+            assert_eq!(jittered(base, url, Duration::ZERO), base);
         }
     }
 
