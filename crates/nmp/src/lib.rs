@@ -69,7 +69,7 @@ pub use nmp_resolver::LiveQuery;
 // protocol module, not the default facade surface.
 pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
-pub use nmp_engine::runtime::ReceiptStream;
+pub use nmp_engine::runtime::{ReceiptReattachment, ReceiptStream};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,

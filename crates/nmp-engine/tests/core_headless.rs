@@ -169,7 +169,10 @@ impl EventStore for FailOnceCompensationStore {
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
         self.inner.recover_outbox()
     }
-    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn record_route_revision(
@@ -289,7 +292,10 @@ impl EventStore for SharedFailStartStore {
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
         self.inner.lock().unwrap().recover_outbox()
     }
-    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.lock().unwrap().reattach_receipt(receipt_id)
     }
     fn record_route_revision(
@@ -428,7 +434,10 @@ impl EventStore for RedbFailStartStore {
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
         self.inner.recover_outbox()
     }
-    fn reattach_receipt(&self, receipt_id: u64) -> Option<RecoveredReceipt> {
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn record_route_revision(
@@ -2324,7 +2333,9 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
             if *receipt == id && relay == &blocked
     )));
     let replay = CapturingReceiptSink::default();
-    assert!(core.reattach_receipt(id, Box::new(replay.clone())));
+    assert!(core
+        .reattach_receipt(id, Box::new(replay.clone()))
+        .is_attached());
     assert!(replay
         .0
         .lock()
@@ -2355,7 +2366,9 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     assert!(statuses.contains(&WriteStatus::PersistenceBlocked(b.clone())));
     drop(statuses);
     let replay = CapturingReceiptSink::default();
-    assert!(core.reattach_receipt(id, Box::new(replay.clone())));
+    assert!(core
+        .reattach_receipt(id, Box::new(replay.clone()))
+        .is_attached());
     let replayed = replay.0.lock().unwrap();
     assert!(replayed.contains(&WriteStatus::PersistenceBlocked(a)));
     assert!(replayed.contains(&WriteStatus::PersistenceBlocked(b)));
@@ -2394,7 +2407,9 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
             if *receipt == id && relay == &good
     )));
     let replay = CapturingReceiptSink::default();
-    assert!(core.reattach_receipt(id, Box::new(replay.clone())));
+    assert!(core
+        .reattach_receipt(id, Box::new(replay.clone()))
+        .is_attached());
     assert!(replay
         .0
         .lock()
@@ -2433,7 +2448,9 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     );
     assert!(still_blocked.recover_on_boot().is_empty());
     let replay = CapturingReceiptSink::default();
-    assert!(still_blocked.reattach_receipt(receipt, Box::new(replay.clone())));
+    assert!(still_blocked
+        .reattach_receipt(receipt, Box::new(replay.clone()))
+        .is_attached());
     assert!(replay
         .0
         .lock()
@@ -2521,7 +2538,9 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
             .count(),
         1
     );
-    assert!(recovered.reattach_receipt(receipt, Box::new(CapturingReceiptSink::default())));
+    assert!(recovered
+        .reattach_receipt(receipt, Box::new(CapturingReceiptSink::default()))
+        .is_attached());
 }
 
 #[test]
@@ -2602,7 +2621,9 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
             Effect::EmitReceipt(_, WriteStatus::Acked(r)) if r == &old
         )));
         let replay = CapturingReceiptSink::default();
-        assert!(core.reattach_receipt(receipt, Box::new(replay.clone())));
+        assert!(core
+            .reattach_receipt(receipt, Box::new(replay.clone()))
+            .is_attached());
         assert!(replay
             .0
             .lock()

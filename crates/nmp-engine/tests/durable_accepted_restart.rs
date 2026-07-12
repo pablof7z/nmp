@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use nmp_engine::core::{Effect, EngineCore, EngineMsg, ReceiptId};
+use nmp_engine::core::{Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId};
 use nmp_engine::outbox::{
     Durability, ReceiptSink, WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
@@ -104,8 +104,12 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
 
     let first = Sink::default();
     let second = Sink::default();
-    assert!(core.reattach_receipt(id, Box::new(first.clone())));
-    assert!(core.reattach_receipt(id, Box::new(second.clone())));
+    assert!(core
+        .reattach_receipt(id, Box::new(first.clone()))
+        .is_attached());
+    assert!(core
+        .reattach_receipt(id, Box::new(second.clone()))
+        .is_attached());
     assert_eq!(
         first.0.lock().unwrap().len(),
         second.0.lock().unwrap().len()
@@ -146,6 +150,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
         RedbStore::open(&path)
             .unwrap()
             .reattach_receipt(id.0)
+            .unwrap()
             .unwrap()
             .intent_id
             .unwrap()
@@ -219,7 +224,9 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(core.recover_on_boot().is_empty());
     let reattached = Sink::default();
-    assert!(core.reattach_receipt(id, Box::new(reattached.clone())));
+    assert!(core
+        .reattach_receipt(id, Box::new(reattached.clone()))
+        .is_attached());
     assert_eq!(
         *reattached.0.lock().unwrap(),
         vec![WriteStatus::Accepted, WriteStatus::AwaitingCapability]
@@ -291,8 +298,12 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         replays, 4,
         "two coowners retain both append-only relay lanes"
     );
-    assert!(core.reattach_receipt(a, Box::new(Sink::default())));
-    assert!(core.reattach_receipt(b, Box::new(Sink::default())));
+    assert!(core
+        .reattach_receipt(a, Box::new(Sink::default()))
+        .is_attached());
+    assert!(core
+        .reattach_receipt(b, Box::new(Sink::default()))
+        .is_attached());
 }
 
 #[test]
@@ -335,7 +346,9 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-    assert!(core.reattach_receipt(receipt_id, Box::new(Sink::default())));
+    assert!(core
+        .reattach_receipt(receipt_id, Box::new(Sink::default()))
+        .is_attached());
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
@@ -374,6 +387,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             store
                 .reattach_receipt(receipt_id.0)
                 .unwrap()
+                .unwrap()
                 .intent_id
                 .unwrap(),
             receipt_id,
@@ -408,7 +422,170 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(core.recover_on_boot().is_empty());
-    assert!(!core.reattach_receipt(receipt_id, Box::new(Sink::default())));
+    let unreadable_sink = Sink::default();
+    assert_eq!(
+        core.reattach_receipt(receipt_id, Box::new(unreadable_sink.clone())),
+        ReattachOutcome::RetainedButUnreadable
+    );
+    assert!(unreadable_sink.0.lock().unwrap().is_empty());
+    drop(core);
+    assert!(RedbStore::open(&path)
+        .unwrap()
+        .recover_outbox()
+        .iter()
+        .any(|intent| intent.intent_id == intent_id));
+}
+
+#[test]
+fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://terminal.example").unwrap();
+    let store = nmp_store::MemoryStore::new();
+    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(500),
+                Kind::TextNote,
+                vec![],
+                "terminal retained",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        },
+        Box::new(Sink::default()),
+    ));
+    let receipt = receipt_id(&effects);
+    core.handle(EngineMsg::CancelWrite(receipt));
+
+    let replay = Sink::default();
+    assert_eq!(
+        core.reattach_receipt(receipt, Box::new(replay.clone())),
+        ReattachOutcome::Attached
+    );
+    assert_eq!(
+        *replay.0.lock().unwrap(),
+        vec![WriteStatus::Failed("write compensated".to_string())]
+    );
+}
+
+#[test]
+fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("corrupt-receipt.redb");
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://corrupt-receipt.example").unwrap();
+    let (intent_id, receipt_id) = {
+        let store = RedbStore::open(&path).unwrap();
+        let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let effects = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(501),
+                    Kind::TextNote,
+                    vec![],
+                    "corrupt receipt",
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(Sink::default()),
+        ));
+        let receipt_id = receipt_id(&effects);
+        drop(core);
+        let store = RedbStore::open(&path).unwrap();
+        let intent_id = store
+            .reattach_receipt(receipt_id.0)
+            .unwrap()
+            .unwrap()
+            .intent_id
+            .unwrap();
+        (intent_id, receipt_id)
+    };
+
+    const RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_receipts");
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(RECEIPTS).unwrap();
+        table
+            .insert(format!("{:020}", receipt_id.0).as_str(), "{")
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+
+    let store = RedbStore::open(&path).unwrap();
+    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    assert!(core.recover_on_boot().is_empty());
+    let replay = Sink::default();
+    assert_eq!(
+        core.reattach_receipt(receipt_id, Box::new(replay.clone())),
+        ReattachOutcome::RetainedButUnreadable
+    );
+    assert!(replay.0.lock().unwrap().is_empty());
+    drop(core);
+    assert!(RedbStore::open(&path)
+        .unwrap()
+        .recover_outbox()
+        .iter()
+        .any(|intent| intent.intent_id == intent_id));
+}
+
+#[test]
+fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("corrupt-route.redb");
+    let keys = Keys::generate();
+    let event = signed(&keys, "corrupt route", 502);
+    let (intent_id, receipt_id) = {
+        let store = RedbStore::open(&path).unwrap();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+        let effects = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Signed(event),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(Sink::default()),
+        ));
+        let receipt_id = receipt_id(&effects);
+        drop(core);
+        let store = RedbStore::open(&path).unwrap();
+        let intent_id = store
+            .reattach_receipt(receipt_id.0)
+            .unwrap()
+            .unwrap()
+            .intent_id
+            .unwrap();
+        (intent_id, receipt_id)
+    };
+
+    const ROUTES: TableDefinition<&str, &str> = TableDefinition::new("outbox_route_revisions");
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(ROUTES).unwrap();
+        table
+            .insert(format!("{:020}:{:020}", intent_id.0, 1).as_str(), "{}")
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+
+    let store = RedbStore::open(&path).unwrap();
+    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    assert!(core.recover_on_boot().is_empty());
+    let replay = Sink::default();
+    assert_eq!(
+        core.reattach_receipt(receipt_id, Box::new(replay.clone())),
+        ReattachOutcome::RetainedButUnreadable
+    );
+    assert!(replay.0.lock().unwrap().is_empty());
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()

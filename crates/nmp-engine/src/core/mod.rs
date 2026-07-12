@@ -88,6 +88,25 @@ pub(crate) use attribution::wire_sub_id_string;
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct ReceiptId(pub u64);
 
+/// Truthful result of trying to attach a receipt observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReattachOutcome {
+    /// The retained receipt and all replay evidence were readable; the sink
+    /// was primed and, for live work, registered for subsequent facts.
+    Attached,
+    /// This store has no retained receipt with the requested id.
+    NotFound,
+    /// The receipt identity is retained, but its receipt/attempt/route evidence
+    /// cannot be decoded. Nothing is published, deleted, or attached.
+    RetainedButUnreadable,
+}
+
+impl ReattachOutcome {
+    pub fn is_attached(self) -> bool {
+        self == Self::Attached
+    }
+}
+
 /// Sink an app-facing `Handle` registers for row deltas on a subscription.
 pub trait RowSink: Send {
     fn on_rows(&self, rows: Vec<RowDelta>);
@@ -597,15 +616,32 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Attach another observer to an existing durable receipt and replay
     /// its retained facts. Unknown ids do not create state.
-    pub fn reattach_receipt(&mut self, id: ReceiptId, sink: Box<dyn ReceiptSink>) -> bool {
-        let Some(receipt) = self.resolver.store().reattach_receipt(id.0) else {
-            return false;
+    pub fn reattach_receipt(
+        &mut self,
+        id: ReceiptId,
+        sink: Box<dyn ReceiptSink>,
+    ) -> ReattachOutcome {
+        let receipt = match self.resolver.store().reattach_receipt(id.0) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return ReattachOutcome::NotFound,
+            Err(_) => return ReattachOutcome::RetainedButUnreadable,
         };
         let attempts = match receipt.intent_id {
-            Some(intent_id) => match self.resolver.store().recover_attempts(intent_id) {
-                Ok(attempts) => attempts,
-                Err(_) => return false,
-            },
+            Some(intent_id) => {
+                let attempts = match self.resolver.store().recover_attempts(intent_id) {
+                    Ok(attempts) => attempts,
+                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                };
+                if self
+                    .resolver
+                    .store()
+                    .recover_route_revisions(intent_id)
+                    .is_err()
+                {
+                    return ReattachOutcome::RetainedButUnreadable;
+                }
+                attempts
+            }
             None => Vec::new(),
         };
         let status = match receipt.state {
@@ -650,7 +686,7 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(pending) = self.pending.get_mut(&id) {
             pending.sinks.push(sink);
         }
-        true
+        ReattachOutcome::Attached
     }
 
     /// Read-only access to the resolver's current demand (test/diagnostic

@@ -3,6 +3,26 @@ import XCTest
 import NMPFFI
 
 final class EvidenceMappingTests: XCTestCase {
+    func testEveryReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
+        let stream = AsyncStream<WriteStatus> { $0.finish() }
+
+        guard case let .attached(receipt) = mapReceiptReattachment(.attached, id: 42, status: stream) else {
+            return XCTFail("attached must remain attached")
+        }
+        XCTAssertEqual(receipt.id, 42)
+
+        guard case .notFound = mapReceiptReattachment(.notFound, id: 42, status: stream) else {
+            return XCTFail("notFound must remain notFound")
+        }
+        guard case .retainedButUnreadable = mapReceiptReattachment(
+            .retainedButUnreadable,
+            id: 42,
+            status: stream
+        ) else {
+            return XCTFail("retained corruption must not collapse into absence")
+        }
+    }
+
     func testOutcomeUnknownReceiptMappingRemainsDistinctFromGaveUp() {
         XCTAssertEqual(
             WriteStatus(.outcomeUnknown(relay: "wss://ambiguous.example")),
