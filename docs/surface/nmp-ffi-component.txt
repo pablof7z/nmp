@@ -1400,6 +1400,37 @@ record Record {
 }
 
 record Record {
+    name: "FfiGroupRef",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "group_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "host",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "name",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "A remembered NIP-29 group reference (#108, `nmp_nip29::GroupRef`\nmirror) -- group id, host relay, and optional display name.",
+    ),
+}
+
+record Record {
     name: "FfiKindCount",
     module_path: "nmp_ffi",
     remote: false,
@@ -1514,6 +1545,42 @@ record Record {
     ],
     docstring: Some(
         "One relay's full diagnostics (M5 plan §1.1) -- per-relay wire-sub count,\nexact filters, lane breakdown, reverse coverage (authors served), events\nactually received per kind, and per-filter coverage state. Every field\nhere is a REAL number read off the running engine -- never fabricated or\nestimated (the plan's truth-anchor rule).",
+    ),
+}
+
+record Record {
+    name: "FfiRememberedGroups",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "groups",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroupRef",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "hosts_in_use",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "has_private_content",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "The composed remembered-groups/host-relays value (#108,\n`nmp_nip29::RememberedGroups` mirror) -- what\n`crate::nip29::decode_remembered_groups` returns from a delivered\nkind:10009 [`FfiRow`].",
     ),
 }
 
@@ -1739,6 +1806,44 @@ record Record {
 }
 
 function Function {
+    name: "active_account_demand",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiDemand",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_active_account_demand",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiDemand",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "The signed-in account's remembered-groups demand (#108,\n`nmp_nip51::active_account_demand` mirror): `kinds:[10009]`,\n`AuthorOutboxes + Public`. Signed-out (no active account) resolves to\nzero atoms through the ordinary reactive-binding empty-resolution path\n-- no special case needed on either side of this boundary.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_active_account_demand",
+    checksum: Some(
+        44233,
+    ),
+}
+
+function Function {
     name: "decode_nostr_entity",
     module_path: "nmp_ffi",
     is_async: false,
@@ -1793,6 +1898,196 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_nostr_entity",
     checksum: Some(
         43591,
+    ),
+}
+
+function Function {
+    name: "decode_remembered_groups",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "row",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiRememberedGroups",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_decode_remembered_groups",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "row",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiRememberedGroups",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Decode a delivered kind:10009 [`FfiRow`] into the composed remembered-\ngroups/host-relays value (#108). Infallible, mirroring\n`nmp_nip51::decode_simple_groups_list`'s own never-fails contract:\nmalformed individual items are dropped, never the whole decode.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_remembered_groups",
+    checksum: Some(
+        13946,
+    ),
+}
+
+function Function {
+    name: "group_content_demand",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "host",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "group_id",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiDemand",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_group_content_demand",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "host",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "group_id",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiDemand",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Group content (kinds 9, 30315), `h`-tag scoped to `group_id`, pinned to\n`host` (#108, `nmp_nip29::group_content_demand` mirror).",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_group_content_demand",
+    checksum: Some(
+        15553,
+    ),
+}
+
+function Function {
+    name: "group_discovery_demand",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "host",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiDemand",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_group_discovery_demand",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "host",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiDemand",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Group discovery (kind:39000) pinned to `host` (#108,\n`nmp_nip29::group_discovery_demand` mirror). `host` crosses the FFI\nboundary as a raw string, unlike the direct-Rust constructor's\n`RelayUrl` -- fallibility is restored HERE (an FFI caller can supply a\nmalformed URL the direct-Rust singleton-set proof doesn't cover).",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_group_discovery_demand",
+    checksum: Some(
+        49815,
     ),
 }
 
