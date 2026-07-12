@@ -832,8 +832,8 @@ fn boot_catches_up_past_due_expiry() {
         expiring_id = expiring.id;
         control_id = control.id;
         let observed = RelayObserved::new(relay0.clone(), Timestamp::from(100u64));
-        store.insert(expiring, observed.clone());
-        store.insert(control, observed);
+        store.insert(expiring, observed.clone()).unwrap();
+        store.insert(control, observed).unwrap();
         // `store` drops here -- redb flushes/closes on drop, same as
         // `watermark_cold_start_offline`'s own phase boundary.
     }

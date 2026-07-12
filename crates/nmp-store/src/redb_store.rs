@@ -1963,102 +1963,104 @@ impl RedbStore {
         &self,
         read_txn: &redb::ReadTransaction,
         filter: &Filter,
-    ) -> Option<HashSet<EventId>> {
-        let by_authors = filter.authors.as_ref().map(|authors| {
-            let by_author = read_txn
-                .open_table(BY_AUTHOR)
-                .expect("redb: open by_author");
-            let mut ids = HashSet::new();
-            for author in authors {
-                let (lower, upper) = by_author_range(author);
-                for entry in by_author
-                    .range::<&str>(lower.as_str()..=upper.as_str())
-                    .expect("redb: range by_author")
-                {
-                    let (_key, value) = entry.expect("redb: read by_author entry");
-                    ids.insert(
-                        EventId::from_hex(value.value()).expect("redb: decode by_author id"),
-                    );
+    ) -> Result<Option<HashSet<EventId>>, PersistenceError> {
+        // `?` reaches this fn (returning `Result`), so redb read failures
+        // surface as `PersistenceError` on `query`'s index-narrowing path
+        // rather than panicking (issue #122); `EventId::from_hex` on an index
+        // value stays `.expect()`-on-invariant (a corrupt persisted key).
+        let by_authors = match filter.authors.as_ref() {
+            None => None,
+            Some(authors) => {
+                let by_author = read_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+                let mut ids = HashSet::new();
+                for author in authors {
+                    let (lower, upper) = by_author_range(author);
+                    for entry in by_author
+                        .range::<&str>(lower.as_str()..=upper.as_str())
+                        .map_err(persist_err)?
+                    {
+                        let (_key, value) = entry.map_err(persist_err)?;
+                        ids.insert(
+                            EventId::from_hex(value.value()).expect("redb: decode by_author id"),
+                        );
+                    }
                 }
+                Some(ids)
             }
-            ids
-        });
+        };
 
-        let by_kinds = filter.kinds.as_ref().map(|kinds| {
-            let by_kind = read_txn.open_table(BY_KIND).expect("redb: open by_kind");
-            let mut ids = HashSet::new();
-            for kind in kinds {
-                let (lower, upper) = by_kind_range(*kind);
-                for entry in by_kind
-                    .range::<&str>(lower.as_str()..=upper.as_str())
-                    .expect("redb: range by_kind")
-                {
-                    let (_key, value) = entry.expect("redb: read by_kind entry");
-                    ids.insert(EventId::from_hex(value.value()).expect("redb: decode by_kind id"));
+        let by_kinds = match filter.kinds.as_ref() {
+            None => None,
+            Some(kinds) => {
+                let by_kind = read_txn.open_table(BY_KIND).map_err(persist_err)?;
+                let mut ids = HashSet::new();
+                for kind in kinds {
+                    let (lower, upper) = by_kind_range(*kind);
+                    for entry in by_kind
+                        .range::<&str>(lower.as_str()..=upper.as_str())
+                        .map_err(persist_err)?
+                    {
+                        let (_key, value) = entry.map_err(persist_err)?;
+                        ids.insert(
+                            EventId::from_hex(value.value()).expect("redb: decode by_kind id"),
+                        );
+                    }
                 }
+                Some(ids)
             }
-            ids
-        });
+        };
 
-        match (by_authors, by_kinds) {
+        Ok(match (by_authors, by_kinds) {
             (Some(a), Some(k)) => Some(a.intersection(&k).copied().collect()),
             (Some(a), None) => Some(a),
             (None, Some(k)) => Some(k),
             (None, None) => None,
-        }
+        })
     }
 }
 
 impl EventStore for RedbStore {
-    fn insert(&mut self, event: Event, from: RelayObserved) -> InsertOutcome {
+    fn insert(
+        &mut self,
+        event: Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
         // Refused at the door FIRST: an already-expired event is never
         // stored, so it never touches dedup or supersession at all.
         if event.is_expired_at(&from.at) {
-            return InsertOutcome::Refused(RefuseReason::AlreadyExpired);
+            return Ok(InsertOutcome::Refused(RefuseReason::AlreadyExpired));
         }
 
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         let outcome = {
-            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
-            let mut addr_index = write_txn
-                .open_table(ADDR_INDEX)
-                .expect("redb: open addr_index");
-            let mut tombstones = write_txn
-                .open_table(TOMBSTONES)
-                .expect("redb: open tombstones");
-            let mut addr_tombstones = write_txn
-                .open_table(ADDR_TOMBSTONES)
-                .expect("redb: open addr_tombstones");
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
+            let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
+            let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
-                .expect("redb: open expiration_index");
-            let mut by_author = write_txn
-                .open_table(BY_AUTHOR)
-                .expect("redb: open by_author");
-            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
-            let mut outbox_intents = write_txn
-                .open_table(OUTBOX_INTENTS)
-                .expect("redb: open outbox_intents");
-            let mut outbox_receipts = write_txn
-                .open_table(OUTBOX_RECEIPTS)
-                .expect("redb: open outbox_receipts");
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
+            let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
             let mut outbox_displaced = write_txn
                 .open_table(OUTBOX_DISPLACED)
-                .expect("redb: open outbox_displaced");
+                .map_err(persist_err)?;
             let mut outbox_kind5_claims = write_txn
                 .open_table(OUTBOX_KIND5_CLAIMS)
-                .expect("redb: open outbox_kind5_claims");
+                .map_err(persist_err)?;
             let mut outbox_suppress_by_id = write_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ID)
-                .expect("redb: open outbox_suppress_by_id");
+                .map_err(persist_err)?;
             let mut outbox_suppress_by_addr = write_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-                .expect("redb: open outbox_suppress_by_addr");
+                .map_err(persist_err)?;
             let id_hex = event.id.to_hex();
 
             let existing_json = events
                 .get(id_hex.as_str())
-                .expect("redb: get event")
+                .map_err(persist_err)?
                 .map(|guard| guard.value().to_string());
 
             if let Some(existing_json) = existing_json {
@@ -2108,7 +2110,7 @@ impl EventStore for RedbStore {
                 let encoded = serde_json::to_string(&record).expect("redb: encode stored event");
                 events
                     .insert(id_hex.as_str(), encoded.as_str())
-                    .expect("redb: update event provenance");
+                    .map_err(persist_err)?;
                 let satisfied_intents = if let Some(owners) = &fan_out_owners {
                     fan_out_signed_in_txn(
                         &mut events,
@@ -2126,8 +2128,7 @@ impl EventStore for RedbStore {
                         &mut outbox_suppress_by_addr,
                         owners,
                         &event,
-                    )
-                    .expect("redb: fan out adopted signature")
+                    )?
                 } else {
                     Vec::new()
                 };
@@ -2135,9 +2136,7 @@ impl EventStore for RedbStore {
                     provenance_grew: grew,
                     satisfied_intents,
                 }
-            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event)
-                .expect("redb: tombstone check")
-            {
+            } else if tombstone_refuses(&tombstones, &addr_tombstones, &event)? {
                 // Tombstone check, AFTER dedup-by-id, BEFORE storage
                 // (retraction-and-negative-deltas.md §2).
                 InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -2158,21 +2157,21 @@ impl EventStore for RedbStore {
                     None => {
                         events
                             .insert(id_hex.as_str(), encoded.as_str())
-                            .expect("redb: insert event");
+                            .map_err(persist_err)?;
                         by_author
                             .insert(
                                 by_author_key(&event.pubkey, &event.id).as_str(),
                                 id_hex.as_str(),
                             )
-                            .expect("redb: insert by_author");
+                            .map_err(persist_err)?;
                         by_kind
                             .insert(by_kind_key(event.kind, &event.id).as_str(), id_hex.as_str())
-                            .expect("redb: insert by_kind");
+                            .map_err(persist_err)?;
                         if let Some(ts) = event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &event.id);
                             expiration_index
                                 .insert(exp_key.as_str(), id_hex.as_str())
-                                .expect("redb: insert expiration_index");
+                                .map_err(persist_err)?;
                         }
                         InsertOutcome::Inserted
                     }
@@ -2180,41 +2179,41 @@ impl EventStore for RedbStore {
                         let addr_key_str = addr_key.to_redb_key();
                         let current_id_hex = addr_index
                             .get(addr_key_str.as_str())
-                            .expect("redb: get addr_index")
+                            .map_err(persist_err)?
                             .map(|guard| guard.value().to_string());
 
                         match current_id_hex {
                             None => {
                                 events
                                     .insert(id_hex.as_str(), encoded.as_str())
-                                    .expect("redb: insert event");
+                                    .map_err(persist_err)?;
                                 addr_index
                                     .insert(addr_key_str.as_str(), id_hex.as_str())
-                                    .expect("redb: insert addr_index");
+                                    .map_err(persist_err)?;
                                 by_author
                                     .insert(
                                         by_author_key(&event.pubkey, &event.id).as_str(),
                                         id_hex.as_str(),
                                     )
-                                    .expect("redb: insert by_author");
+                                    .map_err(persist_err)?;
                                 by_kind
                                     .insert(
                                         by_kind_key(event.kind, &event.id).as_str(),
                                         id_hex.as_str(),
                                     )
-                                    .expect("redb: insert by_kind");
+                                    .map_err(persist_err)?;
                                 if let Some(ts) = event.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &event.id);
                                     expiration_index
                                         .insert(exp_key.as_str(), id_hex.as_str())
-                                        .expect("redb: insert expiration_index");
+                                        .map_err(persist_err)?;
                                 }
                                 InsertOutcome::Inserted
                             }
                             Some(current_id_hex) => {
                                 let current_json = events
                                     .get(current_id_hex.as_str())
-                                    .expect("redb: get current winner")
+                                    .map_err(persist_err)?
                                     .expect("addr_index must always point at a stored event")
                                     .value()
                                     .to_string();
@@ -2234,7 +2233,7 @@ impl EventStore for RedbStore {
                                     };
                                     events
                                         .remove(current_id_hex.as_str())
-                                        .expect("redb: remove superseded event");
+                                        .map_err(persist_err)?;
                                     by_author
                                         .remove(
                                             by_author_key(
@@ -2243,42 +2242,42 @@ impl EventStore for RedbStore {
                                             )
                                             .as_str(),
                                         )
-                                        .expect("redb: remove by_author");
+                                        .map_err(persist_err)?;
                                     by_kind
                                         .remove(
                                             by_kind_key(replaced.event.kind, &replaced.event.id)
                                                 .as_str(),
                                         )
-                                        .expect("redb: remove by_kind");
+                                        .map_err(persist_err)?;
                                     if let Some(ts) = replaced.event.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &replaced.event.id);
                                         expiration_index
                                             .remove(exp_key.as_str())
-                                            .expect("redb: remove expiration_index");
+                                            .map_err(persist_err)?;
                                     }
                                     events
                                         .insert(id_hex.as_str(), encoded.as_str())
-                                        .expect("redb: insert winning event");
+                                        .map_err(persist_err)?;
                                     addr_index
                                         .insert(addr_key_str.as_str(), id_hex.as_str())
-                                        .expect("redb: update addr_index");
+                                        .map_err(persist_err)?;
                                     by_author
                                         .insert(
                                             by_author_key(&event.pubkey, &event.id).as_str(),
                                             id_hex.as_str(),
                                         )
-                                        .expect("redb: insert by_author");
+                                        .map_err(persist_err)?;
                                     by_kind
                                         .insert(
                                             by_kind_key(event.kind, &event.id).as_str(),
                                             id_hex.as_str(),
                                         )
-                                        .expect("redb: insert by_kind");
+                                        .map_err(persist_err)?;
                                     if let Some(ts) = event.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &event.id);
                                         expiration_index
                                             .insert(exp_key.as_str(), id_hex.as_str())
-                                            .expect("redb: insert expiration_index");
+                                            .map_err(persist_err)?;
                                     }
                                     InsertOutcome::Superseded {
                                         replaced: Box::new(replaced),
@@ -2306,8 +2305,7 @@ impl EventStore for RedbStore {
                             &mut by_author,
                             &mut by_kind,
                             &event,
-                        )
-                        .expect("redb: kind5 processing");
+                        )?;
                         InsertOutcome::Kind5Processed { deleted }
                     } else {
                         outcome
@@ -2317,27 +2315,30 @@ impl EventStore for RedbStore {
                 }
             }
         };
-        write_txn.commit().expect("redb: commit insert");
-        outcome
+        write_txn.commit().map_err(persist_err)?;
+        Ok(outcome)
     }
 
-    fn query(&self, filter: &Filter) -> Vec<StoredEvent> {
-        let read_txn = self.db.begin_read().expect("redb: begin_read");
-        let events = read_txn.open_table(EVENTS).expect("redb: open events");
+    fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let outbox_suppress_by_id = read_txn
             .open_table(OUTBOX_SUPPRESS_BY_ID)
-            .expect("redb: open outbox_suppress_by_id");
+            .map_err(persist_err)?;
         let outbox_suppress_by_addr = read_txn
             .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-            .expect("redb: open outbox_suppress_by_addr");
+            .map_err(persist_err)?;
         // A still-open kind:5 intent's provisional suppression claim
         // (architecture review requirement — see `SuppressClaimRecord`'s
         // doc) hides a row from every one of `query`'s three paths WITHOUT
         // ever removing it from `EVENTS` — the row is fully present, only
         // filtered out here.
-        let visible = |event: &Event| -> bool {
-            !is_suppressed_in_txn(&outbox_suppress_by_id, &outbox_suppress_by_addr, event)
-                .expect("redb: check suppression")
+        let visible = |event: &Event| -> Result<bool, PersistenceError> {
+            Ok(!is_suppressed_in_txn(
+                &outbox_suppress_by_id,
+                &outbox_suppress_by_addr,
+                event,
+            )?)
         };
 
         // Fast path: `filter.ids` narrows directly through `EVENTS`'s own
@@ -2347,15 +2348,15 @@ impl EventStore for RedbStore {
             let mut out = Vec::new();
             for id in ids {
                 let id_hex = id.to_hex();
-                let Some(value) = events.get(id_hex.as_str()).expect("redb: get event") else {
+                let Some(value) = events.get(id_hex.as_str()).map_err(persist_err)? else {
                     continue;
                 };
                 let se = self.decode_row(value.value());
-                if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event) {
+                if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event)? {
                     out.push(se);
                 }
             }
-            return out;
+            return Ok(out);
         }
 
         // Otherwise, narrow via `BY_AUTHOR`/`BY_KIND` when the filter
@@ -2364,54 +2365,56 @@ impl EventStore for RedbStore {
         // neither is present (e.g. a bare generic-tag or search-only
         // filter), in which case no index narrows it and the pre-existing
         // full scan is the only correct fallback.
-        match self.candidate_ids(&read_txn, filter) {
+        match self.candidate_ids(&read_txn, filter)? {
             Some(candidates) => {
                 let mut out = Vec::with_capacity(candidates.len());
                 for id in candidates {
                     let id_hex = id.to_hex();
-                    let Some(value) = events.get(id_hex.as_str()).expect("redb: get event") else {
+                    let Some(value) = events.get(id_hex.as_str()).map_err(persist_err)? else {
                         // A stale index entry outliving its row (e.g. a GC'd
                         // event whose BY_AUTHOR/BY_KIND rows haven't been
                         // touched by that path) — harmless, just skip.
                         continue;
                     };
                     let se = self.decode_row(value.value());
-                    if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event)
+                    if filter.match_event(&se.event, MatchEventOptions::new())
+                        && visible(&se.event)?
                     {
                         out.push(se);
                     }
                 }
-                out
+                Ok(out)
             }
             None => {
                 let mut out = Vec::new();
-                for entry in events.iter().expect("redb: iter events") {
-                    let (_key, value) = entry.expect("redb: read event entry");
+                for entry in events.iter().map_err(persist_err)? {
+                    let (_key, value) = entry.map_err(persist_err)?;
                     let se = self.decode_row(value.value());
-                    if filter.match_event(&se.event, MatchEventOptions::new()) && visible(&se.event)
+                    if filter.match_event(&se.event, MatchEventOptions::new())
+                        && visible(&se.event)?
                     {
                         out.push(se);
                     }
                 }
-                out
+                Ok(out)
             }
         }
     }
 
-    fn remove(&mut self, id: EventId, _reason: RetractReason) -> Option<StoredEvent> {
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+    fn remove(
+        &mut self,
+        id: EventId,
+        _reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         let removed = {
-            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
-            let mut addr_index = write_txn
-                .open_table(ADDR_INDEX)
-                .expect("redb: open addr_index");
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
-                .expect("redb: open expiration_index");
-            let mut by_author = write_txn
-                .open_table(BY_AUTHOR)
-                .expect("redb: open by_author");
-            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
             remove_row_in_txn(
                 &mut events,
                 &mut addr_index,
@@ -2420,56 +2423,56 @@ impl EventStore for RedbStore {
                 &mut by_kind,
                 id,
                 |_| true,
-            )
-            .expect("redb: remove row")
+            )?
         };
-        write_txn.commit().expect("redb: commit remove");
-        removed
+        write_txn.commit().map_err(persist_err)?;
+        Ok(removed)
     }
 
-    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         let removed = {
-            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
-            let mut addr_index = write_txn
-                .open_table(ADDR_INDEX)
-                .expect("redb: open addr_index");
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
             let mut expiration_index = write_txn
                 .open_table(EXPIRATION_INDEX)
-                .expect("redb: open expiration_index");
-            let mut by_author = write_txn
-                .open_table(BY_AUTHOR)
-                .expect("redb: open by_author");
-            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+                .map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
 
             let upper = expiration_key_upper_bound(now);
-            let due_ids: Vec<EventId> = expiration_index
+            // Collect due ids first, propagating any redb read error out of
+            // the iterator (a plain `for` accumulate rather than a `.map()`
+            // closure so `?` reaches this fn, not the closure).
+            let mut due_ids: Vec<EventId> = Vec::new();
+            for entry in expiration_index
                 .range::<&str>(..=upper.as_str())
-                .expect("redb: range expiration_index")
-                .map(|entry| {
-                    let (_key, value) = entry.expect("redb: read expiration_index entry");
-                    EventId::from_hex(value.value()).expect("redb: decode expiration_index id")
-                })
-                .collect();
+                .map_err(persist_err)?
+            {
+                let (_key, value) = entry.map_err(persist_err)?;
+                due_ids.push(
+                    EventId::from_hex(value.value()).expect("redb: decode expiration_index id"),
+                );
+            }
 
-            due_ids
-                .into_iter()
-                .filter_map(|id| {
-                    remove_row_in_txn(
-                        &mut events,
-                        &mut addr_index,
-                        &mut expiration_index,
-                        &mut by_author,
-                        &mut by_kind,
-                        id,
-                        |_| true,
-                    )
-                    .expect("redb: remove due row")
-                })
-                .collect()
+            let mut removed = Vec::new();
+            for id in due_ids {
+                if let Some(row) = remove_row_in_txn(
+                    &mut events,
+                    &mut addr_index,
+                    &mut expiration_index,
+                    &mut by_author,
+                    &mut by_kind,
+                    id,
+                    |_| true,
+                )? {
+                    removed.push(row);
+                }
+            }
+            removed
         };
-        write_txn.commit().expect("redb: commit expire_due");
-        removed
+        write_txn.commit().map_err(persist_err)?;
+        Ok(removed)
     }
 
     fn next_expiration(&self) -> Option<Timestamp> {
@@ -2497,17 +2500,17 @@ impl EventStore for RedbStore {
         atom: &ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
-    ) {
+    ) -> Result<(), PersistenceError> {
         let key = compute_coverage_key(atom);
         let shape = window_erase(&atom.filter);
         let row_key = Self::coverage_row_key(key, relay);
 
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         {
-            let mut coverage = write_txn.open_table(COVERAGE).expect("redb: open coverage");
+            let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
             let existing = coverage
                 .get(row_key.as_str())
-                .expect("redb: get coverage row")
+                .map_err(persist_err)?
                 .map(|guard| decode_interval(guard.value()));
 
             let merged = merge_interval(existing, proven);
@@ -2519,9 +2522,10 @@ impl EventStore for RedbStore {
             let encoded = serde_json::to_string(&record).expect("redb: encode coverage row");
             coverage
                 .insert(row_key.as_str(), encoded.as_str())
-                .expect("redb: insert coverage row");
+                .map_err(persist_err)?;
         }
-        write_txn.commit().expect("redb: commit record_coverage");
+        write_txn.commit().map_err(persist_err)?;
+        Ok(())
     }
 
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
@@ -2534,23 +2538,21 @@ impl EventStore for RedbStore {
             .map(|guard| decode_interval(guard.value()))
     }
 
-    fn gc(&mut self, claims: &ClaimSet) -> GcReport {
+    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
         let mut report = GcReport::default();
 
-        let write_txn = self.db.begin_write().expect("redb: begin_write");
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
         {
-            let mut events = write_txn.open_table(EVENTS).expect("redb: open events");
-            let mut coverage = write_txn.open_table(COVERAGE).expect("redb: open coverage");
-            let mut by_author = write_txn
-                .open_table(BY_AUTHOR)
-                .expect("redb: open by_author");
-            let mut by_kind = write_txn.open_table(BY_KIND).expect("redb: open by_kind");
+            let mut events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+            let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
+            let mut by_author = write_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+            let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
             let outbox_suppress_by_id = write_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ID)
-                .expect("redb: open outbox_suppress_by_id");
+                .map_err(persist_err)?;
             let outbox_suppress_by_addr = write_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-                .expect("redb: open outbox_suppress_by_addr");
+                .map_err(persist_err)?;
 
             // Pass 1: find victims (regular events matched by no claim, and
             // not an open — unsigned — local intent: Fable checkpoint R5,
@@ -2562,8 +2564,8 @@ impl EventStore for RedbStore {
             // Collected up front into owned values so the removal pass
             // below never holds a borrow across a mutation.
             let mut victims: Vec<(String, Event)> = Vec::new();
-            for entry in events.iter().expect("redb: iter events") {
-                let (key, value) = entry.expect("redb: read event entry");
+            for entry in events.iter().map_err(persist_err)? {
+                let (key, value) = entry.map_err(persist_err)?;
                 let record: StoredEventRecord =
                     serde_json::from_str(value.value()).expect("redb: decode stored event");
                 let event = Event::from_json(&record.event_json).expect("redb: decode event json");
@@ -2573,8 +2575,7 @@ impl EventStore for RedbStore {
                         &outbox_suppress_by_id,
                         &outbox_suppress_by_addr,
                         &event,
-                    )
-                    .expect("redb: check suppression")
+                    )?
                     && !claims.is_claimed(&event)
                 {
                     victims.push((key.value().to_string(), event));
@@ -2582,9 +2583,7 @@ impl EventStore for RedbStore {
             }
 
             for (id_hex, event) in &victims {
-                events
-                    .remove(id_hex.as_str())
-                    .expect("redb: remove gc victim");
+                events.remove(id_hex.as_str()).map_err(persist_err)?;
                 // Keep BY_AUTHOR/BY_KIND in lockstep with EVENTS -- a stale
                 // index row surviving a gc'd event would keep costing
                 // `query` a wasted `events.get` miss on every future hit
@@ -2592,10 +2591,10 @@ impl EventStore for RedbStore {
                 // growth otherwise).
                 by_author
                     .remove(by_author_key(&event.pubkey, &event.id).as_str())
-                    .expect("redb: remove by_author");
+                    .map_err(persist_err)?;
                 by_kind
                     .remove(by_kind_key(event.kind, &event.id).as_str())
-                    .expect("redb: remove by_kind");
+                    .map_err(persist_err)?;
                 report.events_evicted += 1;
             }
 
@@ -2606,8 +2605,8 @@ impl EventStore for RedbStore {
             // never leave a watermark claiming coverage of evicted data).
             let mut row_updates: Vec<(String, Option<CoverageRowRecord>)> = Vec::new();
             let mut legacy_row_keys: Vec<String> = Vec::new();
-            for entry in coverage.iter().expect("redb: iter coverage") {
-                let (row_key, value) = entry.expect("redb: read coverage entry");
+            for entry in coverage.iter().map_err(persist_err)? {
+                let (row_key, value) = entry.map_err(persist_err)?;
 
                 // Legacy-row purge (#106, Fable's C refinement): a row
                 // whose key predates the current schema version (no
@@ -2665,9 +2664,7 @@ impl EventStore for RedbStore {
             for (row_key, update) in row_updates {
                 match update {
                     None => {
-                        coverage
-                            .remove(row_key.as_str())
-                            .expect("redb: remove coverage row");
+                        coverage.remove(row_key.as_str()).map_err(persist_err)?;
                         report.coverage_rows_deleted += 1;
                     }
                     Some(record) => {
@@ -2675,22 +2672,20 @@ impl EventStore for RedbStore {
                             serde_json::to_string(&record).expect("redb: encode coverage row");
                         coverage
                             .insert(row_key.as_str(), encoded.as_str())
-                            .expect("redb: update coverage row");
+                            .map_err(persist_err)?;
                         report.coverage_rows_shrunk += 1;
                     }
                 }
             }
 
             for row_key in legacy_row_keys {
-                coverage
-                    .remove(row_key.as_str())
-                    .expect("redb: remove legacy coverage row");
+                coverage.remove(row_key.as_str()).map_err(persist_err)?;
                 report.legacy_coverage_rows_purged += 1;
             }
         }
-        write_txn.commit().expect("redb: commit gc");
+        write_txn.commit().map_err(persist_err)?;
 
-        report
+        Ok(report)
     }
 
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -5339,7 +5334,7 @@ mod tests {
             write_txn.commit().unwrap();
         }
 
-        let report = store.gc(&ClaimSet::new(Vec::new()));
+        let report = store.gc(&ClaimSet::new(Vec::new())).unwrap();
         assert_eq!(
             report.legacy_coverage_rows_purged, 1,
             "the unversioned legacy row must be purged"
@@ -5372,10 +5367,12 @@ mod tests {
             .sign_with_keys(&target)
             .expect("sign target event");
         let target_id = target_event.id;
-        store.insert(
-            target_event,
-            RelayObserved::new(r1.clone(), Timestamp::from(1u64)),
-        );
+        store
+            .insert(
+                target_event,
+                RelayObserved::new(r1.clone(), Timestamp::from(1u64)),
+            )
+            .unwrap();
 
         // A pile of OTHER authors' rows -- large enough that a full-table
         // scan would dwarf the one-row match set below.
@@ -5385,14 +5382,18 @@ mod tests {
                 .custom_created_at(Timestamp::from(100 + i))
                 .sign_with_keys(&noise_author)
                 .expect("sign noise event");
-            store.insert(
-                noise,
-                RelayObserved::new(r1.clone(), Timestamp::from(100 + i)),
-            );
+            store
+                .insert(
+                    noise,
+                    RelayObserved::new(r1.clone(), Timestamp::from(100 + i)),
+                )
+                .unwrap();
         }
 
         let before = store.examined_rows();
-        let results = store.query(&Filter::new().author(target.public_key()));
+        let results = store
+            .query(&Filter::new().author(target.public_key()))
+            .unwrap();
         let examined = store.examined_rows() - before;
 
         assert_eq!(results.len(), 1);
