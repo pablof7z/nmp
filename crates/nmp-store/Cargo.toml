@@ -13,11 +13,9 @@ nmp-grammar.workspace = true
 # ACID key-value store — no C toolchain/`build.rs`, no wasm landmine. A1
 # lands `RedbStore`.
 redb = "4.1"
-# Row/value encoding for `RedbStore`: `nostr::Event` already has a canonical
-# NIP-01 JSON form (`JsonUtil::as_json`/`from_json`) — reused as-is rather
-# than inventing a second wire format. `Provenance`/`CoverageRow`/`ShapeRecord`
-# are plain-old-data, JSON-encoded the same way for one consistent on-disk
-# encoding across every table.
+# `RedbStore` canonical event rows use a versioned portable binary envelope
+# for borrowed query filtering. Outbox/coverage control records remain typed
+# serde JSON where they are not event-query hot-path values.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

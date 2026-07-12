@@ -80,6 +80,15 @@ fn table_len(path: &Path, table: TableDefinition<&str, &str>) -> u64 {
         .expect("count raw rows")
 }
 
+fn binary_table_len(path: &Path, table: TableDefinition<&str, &[u8]>) -> u64 {
+    let db = Database::open(path).expect("open raw database after crash");
+    let txn = db.begin_read().expect("begin raw read");
+    txn.open_table(table)
+        .expect("open raw binary table")
+        .len()
+        .expect("count raw binary rows")
+}
+
 fn crash(path: &Path, point: &str) {
     let stdout = tempfile::NamedTempFile::new().expect("worker stdout file");
     let stderr = tempfile::NamedTempFile::new().expect("worker stderr file");
@@ -269,7 +278,11 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         RedbStore::open(&path).expect("initialize store");
         crash(&path, point);
 
-        assert_eq!(table_len(&path, EVENTS), 0, "no orphan event at {point}");
+        assert_eq!(
+            binary_table_len(&path, EVENTS),
+            0,
+            "no orphan event at {point}"
+        );
         assert_eq!(
             table_len(&path, OUTBOX_INTENTS),
             0,
