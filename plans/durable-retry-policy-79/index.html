@@ -10,7 +10,7 @@
     <main class="shell">
       <nav class="topbar">
         <a href="../../">Planning pages</a>
-        <a href="https://github.com/pablof7z/nmp/pull/98">Open PR</a>
+        
       </nav>
       <section class="hero">
         <div class="eyebrow">Architecture plan</div>
@@ -39,12 +39,12 @@
             <h2>Very High Level</h2>
             <p>Issue #79 closes the remaining crash-safe write gap without creating a second publication queue or a zero-timeout scheduler loop. The work is split into four issue-first units.
 
-1. **#93 — transport handoff ownership.** Durable EVENT commands become correlated and connection-generation-scoped. Transport may reconnect sockets and replay read preambles, but it must report and drop EVENT work at generation rollover; only the outbox decides whether to resend.
-2. **#94 — durable lane cursor/index.** Add versioned per-`(intent, relay)` current state and an ordered eligibility index beside immutable attempt history. Store transitions are atomic and policy-free, v1 evidence remains readable, terminal open-work rows close, and receipt/attempt history remains retained.
-3. **#95 — one engine scheduler.** Implement waiting, eligible, in-flight, transient, and terminal transitions; stable fairness; exact attempt ordinals; offline/AUTH zero-consumption; and the only deadline consumer. Ratified defaults are exponential 3–300 seconds, deterministic jitter below 5 seconds, 30-second ACK timeout, 32 global in-flight, and 1 per relay. `AtMostOnce` ambiguity becomes `OutcomeUnknown` with no blind resend.
-4. **#96 — governed observation.** Expose `AwaitingRelay`, `AwaitingAuth`, and `RetryEligible` across Rust, UniFFI, Swift, and Kotlin. Mere transport queue acceptance is never called `Sent`.
+1. **#93 — transport handoff ownership.** Durable EVENT commands become correlated and connection-generation-scoped. Transport reports `NotHandedOff`, `Written`, or `Ambiguous`; it never carries EVENT work across reconnect, and only a persisted `Written` result becomes `Sent`.
+2. **#94 — durable lane cursor/index.** Add versioned per-`(intent, relay)` current state, an ordered eligibility index, and additive attempt-detail evidence beside immutable v1 attempt rows. Store transitions are atomic and policy-free, v1 evidence deterministically seeds missing cursors, terminal open-work rows close, and receipt/attempt history remains retained.
+3. **#95 — one engine scheduler.** Implement waiting, eligible, in-flight, transient, and terminal transitions; stable fairness; exact attempt ordinals; NIP-20 classification; offline/AUTH zero-consumption; and the only deadline consumer. Ratified defaults are exponential 3–300 seconds, deterministic jitter below 5 seconds, 30-second ACK timeout, 32 global in-flight, and 1 per relay. `AtMostOnce` ambiguity becomes `OutcomeUnknown` with no blind resend.
+4. **#96 — governed observation.** Expose `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, and durable handoff ambiguity across Rust, UniFFI, Swift, and Kotlin. Mere transport queue acceptance is never called `Sent`.
 
-Sequence: #93 and #94 establish the two boundaries; #95 consumes them and ships deadline folding with its advancing transition; #96 completes public parity. #87 is already merged, so every new read must be bounded/indexed from inception. #88 lands first where possible so corrupt retained evidence stays typed. #81 is admin-only and does not block implementation.</p>
+Sequence: #93 and #94 establish the two boundaries; #95 consumes them and ships deadline folding with its advancing transition; #96 completes public parity. #87 is already merged, so every new read must be bounded/indexed from inception. #88 lands first where possible so corrupt retained evidence stays typed. #81 is admin-only and does not block implementation. This repository publishes Pages from `master/docs`, so the committed HTML player becomes live at the linked Pages URL when this planning PR merges; the direct narration link is already live.</p>
           </section>
           <section class="section">
             <h2>Existing Rules Or ADRs</h2>
@@ -65,7 +65,7 @@ Sequence: #93 and #94 establish the two boundaries; #95 consumes them and ships 
         <aside>
           <section class="card">
             <h2>TTS Version</h2>
-            <audio controls preload="metadata" src="https://blossom.primal.net/9d5222f80bb04ad33cb2372964b4cdca5793a5d21f1b255f94860596b5f71e8d.mp3"></audio>
+            <audio controls preload="metadata" src="https://blossom.primal.net/91606d34f8898ecf574b2006a95c6bb05a1a9e2897f0d81ae4cf6eec455dce09.mp3"></audio>
             <p>Audio-friendly narration generated from the planning payload.</p>
           </section>
           <section class="card">
@@ -75,8 +75,8 @@ Sequence: #93 and #94 establish the two boundaries; #95 consumes them and ships 
           </section>
           <section class="card links">
             <h2>Links</h2>
-            <a href="https://github.com/pablof7z/nmp/pull/98">Open PR</a>
-            <a href="https://blossom.primal.net/9d5222f80bb04ad33cb2372964b4cdca5793a5d21f1b255f94860596b5f71e8d.mp3">Open narration</a>
+            
+            <a href="https://blossom.primal.net/91606d34f8898ecf574b2006a95c6bb05a1a9e2897f0d81ae4cf6eec455dce09.mp3">Open narration</a>
             <a href="../../docs/plans/durable-retry-policy-79/plan.md">Detailed plan file</a>
           </section>
         </aside>
