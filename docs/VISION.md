@@ -78,7 +78,10 @@ Apps and opt-in protocol crates may publish reusable **derived fragments** that
 construct this grammar. A follows fragment, for example, expands to an ordinary
 `Derived` graph; it is not an opaque macro or a privileged core concept. Richer
 protocol helpers may return typed values, such as group references containing a
-group id and host relay, while their underlying demand remains inspectable.
+group id and host relay, while their underlying demand remains inspectable. NIP-29's
+own remembered-group browsing (#108) is exactly this shape: `nmp-nip51` owns and
+decodes NIP-51 kind:10009, and `nmp-nip29` composes the result into typed group
+references, never a privileged core concept.
 
 The core must not privilege kind:1, timelines, follows, or any other content
 shape. Proofs and examples must remain kind-diverse.
