@@ -76,7 +76,7 @@ Receipts expose every wait/retry/handoff transition. Unchanged v1 attempt histor
 ## Possible Rule Tightening
 
 - Consider adding a durable rule that every deadline source must name the state transition that consumes and advances it.
-- Consider requiring every durable transport handoff to be correlated, generation-scoped, and classified as proven-not-handed-off or ambiguous.
+- Consider requiring every durable transport handoff to be correlated, generation-scoped, and classified as NotHandedOff, Written, or Ambiguous.
 
 ## Alternatives Considered
 
@@ -98,4 +98,4 @@ ready
 
 - Plan page: https://pablof7z.github.io/nmp/plans/durable-retry-policy-79/
 
-- TTS audio: https://blossom.primal.net/91606d34f8898ecf574b2006a95c6bb05a1a9e2897f0d81ae4cf6eec455dce09.mp3
+- TTS audio: https://blossom.primal.net/ac0ffc9274bb7879bd8c103042ea77ead17db85928a1ff30af07503147398e59.mp3
