@@ -37,7 +37,7 @@ use nostr::{
     UnsignedEvent,
 };
 
-use nmp_grammar::{Binding, ConcreteFilter, Filter};
+use nmp_grammar::{AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, SourceAuthority};
 use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
 use nmp_router::{
     DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayLimits, Router, RuleRegistry,
@@ -73,6 +73,29 @@ const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
 /// with NO router-side changes of its own -- the same `build_candidates`
 /// eligibility check that already applies to kind:3/kind:0/kind:10050.
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
+
+/// Reconstruct a bare `ConcreteFilter`'s `ContextualAtom` identity via the
+/// SAME static default `nmp_grammar::Demand::from_filter` applies
+/// (`authors.is_some() -> AuthorOutboxes`, else `Public`; `access` is
+/// always `Public` today, #106) -- used ONLY at the `get_coverage` test/
+/// diagnostic-convenience boundary, where a caller hands in a bare filter
+/// with no context of its own. Every REAL production coverage read/write
+/// carries its atom's actual `ContextualAtom` through directly; this
+/// reconstruction is exact precisely because it's the identical rule the
+/// atom's own `Demand` would have applied had it gone through the default
+/// path, which every existing caller's atoms do.
+fn default_context_atom(filter: &ConcreteFilter) -> ContextualAtom {
+    let source = if filter.authors.is_some() {
+        SourceAuthority::AuthorOutboxes
+    } else {
+        SourceAuthority::Public
+    };
+    ContextualAtom {
+        filter: filter.clone(),
+        source,
+        access: AccessContext::Public,
+    }
+}
 
 use attribution::AttributionState;
 pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
@@ -900,14 +923,29 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Read-only access to the resolver's current demand (test/diagnostic
     /// convenience — the whole point of a headlessly-testable reducer is
-    /// that its state can be inspected directly).
+    /// that its state can be inspected directly). Selection-only
+    /// (`ConcreteFilter`, not `ContextualAtom`, #106): this is a plain
+    /// introspection surface existing callers already index by filter
+    /// shape (e.g. `atom.kinds == ...`), so it stays exactly as before —
+    /// the resolver's OWN internal demand tracking is fully context-aware
+    /// underneath regardless of what this convenience view exposes.
     pub fn active_demand(&self) -> BTreeSet<ConcreteFilter> {
-        self.resolver.active_demand()
+        self.resolver
+            .active_demand()
+            .into_iter()
+            .map(|atom| atom.filter)
+            .collect()
     }
 
     /// Read-only coverage introspection (test/diagnostic convenience,
     /// mirroring `active_demand`): the proven interval for `atom`'s
     /// window-erased shape at `relay`, if any coverage has been recorded.
+    /// `atom` stays a bare `ConcreteFilter` (unchanged surface, #106): its
+    /// `source`/`access` are reconstructed via the SAME static default
+    /// `Demand::from_filter` applies (`authors.is_some() ->
+    /// AuthorOutboxes`, else `Public`) — exact for any atom whose `Demand`
+    /// took the default path, which every existing caller's atoms do (the
+    /// regression floor this reconstruction leans on).
     pub fn get_coverage(
         &self,
         atom: &ConcreteFilter,
@@ -915,7 +953,7 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Option<nmp_store::CoverageInterval> {
         self.resolver
             .store()
-            .get_coverage(nmp_store::coverage_key(atom), relay)
+            .get_coverage(nmp_store::coverage_key(&default_context_atom(atom)), relay)
     }
 
     /// The engine-global diagnostics projection (M5 plan §1.2 step 2) — "the
@@ -2126,10 +2164,10 @@ impl<S: EventStore> EngineCore<S> {
                 let wire_id = sub_id.as_str();
                 let attributed = self.attribution.attribute_eose(&relay, wire_id, self.clock);
                 for (key, interval) in attributed {
-                    if let Some(shape) = self.attribution.shape_of(key) {
+                    if let Some(atom) = self.attribution.shape_of(key) {
                         self.resolver
                             .store_mut()
-                            .record_coverage(&shape, &relay, interval);
+                            .record_coverage(&atom, &relay, interval);
                         effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
                     }
                 }
@@ -2343,7 +2381,7 @@ impl<S: EventStore> EngineCore<S> {
             .resolver
             .active_demand()
             .into_iter()
-            .filter_map(|atom| atom.authors)
+            .filter_map(|atom| atom.filter.authors)
             .flatten()
             // NOT `write_relays(..).is_empty()`: that collapses "known,
             // declares zero write relays" into the same signal as "never
@@ -2381,7 +2419,7 @@ impl<S: EventStore> EngineCore<S> {
         // building the new atom.
         self.discovery_authors = self.discovery_authors.union(&needed).cloned().collect();
         self.discovery_handle = None;
-        let query = LiveQuery(Filter {
+        let query = LiveQuery::from_filter(Filter {
             kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
             authors: Some(Binding::Literal(self.discovery_authors.clone())),
             ..Filter::default()
@@ -2552,7 +2590,19 @@ impl<S: EventStore> EngineCore<S> {
                 ids: Some(need_ids.iter().map(|id| id.to_hex()).collect()),
                 ..ConcreteFilter::default()
             };
-            let backfill_sub = SubId::for_filter(relay.clone(), &backfill);
+            // An id-targeted one-shot backfill fetch, not itself tied to
+            // any live Demand (#106): no `authors` binding at all, so
+            // `Public`/`Public` is the exact context `Demand::from_filter`'s
+            // static default would assign an authorless filter -- and this
+            // sub carries no coverage credit of its own anyway (`absorbed`
+            // is empty below; the credit it unlocks is `sub_id`'s, via
+            // `pending_neg_credit`).
+            let backfill_sub = SubId::for_wire(
+                relay.clone(),
+                &backfill,
+                SourceAuthority::Public,
+                AccessContext::Public,
+            );
             self.pending_backfills.insert(backfill_sub.clone());
             self.pending_neg_credit
                 .insert(backfill_sub.clone(), sub_id.clone());
