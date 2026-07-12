@@ -997,6 +997,16 @@ pub trait EventStore {
     /// uncapped regardless. Both backends are cross-checked for this exact
     /// contract (`store_contract.rs`); when #9 resolves, whoever implements
     /// ordered/truncated local reads updates that test, not just adds one.
+    ///
+    /// The app never sees this uncapped answer directly, though: the handle
+    /// PROJECTION (`EngineCore::rows_and_evidence_for`, #124 via #139) caps the
+    /// app-facing row set to the `limit` most recent by `created_at`
+    /// (`EventId`-tiebroken). That is NIP-01 limit-recency SELECTION — WHICH
+    /// rows survive — not a display ordering: the app receives an unordered,
+    /// `EventId`-keyed `RowDelta` stream and sorts it itself, so #9's
+    /// display-sort fork stays open and the two compose. This store door
+    /// deliberately stays uncapped so reactive recompute and negentropy still
+    /// see every match.
     fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError>;
 
     /// Remove `id` from the store — clearing both the id index and, if `id`
