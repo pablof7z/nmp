@@ -29,11 +29,11 @@ Add correlated `PublishAttempt` keyed by attempt identity and connection generat
 
 ## #94 — lane cursor and eligibility
 
-Add bounded, versioned `OUTBOX_LANES`, ordered `OUTBOX_ELIGIBILITY`, and additive `OUTBOX_ATTEMPT_DETAILS`. Keep existing `OUTBOX_ATTEMPTS` v1 rows unchanged so older binaries decode them. Details hold time, handoff, and transient classification. Add policy-free atomic waiting/eligible/in-flight/transient/terminal/close doors.
+Add bounded, versioned `OUTBOX_LANES`, one ordered typed `OUTBOX_DEADLINES` index (`RetryEligible` or `AckTimeout`) with a transactionally mirrored by-intent cleanup index, and additive `OUTBOX_ATTEMPT_DETAILS`. New `OUTBOX_ATTEMPTS` v1 rows remain immutable `Started` facts and current recovery overlays terminal facts from details. Upgrade recovery also accepts terminal v1 rows written by the pre-detail implementation and seeds missing detail shells/cursors without rewriting history. Details hold time, handoff, and engine-selected transient evidence. Add policy-free atomic waiting/eligible/in-flight/transient/terminal/close doors that maintain cursor, detail, and both deadline-index entries together; reads and close fail closed if index cardinality or values disagree.
 
 Idempotent bootstrap inserts missing cursors from open intents, routes, and highest v1 attempt: no attempt becomes waiting connection; terminal maps terminal; Started maps legacy in-flight. Engine converts legacy Durable Started to interrupted/eligible and AtMostOnce Started to `OutcomeUnknown`. No history rewrite.
 
-Crash-test lane creation, start, handoff detail, finish, eligibility, and close. Reads are bounded per #87. Evidence is retained. Downgrade is schema-readable but behaviorally unsafe with open new-lane work, so rollback requires quiescing/closing work or rolling forward.
+Crash-test lane creation, start/detail, handoff, finish, both typed deadline kinds, and close. Reads are prefix/index bounded per #87. Terminal close removes only the open intent and deadlines; lane/receipt/route/attempt/detail evidence remains. Downgrade is schema-readable—legacy terminal v1 facts remain valid, while new attempts remain v1 `Started` plus additive terminal detail—but behaviorally unsafe with open new-lane work because the old binary cannot honor the cursor or additive overlay. Rollback requires quiescing/closing work or rolling forward.
 
 ## #95 — reducer and scheduler
 

@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
 use super::*;
-use crate::sentinel_signature;
+use crate::{sentinel_signature, HandoffEvidence};
 
 const WORKER: &str = "redb_store::crash_atomicity_tests::redb_crash_worker";
 const SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -176,6 +176,86 @@ fn redb_crash_worker() {
                     .expect("open worker store");
             let intent = store.recover_outbox()[0].intent_id;
             let _ = store.finish_attempt(intent, &relay, 1, AttemptOutcome::Acked);
+        }
+        "lane-bootstrap-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneBootstrapBeforeCommit)
+                    .expect("open worker store");
+            let intent = store.recover_outbox()[0].intent_id;
+            let _ = store.bootstrap_outbox_lanes(intent);
+        }
+        "lane-transition-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneTransitionBeforeCommit)
+                    .expect("open worker store");
+            let intent = store.recover_outbox()[0].intent_id;
+            let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+            let _ = store.set_lane_transient(
+                &lane.key,
+                lane.revision,
+                lane.last_ordinal,
+                Timestamp::from(2_000u64),
+                TransientCause::ConnectionLost,
+                None,
+            );
+        }
+        "lane-start-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneStartBeforeCommit)
+                    .expect("open worker store");
+            let recovered = store.recover_outbox().remove(0);
+            let intent = recovered.intent_id;
+            let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+            store
+                .start_lane_attempt(
+                    &lane.key,
+                    lane.revision,
+                    recovered.frozen,
+                    Timestamp::from(1_500u64),
+                )
+                .expect("lane start reaches crash seam");
+        }
+        "lane-handoff-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneHandoffBeforeCommit)
+                    .expect("open worker store");
+            let intent = store.recover_outbox()[0].intent_id;
+            let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+            let _ = store.record_lane_handoff(
+                &lane.key,
+                lane.revision,
+                lane.last_ordinal,
+                AttemptHandoffDetail {
+                    at: Timestamp::from(1_600u64),
+                    result: HandoffEvidence::Written,
+                },
+                PostHandoffState::AwaitingAck {
+                    deadline: Timestamp::from(1_630u64),
+                },
+            );
+        }
+        "lane-close-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneCloseBeforeCommit)
+                    .expect("open worker store");
+            let intent = store.recover_outbox()[0].intent_id;
+            let _ = store.close_terminal_intent(intent);
+        }
+        "lane-finish-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::FinishAttemptBeforeCommit)
+                    .expect("open worker store");
+            let intent = store.recover_outbox()[0].intent_id;
+            let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+            store
+                .finish_lane_attempt(
+                    &lane.key,
+                    lane.revision,
+                    lane.last_ordinal,
+                    AttemptOutcome::Acked,
+                    Timestamp::from(1_610u64),
+                )
+                .expect("lane finish reaches crash seam");
         }
         other => panic!("unknown crash point {other}"),
     }
@@ -348,6 +428,147 @@ fn attempt_started_and_terminal_facts_never_partially_commit() {
         store.recover_attempts(intent).unwrap()[0].outcome,
         AttemptOutcome::Acked
     );
+}
+
+#[test]
+fn lane_cursor_detail_deadline_and_close_are_atomic_across_process_death() {
+    let (_dir, path) = fixture();
+    let (_, signed) = event_pair();
+    let relay = RelayUrl::parse(RELAY).expect("relay");
+    let intent = {
+        let mut store = RedbStore::open(&path).expect("open");
+        let (intent, _) = accepted(&mut store);
+        store.promote_signed(intent, signed.sig).expect("promote");
+        store
+            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+            .expect("route");
+        intent
+    };
+
+    crash(&path, "lane-bootstrap-before-commit");
+    let mut store = RedbStore::open(&path).expect("reopen bootstrap crash");
+    assert!(store.recover_outbox_lanes(intent).unwrap().is_empty());
+    let mut lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+    assert_eq!(lane.state, LaneState::WaitingConnection);
+    drop(store);
+
+    crash(&path, "lane-transition-before-commit");
+    let mut store = RedbStore::open(&path).expect("reopen transition crash");
+    lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+    assert_eq!(lane.state, LaneState::WaitingConnection);
+    assert_eq!(store.next_outbox_deadline().unwrap(), None);
+    store
+        .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_500u64))
+        .unwrap();
+    drop(store);
+
+    crash(&path, "lane-start-before-commit");
+    let mut store = RedbStore::open(&path).expect("reopen start crash");
+    lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+    assert!(matches!(lane.state, LaneState::Eligible { .. }));
+    assert!(store.recover_attempts(intent).unwrap().is_empty());
+    assert!(store.recover_attempt_details(intent).unwrap().is_empty());
+    store
+        .start_lane_attempt(
+            &lane.key,
+            lane.revision,
+            signed.clone(),
+            Timestamp::from(1_500u64),
+        )
+        .unwrap();
+    drop(store);
+
+    crash(&path, "lane-handoff-before-commit");
+    let mut store = RedbStore::open(&path).expect("reopen handoff crash");
+    lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+    assert!(matches!(
+        lane.state,
+        LaneState::InFlight {
+            phase: InFlightPhase::AwaitingHandoff,
+            ..
+        }
+    ));
+    assert!(store.recover_attempt_details(intent).unwrap()[0]
+        .handoff
+        .is_none());
+    assert_eq!(store.next_outbox_deadline().unwrap(), None);
+    let handoff = AttemptHandoffDetail {
+        at: Timestamp::from(1_600u64),
+        result: HandoffEvidence::Written,
+    };
+    store
+        .record_lane_handoff(
+            &lane.key,
+            lane.revision,
+            lane.last_ordinal,
+            handoff.clone(),
+            PostHandoffState::AwaitingAck {
+                deadline: Timestamp::from(1_630u64),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.next_outbox_deadline().unwrap(),
+        Some(Timestamp::from(1_630u64))
+    );
+    drop(store);
+
+    crash(&path, "lane-finish-before-commit");
+    let mut store = RedbStore::open(&path).expect("reopen lane finish crash");
+    lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+    assert!(matches!(
+        lane.state,
+        LaneState::InFlight {
+            phase: InFlightPhase::AwaitingAck { .. },
+            ..
+        }
+    ));
+    assert!(store.recover_attempt_details(intent).unwrap()[0]
+        .terminal
+        .is_none());
+    assert_eq!(
+        store.next_outbox_deadline().unwrap(),
+        Some(Timestamp::from(1_630u64))
+    );
+    lane = store
+        .finish_lane_attempt(
+            &lane.key,
+            lane.revision,
+            lane.last_ordinal,
+            AttemptOutcome::Acked,
+            Timestamp::from(1_610u64),
+        )
+        .unwrap();
+    assert!(matches!(lane.state, LaneState::Terminal { .. }));
+    let committed_detail = store.recover_attempt_details(intent).unwrap().remove(0);
+    assert_eq!(committed_detail.terminal, Some(AttemptOutcome::Acked));
+    assert_eq!(
+        committed_detail.finished_at,
+        Some(Timestamp::from(1_610u64))
+    );
+    assert_eq!(store.next_outbox_deadline().unwrap(), None);
+    drop(store);
+
+    crash(&path, "lane-close-before-commit");
+    let mut store = RedbStore::open(&path).expect("reopen close crash");
+    assert_eq!(store.recover_outbox().len(), 1);
+    assert_eq!(store.recover_outbox_lanes(intent).unwrap().len(), 1);
+    assert_eq!(store.recover_attempts(intent).unwrap().len(), 1);
+    assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
+    assert_eq!(
+        store.close_terminal_intent(intent).unwrap(),
+        CloseIntentOutcome::Closed
+    );
+    drop(store);
+
+    let store = RedbStore::open(&path).expect("final reopen");
+    assert!(store.recover_outbox().is_empty());
+    assert_eq!(store.recover_outbox_lanes(intent).unwrap().len(), 1);
+    assert_eq!(
+        store.recover_attempts(intent).unwrap()[0].outcome,
+        AttemptOutcome::Acked
+    );
+    assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
 }
 
 #[test]

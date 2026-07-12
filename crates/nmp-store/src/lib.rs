@@ -740,6 +740,177 @@ pub struct RecoveredAttempt {
     pub outcome: AttemptOutcome,
 }
 
+/// Stable identity of one durable publication lane.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LaneKey {
+    pub intent_id: IntentId,
+    pub relay: RelayUrl,
+}
+
+/// The current, versioned cursor for one `(intent, relay)` obligation.
+/// History remains in the route/attempt/detail tables; this is the bounded
+/// authoritative row recovery and scheduling read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveredLane {
+    pub version: u8,
+    pub key: LaneKey,
+    pub revision: u64,
+    pub last_ordinal: u64,
+    pub state: LaneState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaneState {
+    WaitingConnection,
+    WaitingAuth,
+    Eligible {
+        since: Timestamp,
+    },
+    InFlight {
+        ordinal: u64,
+        phase: InFlightPhase,
+    },
+    Transient {
+        ordinal: u64,
+        eligible_at: Timestamp,
+        cause: TransientCause,
+        raw_reason: Option<String>,
+    },
+    /// A v1 `Started` fact discovered during additive-schema bootstrap.
+    /// The engine, not the store, decides how durability resolves it.
+    LegacyInFlight {
+        ordinal: u64,
+    },
+    Terminal {
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InFlightPhase {
+    AwaitingHandoff,
+    AwaitingAck { deadline: Timestamp },
+}
+
+/// Ordered deadline-index discriminator. Retry eligibility and ACK timeout
+/// share one index but remain impossible to conflate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeadlineKind {
+    RetryEligible,
+    AckTimeout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneDeadline {
+    pub at: Timestamp,
+    pub key: LaneKey,
+    pub lane_revision: u64,
+    pub kind: DeadlineKind,
+}
+
+/// Transport handoff evidence, deliberately independent of nmp-transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandoffEvidence {
+    NotHandedOff,
+    Written,
+    Ambiguous,
+}
+
+/// Closed persistence vocabulary selected by the engine. The store never
+/// maps transport outcomes into one of these causes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransientCause {
+    Interrupted,
+    AckTimeout,
+    ConnectionLost,
+    RelayRateLimited,
+    RelayError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptHandoffDetail {
+    pub at: Timestamp,
+    pub result: HandoffEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptTransientDetail {
+    pub eligible_at: Timestamp,
+    pub cause: TransientCause,
+    pub raw_reason: Option<String>,
+}
+
+/// Additive evidence beside a v1 attempt row. New rows are immutable
+/// `Started` facts; upgrade reads also accept terminal rows written by the
+/// pre-detail implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveredAttemptDetails {
+    pub version: u8,
+    pub intent_id: IntentId,
+    pub relay: RelayUrl,
+    pub ordinal: u64,
+    pub started_at: Option<Timestamp>,
+    pub handoff: Option<AttemptHandoffDetail>,
+    #[serde(default)]
+    pub transient: Option<AttemptTransientDetail>,
+    pub finished_at: Option<Timestamp>,
+    pub terminal: Option<AttemptOutcome>,
+}
+
+pub(crate) fn attempt_is_live(
+    attempt: &RecoveredAttempt,
+    details: Option<&RecoveredAttemptDetails>,
+) -> bool {
+    if attempt.outcome != AttemptOutcome::Started {
+        return false;
+    }
+    match details {
+        Some(details) if details.terminal.is_some() || details.transient.is_some() => false,
+        Some(details)
+            if matches!(
+                details.handoff,
+                Some(AttemptHandoffDetail {
+                    result: HandoffEvidence::NotHandedOff,
+                    ..
+                })
+            ) =>
+        {
+            false
+        }
+        _ => true,
+    }
+}
+
+/// Caller-selected post-handoff persistence state. This is a fact-writing
+/// vocabulary, not a classification policy: the engine chooses the variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostHandoffState {
+    WaitingConnection,
+    WaitingAuth,
+    Eligible {
+        since: Timestamp,
+    },
+    AwaitingAck {
+        deadline: Timestamp,
+    },
+    Transient {
+        eligible_at: Timestamp,
+        cause: TransientCause,
+        raw_reason: Option<String>,
+    },
+    Terminal {
+        outcome: AttemptOutcome,
+        finished_at: Timestamp,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseIntentOutcome {
+    Closed,
+    AlreadyClosed,
+}
+
 /// One append-only snapshot of the exact relay set resolved for an intent.
 /// It is committed before any corresponding attempt may start, so a failed
 /// `start_attempt` cannot erase the lane across restart when dynamic directory
@@ -752,10 +923,10 @@ pub struct RecoveredRouteRevision {
     pub relays: BTreeSet<RelayUrl>,
 }
 
-/// Persisted attempt state. `Started` is committed before the engine emits
-/// `PublishEvent`; every other value is an append-only terminal fact for that
-/// ordinal. Retry eligibility/deadlines deliberately do not live here yet
-/// (issue #79 owns that policy).
+/// Effective attempt state. New v1 rows record `Started` before the engine
+/// emits `PublishEvent` and are never rewritten; terminal variants are
+/// overlaid from additive details. Upgrade reads also preserve legacy terminal
+/// v1 rows written before the additive detail table existed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttemptOutcome {
     Started,
@@ -1003,6 +1174,122 @@ pub trait EventStore {
         &self,
         intent_id: IntentId,
     ) -> Result<Vec<RecoveredAttempt>, PersistenceError>;
+
+    /// Idempotently seed every missing lane from bounded route/attempt
+    /// ranges. Existing cursors are validated and retained.
+    fn bootstrap_outbox_lanes(
+        &mut self,
+        _intent_id: IntentId,
+    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    fn recover_outbox_lanes(
+        &self,
+        _intent_id: IntentId,
+    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    /// Read at most `limit` due rows in stable `(time,intent,relay)` order.
+    fn due_outbox_deadlines(
+        &self,
+        _now: Timestamp,
+        _limit: usize,
+    ) -> Result<Vec<LaneDeadline>, PersistenceError> {
+        Err(PersistenceError("outbox deadlines unsupported".into()))
+    }
+
+    fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        Err(PersistenceError("outbox deadlines unsupported".into()))
+    }
+
+    fn set_lane_waiting(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _auth: bool,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    fn set_lane_eligible(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _since: Timestamp,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    fn set_lane_transient(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _ordinal: u64,
+        _eligible_at: Timestamp,
+        _cause: TransientCause,
+        _raw_reason: Option<String>,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    /// Atomically append new immutable v1 Started evidence, additive details,
+    /// and advance an eligible cursor to awaiting handoff.
+    fn start_lane_attempt(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _event: Event,
+        _started_at: Timestamp,
+    ) -> Result<(RecoveredAttempt, RecoveredLane), PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    /// Atomically retain handoff evidence and apply the engine-selected next
+    /// fact, maintaining the typed deadline index in the same commit.
+    fn record_lane_handoff(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _ordinal: u64,
+        _detail: AttemptHandoffDetail,
+        _next: PostHandoffState,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    /// Make the current attempt terminal without rewriting its immutable v1
+    /// Started row. Exact ordinal + lane revision reject late ACKs against a
+    /// newer attempt; detail, cursor, and deadline removal share one commit.
+    fn finish_lane_attempt(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _ordinal: u64,
+        _outcome: AttemptOutcome,
+        _finished_at: Timestamp,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    fn recover_attempt_details(
+        &self,
+        _intent_id: IntentId,
+    ) -> Result<Vec<RecoveredAttemptDetails>, PersistenceError> {
+        Err(PersistenceError(
+            "outbox attempt details unsupported".into(),
+        ))
+    }
+
+    /// Delete bounded open-work rows only after a non-empty lane set is all
+    /// terminal. Receipts and all route/attempt/detail evidence are retained.
+    fn close_terminal_intent(
+        &mut self,
+        _intent_id: IntentId,
+    ) -> Result<CloseIntentOutcome, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
 
     /// Persist a receipt-ONLY record for an `Ephemeral` write (VISION-
     /// ratified contract clarification, team-lead correction, issue #3):

@@ -26,7 +26,7 @@ use nmp_grammar::ConcreteFilter;
 use nostr::filter::MatchEventOptions;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, JsonUtil, Kind, PublicKey, RelayUrl, Timestamp};
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
@@ -35,11 +35,14 @@ use crate::coverage::{
     window_erase, ShapeRecord,
 };
 use crate::{
-    AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
-    CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, IntentId,
-    IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState,
-    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RefuseReason,
-    RelayObserved, RetractReason, SigState, StoredEvent, WriteDurability,
+    AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
+    ClaimSet, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
+    EventStore, FinishAttemptOutcome, GcReport, InFlightPhase, InsertOutcome, IntentId,
+    IntentSigState, LaneDeadline, LaneKey, LaneState, LocalOrigin, PersistenceError,
+    PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
+    RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
+    RecoveredRouteRevision, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
+    TransientCause, WriteDurability,
 };
 
 /// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
@@ -123,6 +126,12 @@ const OUTBOX_ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbo
 /// Append-only exact resolved-route snapshots, keyed by `(intent, ordinal)`.
 const OUTBOX_ROUTE_REVISIONS: TableDefinition<&str, &str> =
     TableDefinition::new("outbox_route_revisions");
+const OUTBOX_LANES: TableDefinition<&str, &str> = TableDefinition::new("outbox_lanes");
+const OUTBOX_DEADLINES: TableDefinition<&str, &str> = TableDefinition::new("outbox_deadlines");
+const OUTBOX_DEADLINES_BY_INTENT: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_deadlines_by_intent");
+const OUTBOX_ATTEMPT_DETAILS: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_attempt_details");
 /// Store-owned outbox metadata — two rows, `"next_intent_id"` and
 /// `"next_receipt_id"`, each the next id of its kind to allocate (decimal
 /// `u64`, defaulting to 1 if the row has never been written). Both are
@@ -170,6 +179,237 @@ fn prefix_range(prefix: String) -> (String, String) {
 
 fn attempt_key(intent_id: IntentId, relay: &RelayUrl, ordinal: u64) -> String {
     format!("{}{:020}", attempt_prefix(intent_id, relay), ordinal)
+}
+
+fn lane_key(key: &LaneKey) -> String {
+    let relay: &nostr::Url = (&key.relay).into();
+    let relay = relay.as_str();
+    format!("{:020}:{:020}:{relay}", key.intent_id.0, relay.len())
+}
+
+fn relay_order_key(relay: &RelayUrl) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let canonical: &nostr::Url = relay.into();
+    let bytes = canonical.as_str().as_bytes();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn deadline_key(deadline: &LaneDeadline) -> String {
+    format!(
+        "{:020}:{:020}:{}",
+        deadline.at.as_secs(),
+        deadline.key.intent_id.0,
+        relay_order_key(&deadline.key.relay)
+    )
+}
+
+fn deadline_intent_key(deadline: &LaneDeadline) -> String {
+    format!(
+        "{:020}:{:020}:{}",
+        deadline.key.intent_id.0,
+        deadline.at.as_secs(),
+        relay_order_key(&deadline.key.relay)
+    )
+}
+
+fn deadline_upper(now: Timestamp) -> String {
+    format!("{:020};", now.as_secs())
+}
+
+fn encode_json(value: &impl Serialize, what: &str) -> Result<String, PersistenceError> {
+    serde_json::to_string(value).map_err(|err| PersistenceError(format!("encode {what}: {err}")))
+}
+
+fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, PersistenceError> {
+    let lane: RecoveredLane = serde_json::from_str(json)
+        .map_err(|err| PersistenceError(format!("decode outbox lane: {err}")))?;
+    if lane.version != 1 {
+        return Err(PersistenceError(format!(
+            "unsupported outbox lane version {}",
+            lane.version
+        )));
+    }
+    if lane_key(&lane.key) != key {
+        return Err(PersistenceError(
+            "outbox lane key does not match value".into(),
+        ));
+    }
+    if lane.revision == 0 {
+        return Err(PersistenceError(
+            "outbox lane revision must be non-zero".into(),
+        ));
+    }
+    let state_ordinal = match &lane.state {
+        LaneState::InFlight { ordinal, .. }
+        | LaneState::Transient { ordinal, .. }
+        | LaneState::LegacyInFlight { ordinal }
+        | LaneState::Terminal { ordinal, .. } => Some(*ordinal),
+        _ => None,
+    };
+    if state_ordinal.is_some_and(|ordinal| ordinal != lane.last_ordinal) {
+        return Err(PersistenceError(
+            "outbox lane state ordinal disagrees with cursor".into(),
+        ));
+    }
+    if matches!(
+        lane.state,
+        LaneState::Terminal {
+            outcome: AttemptOutcome::Started,
+            ..
+        }
+    ) {
+        return Err(PersistenceError(
+            "terminal lane cannot contain Started".into(),
+        ));
+    }
+    if matches!(
+        &lane.state,
+        LaneState::Transient {
+            raw_reason: Some(reason),
+            ..
+        } if reason.len() > 4_096
+    ) {
+        return Err(PersistenceError(
+            "transient raw reason exceeds 4096 bytes".into(),
+        ));
+    }
+    Ok(lane)
+}
+
+fn decode_deadline(key: &str, json: &str) -> Result<LaneDeadline, PersistenceError> {
+    let deadline: LaneDeadline = serde_json::from_str(json)
+        .map_err(|err| PersistenceError(format!("decode outbox deadline: {err}")))?;
+    if deadline_key(&deadline) != key {
+        return Err(PersistenceError(
+            "outbox deadline key does not match value".into(),
+        ));
+    }
+    Ok(deadline)
+}
+
+fn decode_deadline_by_intent(key: &str, json: &str) -> Result<LaneDeadline, PersistenceError> {
+    let deadline: LaneDeadline = serde_json::from_str(json)
+        .map_err(|err| PersistenceError(format!("decode outbox deadline: {err}")))?;
+    if deadline_intent_key(&deadline) != key {
+        return Err(PersistenceError(
+            "outbox deadline-by-intent key does not match value".into(),
+        ));
+    }
+    Ok(deadline)
+}
+
+fn decode_attempt_details(
+    key: &str,
+    json: &str,
+) -> Result<RecoveredAttemptDetails, PersistenceError> {
+    let details: RecoveredAttemptDetails = serde_json::from_str(json)
+        .map_err(|err| PersistenceError(format!("decode attempt details: {err}")))?;
+    if details.version != 1 {
+        return Err(PersistenceError(format!(
+            "unsupported attempt details version {}",
+            details.version
+        )));
+    }
+    if attempt_key(details.intent_id, &details.relay, details.ordinal) != key {
+        return Err(PersistenceError(
+            "attempt detail key does not match value".into(),
+        ));
+    }
+    if details.terminal == Some(AttemptOutcome::Started) {
+        return Err(PersistenceError(
+            "attempt details terminal cannot contain Started".into(),
+        ));
+    }
+    if details.finished_at.is_some() && details.terminal.is_none() {
+        return Err(PersistenceError(
+            "attempt details finish time lacks terminal outcome".into(),
+        ));
+    }
+    if details
+        .transient
+        .as_ref()
+        .and_then(|detail| detail.raw_reason.as_ref())
+        .is_some_and(|reason| reason.len() > 4_096)
+    {
+        return Err(PersistenceError(
+            "transient raw reason exceeds 4096 bytes".into(),
+        ));
+    }
+    Ok(details)
+}
+
+fn lane_deadline(lane: &RecoveredLane) -> Option<LaneDeadline> {
+    let (at, kind) = match lane.state {
+        LaneState::Transient { eligible_at, .. } => (eligible_at, DeadlineKind::RetryEligible),
+        LaneState::InFlight {
+            phase: InFlightPhase::AwaitingAck { deadline },
+            ..
+        } => (deadline, DeadlineKind::AckTimeout),
+        _ => return None,
+    };
+    Some(LaneDeadline {
+        at,
+        key: lane.key.clone(),
+        lane_revision: lane.revision,
+        kind,
+    })
+}
+
+fn replace_lane_in_txn(
+    lanes: &mut redb::Table<'_, &str, &str>,
+    deadlines: &mut redb::Table<'_, &str, &str>,
+    deadlines_by_intent: &mut redb::Table<'_, &str, &str>,
+    key: &LaneKey,
+    expected_revision: u64,
+    state: LaneState,
+) -> Result<RecoveredLane, PersistenceError> {
+    let storage_key = lane_key(key);
+    let json = lanes
+        .get(storage_key.as_str())
+        .map_err(persist_err)?
+        .map(|guard| guard.value().to_string())
+        .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+    let current = decode_lane(&storage_key, &json)?;
+    if current.revision != expected_revision {
+        return Err(PersistenceError("stale outbox lane revision".into()));
+    }
+    if let Some(old) = lane_deadline(&current) {
+        deadlines
+            .remove(deadline_key(&old).as_str())
+            .map_err(persist_err)?;
+        deadlines_by_intent
+            .remove(deadline_intent_key(&old).as_str())
+            .map_err(persist_err)?;
+    }
+    let lane = RecoveredLane {
+        version: 1,
+        key: key.clone(),
+        revision: current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?,
+        last_ordinal: current.last_ordinal,
+        state,
+    };
+    let encoded = encode_json(&lane, "outbox lane")?;
+    lanes
+        .insert(storage_key.as_str(), encoded.as_str())
+        .map_err(persist_err)?;
+    if let Some(deadline) = lane_deadline(&lane) {
+        let encoded = encode_json(&deadline, "outbox deadline")?;
+        deadlines
+            .insert(deadline_key(&deadline).as_str(), encoded.as_str())
+            .map_err(persist_err)?;
+        deadlines_by_intent
+            .insert(deadline_intent_key(&deadline).as_str(), encoded.as_str())
+            .map_err(persist_err)?;
+    }
+    Ok(lane)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1527,6 +1767,11 @@ enum RedbCrashPoint {
     RouteRevisionBeforeCommit,
     StartAttemptBeforeCommit,
     FinishAttemptBeforeCommit,
+    LaneBootstrapBeforeCommit,
+    LaneTransitionBeforeCommit,
+    LaneStartBeforeCommit,
+    LaneHandoffBeforeCommit,
+    LaneCloseBeforeCommit,
 }
 
 pub struct RedbStore {
@@ -1551,6 +1796,36 @@ pub struct RedbStore {
 }
 
 impl RedbStore {
+    fn persist_lane_state(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        state: LaneState,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let lane = {
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            replace_lane_in_txn(
+                &mut lanes,
+                &mut deadlines,
+                &mut deadlines_by_intent,
+                key,
+                expected_revision,
+                state,
+            )?
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok(lane)
+    }
+
     /// Open (creating if absent) a `redb` database file at `path`, ensuring
     /// all tables exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
@@ -1569,6 +1844,10 @@ impl RedbStore {
             write_txn.open_table(OUTBOX_DISPLACED)?;
             write_txn.open_table(OUTBOX_ATTEMPTS)?;
             write_txn.open_table(OUTBOX_ROUTE_REVISIONS)?;
+            write_txn.open_table(OUTBOX_LANES)?;
+            write_txn.open_table(OUTBOX_DEADLINES)?;
+            write_txn.open_table(OUTBOX_DEADLINES_BY_INTENT)?;
+            write_txn.open_table(OUTBOX_ATTEMPT_DETAILS)?;
             write_txn.open_table(OUTBOX_META)?;
             write_txn.open_table(OUTBOX_KIND5_CLAIMS)?;
             write_txn.open_table(OUTBOX_SUPPRESS_BY_ID)?;
@@ -3634,33 +3913,103 @@ impl EventStore for RedbStore {
         let write_txn = self.db.begin_write().map_err(persist_err)?;
         let attempt = {
             let mut attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
-            let prefix = attempt_prefix(intent_id, &relay);
-            let (lower, upper) = prefix_range(prefix.clone());
-            let mut last = 0;
-            for entry in attempts
-                .range(lower.as_str()..upper.as_str())
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let key = LaneKey {
+                intent_id,
+                relay: relay.clone(),
+            };
+            let lane_storage_key = lane_key(&key);
+            let existing_lane = lanes
+                .get(lane_storage_key.as_str())
                 .map_err(persist_err)?
-            {
-                #[cfg(test)]
-                self.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
-                let (key, value) = entry.map_err(persist_err)?;
-                let suffix = key.value().strip_prefix(&prefix).ok_or_else(|| {
-                    PersistenceError("outbox attempt range escaped its prefix".into())
-                })?;
-                let parsed = suffix.parse::<u64>().map_err(|err| {
-                    PersistenceError(format!("parse outbox attempt ordinal: {err}"))
-                })?;
-                if parsed != u64::MAX {
-                    let recovered = decode_attempt(key.value(), value.value())?;
-                    if recovered.intent_id != intent_id || recovered.relay != relay {
-                        return Err(PersistenceError(
-                            "outbox attempt prefix does not match its value tuple".into(),
-                        ));
-                    }
+                .map(|guard| guard.value().to_string());
+            let lane = match existing_lane {
+                Some(json) => decode_lane(&lane_storage_key, &json)?,
+                None => {
+                    // Temporary compatibility door for pre-lane callers:
+                    // seed from only the lexicographically-last exact-relay
+                    // row, never rescan retained history.
+                    let prefix = attempt_prefix(intent_id, &relay);
+                    let (lower, upper) = prefix_range(prefix.clone());
+                    let last_ordinal = match attempts
+                        .range(lower.as_str()..upper.as_str())
+                        .map_err(persist_err)?
+                        .next_back()
+                    {
+                        None => 0,
+                        Some(row) => {
+                            #[cfg(test)]
+                            self.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
+                            let (raw_key, raw_value) = row.map_err(persist_err)?;
+                            let suffix =
+                                raw_key.value().strip_prefix(&prefix).ok_or_else(|| {
+                                    PersistenceError(
+                                        "outbox attempt range escaped its prefix".into(),
+                                    )
+                                })?;
+                            let ordinal = suffix.parse::<u64>().map_err(|err| {
+                                PersistenceError(format!("parse outbox attempt ordinal: {err}"))
+                            })?;
+                            if ordinal == u64::MAX {
+                                return Err(PersistenceError("attempt ordinal exhausted".into()));
+                            }
+                            decode_attempt(raw_key.value(), raw_value.value())?;
+                            ordinal
+                        }
+                    };
+                    let lane = RecoveredLane {
+                        version: 1,
+                        key: key.clone(),
+                        revision: 1,
+                        last_ordinal,
+                        state: if last_ordinal == 0 {
+                            LaneState::WaitingConnection
+                        } else {
+                            LaneState::LegacyInFlight {
+                                ordinal: last_ordinal,
+                            }
+                        },
+                    };
+                    lanes
+                        .insert(
+                            lane_storage_key.as_str(),
+                            encode_json(&lane, "outbox lane")?.as_str(),
+                        )
+                        .map_err(persist_err)?;
+                    lane
                 }
-                last = last.max(parsed);
+            };
+            if lane.last_ordinal > 0 {
+                let previous_key = attempt_key(intent_id, &relay, lane.last_ordinal);
+                let previous_json = attempts
+                    .get(previous_key.as_str())
+                    .map_err(persist_err)?
+                    .map(|guard| guard.value().to_string())
+                    .ok_or_else(|| PersistenceError("lane cursor attempt row not found".into()))?;
+                let previous = decode_attempt(&previous_key, &previous_json)?;
+                let previous_details = details
+                    .get(previous_key.as_str())
+                    .map_err(persist_err)?
+                    .map(|guard| guard.value().to_string())
+                    .map(|json| decode_attempt_details(&previous_key, &json))
+                    .transpose()?;
+                if crate::attempt_is_live(&previous, previous_details.as_ref()) {
+                    return Err(PersistenceError(
+                        "cannot start a new ordinal while the current attempt is live".into(),
+                    ));
+                }
             }
-            let ordinal = last
+            let ordinal = lane
+                .last_ordinal
                 .checked_add(1)
                 .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
             let record = OutboxAttemptRecord {
@@ -3678,6 +4027,40 @@ impl EventStore for RedbStore {
                     attempt_key(intent_id, &relay, ordinal).as_str(),
                     encoded.as_str(),
                 )
+                .map_err(persist_err)?;
+            let detail = RecoveredAttemptDetails {
+                version: 1,
+                intent_id,
+                relay: relay.clone(),
+                ordinal,
+                started_at: None,
+                handoff: None,
+                transient: None,
+                finished_at: None,
+                terminal: None,
+            };
+            let encoded_detail = encode_json(&detail, "attempt details")?;
+            details
+                .insert(
+                    attempt_key(intent_id, &relay, ordinal).as_str(),
+                    encoded_detail.as_str(),
+                )
+                .map_err(persist_err)?;
+            let mut advanced = replace_lane_in_txn(
+                &mut lanes,
+                &mut deadlines,
+                &mut deadlines_by_intent,
+                &key,
+                lane.revision,
+                LaneState::InFlight {
+                    ordinal,
+                    phase: InFlightPhase::AwaitingHandoff,
+                },
+            )?;
+            advanced.last_ordinal = ordinal;
+            let encoded_lane = encode_json(&advanced, "outbox lane")?;
+            lanes
+                .insert(lane_storage_key.as_str(), encoded_lane.as_str())
                 .map_err(persist_err)?;
             RecoveredAttempt {
                 version: 1,
@@ -3704,31 +4087,81 @@ impl EventStore for RedbStore {
         if outcome == AttemptOutcome::Started {
             return Err(PersistenceError("Started is not a terminal outcome".into()));
         }
+        let target_key = attempt_key(intent_id, relay, ordinal);
+        {
+            let read_txn = self.db.begin_read().map_err(persist_err)?;
+            let attempts = read_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+            let raw = attempts
+                .get(target_key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string())
+                .ok_or_else(|| PersistenceError("attempt row not found".into()))?;
+            decode_attempt(&target_key, &raw)?;
+        }
+        self.bootstrap_outbox_lanes(intent_id)?;
         let write_txn = self.db.begin_write().map_err(persist_err)?;
         let result = {
-            let mut attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+            let attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
             let key = attempt_key(intent_id, relay, ordinal);
             let existing = attempts.get(key.as_str()).map_err(persist_err)?;
             let json = existing
                 .map(|guard| guard.value().to_string())
                 .ok_or_else(|| PersistenceError("attempt row not found".into()))?;
             let recovered = decode_attempt(&key, &json)?;
-            if recovered.outcome == outcome {
+            if recovered.outcome != AttemptOutcome::Started {
+                if recovered.outcome == outcome {
+                    return Ok(FinishAttemptOutcome::AlreadySame);
+                }
+                return Err(PersistenceError(
+                    "legacy attempt row has a conflicting terminal outcome".into(),
+                ));
+            }
+            let lane_key_value = LaneKey {
+                intent_id,
+                relay: relay.clone(),
+            };
+            let lane_storage_key = lane_key(&lane_key_value);
+            let lane_json = lanes
+                .get(lane_storage_key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string())
+                .ok_or_else(|| PersistenceError("attempt lane not found".into()))?;
+            let lane = decode_lane(&lane_storage_key, &lane_json)?;
+            if lane.last_ordinal != ordinal {
+                return Err(PersistenceError("stale attempt ordinal".into()));
+            }
+            let detail_json = details
+                .get(key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string())
+                .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            let mut detail = decode_attempt_details(&key, &detail_json)?;
+            if detail.terminal.as_ref() == Some(&outcome) {
                 FinishAttemptOutcome::AlreadySame
-            } else if recovered.outcome == AttemptOutcome::Started {
-                let record = OutboxAttemptRecord {
-                    version: recovered.version,
-                    intent_id: recovered.intent_id,
-                    relay: recovered.relay,
-                    ordinal: recovered.ordinal,
-                    event_json: recovered.event.as_json(),
-                    outcome,
-                };
-                let encoded = serde_json::to_string(&record)
-                    .map_err(|err| PersistenceError(format!("encode outbox attempt: {err}")))?;
-                attempts
+            } else if detail.terminal.is_none() {
+                detail.terminal = Some(outcome.clone());
+                let encoded = encode_json(&detail, "attempt details")?;
+                details
                     .insert(key.as_str(), encoded.as_str())
                     .map_err(persist_err)?;
+                replace_lane_in_txn(
+                    &mut lanes,
+                    &mut deadlines,
+                    &mut deadlines_by_intent,
+                    &lane_key_value,
+                    lane.revision,
+                    LaneState::Terminal { ordinal, outcome },
+                )?;
                 FinishAttemptOutcome::Committed
             } else {
                 return Err(PersistenceError(
@@ -3748,6 +4181,9 @@ impl EventStore for RedbStore {
     ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
         let read_txn = self.db.begin_read().map_err(persist_err)?;
         let attempts = read_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+        let details = read_txn
+            .open_table(OUTBOX_ATTEMPT_DETAILS)
+            .map_err(persist_err)?;
         let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
         let mut recovered = Vec::new();
         for entry in attempts
@@ -3757,11 +4193,17 @@ impl EventStore for RedbStore {
             #[cfg(test)]
             self.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
             let (key, value) = entry.map_err(persist_err)?;
-            let attempt = decode_attempt(key.value(), value.value())?;
+            let mut attempt = decode_attempt(key.value(), value.value())?;
             if attempt.intent_id != intent_id {
                 return Err(PersistenceError(
                     "outbox attempt range does not match its value intent".into(),
                 ));
+            }
+            if let Some(detail) = details.get(key.value()).map_err(persist_err)? {
+                let detail = decode_attempt_details(key.value(), detail.value())?;
+                if let Some(terminal) = detail.terminal {
+                    attempt.outcome = terminal;
+                }
             }
             recovered.push(attempt);
         }
@@ -3774,6 +4216,856 @@ impl EventStore for RedbStore {
                 .then(left.ordinal.cmp(&right.ordinal))
         });
         Ok(recovered)
+    }
+
+    fn bootstrap_outbox_lanes(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        {
+            let intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+            if intents
+                .get(intent_key(intent_id).as_str())
+                .map_err(persist_err)?
+                .is_none()
+            {
+                return Err(PersistenceError("lane bootstrap intent is not open".into()));
+            }
+            let route_revisions = write_txn
+                .open_table(OUTBOX_ROUTE_REVISIONS)
+                .map_err(persist_err)?;
+            let attempts_table = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
+            let mut details_by_key = BTreeMap::new();
+            for row in details
+                .range(lower.as_str()..upper.as_str())
+                .map_err(persist_err)?
+            {
+                let (key, value) = row.map_err(persist_err)?;
+                let detail = decode_attempt_details(key.value(), value.value())?;
+                details_by_key.insert((detail.relay.clone(), detail.ordinal), detail);
+            }
+            let mut attempts = Vec::new();
+            for row in attempts_table
+                .range(lower.as_str()..upper.as_str())
+                .map_err(persist_err)?
+            {
+                #[cfg(test)]
+                self.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
+                let (key, value) = row.map_err(persist_err)?;
+                let mut attempt = decode_attempt(key.value(), value.value())?;
+                if let Some(terminal) = details_by_key
+                    .get(&(attempt.relay.clone(), attempt.ordinal))
+                    .and_then(|detail| detail.terminal.clone())
+                {
+                    attempt.outcome = terminal;
+                }
+                attempts.push(attempt);
+            }
+            attempts.sort_by(|left, right| {
+                left.relay
+                    .cmp(&right.relay)
+                    .then(left.ordinal.cmp(&right.ordinal))
+            });
+            let mut relays = BTreeSet::new();
+            for row in route_revisions
+                .range(lower.as_str()..upper.as_str())
+                .map_err(persist_err)?
+            {
+                #[cfg(test)]
+                self.route_revision_range_rows
+                    .fetch_add(1, Ordering::Relaxed);
+                let (key, value) = row.map_err(persist_err)?;
+                let revision = decode_route_revision(key.value(), value.value())?;
+                relays.extend(revision.relays);
+            }
+            for attempt in &attempts {
+                relays.insert(attempt.relay.clone());
+            }
+            for attempt in &attempts {
+                if !details_by_key.contains_key(&(attempt.relay.clone(), attempt.ordinal)) {
+                    let shell = RecoveredAttemptDetails {
+                        version: 1,
+                        intent_id,
+                        relay: attempt.relay.clone(),
+                        ordinal: attempt.ordinal,
+                        started_at: None,
+                        handoff: None,
+                        transient: None,
+                        finished_at: None,
+                        terminal: None,
+                    };
+                    details
+                        .insert(
+                            attempt_key(intent_id, &attempt.relay, attempt.ordinal).as_str(),
+                            encode_json(&shell, "attempt details")?.as_str(),
+                        )
+                        .map_err(persist_err)?;
+                }
+            }
+            for relay in relays {
+                let key = LaneKey { intent_id, relay };
+                let storage_key = lane_key(&key);
+                let lane_attempts: Vec<_> = attempts
+                    .iter()
+                    .filter(|attempt| attempt.relay == key.relay)
+                    .collect();
+                let live_count = lane_attempts
+                    .iter()
+                    .filter(|attempt| {
+                        crate::attempt_is_live(
+                            attempt,
+                            details_by_key.get(&(attempt.relay.clone(), attempt.ordinal)),
+                        )
+                    })
+                    .count();
+                if live_count > 1
+                    || (live_count == 1
+                        && lane_attempts.last().is_some_and(|attempt| {
+                            !crate::attempt_is_live(
+                                attempt,
+                                details_by_key.get(&(attempt.relay.clone(), attempt.ordinal)),
+                            )
+                        }))
+                {
+                    return Err(PersistenceError(
+                        "contradictory live v1 Started attempt history".into(),
+                    ));
+                }
+                if let Some(existing) = lanes.get(storage_key.as_str()).map_err(persist_err)? {
+                    let lane = decode_lane(&storage_key, existing.value())?;
+                    let max = lane_attempts.last().map_or(0, |attempt| attempt.ordinal);
+                    if lane.last_ordinal != max {
+                        return Err(PersistenceError(
+                            "outbox lane cursor disagrees with retained attempt history".into(),
+                        ));
+                    }
+                    match lane_attempts.last() {
+                        Some(attempt) if attempt.outcome != AttemptOutcome::Started => {
+                            if lane.state
+                                != (LaneState::Terminal {
+                                    ordinal: attempt.ordinal,
+                                    outcome: attempt.outcome.clone(),
+                                })
+                            {
+                                return Err(PersistenceError(
+                                    "terminal attempt and lane state disagree".into(),
+                                ));
+                            }
+                        }
+                        _ if matches!(lane.state, LaneState::Terminal { .. }) => {
+                            return Err(PersistenceError(
+                                "terminal lane lacks matching terminal attempt".into(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                let last_ordinal = lane_attempts.last().map_or(0, |attempt| attempt.ordinal);
+                let state = match lane_attempts.last() {
+                    None => LaneState::WaitingConnection,
+                    Some(attempt) if attempt.outcome == AttemptOutcome::Started => {
+                        LaneState::LegacyInFlight {
+                            ordinal: attempt.ordinal,
+                        }
+                    }
+                    Some(attempt) => LaneState::Terminal {
+                        ordinal: attempt.ordinal,
+                        outcome: attempt.outcome.clone(),
+                    },
+                };
+                let lane = RecoveredLane {
+                    version: 1,
+                    key,
+                    revision: 1,
+                    last_ordinal,
+                    state,
+                };
+                let encoded = encode_json(&lane, "outbox lane")?;
+                lanes
+                    .insert(storage_key.as_str(), encoded.as_str())
+                    .map_err(persist_err)?;
+            }
+        }
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::LaneBootstrapBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        self.recover_outbox_lanes(intent_id)
+    }
+
+    fn recover_outbox_lanes(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let lanes = read_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+        let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
+        let mut recovered = Vec::new();
+        for row in lanes
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+        {
+            let (key, value) = row.map_err(persist_err)?;
+            let lane = decode_lane(key.value(), value.value())?;
+            if lane.key.intent_id != intent_id {
+                return Err(PersistenceError("lane range escaped intent prefix".into()));
+            }
+            recovered.push(lane);
+        }
+        recovered.sort_by(|a, b| a.key.relay.cmp(&b.key.relay));
+        Ok(recovered)
+    }
+
+    fn due_outbox_deadlines(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<LaneDeadline>, PersistenceError> {
+        if limit > 1_024 {
+            return Err(PersistenceError("deadline read limit exceeds 1024".into()));
+        }
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let deadlines = read_txn.open_table(OUTBOX_DEADLINES).map_err(persist_err)?;
+        let deadlines_by_intent = read_txn
+            .open_table(OUTBOX_DEADLINES_BY_INTENT)
+            .map_err(persist_err)?;
+        if deadlines.len().map_err(persist_err)?
+            != deadlines_by_intent.len().map_err(persist_err)?
+        {
+            return Err(PersistenceError(
+                "deadline index cardinalities disagree".into(),
+            ));
+        }
+        let lanes = read_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+        let upper = deadline_upper(now);
+        let mut recovered = Vec::new();
+        for row in deadlines
+            .range("00000000000000000000:"..upper.as_str())
+            .map_err(persist_err)?
+        {
+            if recovered.len() == limit {
+                break;
+            }
+            let (key, value) = row.map_err(persist_err)?;
+            let deadline = decode_deadline(key.value(), value.value())?;
+            let secondary_key = deadline_intent_key(&deadline);
+            let secondary = deadlines_by_intent
+                .get(secondary_key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string())
+                .ok_or_else(|| PersistenceError("deadline is missing by-intent index".into()))?;
+            if decode_deadline_by_intent(&secondary_key, &secondary)? != deadline {
+                return Err(PersistenceError("deadline indexes disagree".into()));
+            }
+            let lane_storage_key = lane_key(&deadline.key);
+            let lane_json = lanes
+                .get(lane_storage_key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_string())
+                .ok_or_else(|| PersistenceError("deadline references missing lane".into()))?;
+            let lane = decode_lane(&lane_storage_key, &lane_json)?;
+            if lane_deadline(&lane).as_ref() != Some(&deadline) {
+                return Err(PersistenceError("deadline and lane disagree".into()));
+            }
+            recovered.push(deadline);
+        }
+        Ok(recovered)
+    }
+
+    fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let deadlines = read_txn.open_table(OUTBOX_DEADLINES).map_err(persist_err)?;
+        let deadlines_by_intent = read_txn
+            .open_table(OUTBOX_DEADLINES_BY_INTENT)
+            .map_err(persist_err)?;
+        if deadlines.len().map_err(persist_err)?
+            != deadlines_by_intent.len().map_err(persist_err)?
+        {
+            return Err(PersistenceError(
+                "deadline index cardinalities disagree".into(),
+            ));
+        }
+        let lanes = read_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+        let mut rows = deadlines.iter().map_err(persist_err)?;
+        let Some(row) = rows.next() else {
+            return Ok(None);
+        };
+        let (key, value) = row.map_err(persist_err)?;
+        let deadline = decode_deadline(key.value(), value.value())?;
+        let secondary_key = deadline_intent_key(&deadline);
+        let secondary = deadlines_by_intent
+            .get(secondary_key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string())
+            .ok_or_else(|| PersistenceError("deadline is missing by-intent index".into()))?;
+        if decode_deadline_by_intent(&secondary_key, &secondary)? != deadline {
+            return Err(PersistenceError("deadline indexes disagree".into()));
+        }
+        let lane_storage_key = lane_key(&deadline.key);
+        let lane = lanes
+            .get(lane_storage_key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string())
+            .ok_or_else(|| PersistenceError("deadline references missing lane".into()))?;
+        if lane_deadline(&decode_lane(&lane_storage_key, &lane)?).as_ref() != Some(&deadline) {
+            return Err(PersistenceError("deadline and lane disagree".into()));
+        }
+        Ok(Some(deadline.at))
+    }
+
+    fn set_lane_waiting(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        auth: bool,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        self.persist_lane_state(
+            key,
+            expected_revision,
+            if auth {
+                LaneState::WaitingAuth
+            } else {
+                LaneState::WaitingConnection
+            },
+        )
+    }
+
+    fn set_lane_eligible(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        since: Timestamp,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        self.persist_lane_state(key, expected_revision, LaneState::Eligible { since })
+    }
+
+    fn set_lane_transient(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        eligible_at: Timestamp,
+        cause: TransientCause,
+        raw_reason: Option<String>,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if raw_reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > 4_096)
+        {
+            return Err(PersistenceError(
+                "transient raw reason exceeds 4096 bytes".into(),
+            ));
+        }
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let lane = {
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let storage_key = lane_key(key);
+            let json = lanes
+                .get(storage_key.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            let current = decode_lane(&storage_key, &json)?;
+            if current.last_ordinal != ordinal {
+                return Err(PersistenceError("stale attempt ordinal".into()));
+            }
+            if ordinal > 0 {
+                let detail_key = attempt_key(key.intent_id, &key.relay, ordinal);
+                let detail_json = details
+                    .get(detail_key.as_str())
+                    .map_err(persist_err)?
+                    .map(|g| g.value().to_string())
+                    .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+                let mut detail = decode_attempt_details(&detail_key, &detail_json)?;
+                detail.transient = Some(AttemptTransientDetail {
+                    eligible_at,
+                    cause,
+                    raw_reason: raw_reason.clone(),
+                });
+                details
+                    .insert(
+                        detail_key.as_str(),
+                        encode_json(&detail, "attempt details")?.as_str(),
+                    )
+                    .map_err(persist_err)?;
+            }
+            replace_lane_in_txn(
+                &mut lanes,
+                &mut deadlines,
+                &mut deadlines_by_intent,
+                key,
+                expected_revision,
+                LaneState::Transient {
+                    ordinal,
+                    eligible_at,
+                    cause,
+                    raw_reason,
+                },
+            )?
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok(lane)
+    }
+
+    fn start_lane_attempt(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        event: Event,
+        started_at: Timestamp,
+    ) -> Result<(RecoveredAttempt, RecoveredLane), PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let intents = read_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+        let intent_json = intents
+            .get(intent_key(key.intent_id).as_str())
+            .map_err(persist_err)?
+            .map(|g| g.value().to_string())
+            .ok_or_else(|| PersistenceError("attempt intent is not open".into()))?;
+        let intent: OutboxIntentRecord = serde_json::from_str(&intent_json)
+            .map_err(|e| PersistenceError(format!("decode attempt intent: {e}")))?;
+        let frozen = Event::from_json(&intent.frozen_json)
+            .map_err(|e| PersistenceError(format!("decode attempt intent event: {e}")))?;
+        if intent.sig_state != IntentSigState::Signed || frozen != event {
+            return Err(PersistenceError(
+                "attempt bytes are not the intent's promoted signed bytes".into(),
+            ));
+        }
+        event
+            .verify()
+            .map_err(|e| PersistenceError(format!("attempt event is invalid: {e}")))?;
+        drop(intents);
+        drop(read_txn);
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let (attempt, lane) = {
+            let mut attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            let storage_key = lane_key(key);
+            let lane_json = lanes
+                .get(storage_key.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            let current = decode_lane(&storage_key, &lane_json)?;
+            if current.revision != expected_revision
+                || !matches!(current.state, LaneState::Eligible { .. })
+            {
+                return Err(PersistenceError(
+                    "lane is not expected eligible cursor".into(),
+                ));
+            }
+            let ordinal = current
+                .last_ordinal
+                .checked_add(1)
+                .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
+            let attempt = RecoveredAttempt {
+                version: 1,
+                intent_id: key.intent_id,
+                relay: key.relay.clone(),
+                ordinal,
+                event,
+                outcome: AttemptOutcome::Started,
+            };
+            let raw = OutboxAttemptRecord {
+                version: 1,
+                intent_id: key.intent_id,
+                relay: key.relay.clone(),
+                ordinal,
+                event_json: attempt.event.as_json(),
+                outcome: AttemptOutcome::Started,
+            };
+            attempts
+                .insert(
+                    attempt_key(key.intent_id, &key.relay, ordinal).as_str(),
+                    encode_json(&raw, "outbox attempt")?.as_str(),
+                )
+                .map_err(persist_err)?;
+            let detail = RecoveredAttemptDetails {
+                version: 1,
+                intent_id: key.intent_id,
+                relay: key.relay.clone(),
+                ordinal,
+                started_at: Some(started_at),
+                handoff: None,
+                transient: None,
+                finished_at: None,
+                terminal: None,
+            };
+            details
+                .insert(
+                    attempt_key(key.intent_id, &key.relay, ordinal).as_str(),
+                    encode_json(&detail, "attempt details")?.as_str(),
+                )
+                .map_err(persist_err)?;
+            let mut advanced = replace_lane_in_txn(
+                &mut lanes,
+                &mut deadlines,
+                &mut deadlines_by_intent,
+                key,
+                expected_revision,
+                LaneState::InFlight {
+                    ordinal,
+                    phase: InFlightPhase::AwaitingHandoff,
+                },
+            )?;
+            advanced.last_ordinal = ordinal;
+            lanes
+                .insert(
+                    storage_key.as_str(),
+                    encode_json(&advanced, "outbox lane")?.as_str(),
+                )
+                .map_err(persist_err)?;
+            (attempt, advanced)
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::LaneStartBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok((attempt, lane))
+    }
+
+    fn record_lane_handoff(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        detail: AttemptHandoffDetail,
+        next: PostHandoffState,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if matches!(
+            &next,
+            PostHandoffState::Transient {
+                raw_reason: Some(reason),
+                ..
+            } if reason.len() > 4_096
+        ) {
+            return Err(PersistenceError(
+                "transient raw reason exceeds 4096 bytes".into(),
+            ));
+        }
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let lane = {
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            let lane_storage_key = lane_key(key);
+            let lane_json = lanes
+                .get(lane_storage_key.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            let current_lane = decode_lane(&lane_storage_key, &lane_json)?;
+            if current_lane.revision != expected_revision || current_lane.last_ordinal != ordinal {
+                return Err(PersistenceError("stale lane handoff".into()));
+            }
+            if !matches!(
+                current_lane.state,
+                LaneState::InFlight {
+                    ordinal: current,
+                    phase: InFlightPhase::AwaitingHandoff,
+                } if current == ordinal
+            ) {
+                return Err(PersistenceError("lane is not awaiting handoff".into()));
+            }
+            let attempt_key_value = attempt_key(key.intent_id, &key.relay, ordinal);
+            let detail_json = details
+                .get(attempt_key_value.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            let mut recovered_detail = decode_attempt_details(&attempt_key_value, &detail_json)?;
+            if let Some(existing) = &recovered_detail.handoff {
+                if existing != &detail {
+                    return Err(PersistenceError("conflicting handoff evidence".into()));
+                }
+            } else {
+                recovered_detail.handoff = Some(detail);
+            }
+            let state = match next {
+                PostHandoffState::WaitingConnection => LaneState::WaitingConnection,
+                PostHandoffState::WaitingAuth => LaneState::WaitingAuth,
+                PostHandoffState::Eligible { since } => LaneState::Eligible { since },
+                PostHandoffState::AwaitingAck { deadline } => LaneState::InFlight {
+                    ordinal,
+                    phase: InFlightPhase::AwaitingAck { deadline },
+                },
+                PostHandoffState::Transient {
+                    eligible_at,
+                    cause,
+                    raw_reason,
+                } => LaneState::Transient {
+                    ordinal,
+                    eligible_at,
+                    cause,
+                    raw_reason,
+                },
+                PostHandoffState::Terminal {
+                    outcome,
+                    finished_at,
+                } => {
+                    if outcome == AttemptOutcome::Started {
+                        return Err(PersistenceError("Started is not terminal".into()));
+                    }
+                    recovered_detail.finished_at = Some(finished_at);
+                    recovered_detail.terminal = Some(outcome.clone());
+                    LaneState::Terminal { ordinal, outcome }
+                }
+            };
+            let lane = replace_lane_in_txn(
+                &mut lanes,
+                &mut deadlines,
+                &mut deadlines_by_intent,
+                key,
+                expected_revision,
+                state,
+            )?;
+            if lane.last_ordinal != ordinal {
+                return Err(PersistenceError("stale lane handoff ordinal".into()));
+            }
+            details
+                .insert(
+                    attempt_key_value.as_str(),
+                    encode_json(&recovered_detail, "attempt details")?.as_str(),
+                )
+                .map_err(persist_err)?;
+            lane
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::LaneHandoffBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok(lane)
+    }
+
+    fn finish_lane_attempt(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+        finished_at: Timestamp,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if outcome == AttemptOutcome::Started {
+            return Err(PersistenceError("Started is not terminal".into()));
+        }
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let lane = {
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            let storage_key = lane_key(key);
+            let lane_json = lanes
+                .get(storage_key.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            let current = decode_lane(&storage_key, &lane_json)?;
+            if current.revision != expected_revision || current.last_ordinal != ordinal {
+                return Err(PersistenceError("stale terminal attempt".into()));
+            }
+            let detail_key = attempt_key(key.intent_id, &key.relay, ordinal);
+            let detail_json = details
+                .get(detail_key.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            let mut detail = decode_attempt_details(&detail_key, &detail_json)?;
+            if let Some(existing) = &detail.terminal {
+                if existing == &outcome
+                    && detail.finished_at == Some(finished_at)
+                    && matches!(
+                        current.state,
+                        LaneState::Terminal {
+                            ordinal: current_ordinal,
+                            outcome: ref current_outcome,
+                        } if current_ordinal == ordinal && current_outcome == &outcome
+                    )
+                {
+                    current
+                } else {
+                    return Err(PersistenceError(
+                        "attempt already has conflicting terminal evidence".into(),
+                    ));
+                }
+            } else {
+                detail.finished_at = Some(finished_at);
+                detail.terminal = Some(outcome.clone());
+                details
+                    .insert(
+                        detail_key.as_str(),
+                        encode_json(&detail, "attempt details")?.as_str(),
+                    )
+                    .map_err(persist_err)?;
+                replace_lane_in_txn(
+                    &mut lanes,
+                    &mut deadlines,
+                    &mut deadlines_by_intent,
+                    key,
+                    expected_revision,
+                    LaneState::Terminal { ordinal, outcome },
+                )?
+            }
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::FinishAttemptBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok(lane)
+    }
+
+    fn recover_attempt_details(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<RecoveredAttemptDetails>, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let details = read_txn
+            .open_table(OUTBOX_ATTEMPT_DETAILS)
+            .map_err(persist_err)?;
+        let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
+        let mut recovered = Vec::new();
+        for row in details
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+        {
+            let (key, value) = row.map_err(persist_err)?;
+            recovered.push(decode_attempt_details(key.value(), value.value())?);
+        }
+        recovered.sort_by(|a, b| a.relay.cmp(&b.relay).then(a.ordinal.cmp(&b.ordinal)));
+        Ok(recovered)
+    }
+
+    fn close_terminal_intent(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CloseIntentOutcome, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let result = {
+            let mut intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+            if intents
+                .get(intent_key(intent_id).as_str())
+                .map_err(persist_err)?
+                .is_none()
+            {
+                CloseIntentOutcome::AlreadyClosed
+            } else {
+                let lanes_table = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+                let (lane_lower, lane_upper) = prefix_range(intent_row_prefix(intent_id));
+                let mut lanes_snapshot = Vec::new();
+                for row in lanes_table
+                    .range(lane_lower.as_str()..lane_upper.as_str())
+                    .map_err(persist_err)?
+                {
+                    let (key, value) = row.map_err(persist_err)?;
+                    let lane = decode_lane(key.value(), value.value())?;
+                    if lane.key.intent_id != intent_id {
+                        return Err(PersistenceError(
+                            "lane close range escaped intent prefix".into(),
+                        ));
+                    }
+                    lanes_snapshot.push(lane);
+                }
+                if lanes_snapshot.is_empty()
+                    || lanes_snapshot
+                        .iter()
+                        .any(|lane| !matches!(lane.state, LaneState::Terminal { .. }))
+                {
+                    return Err(PersistenceError(
+                        "intent lanes are not non-empty and terminal".into(),
+                    ));
+                }
+                let mut deadlines = write_txn
+                    .open_table(OUTBOX_DEADLINES)
+                    .map_err(persist_err)?;
+                let mut deadlines_by_intent = write_txn
+                    .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                    .map_err(persist_err)?;
+                if deadlines.len().map_err(persist_err)?
+                    != deadlines_by_intent.len().map_err(persist_err)?
+                {
+                    return Err(PersistenceError(
+                        "deadline index cardinalities disagree".into(),
+                    ));
+                }
+                let (deadline_lower, deadline_upper) = prefix_range(intent_row_prefix(intent_id));
+                let mut stale_rows = Vec::new();
+                for row in deadlines_by_intent
+                    .range(deadline_lower.as_str()..deadline_upper.as_str())
+                    .map_err(persist_err)?
+                {
+                    let (key, value) = row.map_err(persist_err)?;
+                    let deadline = decode_deadline_by_intent(key.value(), value.value())?;
+                    if deadline.key.intent_id != intent_id {
+                        return Err(PersistenceError(
+                            "deadline close range escaped intent prefix".into(),
+                        ));
+                    }
+                    stale_rows.push((key.value().to_string(), deadline));
+                }
+                for (by_intent_key, deadline) in stale_rows {
+                    let ordered_key = deadline_key(&deadline);
+                    let ordered = deadlines
+                        .get(ordered_key.as_str())
+                        .map_err(persist_err)?
+                        .map(|guard| guard.value().to_string())
+                        .ok_or_else(|| {
+                            PersistenceError("by-intent deadline is missing ordered index".into())
+                        })?;
+                    if decode_deadline(&ordered_key, &ordered)? != deadline {
+                        return Err(PersistenceError("deadline indexes disagree".into()));
+                    }
+                    deadlines
+                        .remove(ordered_key.as_str())
+                        .map_err(persist_err)?;
+                    deadlines_by_intent
+                        .remove(by_intent_key.as_str())
+                        .map_err(persist_err)?;
+                }
+                intents
+                    .remove(intent_key(intent_id).as_str())
+                    .map_err(persist_err)?;
+                CloseIntentOutcome::Closed
+            }
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::LaneCloseBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok(result)
     }
 
     fn accept_ephemeral(
@@ -3897,6 +5189,9 @@ mod tests {
                 .unwrap();
             store.start_attempt(intent, relay, event).unwrap();
         }
+        store
+            .finish_attempt(target, &short, 1, AttemptOutcome::GaveUp)
+            .unwrap();
 
         store.reset_outbox_range_rows();
         let attempts = store.recover_attempts(target).unwrap();
@@ -3915,8 +5210,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.outbox_range_rows(),
-            (1, 2),
-            "allocation must inspect only the exact relay or target intent"
+            (0, 2),
+            "cursor allocation must not rescan retained attempt history"
         );
     }
 
