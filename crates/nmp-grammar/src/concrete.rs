@@ -194,33 +194,52 @@ pub struct ContextualAtom {
 impl ContextualAtom {
     /// Canonical, stable, collision-resistant hash — built from the
     /// filter's OWN already-collision-resistant 32-byte digest plus one
-    /// discriminant byte per context axis, via [`fold_context`].
+    /// discriminant byte per context axis (plus the pinned relay set's own
+    /// bytes under `Pinned`, #107), via [`fold_context`].
     pub fn hash(&self) -> DescriptorHash {
-        fold_context(self.filter.hash(), self.source, self.access)
+        fold_context(self.filter.hash(), &self.source, self.access)
     }
 }
 
 /// Fold `source`/`access` context onto an existing hash, producing a NEW,
-/// still framing-unambiguous digest (fixed-width tag bytes, no delimiter
-/// needed). [`ContextualAtom::hash`] is the primary caller; exposed
-/// publicly so a caller with its OWN base hash that isn't a bare
-/// `ConcreteFilter::hash()` -- e.g. `nmp-router`'s `Skeleton` hash
-/// (authors already erased, for sub-id stability across author churn) or
-/// `nmp-store`'s window-erased `CoverageKey` hash -- can derive a
-/// context-aware hash without duplicating the tagging scheme or
+/// still framing-unambiguous digest. [`ContextualAtom::hash`] is the
+/// primary caller; exposed publicly so a caller with its OWN base hash
+/// that isn't a bare `ConcreteFilter::hash()` -- e.g. `nmp-router`'s
+/// `Skeleton` hash (authors already erased, for sub-id stability across
+/// author churn) or `nmp-store`'s window-erased `CoverageKey` hash -- can
+/// derive a context-aware hash without duplicating the tagging scheme or
 /// reconstructing a `ContextualAtom` it doesn't otherwise need.
+///
+/// `source` is a reference (#107): `SourceAuthority` is no longer `Copy`
+/// once `Pinned`'s relay set exists, and a caller with only a borrowed
+/// atom (the common case) shouldn't need to clone a whole relay set just
+/// to hash it.
 pub fn fold_context(
     base: DescriptorHash,
-    source: SourceAuthority,
+    source: &SourceAuthority,
     access: AccessContext,
 ) -> DescriptorHash {
-    let tagged = fold_byte(
-        base,
-        match source {
-            SourceAuthority::AuthorOutboxes => 0,
-            SourceAuthority::Public => 1,
-        },
-    );
+    let tagged = match source {
+        SourceAuthority::AuthorOutboxes => fold_byte(base, 0),
+        SourceAuthority::Public => fold_byte(base, 1),
+        // #107: two `Pinned` atoms with DIFFERENT relay sets must hash
+        // differently (equal filters pinned to R1 vs R2 are genuinely
+        // distinct coverage/wire identities) -- fold every relay's own
+        // length-prefixed bytes in, not just a fixed discriminant. Members
+        // are already canonically ordered (`BTreeSet`), so insertion order
+        // never affects the digest.
+        SourceAuthority::Pinned(relays) => {
+            let mut bytes = Vec::with_capacity(33);
+            bytes.extend_from_slice(base.as_bytes());
+            bytes.push(2);
+            for relay in relays {
+                let s = relay.as_str().as_bytes();
+                bytes.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(s);
+            }
+            DescriptorHash(*blake3::hash(&bytes).as_bytes())
+        }
+    };
     fold_byte(
         tagged,
         match access {
@@ -351,6 +370,57 @@ mod tests {
             public.hash(),
             "same selection under different SourceAuthority must never alias"
         );
+    }
+
+    /// #107's headline anti-alias falsifier (Done-when: "Equal filters
+    /// pinned to R1 and R2 retain distinct row projections, evidence, EOSE
+    /// facts, and teardown"): the IDENTICAL selection pinned to two
+    /// DIFFERENT relay sets must hash differently.
+    #[test]
+    fn contextual_atom_hash_distinguishes_different_pinned_relay_sets() {
+        let filter = cf(vec!["aa"], vec![]);
+        let r1 = nostr::RelayUrl::parse("wss://r1.example").unwrap();
+        let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();
+        let pinned_r1 = ContextualAtom {
+            filter: filter.clone(),
+            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r1])),
+            access: crate::descriptor::AccessContext::Public,
+        };
+        let pinned_r2 = ContextualAtom {
+            filter,
+            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r2])),
+            access: crate::descriptor::AccessContext::Public,
+        };
+        assert_ne!(
+            pinned_r1.hash(),
+            pinned_r2.hash(),
+            "the same selection pinned to different relay sets must never alias"
+        );
+    }
+
+    /// Stability companion: the SAME pinned relay set, inserted in a
+    /// different order, hashes identically (`BTreeSet` already normalizes
+    /// member order; this pins that the fold doesn't accidentally
+    /// reintroduce insertion-order sensitivity).
+    #[test]
+    fn contextual_atom_hash_is_stable_regardless_of_pinned_set_insertion_order() {
+        let filter = cf(vec!["aa"], vec![]);
+        let r1 = nostr::RelayUrl::parse("wss://r1.example").unwrap();
+        let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();
+        let a = ContextualAtom {
+            filter: filter.clone(),
+            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([
+                r1.clone(),
+                r2.clone(),
+            ])),
+            access: crate::descriptor::AccessContext::Public,
+        };
+        let b = ContextualAtom {
+            filter,
+            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r2, r1])),
+            access: crate::descriptor::AccessContext::Public,
+        };
+        assert_eq!(a.hash(), b.hash());
     }
 
     #[test]

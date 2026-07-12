@@ -57,6 +57,20 @@ import kotlin.concurrent.withLock
  * cancelled or the flow completes -- see this file's header finding for why
  * that, not UniFFI's generated `Cleaner`, is the correct mapping. */
 fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> =
+    observeRows { observer -> nmpRethrowing { engine.observe(filter.toFfi(), observer) } }
+
+/** #107: the explicit-`NMPDemand` entry point -- the constructor to reach
+ * for once [observeQuery]'s implicit `AuthorOutboxes`/`Public` default
+ * isn't enough: declaring `NMPSourceAuthority.Pinned` wire authority, a
+ * non-default `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. Same
+ * bridge/accumulation/teardown shape as the `NMPFilter` overload above. */
+fun observeQuery(engine: NmpEngineInterface, demand: NMPDemand): Flow<RowBatch> =
+    observeRows { observer -> nmpRethrowing { engine.observeDemand(demand.toFfi(), observer) } }
+
+/** Shared bridge/accumulation setup: `subscribe` is the ONE difference
+ * between the `NMPFilter` and `NMPDemand` entry points (which
+ * `NmpEngineInterface` verb actually opens the subscription). */
+private fun observeRows(subscribe: (RowObserver) -> NmpQueryHandle): Flow<RowBatch> =
     callbackFlow {
         val lock = ReentrantLock()
         // Insertion-ordered accumulation: `order` tracks arrival order,
@@ -83,7 +97,7 @@ fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> 
                 }
             }
 
-        val handle: NmpQueryHandle = nmpRethrowing { engine.observe(filter.toFfi(), observer) }
+        val handle: NmpQueryHandle = subscribe(observer)
 
         awaitClose { handle.cancel() }
     }.conflate()

@@ -42,6 +42,12 @@ public enum NMPError: Error, Sendable, Equatable {
     /// `decodeNostrEntity`'s input decoded to `nsec`/`ncryptsec` -- refused
     /// rather than decoded (#116).
     case nostrEntitySecretKeyRejected
+    /// An `NMPDemand` declared `.authorOutboxes` over a selection whose
+    /// `authors` field is unbound (#107).
+    case authorOutboxesRequiresBoundAuthors
+    /// An `NMPDemand` declared `.pinned([])` -- an empty relay set (#107
+    /// Contract: "the pinned relay set must be nonempty").
+    case emptyPinnedRelaySet
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -57,6 +63,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .EngineClosed: self = .engineClosed
         case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)
         case .NostrEntitySecretKeyRejected: self = .nostrEntitySecretKeyRejected
+        case .AuthorOutboxesRequiresBoundAuthors: self = .authorOutboxesRequiresBoundAuthors
+        case .EmptyPinnedRelaySet: self = .emptyPinnedRelaySet
         }
     }
 }

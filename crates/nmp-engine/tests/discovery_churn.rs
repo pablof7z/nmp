@@ -297,7 +297,7 @@ fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
     let has_discovery_atom = |core: &EngineCore<MemoryStore>| {
         core.active_demand()
             .iter()
-            .any(|atom| atom.kinds == Some(BTreeSet::from([10_002u16])))
+            .any(|atom| atom.filter.kinds == Some(BTreeSet::from([10_002u16])))
     };
     assert!(
         has_discovery_atom(&core),

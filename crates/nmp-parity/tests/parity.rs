@@ -145,6 +145,7 @@ fn lane_name(lane: Lane) -> &'static str {
         Lane::Nip65Read => "nip65_read",
         Lane::AppRelay => "app_relay",
         Lane::Fallback => "fallback",
+        Lane::ExplicitPinned => "explicit_pinned",
     }
 }
 

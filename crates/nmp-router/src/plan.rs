@@ -35,7 +35,7 @@ impl SubId {
     pub fn for_wire(
         relay: RelayUrl,
         filter: &ConcreteFilter,
-        source: SourceAuthority,
+        source: &SourceAuthority,
         access: AccessContext,
     ) -> Self {
         let (skeleton, _) = Skeleton::of(filter);
@@ -158,7 +158,7 @@ mod tests {
         let sub_id = SubId::for_wire(
             relay.clone(),
             &filter,
-            SourceAuthority::AuthorOutboxes,
+            &SourceAuthority::AuthorOutboxes,
             AccessContext::Public,
         );
         let req = WireReq {
@@ -219,7 +219,7 @@ mod tests {
                 sub_id: SubId::for_wire(
                     relay(1),
                     &cf(1, &["bb", "cc"]),
-                    SourceAuthority::AuthorOutboxes,
+                    &SourceAuthority::AuthorOutboxes,
                     AccessContext::Public,
                 ),
                 filter: cf(1, &["bb", "cc"]),
@@ -246,13 +246,13 @@ mod tests {
         let outbox_sub = SubId::for_wire(
             relay(0),
             &filter,
-            SourceAuthority::AuthorOutboxes,
+            &SourceAuthority::AuthorOutboxes,
             AccessContext::Public,
         );
         let public_sub = SubId::for_wire(
             relay(0),
             &filter,
-            SourceAuthority::Public,
+            &SourceAuthority::Public,
             AccessContext::Public,
         );
         assert_ne!(
@@ -272,13 +272,13 @@ mod tests {
         let sub_a = SubId::for_wire(
             relay(0),
             &a,
-            SourceAuthority::AuthorOutboxes,
+            &SourceAuthority::AuthorOutboxes,
             AccessContext::Public,
         );
         let sub_b = SubId::for_wire(
             relay(0),
             &b,
-            SourceAuthority::AuthorOutboxes,
+            &SourceAuthority::AuthorOutboxes,
             AccessContext::Public,
         );
         assert_eq!(sub_a, sub_b);

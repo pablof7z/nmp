@@ -42,6 +42,11 @@ pub enum Lane {
     /// when that author's own-relay coverage is under the 2-relay-min AND no
     /// `AppRelay` is configured; never counted toward the 2-relay-min itself.
     Fallback,
+    /// Query-declared pinned wire authority (#107, `SourceAuthority::Pinned`)
+    /// -- the Demand's OWN relay set, never a directory fact. Bypasses every
+    /// other lane entirely: no directory/outbox/app/fallback/indexer relay is
+    /// ever added alongside this one for the same atom.
+    ExplicitPinned,
 }
 
 /// A relay tagged with the lane that supplied it.

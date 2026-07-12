@@ -18,7 +18,9 @@ use nmp_engine::outbox::{
     Durability, NarrowOnly, PrivateRoute, ReceiptSink, WriteIntent, WritePayload, WriteRouting,
     WriteStatus,
 };
-use nmp_grammar::{Binding, ConcreteFilter, Filter};
+use nmp_grammar::{
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, SourceAuthority,
+};
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{
@@ -70,6 +72,22 @@ fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
         kinds: Some(kinds.iter().copied().collect()),
         authors: Some(authors.iter().map(|s| s.to_string()).collect()),
         ..ConcreteFilter::default()
+    }
+}
+
+/// An `AuthorOutboxes`-sourced atom (#118): every `cf(...)` fixture in this
+/// file is author-bearing, so this is the exact true context each one was
+/// actually acquired under -- `EngineCore::get_coverage` now takes the
+/// atom's real `ContextualAtom`, never a reconstruction.
+fn ctx_atom(filter: ConcreteFilter) -> ContextualAtom {
+    ctx_atom_with(filter, SourceAuthority::AuthorOutboxes)
+}
+
+fn ctx_atom_with(filter: ConcreteFilter, source: SourceAuthority) -> ContextualAtom {
+    ContextualAtom {
+        filter,
+        source,
+        access: AccessContext::Public,
     }
 }
 
@@ -779,7 +797,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
         event_frame(&wire, e),
     ));
     assert_eq!(
-        core.get_coverage(&atom, &relay0),
+        core.get_coverage(&ctx_atom(atom.clone()), &relay0),
         None,
         "presence != coverage"
     );
@@ -795,10 +813,335 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     ));
 
     let interval = core
-        .get_coverage(&atom, &relay0)
+        .get_coverage(&ctx_atom(atom.clone()), &relay0)
         .expect("EOSE must record a coverage row");
     assert_eq!(interval.from, Timestamp::from(0u64));
     assert_eq!(interval.through, Timestamp::from(500u64));
+}
+
+/// #118's headline falsifier (fixed ahead of #107): a `Demand` explicitly
+/// declared `Public` over an author-bearing selection (#106's "new
+/// expressible behavior" -- "these authors, generic facts only, no outbox
+/// chase") is a genuinely DIFFERENT coverage identity than the SAME
+/// selection under the static-default `AuthorOutboxes` guess. Proves
+/// `get_coverage` now reads the atom's TRUE declared context: querying
+/// under the correct (`Public`) context finds the recorded coverage;
+/// querying under the static default's WRONG guess (`AuthorOutboxes`,
+/// since the filter IS author-bearing) does not -- exactly the silent
+/// re-alias #118 describes, now provably closed.
+#[test]
+fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let filter = cf(&[1], &[&a.public_key().to_hex()]);
+    // A directory fact so the Public-sourced atom (classify() sends
+    // `Public` straight to the pinned/directory lookup, never the outbox
+    // solver) actually routes somewhere.
+    let dir = FixtureDirectory::new().with_group_host(filter.clone(), relay0.clone());
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let demand = nmp_grammar::Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+            ..Filter::default()
+        },
+        SourceAuthority::Public,
+        AccessContext::Public,
+    )
+    .expect("Public over an author-bearing selection is legal (#106)");
+
+    let effects = core.handle(EngineMsg::Subscribe(
+        LiveQuery(demand),
+        Box::new(CapturingSink::default()),
+    ));
+    let (sub_id, _f) = req_for(&effects, &relay0);
+    let wire = wire_sub_string(sub_id);
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire),
+    ));
+
+    assert!(
+        core.get_coverage(
+            &ctx_atom_with(filter.clone(), SourceAuthority::Public),
+            &relay0
+        )
+        .is_some(),
+        "the TRUE declared context (Public) must find the recorded coverage"
+    );
+    assert!(
+        core.get_coverage(&ctx_atom(filter), &relay0).is_none(),
+        "the static-default's WRONG guess (AuthorOutboxes, since the filter is \
+         author-bearing) must NOT find coverage recorded under a genuinely \
+         different declared context"
+    );
+}
+
+/// #107's core Done-when trio, exercised as one flow since they compose
+/// naturally: (1) Agnostic pinned-R1 returns a matching cached R2-only row
+/// while wire contacts only R1; (2) Strict pinned-R1 excludes that same row
+/// until it is observed from R1 too; (6) same-filter Agnostic and Strict
+/// handles remain distinct even though they share ONE wire subscription
+/// (`AcquisitionKey` excludes `cache`, #106/#107's ratified shape -- two
+/// handles differing ONLY in `cache` dedup onto the identical graph node/
+/// wire/coverage, per `nmp-resolver::Engine::subscribe`'s own doc).
+#[test]
+fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire() {
+    let a = Keys::generate();
+    let relay_other = RelayUrl::parse("wss://other.example.com").unwrap();
+    let relay_pinned = RelayUrl::parse("wss://pinned.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay_other.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay_other);
+    connect(&mut core, 1, &relay_pinned);
+
+    // Seed the store: an ordinary AuthorOutboxes subscribe pulls the event
+    // in from relay_other, giving it Row.sources == {relay_other}.
+    let outbox_effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let (outbox_sub, _f) = req_for(&outbox_effects, &relay_other);
+    let outbox_wire = wire_sub_string(outbox_sub);
+    let event = unsigned(&a, 1, "seeded via relay_other")
+        .sign_with_keys(&a)
+        .expect("sign fixture event");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame(&outbox_wire, event.clone()),
+    ));
+
+    // Two NEW handles over the IDENTICAL selection, both declared
+    // SourceAuthority::Pinned({relay_pinned}) -- the SAME AcquisitionKey --
+    // but one Agnostic (the default), one Strict.
+    let filter = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+        ..Filter::default()
+    };
+    let pinned_relays = BTreeSet::from([relay_pinned.clone()]);
+    let agnostic_demand = nmp_grammar::Demand::new(
+        filter,
+        SourceAuthority::Pinned(pinned_relays),
+        AccessContext::Public,
+    )
+    .expect("a nonempty pinned relay set is legal (#107)");
+    let mut strict_demand = agnostic_demand.clone();
+    strict_demand.cache = nmp_grammar::CacheMode::Strict;
+
+    let effects_agnostic = core.handle(EngineMsg::Subscribe(
+        LiveQuery(agnostic_demand),
+        Box::new(CapturingSink::default()),
+    ));
+
+    // Wire contacts ONLY the declared pinned relay for this new atom --
+    // never relay_other (no re-req there at all: nothing about that atom
+    // changed), and (since this fixture directory configures no app/
+    // fallback/indexer/group-host facts) there is nowhere else it even
+    // COULD leak to.
+    let (pinned_sub, _f) = req_for(&effects_agnostic, &relay_pinned);
+    let pinned_wire = wire_sub_string(pinned_sub);
+    assert!(
+        !effects_agnostic.iter().any(|effect| matches!(
+            effect,
+            Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay_other)
+        )),
+        "an ExplicitPinned atom's subscribe must never recompile a Req/Close at any \
+         relay but its own declared set"
+    );
+    assert!(
+        all_row_deltas(&effects_agnostic)
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id)),
+        "Agnostic must return a matching cached row regardless of its recorded provenance"
+    );
+
+    // The Strict handle dedups onto the SAME graph/wire (no new Req at
+    // relay_pinned), yet must NOT see the row: its provenance ({relay_other})
+    // is disjoint from the pinned set ({relay_pinned}).
+    let effects_strict = core.handle(EngineMsg::Subscribe(
+        LiveQuery(strict_demand),
+        Box::new(CapturingSink::default()),
+    ));
+    assert!(
+        !effects_strict
+            .iter()
+            .any(|effect| matches!(effect, Effect::Wire(_))),
+        "a Strict handle sharing the identical AcquisitionKey must dedup onto the \
+         existing wire subscription, never open a second one"
+    );
+    assert!(
+        !all_row_deltas(&effects_strict)
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id)),
+        "Strict must exclude a row whose recorded provenance is disjoint from the \
+         pinned relay set"
+    );
+
+    // The SAME event now arrives from the pinned relay too: the Strict
+    // handle must pick it up the instant its own provenance intersects the
+    // pinned set, and the Agnostic handle (which already had it) must still
+    // record the provenance growth -- both are the SAME underlying
+    // `Row.sources` growing, projected differently per handle's `cache`.
+    let after = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        event_frame(&pinned_wire, event.clone()),
+    ));
+    let deltas = all_row_deltas(&after);
+    assert!(
+        deltas.iter().any(|delta| matches!(
+            delta,
+            RowDelta::Added(row) if row.event.id == event.id && row.sources.contains(&relay_pinned)
+        )),
+        "the Strict handle must newly Add the row once its provenance includes the \
+         pinned relay: {deltas:?}"
+    );
+    assert!(
+        deltas.iter().any(|delta| matches!(
+            delta,
+            RowDelta::SourcesGrew { id, sources } if *id == event.id && sources.contains(&relay_pinned)
+        )),
+        "the Agnostic handle's already-visible row must still record the provenance \
+         growth: {deltas:?}"
+    );
+}
+
+/// #107's remaining Done-when trio item: "Equal filters pinned to R1 and R2
+/// retain distinct row projections, evidence, EOSE facts, and teardown."
+/// Unlike the Agnostic/Strict test above (same pinned set, different cache
+/// mode, sharing ONE wire subscription), this is the OTHER axis: the
+/// IDENTICAL filter pinned to two DIFFERENT relay sets is a genuinely
+/// different `SourceAuthority::Pinned` value, hence a different
+/// `AcquisitionKey` -- two fully independent handles, subs, and EOSE
+/// watermarks, never sharing so much as a wire request.
+#[test]
+fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
+    let a = Keys::generate();
+    let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
+    let relay2 = RelayUrl::parse("wss://relay2.example.com").unwrap();
+    let mut core = new_core(FixtureDirectory::new());
+    connect(&mut core, 0, &relay1);
+    connect(&mut core, 1, &relay2);
+
+    let filter = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+        ..Filter::default()
+    };
+    let demand1 = nmp_grammar::Demand::new(
+        filter.clone(),
+        SourceAuthority::Pinned(BTreeSet::from([relay1.clone()])),
+        AccessContext::Public,
+    )
+    .expect("nonempty pinned relay set is legal");
+    let demand2 = nmp_grammar::Demand::new(
+        filter,
+        SourceAuthority::Pinned(BTreeSet::from([relay2.clone()])),
+        AccessContext::Public,
+    )
+    .expect("nonempty pinned relay set is legal");
+
+    let effects1 = core.handle(EngineMsg::Subscribe(
+        LiveQuery(demand1),
+        Box::new(CapturingSink::default()),
+    ));
+    let id1 = effects1
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(hid, ..) => Some(*hid),
+            _ => None,
+        })
+        .expect("subscribe must emit an initial EmitRows for its own handle");
+    let (sub1, _) = req_for(&effects1, &relay1);
+    let wire1 = wire_sub_string(sub1);
+    assert!(
+        !effects1.iter().any(
+            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay2))
+        ),
+        "demand1's Pinned({{relay1}}) atom must never touch relay2"
+    );
+
+    let effects2 = core.handle(EngineMsg::Subscribe(
+        LiveQuery(demand2),
+        Box::new(CapturingSink::default()),
+    ));
+    let id2 = effects2
+        .iter()
+        .find_map(|e| match e {
+            Effect::EmitRows(hid, ..) => Some(*hid),
+            _ => None,
+        })
+        .expect("subscribe must emit an initial EmitRows for its own handle");
+    let (sub2, _) = req_for(&effects2, &relay2);
+    let _wire2 = wire_sub_string(sub2);
+    assert_ne!(
+        id1, id2,
+        "two distinct subscribe calls must yield distinct handles"
+    );
+    assert_ne!(
+        sub1, sub2,
+        "distinct pinned relay sets over an identical filter must never share a SubId"
+    );
+    assert!(
+        !effects2.iter().any(
+            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay1))
+        ),
+        "demand2's Pinned({{relay2}}) atom must never touch relay1 -- and must not even \
+         re-touch relay1's already-open sub, since these are independent graph nodes"
+    );
+
+    // Distinct EOSE facts: only relay1's sub finishes -- handle1's OWN
+    // relay1 entry advances; handle2's relay2 entry (a DIFFERENT handle
+    // entirely) must stay unproven.
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(10u64)));
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire1),
+    ));
+    let evidence1 = evidence_from(&effects, id1).expect("relay1's EOSE must refresh handle1");
+    let r1 = source_for(evidence1, &relay1).expect("relay1 must be a source for handle1");
+    assert_eq!(r1.reconciled_through, Some(Timestamp::from(10u64)));
+    assert!(
+        evidence_from(&effects, id2).is_none()
+            || source_for(evidence_from(&effects, id2).unwrap(), &relay2)
+                .is_none_or(|r2| r2.reconciled_through.is_none()),
+        "handle2's relay2 entry must NOT advance off handle1's relay1 EOSE"
+    );
+
+    // Distinct teardown: unsubscribing handle1 closes ONLY relay1's sub;
+    // handle2's relay2 subscription is untouched.
+    let teardown = core.handle(EngineMsg::Unsubscribe(id1));
+    let closed_relays: BTreeSet<RelayUrl> = teardown
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Wire(delta) => {
+                Some(delta.ops.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        closed_relays,
+        BTreeSet::from([relay1]),
+        "unsubscribing handle1 must close exactly relay1's sub, never touch relay2's"
+    );
 }
 
 // ---- the EOSE-overwrite-race rule (ruling §2) ---------------------------
@@ -855,11 +1198,13 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     let atom_a = cf(&[1], &[&a.public_key().to_hex()]);
     let atom_e = cf(&[1], &[&e_key.public_key().to_hex()]);
     assert!(
-        core.get_coverage(&atom_a, &relay0).is_some(),
+        core.get_coverage(&ctx_atom(atom_a.clone()), &relay0)
+            .is_some(),
         "a is in BOTH outstanding snapshots -- must be credited"
     );
     assert!(
-        core.get_coverage(&atom_e, &relay0).is_none(),
+        core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
+            .is_none(),
         "e is only in the newer snapshot -- the straggler EOSE must NOT credit it"
     );
 
@@ -873,7 +1218,8 @@ fn eose_overwrite_race_credits_only_the_intersection() {
         eose_frame(&wire),
     ));
     assert!(
-        core.get_coverage(&atom_e, &relay0).is_some(),
+        core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
+            .is_some(),
         "the second EOSE must credit the still-outstanding snapshot's atoms"
     );
 }
@@ -913,7 +1259,7 @@ fn limited_fetch_never_records_coverage() {
 
     let atom = cf(&[1], &[&a.public_key().to_hex()]);
     assert_eq!(
-        core.get_coverage(&atom, &relay0),
+        core.get_coverage(&ctx_atom(atom.clone()), &relay0),
         None,
         "a limited REQ's EOSE must poison -- never record a watermark"
     );

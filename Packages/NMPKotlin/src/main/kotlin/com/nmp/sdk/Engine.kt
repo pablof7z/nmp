@@ -64,6 +64,14 @@ class NMPEngine(config: NMPConfig) : AutoCloseable {
      * Query.kt's `observeQuery` for the teardown-mapping finding. */
     fun observe(filter: NMPFilter): Flow<RowBatch> = observeQuery(ffi, filter)
 
+    /** Open a live, detachable query over an explicit `NMPDemand` (#107) --
+     * the constructor to reach for once [observe]'s implicit
+     * `AuthorOutboxes`/`Public` default isn't enough: declaring
+     * `NMPSourceAuthority.Pinned` wire authority, a non-default
+     * `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. Same
+     * cold-`Flow`/teardown discipline as the `NMPFilter` overload. */
+    fun observe(demand: NMPDemand): Flow<RowBatch> = observeQuery(ffi, demand)
+
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,
     // events actually received per relay per kind, and per-filter coverage.

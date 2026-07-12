@@ -27,11 +27,11 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::convert::{
-    diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey, row_delta_to_ffi,
-    write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
+    demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey,
+    row_delta_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
 };
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
-use crate::types::{FfiFilter, FfiReceiptReattachment, FfiWriteIntent};
+use crate::types::{FfiDemand, FfiFilter, FfiReceiptReattachment, FfiWriteIntent};
 use nmp::ReceiptReattachment;
 
 fn reattachment_to_ffi(value: &ReceiptReattachment) -> FfiReceiptReattachment {
@@ -126,6 +126,32 @@ impl NmpEngine {
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let filter = filter_from_ffi(query)?;
         let subscription = self.engine.observe(nmp::LiveQuery::from_filter(filter))?;
+        let cancel = subscription.cancel_handle();
+
+        thread::spawn(move || {
+            while let Ok((deltas, evidence)) = subscription.recv() {
+                let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
+                observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
+            }
+            observer.on_closed();
+        });
+
+        Ok(Arc::new(NmpQueryHandle { cancel }))
+    }
+
+    /// Open a live subscription over an explicit [`FfiDemand`] (#107) --
+    /// the constructor an app reaches for once [`Self::observe`]'s bare
+    /// `FfiFilter` (which always takes `Demand::from_filter`'s static
+    /// default) isn't enough: declaring `Pinned` wire authority, a non-
+    /// default `AccessContext`, or a non-`Agnostic` `CacheMode`. Same
+    /// drain-thread/cancel-handle shape as `observe` in every other respect.
+    pub fn observe_demand(
+        &self,
+        query: FfiDemand,
+        observer: Box<dyn RowObserver>,
+    ) -> Result<Arc<NmpQueryHandle>, FfiError> {
+        let demand = demand_from_ffi(query)?;
+        let subscription = self.engine.observe(nmp::LiveQuery(demand))?;
         let cancel = subscription.cancel_handle();
 
         thread::spawn(move || {

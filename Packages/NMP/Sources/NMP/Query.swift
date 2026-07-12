@@ -27,6 +27,27 @@ public struct NMPQuery: AsyncSequence, Sendable {
     private let stream: AsyncStream<RowBatch>
 
     init(engine: NmpEngineProtocol, filter: FfiFilter) throws {
+        try self.init(engine: engine) { engine, observer in
+            try engine.observe(query: filter, observer: observer)
+        }
+    }
+
+    /// #107: the explicit-`FfiDemand` entry point -- same bridge/coalescing
+    /// shape as the `FfiFilter` initializer above, just a different
+    /// `NmpEngineProtocol` verb underneath.
+    init(engine: NmpEngineProtocol, demand: FfiDemand) throws {
+        try self.init(engine: engine) { engine, observer in
+            try engine.observeDemand(query: demand, observer: observer)
+        }
+    }
+
+    /// Shared bridge/coalescing setup: `subscribe` is the ONE difference
+    /// between the `FfiFilter` and `FfiDemand` entry points (which
+    /// `NmpEngineProtocol` verb actually opens the subscription).
+    private init(
+        engine: NmpEngineProtocol,
+        subscribe: (NmpEngineProtocol, RowObserver) throws -> NmpQueryHandle
+    ) throws {
         var continuation: AsyncStream<RowBatch>.Continuation!
         // `.bufferingNewest(1)`: belt-and-suspenders alongside `RowBridge`'s
         // own frame coalescing below -- if a consumer ever falls behind the
@@ -36,7 +57,7 @@ public struct NMPQuery: AsyncSequence, Sendable {
             continuation = $0
         }
         let bridge = RowBridge(continuation: continuation)
-        self.handle = try nmpRethrowing { try engine.observe(query: filter, observer: bridge) }
+        self.handle = try nmpRethrowing { try subscribe(engine, bridge) }
         self.stream = stream
     }
 

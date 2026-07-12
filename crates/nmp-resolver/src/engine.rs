@@ -66,7 +66,7 @@ impl From<&Demand> for AcquisitionKey {
     fn from(d: &Demand) -> Self {
         Self {
             selection: d.selection.clone(),
-            source: d.source,
+            source: d.source.clone(),
             access: d.access,
         }
     }
@@ -783,7 +783,7 @@ impl<S: EventStore> Engine<S> {
                     self.unref_atom(
                         &ContextualAtom {
                             filter: a.clone(),
-                            source,
+                            source: source.clone(),
                             access,
                         },
                         acc,
@@ -793,7 +793,7 @@ impl<S: EventStore> Engine<S> {
                     self.ref_atom(
                         &ContextualAtom {
                             filter: a.clone(),
-                            source,
+                            source: source.clone(),
                             access,
                         },
                         acc,
