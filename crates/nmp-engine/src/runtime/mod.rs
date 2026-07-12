@@ -986,7 +986,9 @@ impl Handle {
     /// every `WriteStatus` this intent ever reaches (ledger #9 — enqueue is
     /// not converged; the FIRST value is never a terminal for a durable/
     /// at-most-once intent. `Ephemeral` also yields receipt facts, but owns
-    /// no durable delivery obligation or query-visible pending row.
+    /// no durable delivery obligation or query-visible pending row. If no
+    /// pre-acceptance correlation id remains, this returns a typed error and
+    /// creates no receipt stream.
     #[must_use]
     pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, PublishError> {
         self.publish_tracked(intent).map(|receipt| receipt.statuses)
@@ -994,7 +996,8 @@ impl Handle {
 
     /// Enqueue a write and expose its stable receipt id. This synchronous
     /// round trip waits only for the local crash-atomic acceptance door,
-    /// never for signing, routing, network I/O, or ACKs.
+    /// never for signing, routing, network I/O, or ACKs. Correlation-id
+    /// exhaustion is returned before any stream or identity is fabricated.
     #[must_use]
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
         let (tx, rx) = mpsc::channel();

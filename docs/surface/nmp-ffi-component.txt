@@ -231,6 +231,14 @@ enum Enum {
             ),
         },
         Variant {
+            name: "ReceiptCorrelationIdExhausted",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "No upper-half correlation id remains for a publish rejected before\ndurable acceptance. No receipt or status stream was created.",
+            ),
+        },
+        Variant {
             name: "StoreOpenFailed",
             discr: None,
             fields: [
@@ -274,7 +282,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "Every way a value crossing this boundary can fail to parse -- typed\nstates, never a panic (plan §2/§6).",
+        "Every typed failure crossing this boundary -- parse, lifecycle, storage,\nor pre-receipt allocation states; never a panic (plan §2/§6).",
     ),
 }
 
@@ -2235,7 +2243,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Enqueue a write. `observer` streams every `WriteStatus` this intent\never reaches (ledger #9 -- enqueue is not converged; the first value\nis never a terminal for a durable/at-most-once intent). A\ncaller-supplied `Signed` payload that fails verification is no\nlonger a synchronous error here (that guarantee moved to\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary,\nUnit A0/#56, so it holds for every entry point, not only this one) --\nit surfaces as `WriteStatus::Failed`, the FIRST and only status\n`observer` receives, with no preceding `Accepted`.",
+                "Enqueue a write. `observer` streams every `WriteStatus` this intent\never reaches (ledger #9 -- enqueue is not converged; the first value\nis never a terminal for a durable/at-most-once intent). A\ncaller-supplied `Signed` payload that fails verification is no\nlonger a synchronous error here (that guarantee moved to\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary,\nUnit A0/#56, so it holds for every entry point, not only this one) --\nit surfaces as `WriteStatus::Failed`, the FIRST and only status\n`observer` receives, with no preceding `Accepted`.\nExhaustion of the pre-acceptance correlation namespace instead returns\na typed `FfiError` synchronously: no receipt id or stream exists.",
             ),
             throws: Some(
                 Enum {
@@ -2246,7 +2254,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish",
             checksum: Some(
-                24329,
+                52186,
             ),
         },
         Method {

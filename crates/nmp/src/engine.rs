@@ -151,16 +151,20 @@ impl Engine {
     /// `WritePayload::Signed` is rejected at the engine's acceptance
     /// boundary and surfaces here as a `WriteStatus::Failed` with no
     /// preceding `Accepted` -- see this module's doc.
+    /// Exhaustion of the disjoint pre-acceptance correlation namespace is a
+    /// synchronous [`EngineError::ReceiptCorrelationIdExhausted`], because
+    /// no truthful receipt stream can exist without an id.
     pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, EngineError> {
         self.with_handle(|handle| handle.publish(intent))?
-            .map_err(EngineError::from)
+            .map_err(EngineError::from_publish_error)
     }
 
     /// Enqueue a write while retaining the stable store-issued receipt id
-    /// needed for process-later reattachment.
+    /// needed for process-later reattachment. Pre-acceptance correlation-id
+    /// exhaustion returns a typed error without creating a receipt.
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
         self.with_handle(|handle| handle.publish_tracked(intent))?
-            .map_err(EngineError::from)
+            .map_err(EngineError::from_publish_error)
     }
 
     /// Reattach to durable receipt facts after a restart. Missing ids and

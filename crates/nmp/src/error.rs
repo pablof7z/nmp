@@ -53,8 +53,8 @@ impl std::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
-impl From<nmp_engine::core::PublishError> for EngineError {
-    fn from(err: nmp_engine::core::PublishError) -> Self {
+impl EngineError {
+    pub(crate) fn from_publish_error(err: nmp_engine::core::PublishError) -> Self {
         match err {
             nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted => {
                 Self::ReceiptCorrelationIdExhausted
@@ -69,8 +69,9 @@ mod tests {
 
     #[test]
     fn receipt_correlation_exhaustion_maps_and_displays_truthfully() {
-        let error =
-            EngineError::from(nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted);
+        let error = EngineError::from_publish_error(
+            nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted,
+        );
         assert_eq!(error, EngineError::ReceiptCorrelationIdExhausted);
         assert_eq!(
             error.to_string(),

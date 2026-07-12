@@ -16,6 +16,8 @@ import NMPFFI
 /// `nmp-engine`'s acceptance boundary so it holds for every entry point, not
 /// only this one). It surfaces on `Receipt.status` instead, as
 /// `WriteStatus.failed`, the first and only status delivered.
+/// Receipt-correlation exhaustion is synchronous because no truthful
+/// `Receipt` or status stream can be created without an identity.
 ///
 /// Also no `.signerHasNoPublicKey` case: `addAccount` goes through
 /// `nmp::Engine::add_account`, whose built-in `LocalKeySigner` path always

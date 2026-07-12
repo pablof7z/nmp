@@ -20,6 +20,8 @@ import uniffi.nmp_ffi.FfiException
  * `nmp-engine`'s acceptance boundary so it holds for every entry point, not
  * only this one). It surfaces on the `publish` `Flow<WriteStatus>` instead,
  * as `WriteStatus.Failed`, the first and only status delivered.
+ * Receipt-correlation exhaustion is synchronous because no truthful
+ * `Receipt` or status flow can be created without an identity.
  *
  * Also no `SignerHasNoPublicKey` case: `addAccount` goes through
  * `nmp::Engine::add_account`, whose built-in `LocalKeySigner` path always

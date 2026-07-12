@@ -33,8 +33,8 @@ use crate::types::{
     FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
-/// Every way a value crossing this boundary can fail to parse -- typed
-/// states, never a panic (plan §2/§6).
+/// Every typed failure crossing this boundary -- parse, lifecycle, storage,
+/// or pre-receipt allocation states; never a panic (plan §2/§6).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiError {
     /// A `FfiFilter.tags` key was not exactly one ASCII letter (`a`-`z` or
