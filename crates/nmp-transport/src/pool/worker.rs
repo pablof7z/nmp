@@ -274,6 +274,12 @@ fn run_worker(
                             },
                         });
                         if permanent {
+                            drain_permanently_disconnected(
+                                &command_rx,
+                                &event_tx,
+                                slot,
+                                generation,
+                            );
                             return;
                         }
                         let base = retry_in.expect("retry_in set above for non-permanent");
@@ -311,6 +317,7 @@ fn run_worker(
                     return;
                 }
                 if permanent {
+                    drain_permanently_disconnected(&command_rx, &event_tx, slot, generation);
                     return;
                 }
                 let base = retry_in.expect("retry_in set above for non-permanent");
@@ -328,6 +335,34 @@ fn run_worker(
                     return;
                 }
             }
+        }
+    }
+}
+
+/// Keep the worker's command receiver alive after a permanent connection
+/// failure until the pool explicitly closes the slot. This closes the race
+/// between `Pool::send_durable` successfully enqueueing a command and the
+/// worker returning after its final dial/session failure: every command the
+/// sender accepted before the pool observed the permanent failure is
+/// drained and resolved `NotHandedOff`, while commands submitted after the
+/// health transition are rejected synchronously by `PoolInner`.
+fn drain_permanently_disconnected(
+    command_rx: &Receiver<WorkerCommand>,
+    event_tx: &Sender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) {
+    loop {
+        match command_rx.recv() {
+            Ok(WorkerCommand::SendDurable { correlation, .. }) => resolve_correlation(
+                event_tx,
+                slot,
+                generation,
+                correlation,
+                HandoffResult::NotHandedOff,
+            ),
+            Ok(WorkerCommand::Send(_) | WorkerCommand::SetReconnectPreamble(_)) => {}
+            Ok(WorkerCommand::Shutdown) | Err(_) => return,
         }
     }
 }
@@ -847,6 +882,18 @@ fn socket_tcp(socket: &mut RelaySocket) -> io::Result<&mut TcpStream> {
 mod tests {
     use super::*;
 
+    fn handoff_results(rx: &Receiver<WorkerEvent>) -> Vec<(AttemptCorrelation, HandoffResult)> {
+        rx.try_iter()
+            .filter_map(|event| match event.kind {
+                WorkerEventKind::EventHandoff {
+                    correlation,
+                    result,
+                } => Some((correlation, result)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn pack_generation_is_ordered_by_worker_id_then_attempt() {
         assert!(pack_generation(1, 0) < pack_generation(1, 1));
@@ -861,6 +908,63 @@ mod tests {
         assert_ne!(
             worker_id_of(pack_generation(1, 0)),
             worker_id_of(pack_generation(2, 0))
+        );
+    }
+
+    #[test]
+    fn generation_end_classifies_queued_and_write_accepted_exactly() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let queued = AttemptCorrelation(10);
+        let accepted = AttemptCorrelation(11);
+        let mut durable = VecDeque::from([(queued, "queued".to_string())]);
+        let mut write_accepted = vec![accepted];
+
+        resolve_generation_end(&event_tx, 3, 7, &mut durable, &mut write_accepted);
+
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![
+                (queued, HandoffResult::NotHandedOff),
+                (accepted, HandoffResult::Ambiguous),
+            ]
+        );
+        assert!(durable.is_empty());
+        assert!(write_accepted.is_empty());
+    }
+
+    #[test]
+    fn permanent_disconnect_drains_every_accepted_durable_command_once() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let first = AttemptCorrelation(21);
+        let second = AttemptCorrelation(22);
+        let drain = std::thread::spawn(move || {
+            drain_permanently_disconnected(&command_rx, &event_tx, 1, 9);
+        });
+        command_tx
+            .send(WorkerCommand::SendDurable {
+                generation: 9,
+                correlation: first,
+                frame: "first".to_string(),
+            })
+            .unwrap();
+        command_tx.send(WorkerCommand::Send("req".into())).unwrap();
+        command_tx
+            .send(WorkerCommand::SendDurable {
+                generation: 9,
+                correlation: second,
+                frame: "second".to_string(),
+            })
+            .unwrap();
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        drain.join().unwrap();
+
+        assert_eq!(
+            handoff_results(&event_rx),
+            vec![
+                (first, HandoffResult::NotHandedOff),
+                (second, HandoffResult::NotHandedOff),
+            ]
         );
     }
 }

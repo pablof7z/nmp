@@ -189,7 +189,7 @@ impl PoolInner {
 
     pub(super) fn command_tx_for(&self, h: RelayHandle) -> Option<&WorkerHandle> {
         let state = self.slots.get(h.slot as usize)?;
-        if state.generation != h.generation {
+        if state.generation != h.generation || state.health.state == ConnState::Disconnected {
             return None;
         }
         state.worker.as_ref()
@@ -433,7 +433,7 @@ fn apply_worker_event(inner: &mut PoolInner, event: WorkerEvent) -> Option<PoolE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::{PoolConfig, PoolEvent};
+    use crate::pool::{Pool, PoolConfig, PoolEvent, WireFrame};
     use std::sync::mpsc::Sender as StdSender;
 
     struct Collector(StdSender<PoolEvent>);
@@ -717,6 +717,41 @@ mod tests {
             }
         }
         assert!(matches!(found, Some(HandoffResult::NotHandedOff)));
+        pool.shutdown();
+    }
+
+    #[test]
+    fn poisoned_pool_lock_still_resolves_durable_handoff_synchronously() {
+        let (tx, rx) = mpsc::channel();
+        let inner = PoolInner::new(PoolConfig::default(), Arc::new(Collector(tx)));
+        let pool = Pool {
+            inner: Arc::clone(&inner),
+        };
+        let poison = Arc::clone(&inner);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        let correlation = crate::pool::AttemptCorrelation(99);
+        assert!(!pool.send_durable(
+            RelayHandle {
+                slot: u32::MAX,
+                generation: 0,
+            },
+            correlation,
+            WireFrame::Text("[]".into()),
+        ));
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(PoolEvent::EventHandoff {
+                correlation: found,
+                result: crate::pool::HandoffResult::NotHandedOff,
+            }) if found == correlation
+        ));
+
+        inner.clear_poison();
         pool.shutdown();
     }
 }

@@ -2409,6 +2409,69 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     );
 }
 
+#[test]
+fn ephemeral_observer_survives_until_every_handoff_result_then_sees_written_sent() {
+    let author = Keys::generate();
+    let relay_a = RelayUrl::parse("wss://ephemeral-a.example").unwrap();
+    let relay_b = RelayUrl::parse("wss://ephemeral-b.example").unwrap();
+    let mut core = new_core(FixtureDirectory::new());
+    activate(&mut core, &author);
+    let sink = CapturingReceiptSink::default();
+    let accepted = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 93, "ephemeral handoff")),
+            durability: Durability::Ephemeral,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay_a.clone(), relay_b.clone()]),
+            }),
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, generation, unsigned) = find_sign_request(&accepted);
+    let signed = unsigned.sign_with_keys(&author).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+    assert!(!sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|status| matches!(status, WriteStatus::Sent(_))));
+    let correlation_for = |relay: &RelayUrl| {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PublishEvent(found, _, correlation) if found == relay => Some(*correlation),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    assert!(core
+        .handle(EngineMsg::EventHandoff(
+            correlation_for(&relay_a),
+            HandoffResult::NotHandedOff,
+        ))
+        .is_empty());
+    let written = core.handle(EngineMsg::EventHandoff(
+        correlation_for(&relay_b),
+        HandoffResult::Written,
+    ));
+    assert!(written.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(found, WriteStatus::Sent(relay))
+            if *found == id && relay == &relay_b
+    )));
+    assert_eq!(
+        sink.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|status| matches!(status, WriteStatus::Sent(relay) if relay == &relay_b))
+            .count(),
+        1
+    );
+}
+
 /// `NotHandedOff`/`Ambiguous` are typed INTERNAL facts only (issue #93
 /// scope): neither ever emits `WriteStatus::Sent`, any other receipt
 /// status, or any effect at all -- #96 wires governed visibility, #95

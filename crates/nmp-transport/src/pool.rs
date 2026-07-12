@@ -267,7 +267,7 @@ impl Pool {
                 }
                 None => Some(guard.sink()),
             },
-            Err(_) => None,
+            Err(poisoned) => Some(poisoned.into_inner().sink()),
         };
         match outcome {
             Some(sink) => {
@@ -287,12 +287,14 @@ impl Pool {
     /// path in [`Self::send_durable`] so every call resolves exactly once
     /// regardless of which early-return fires.
     fn resolve_not_handed_off(&self, correlation: AttemptCorrelation) {
-        if let Ok(guard) = self.inner.lock() {
-            guard.sink().on_event(PoolEvent::EventHandoff {
-                correlation,
-                result: HandoffResult::NotHandedOff,
-            });
-        }
+        let sink = match self.inner.lock() {
+            Ok(guard) => guard.sink(),
+            Err(poisoned) => poisoned.into_inner().sink(),
+        };
+        sink.on_event(PoolEvent::EventHandoff {
+            correlation,
+            result: HandoffResult::NotHandedOff,
+        });
     }
 
     /// Close the slot for `h`. No-op if the handle is stale or the slot was

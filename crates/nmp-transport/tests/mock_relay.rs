@@ -11,6 +11,7 @@
 //! runtime here drives the test relay, not `nmp-transport`.
 
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -65,9 +66,40 @@ fn frame_contains(event: &PoolEvent, needle: &str) -> bool {
 /// Reserve an ephemeral TCP port by binding then immediately dropping the
 /// listener, so the *second* relay instance in the reconnect half of this
 /// test can rebind the exact same port the first one used.
+static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(0);
+
 fn free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
-    listener.local_addr().expect("local_addr").port()
+    let base = 20_000 + (std::process::id() % 20_000) as u16;
+    let _ = NEXT_TEST_PORT.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed);
+    loop {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        if port < 20_000 {
+            NEXT_TEST_PORT.store(base, Ordering::Relaxed);
+            continue;
+        }
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}
+
+/// `LocalRelay::run` starts its listener task asynchronously. Prove the TCP
+/// accept loop is live before asking the pool to dial, so a loaded CI host
+/// cannot turn startup scheduling into a reconnect-test timeout.
+async fn wait_for_listener(port: u16) {
+    tokio::time::timeout(Duration::from_secs(5), async move {
+        loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return;
+                }
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("test relay listener did not become ready");
 }
 
 // Multi-thread flavor is load-bearing here, not a style choice: the test
@@ -93,6 +125,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
         .port(port)
         .build();
     relay_a.run().await.expect("run relay_a");
+    wait_for_listener(port).await;
     eprintln!("[test] relay_a running on port {port}");
     relay_a
         .add_event(event.clone())
@@ -179,6 +212,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     // shutdown before relay_b binds it.
     tokio::time::sleep(Duration::from_millis(100)).await;
     relay_b.run().await.expect("run relay_b");
+    wait_for_listener(port).await;
     relay_b
         .add_event(event.clone())
         .await
@@ -242,6 +276,7 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
         .port(port)
         .build();
     relay_a.run().await.expect("run relay_a");
+    wait_for_listener(port).await;
     let relay_url_str = relay_a.url().await.to_string();
     let url = nostr::RelayUrl::parse(&relay_url_str).expect("parse relay url");
 
@@ -309,10 +344,11 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
     );
     match handoff {
         PoolEvent::EventHandoff { result, .. } => {
-            assert!(
-                !matches!(result, HandoffResult::Written),
-                "a durable EVENT submitted against an ending generation must never resolve \
-                 Written, got {result:?}"
+            assert_eq!(
+                result,
+                HandoffResult::NotHandedOff,
+                "a durable EVENT submitted after the worker observed disconnect never reached \
+                 socket.write and must resolve exactly NotHandedOff"
             );
         }
         other => panic!("expected EventHandoff, got {other:?}"),
@@ -325,6 +361,7 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
         .build();
     tokio::time::sleep(Duration::from_millis(100)).await;
     relay_b.run().await.expect("run relay_b");
+    wait_for_listener(port).await;
 
     let connected2 = recv_matching(&rx, Duration::from_secs(15), is_connected);
     let PoolEvent::Connected { handle: h2, .. } = connected2 else {
@@ -391,6 +428,7 @@ async fn durable_event_resolves_written_exactly_once() {
         .port(port)
         .build();
     relay.run().await.expect("run relay");
+    wait_for_listener(port).await;
     let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
