@@ -2896,11 +2896,33 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitRows(id, delta, evidence));
     }
 
-    /// The query's FULL current matching row set (by id) + its
+    /// The query's current matching row set (by id) + its
     /// [`AcquisitionEvidence`] -- an internal snapshot `refresh_handle`
     /// diffs against the handle's own remembered `last_rows` to compute the
     /// outgoing delta. This snapshot itself is never handed to a caller/
-    /// effect directly. Rows are computed over `root_atoms` alone (delivery
+    /// effect directly.
+    ///
+    /// #124: when the demand carries a Nostr `limit:N` this projection is the
+    /// N MOST RECENT matching rows -- `created_at` DESC, ties broken by event
+    /// `id` ASC (bytewise), the NIP-01 canonical newest-first order -- NOT
+    /// every cached match. The truncation lives HERE, at the handle
+    /// projection, deliberately NOT in `EventStore::query` (which must keep
+    /// returning every current match: the resolver's `wide_concrete` KEEPS
+    /// `limit`, so Derived-node recompute / negentropy / ingest all push
+    /// limit-bearing filters into `query()` and rely on getting the FULL
+    /// match set -- truncating there would corrupt reactive recompute). It is
+    /// applied ONCE to the final merged/deduped set the app sees, per NIP-01
+    /// per-subscription `limit`, never per-atom (see [`effective_row_limit`]).
+    /// Because `refresh_handle` diffs THIS truncated snapshot against
+    /// `last_rows`, the top-N is maintained reactively for free: a newer
+    /// match entering the top-N evicts the oldest (Added(new)+Removed(oldest),
+    /// never exceeding N), and retracting a top-N member pulls the next-newest
+    /// in. `limit: None` is unchanged -- every match, no ordering imposed.
+    /// Row truncation NEVER touches `evidence` below (coverage is about what
+    /// was acquired, not how many rows are shown -- ledger #17): a limited
+    /// query still records no coverage watermark.
+    ///
+    /// Rows are computed over `root_atoms` alone (delivery
     /// shape unchanged); evidence is computed over `subtree_atoms` (#12: the
     /// query's FULL subtree, interior `Derived` atoms included). Each row
     /// carries its provenance (#105: `StoredEvent::provenance`, already
@@ -2963,6 +2985,23 @@ impl<S: EventStore> EngineCore<S> {
                 });
             }
         }
+        // #124: a demand carrying `limit:N` projects only its N newest rows.
+        // Applied to the merged/deduped set (per-subscription, not per-atom)
+        // in NIP-01 canonical newest-first order; `refresh_handle`'s diff then
+        // maintains the top-N reactively. No-op when there is no limit or the
+        // set already fits.
+        if let Some(limit) = effective_row_limit(&root_atoms) {
+            if by_id.len() > limit {
+                let mut ordered: Vec<(u64, EventId)> = by_id
+                    .iter()
+                    .map(|(event_id, row)| (row.event.created_at.as_secs(), *event_id))
+                    .collect();
+                ordered.sort_by(|a, b| nip01_newest_first((a.0, &a.1), (b.0, &b.1)));
+                let keep: BTreeSet<EventId> =
+                    ordered.into_iter().take(limit).map(|(_, id)| id).collect();
+                by_id.retain(|event_id, _| keep.contains(event_id));
+            }
+        }
         let evidence = evidence::acquisition_evidence(
             &subtree_atoms,
             self.router.plan(),
@@ -2972,6 +3011,31 @@ impl<S: EventStore> EngineCore<S> {
         );
         Ok((by_id, evidence))
     }
+}
+
+/// The demand's effective result cap (NIP-01 `limit:N`) -- the single limit
+/// the app's subscription carries, to be applied ONCE to the final merged/
+/// deduped row set the handle projects, never per-atom (#124). A demand fans
+/// out into many `root_atoms` only via the cartesian product of its bound
+/// fields' resolved elements (`Graph::compute_atoms`), and every one of those
+/// atoms is a clone of the SAME base filter -- so they all carry the
+/// IDENTICAL `limit`. Reducing with `max` over that invariantly-uniform set
+/// is therefore just a defensive fold that yields exactly that shared value;
+/// `None` iff the demand carried no limit at all (the whole set is projected,
+/// unordered). For a union/multi-atom demand this is the deliberate choice:
+/// NIP-01's `limit` is a property of the subscription, so the app sees the N
+/// newest rows across the WHOLE union, not N per operand.
+fn effective_row_limit(root_atoms: &BTreeSet<ConcreteFilter>) -> Option<usize> {
+    root_atoms.iter().filter_map(|atom| atom.limit).max()
+}
+
+/// The NIP-01 canonical newest-first total order used to pick the N most
+/// recent rows for a `limit:N` demand (#124): `created_at` DESC, ties broken
+/// by event `id` ASC compared bytewise -- the same deterministic order a
+/// relay applies when it answers a limited REQ with "the `limit` most recent
+/// events". Each argument is a `(created_at_secs, &id)` pair.
+fn nip01_newest_first(a: (u64, &EventId), b: (u64, &EventId)) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
 }
 
 /// Parse NIP-65 `r` tags off a kind:10002 event into its WRITE relay set
