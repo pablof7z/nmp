@@ -1426,6 +1426,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-nip29"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nmp-nip51",
+ "nmp-ownership",
+ "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip51"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nmp-ownership",
+ "nostr 0.44.4",
+]
+
+[[package]]
 name = "nmp-ownership"
 version = "0.1.0"
 
