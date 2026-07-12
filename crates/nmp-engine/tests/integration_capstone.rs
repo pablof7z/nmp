@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, RowsMsg};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp};
+use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
@@ -46,7 +46,7 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 }
 
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()
@@ -545,19 +545,19 @@ async fn write_ack_per_relay_over_real_relays() {
 
 fn follows_minus_mutes_filter() -> Filter {
     let follows = Binding::Derived(Box::new(Derived {
-        inner: Filter {
+        inner: Demand::from_filter(Filter {
             kinds: Some(BTreeSet::from([3u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        },
+            }),
         project: Selector::Tag("p".to_string()),
     }));
     let mutes = Binding::Derived(Box::new(Derived {
-        inner: Filter {
+        inner: Demand::from_filter(Filter {
             kinds: Some(BTreeSet::from([10_000u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        },
+            }),
         project: Selector::Tag("p".to_string()),
     }));
     Filter {
@@ -625,7 +625,7 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
     handle.add_signer(LocalKeySigner::new(a.clone()));
 
     handle.set_active_account(Some(a.public_key()));
-    let (_qh, rows_rx) = handle.subscribe(LiveQuery(follows_minus_mutes_filter()));
+    let (_qh, rows_rx) = handle.subscribe(LiveQuery::from_filter(follows_minus_mutes_filter()));
 
     // Publish a's contact list naming BOTH b and c.
     let contact_list = UnsignedEvent::new(

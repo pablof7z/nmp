@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::{LiveDirectory, WireOp};
 use nmp_store::MemoryStore;
@@ -77,14 +77,14 @@ fn kind10002_declaring_no_write_relays(author: &Keys, created_at: u64) -> nostr:
 }
 
 fn follow_feed_query() -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+                }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()

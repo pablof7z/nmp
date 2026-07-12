@@ -74,7 +74,7 @@ fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(kinds.iter().copied().collect()),
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()
@@ -131,11 +131,11 @@ impl EventStore for FailOnceCompensationStore {
     }
     fn record_coverage(
         &mut self,
-        filter: &ConcreteFilter,
+        atom: &nmp_grammar::ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
     ) {
-        self.inner.record_coverage(filter, relay, proven);
+        self.inner.record_coverage(atom, relay, proven);
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
@@ -258,14 +258,14 @@ impl EventStore for SharedFailStartStore {
     }
     fn record_coverage(
         &mut self,
-        filter: &ConcreteFilter,
+        atom: &nmp_grammar::ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
     ) {
         self.inner
             .lock()
             .unwrap()
-            .record_coverage(filter, relay, proven);
+            .record_coverage(atom, relay, proven);
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.lock().unwrap().get_coverage(key, relay)
@@ -403,11 +403,11 @@ impl EventStore for RedbFailStartStore {
     }
     fn record_coverage(
         &mut self,
-        filter: &ConcreteFilter,
+        atom: &nmp_grammar::ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
     ) {
-        self.inner.record_coverage(filter, relay, proven);
+        self.inner.record_coverage(atom, relay, proven);
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
@@ -592,14 +592,14 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
 
     // $myFollows shape: kinds:[1], authors := Derived(inner=kind:3 by me,
     // project=#p) -- exactly nmp-resolver's M1 contract-test shape.
-    let my_follows = LiveQuery(Filter {
+    let my_follows = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: Filter {
+            inner: nmp_grammar::Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: nmp_grammar::Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -888,7 +888,7 @@ fn limited_fetch_never_records_coverage() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let limited_query = LiveQuery(Filter {
+    let limited_query = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
         limit: Some(500),
@@ -940,7 +940,7 @@ fn evidence_from(effects: &[Effect], id: HandleId) -> Option<&AcquisitionEvidenc
 #[test]
 fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
     let mut core = new_core(FixtureDirectory::new());
-    let unresolved = LiveQuery(Filter {
+    let unresolved = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([9999u16])),
         authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
         ..Filter::default()
@@ -1188,14 +1188,14 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let my_follows = LiveQuery(Filter {
+    let my_follows = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: Filter {
+            inner: nmp_grammar::Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+            }),
             project: nmp_grammar::Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -1344,7 +1344,7 @@ fn set_active_pubkey_reroots_and_recompiles() {
         .with_write(b.public_key().to_hex(), [relay_b.clone()]);
     let mut core = new_core(dir);
 
-    let whoami = LiveQuery(Filter {
+    let whoami = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([0u16])),
         authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
         ..Filter::default()
@@ -3201,7 +3201,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // REQ even though the relay is Supported -- ledger #8's REQ-fallback
     // selection rule (a different skeleton -- kind:7 -- so it is a brand
     // new, independent sub-id, unaffected by kind:1's negentropy routing).
-    let limited = LiveQuery(Filter {
+    let limited = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([7u16])),
         authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
         limit: Some(1),

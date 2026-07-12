@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::{Durability, WriteIntent, WritePayload, WriteRouting, WriteStatus};
 use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
-use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
@@ -82,7 +82,7 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 /// exercise the `Derived`/reactive-authors machinery the module's flagship
 /// test does.
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery(Filter {
+    LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()
@@ -207,14 +207,14 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     // $myFollows shape: kind:1 authored by whoever `a`'s kind:3 contact
     // list (#p-projected) currently names -- identical shape to M1's own
     // contract-test query and `core_headless.rs`'s analog.
-    let my_follows = LiveQuery(Filter {
+    let my_follows = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Filter {
+            inner: Demand::from_filter(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            },
+                }),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
