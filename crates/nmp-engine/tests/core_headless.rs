@@ -132,16 +132,24 @@ impl FailOnceCompensationStore {
 }
 
 impl EventStore for FailOnceCompensationStore {
-    fn insert(&mut self, event: nostr::Event, from: RelayObserved) -> InsertOutcome {
+    fn insert(
+        &mut self,
+        event: nostr::Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
         self.inner.insert(event, from)
     }
-    fn query(&self, filter: &nostr::Filter) -> Vec<StoredEvent> {
+    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.query(filter)
     }
-    fn remove(&mut self, id: nostr::EventId, reason: RetractReason) -> Option<StoredEvent> {
+    fn remove(
+        &mut self,
+        id: nostr::EventId,
+        reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
         self.inner.remove(id, reason)
     }
-    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.expire_due(now)
     }
     fn next_expiration(&self) -> Option<Timestamp> {
@@ -152,13 +160,13 @@ impl EventStore for FailOnceCompensationStore {
         atom: &nmp_grammar::ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
-    ) {
-        self.inner.record_coverage(atom, relay, proven);
+    ) -> Result<(), PersistenceError> {
+        self.inner.record_coverage(atom, relay, proven)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> GcReport {
+    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -259,16 +267,24 @@ impl SharedFailStartStore {
 }
 
 impl EventStore for SharedFailStartStore {
-    fn insert(&mut self, event: nostr::Event, from: RelayObserved) -> InsertOutcome {
+    fn insert(
+        &mut self,
+        event: nostr::Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
         self.inner.lock().unwrap().insert(event, from)
     }
-    fn query(&self, filter: &nostr::Filter) -> Vec<StoredEvent> {
+    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.lock().unwrap().query(filter)
     }
-    fn remove(&mut self, id: nostr::EventId, reason: RetractReason) -> Option<StoredEvent> {
+    fn remove(
+        &mut self,
+        id: nostr::EventId,
+        reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
         self.inner.lock().unwrap().remove(id, reason)
     }
-    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.lock().unwrap().expire_due(now)
     }
     fn next_expiration(&self) -> Option<Timestamp> {
@@ -279,16 +295,16 @@ impl EventStore for SharedFailStartStore {
         atom: &nmp_grammar::ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
-    ) {
+    ) -> Result<(), PersistenceError> {
         self.inner
             .lock()
             .unwrap()
-            .record_coverage(atom, relay, proven);
+            .record_coverage(atom, relay, proven)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.lock().unwrap().get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> GcReport {
+    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
         self.inner.lock().unwrap().gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -404,16 +420,24 @@ impl RedbFailStartStore {
 }
 
 impl EventStore for RedbFailStartStore {
-    fn insert(&mut self, event: nostr::Event, from: RelayObserved) -> InsertOutcome {
+    fn insert(
+        &mut self,
+        event: nostr::Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
         self.inner.insert(event, from)
     }
-    fn query(&self, filter: &nostr::Filter) -> Vec<StoredEvent> {
+    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.query(filter)
     }
-    fn remove(&mut self, id: nostr::EventId, reason: RetractReason) -> Option<StoredEvent> {
+    fn remove(
+        &mut self,
+        id: nostr::EventId,
+        reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
         self.inner.remove(id, reason)
     }
-    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent> {
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.expire_due(now)
     }
     fn next_expiration(&self) -> Option<Timestamp> {
@@ -424,13 +448,13 @@ impl EventStore for RedbFailStartStore {
         atom: &nmp_grammar::ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
-    ) {
-        self.inner.record_coverage(atom, relay, proven);
+    ) -> Result<(), PersistenceError> {
+        self.inner.record_coverage(atom, relay, proven)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> GcReport {
+    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -4082,4 +4106,217 @@ fn to_inboxes_unknown_recipient_fails_the_whole_intent_closed() {
         sink.0.lock().unwrap().last(),
         Some(WriteStatus::Failed(_))
     ));
+}
+
+// ---- issue #122: fallible ingest/read doors degrade, never panic ---------
+//
+// A fault-injecting `EventStore` whose ONE mutating ingest door (`insert`)
+// returns a `PersistenceError` (a stand-in for disk-full / an I/O error on
+// the real redb backend) while every OTHER door delegates to a healthy
+// in-memory store. This isolates the ingest failure so the falsifiers below
+// prove (a) the door surfaces `Err` rather than panicking, and (b) the
+// engine degrades the local cache to read-only and emits a diagnostic
+// instead of crashing the host app on a relay EVENT frame.
+struct FailIngestStore {
+    inner: MemoryStore,
+    fail_insert: bool,
+}
+
+impl FailIngestStore {
+    fn armed() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            fail_insert: true,
+        }
+    }
+}
+
+impl EventStore for FailIngestStore {
+    fn insert(
+        &mut self,
+        event: nostr::Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
+        if self.fail_insert {
+            return Err(PersistenceError("injected ingest I/O failure".into()));
+        }
+        self.inner.insert(event, from)
+    }
+    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
+        self.inner.query(filter)
+    }
+    fn remove(
+        &mut self,
+        id: nostr::EventId,
+        reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
+        self.inner.remove(id, reason)
+    }
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
+        self.inner.expire_due(now)
+    }
+    fn next_expiration(&self) -> Option<Timestamp> {
+        self.inner.next_expiration()
+    }
+    fn record_coverage(
+        &mut self,
+        atom: &nmp_grammar::ContextualAtom,
+        relay: &RelayUrl,
+        proven: CoverageInterval,
+    ) -> Result<(), PersistenceError> {
+        self.inner.record_coverage(atom, relay, proven)
+    }
+    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+        self.inner.get_coverage(key, relay)
+    }
+    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+        self.inner.gc(claims)
+    }
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
+        self.inner.accept_write(accept)
+    }
+    fn promote_signed(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        sig: nostr::secp256k1::schnorr::Signature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        self.inner.promote_signed(intent_id, sig)
+    }
+    fn compensate_write(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write(intent_id)
+    }
+    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+        self.inner.recover_outbox()
+    }
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
+        self.inner.reattach_receipt(receipt_id)
+    }
+    fn record_route_revision(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+        self.inner.record_route_revision(intent_id, relays)
+    }
+    fn recover_route_revisions(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+        self.inner.recover_route_revisions(intent_id)
+    }
+    fn start_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: RelayUrl,
+        event: nostr::Event,
+    ) -> Result<RecoveredAttempt, PersistenceError> {
+        self.inner.start_attempt(intent_id, relay, event)
+    }
+    fn finish_attempt(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        relay: &RelayUrl,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+    ) -> Result<FinishAttemptOutcome, PersistenceError> {
+        self.inner
+            .finish_attempt(intent_id, relay, ordinal, outcome)
+    }
+    fn recover_attempts(
+        &self,
+        intent_id: nmp_store::IntentId,
+    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+        self.inner.recover_attempts(intent_id)
+    }
+    fn accept_ephemeral(
+        &mut self,
+        frozen_id: nostr::EventId,
+        expected_pubkey: nostr::PublicKey,
+    ) -> Result<u64, PersistenceError> {
+        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
+    }
+}
+
+/// Door-level falsifier (issue #122): the `insert` ingest door surfaces a
+/// realistic persistence I/O failure as `Err(PersistenceError)` rather than
+/// panicking. `MemoryStore` never fails, so the fault is entirely the
+/// injected one — this is the exact contract the redb backend now honors via
+/// `.map_err(persist_err)?` on every real redb operation.
+#[test]
+fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
+    let a = Keys::generate();
+    let mut store = FailIngestStore::armed();
+    let event = nmp_resolver::testkit::kind1(&a, "disk is full", 1_000);
+    let from = RelayObserved::new(
+        RelayUrl::parse("wss://relay.example.com").unwrap(),
+        Timestamp::from(1_000u64),
+    );
+    let outcome = store.insert(event, from);
+    assert!(
+        matches!(outcome, Err(PersistenceError(_))),
+        "an ingest-path I/O failure must surface as Err(PersistenceError), got {outcome:?}"
+    );
+}
+
+/// Engine-level falsifier (issue #122): a relay EVENT frame whose store
+/// `insert` fails on I/O DEGRADES the engine to read-only (a `store_degraded`
+/// diagnostic is emitted) and never panics the reducer. The failed frame
+/// delivers no phantom rows, and the engine stays usable for later messages.
+#[test]
+fn ingest_io_failure_degrades_read_only_without_panicking() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    // `query`/coverage doors stay healthy; only `insert` fails — so the
+    // subscribe/connect setup below (which reads, never inserts) succeeds,
+    // proving the degrade is specific to the failing ingest door.
+    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+
+    let sink = CapturingSink::default();
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(sink.clone()),
+    ));
+    let _ = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        relay.clone(),
+    ));
+
+    // The real relay ingest path — the exact call that used to `.expect()`
+    // panic on a disk-full redb `insert`.
+    let event = nmp_resolver::testkit::kind1(&a, "disk is full", 1_000);
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        event_frame("s", event),
+    ));
+
+    // Degrade, don't panic: the read-only signal reaches the diagnostics
+    // surface.
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())),
+        "an ingest I/O failure must surface a `store_degraded` diagnostic, got {effects:?}"
+    );
+    // A failed ingest fabricates no rows.
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitRows(_, rows, _) if !rows.is_empty())),
+        "a failed ingest must not deliver phantom rows, got {effects:?}"
+    );
+    // The reducer survives and keeps handling messages (no poisoned state).
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
 }

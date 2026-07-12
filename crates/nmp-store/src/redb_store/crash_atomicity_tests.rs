@@ -283,7 +283,10 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
 
         let mut reopened = RedbStore::open(&path).expect("reopen after crash");
         let (frozen, _) = event_pair();
-        assert!(reopened.query(&Filter::new().id(frozen.id)).is_empty());
+        assert!(reopened
+            .query(&Filter::new().id(frozen.id))
+            .unwrap()
+            .is_empty());
         assert!(reopened.recover_outbox().is_empty());
         assert!(reopened.reattach_receipt(1).unwrap().is_none());
 
@@ -292,7 +295,7 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
             .expect("accept after rollback");
         assert_eq!(outcome.journaled_intent_id(), Some(IntentId(1)));
         assert_eq!(outcome.journaled_receipt_id(), Some(1));
-        assert_eq!(reopened.query(&Filter::new()).len(), 1);
+        assert_eq!(reopened.query(&Filter::new()).unwrap().len(), 1);
         assert_eq!(reopened.recover_outbox().len(), 1);
     }
 }
@@ -333,7 +336,9 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
         let mut store = RedbStore::open(&path).expect("reopen promotion crash");
         assert_eq!(store.recover_outbox()[0].sig_state, IntentSigState::Pending);
         assert_eq!(
-            store.query(&Filter::new().id(frozen.id))[0].event.sig,
+            store.query(&Filter::new().id(frozen.id)).unwrap()[0]
+                .event
+                .sig,
             sentinel_signature()
         );
         assert_eq!(
@@ -346,7 +351,9 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     }
     let store = RedbStore::open(&path).expect("reopen promoted state");
     assert_eq!(
-        store.query(&Filter::new().id(signed.id))[0].event.as_json(),
+        store.query(&Filter::new().id(signed.id)).unwrap()[0]
+            .event
+            .as_json(),
         signed.as_json()
     );
     assert_eq!(
@@ -371,8 +378,8 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     crash(&path, "compensate-before-commit");
     {
         let mut store = RedbStore::open(&path).expect("reopen compensation crash");
-        assert_eq!(store.query(&Filter::new().id(newer_id)).len(), 1);
-        assert!(store.query(&Filter::new().id(older_id)).is_empty());
+        assert_eq!(store.query(&Filter::new().id(newer_id)).unwrap().len(), 1);
+        assert!(store.query(&Filter::new().id(older_id)).unwrap().is_empty());
         assert_eq!(store.recover_outbox().len(), 2);
         assert!(matches!(
             store.compensate_write(intent).unwrap(),
@@ -380,8 +387,8 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
         ));
     }
     let store = RedbStore::open(&path).expect("reopen compensated state");
-    assert!(store.query(&Filter::new().id(newer_id)).is_empty());
-    assert_eq!(store.query(&Filter::new().id(older_id)).len(), 1);
+    assert!(store.query(&Filter::new().id(newer_id)).unwrap().is_empty());
+    assert_eq!(store.query(&Filter::new().id(older_id)).unwrap().len(), 1);
     assert_eq!(store.recover_outbox().len(), 1);
     assert_eq!(
         store.reattach_receipt(receipt).unwrap().unwrap().state,
@@ -580,7 +587,7 @@ fn committed_pending_row_and_journal_survive_real_reopen_as_one_fact() {
         accepted(&mut store)
     };
     let store = RedbStore::open(&path).expect("reopen committed accept");
-    let rows = store.query(&Filter::new().id(frozen.id));
+    let rows = store.query(&Filter::new().id(frozen.id)).unwrap();
     assert_eq!(rows.len(), 1);
     let local = rows[0].provenance.local.as_ref().expect("local provenance");
     assert_eq!(local.sig_state, SigState::Pending);

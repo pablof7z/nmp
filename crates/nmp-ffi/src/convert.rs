@@ -993,6 +993,7 @@ mod tests {
             dropped_merge_rules: vec!["limit"],
             discovered_private_relays_rejected: 0,
             relays_rejected_over_cap: 0,
+            store_degraded: None,
         });
 
         assert_eq!(ffi.relays[0].relay, relay.to_string());

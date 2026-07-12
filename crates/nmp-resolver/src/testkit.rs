@@ -36,11 +36,15 @@ impl Harness {
     }
 
     pub fn set_active(&mut self, pk: Option<nostr::PublicKey>) -> DemandDelta {
-        self.engine.set_active_pubkey(pk)
+        self.engine
+            .set_active_pubkey(pk)
+            .expect("query persistence (MemoryStore never fails a door)")
     }
 
     pub fn subscribe(&mut self, q: LiveQuery) -> (QueryHandle, DemandDelta) {
-        self.engine.subscribe(q)
+        self.engine
+            .subscribe(q)
+            .expect("query persistence (MemoryStore never fails a door)")
     }
 
     /// Withdraw a subscription. Not in the plan's illustrative `Harness`
@@ -62,7 +66,9 @@ impl Harness {
     /// Script a "relay push": insert `events` into the store and let the
     /// engine react (M1 plan §3.3 — the real path).
     pub fn deliver(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
-        self.engine.ingest(events)
+        self.engine
+            .ingest(events)
+            .expect("ingest persistence (MemoryStore never fails a door)")
     }
 
     /// Script a LOCAL optimistic write: enter `accept` through the

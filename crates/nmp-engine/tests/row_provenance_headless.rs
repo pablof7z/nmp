@@ -259,14 +259,18 @@ fn projected_sources_survive_a_real_redb_reopen() {
 
     {
         let mut store = RedbStore::open(&path).expect("redb: open");
-        store.insert(
-            event.clone(),
-            nmp_store::RelayObserved::new(relay0.clone(), Timestamp::from(300)),
-        );
-        store.insert(
-            event.clone(),
-            nmp_store::RelayObserved::new(relay1.clone(), Timestamp::from(301)),
-        );
+        store
+            .insert(
+                event.clone(),
+                nmp_store::RelayObserved::new(relay0.clone(), Timestamp::from(300)),
+            )
+            .unwrap();
+        store
+            .insert(
+                event.clone(),
+                nmp_store::RelayObserved::new(relay1.clone(), Timestamp::from(301)),
+            )
+            .unwrap();
     }
 
     let store = RedbStore::open(&path).expect("redb: reopen");

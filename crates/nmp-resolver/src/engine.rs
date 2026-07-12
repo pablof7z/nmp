@@ -313,20 +313,26 @@ impl<S: EventStore> Engine<S> {
 
     // ---- identity re-root (M1 plan §3.6) --------------------------------
 
-    pub fn set_active_pubkey(&mut self, pk: Option<nostr::PublicKey>) -> DemandDelta {
+    pub fn set_active_pubkey(
+        &mut self,
+        pk: Option<nostr::PublicKey>,
+    ) -> Result<DemandDelta, PersistenceError> {
         let drop_delta = self.drain_pending_drops();
         self.identity = pk;
         let seed: BTreeSet<NodeId> = self.reactive_nodes.iter().copied().collect();
         if seed.is_empty() {
-            return drop_delta;
+            return Ok(drop_delta);
         }
         self.metrics.recompute_passes += 1;
-        merge_deltas(drop_delta, self.run_recompute(seed))
+        Ok(merge_deltas(drop_delta, self.run_recompute(seed)?))
     }
 
     // ---- subscribe / unsubscribe (M1 plan §4) ---------------------------
 
-    pub fn subscribe(&mut self, q: LiveQuery) -> (QueryHandle, DemandDelta) {
+    pub fn subscribe(
+        &mut self,
+        q: LiveQuery,
+    ) -> Result<(QueryHandle, DemandDelta), PersistenceError> {
         let drop_delta = self.drain_pending_drops();
         let handle_id = self.alloc_handle();
         let key = AcquisitionKey::from(&q.0);
@@ -355,11 +361,11 @@ impl<S: EventStore> Engine<S> {
                 cache,
                 pending_drops: Rc::downgrade(&self.pending_drops),
             };
-            return (handle, merge_deltas(drop_delta, acc.into_delta()));
+            return Ok((handle, merge_deltas(drop_delta, acc.into_delta())));
         }
 
         let (source, access) = q.0.atom_context();
-        let root = self.build_filter_node(&q.0.selection, source, access, ParentLink::Root, 0);
+        let root = self.build_filter_node(&q.0.selection, source, access, ParentLink::Root, 0)?;
         self.descriptor_to_root.insert(key.clone(), root);
         self.graph_entries.insert(
             root,
@@ -379,7 +385,7 @@ impl<S: EventStore> Engine<S> {
             cache,
             pending_drops: Rc::downgrade(&self.pending_drops),
         };
-        (handle, merge_deltas(drop_delta, acc.into_delta()))
+        Ok((handle, merge_deltas(drop_delta, acc.into_delta())))
     }
 
     pub fn unsubscribe(&mut self, id: HandleId) -> DemandDelta {
@@ -480,7 +486,7 @@ impl<S: EventStore> Engine<S> {
         )
     }
 
-    pub fn ingest(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
+    pub fn ingest(&mut self, events: Vec<nostr::Event>) -> Result<DemandDelta, PersistenceError> {
         let observed = events
             .into_iter()
             .map(|e| {
@@ -510,19 +516,22 @@ impl<S: EventStore> Engine<S> {
     /// feeding `removed` too, the dirty-seed would miss it exactly the way
     /// a kind:5/expiry retraction would (§0's "by luck of shape overlap"
     /// finding).
-    pub fn ingest_observed(&mut self, events: Vec<(nostr::Event, RelayObserved)>) -> DemandDelta {
-        self.ingest_observed_detailed(events).delta
+    pub fn ingest_observed(
+        &mut self,
+        events: Vec<(nostr::Event, RelayObserved)>,
+    ) -> Result<DemandDelta, PersistenceError> {
+        Ok(self.ingest_observed_detailed(events)?.delta)
     }
 
     pub fn ingest_observed_detailed(
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
-    ) -> RelayIngestResult {
+    ) -> Result<RelayIngestResult, PersistenceError> {
         let mut inserted: Vec<nostr::Event> = Vec::new();
         let mut removed: Vec<nostr::Event> = Vec::new();
         let mut satisfied_intents = Vec::new();
         for (event, from) in events {
-            match self.store.insert(event.clone(), from) {
+            match self.store.insert(event.clone(), from)? {
                 InsertOutcome::Inserted => inserted.push(event),
                 InsertOutcome::Superseded { replaced } => {
                     inserted.push(event);
@@ -547,10 +556,10 @@ impl<S: EventStore> Engine<S> {
                 InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
             }
         }
-        RelayIngestResult {
-            delta: self.react(inserted, removed),
+        Ok(RelayIngestResult {
+            delta: self.react(inserted, removed)?,
             satisfied_intents,
-        }
+        })
     }
 
     /// The local-authorship mirror of [`Self::ingest_observed`]
@@ -606,7 +615,7 @@ impl<S: EventStore> Engine<S> {
             | AcceptOutcome::Stale { .. }
             | AcceptOutcome::Refused(_) => {}
         }
-        let delta = self.react(inserted, removed);
+        let delta = self.react(inserted, removed)?;
         Ok((outcome, delta))
     }
 
@@ -619,7 +628,7 @@ impl<S: EventStore> Engine<S> {
         &mut self,
         removed_pending: nostr::Event,
         outcome: &CompensateOutcome,
-    ) -> DemandDelta {
+    ) -> Result<DemandDelta, PersistenceError> {
         match outcome {
             CompensateOutcome::Compensated { restored, revealed } => {
                 let mut inserted: Vec<nostr::Event> =
@@ -629,7 +638,7 @@ impl<S: EventStore> Engine<S> {
                 }
                 self.react(inserted, vec![removed_pending])
             }
-            CompensateOutcome::NotFound => DemandDelta::default(),
+            CompensateOutcome::NotFound => Ok(DemandDelta::default()),
         }
     }
 
@@ -641,7 +650,7 @@ impl<S: EventStore> Engine<S> {
     /// from the store itself (`EventStore::expire_due`/`remove`) before
     /// calling this: `retract` only re-evaluates the graph, it never
     /// touches the store door.
-    pub fn retract(&mut self, removed: Vec<nostr::Event>) -> DemandDelta {
+    pub fn retract(&mut self, removed: Vec<nostr::Event>) -> Result<DemandDelta, PersistenceError> {
         self.react(Vec::new(), removed)
     }
 
@@ -660,10 +669,14 @@ impl<S: EventStore> Engine<S> {
     /// |symmetric diff|`) holds with zero new bookkeeping.
     /// `ingest_observed`/`retract` are both thin callers of this; the four
     /// §1.4 feeders differ only in who populates `removed`.
-    fn react(&mut self, inserted: Vec<nostr::Event>, removed: Vec<nostr::Event>) -> DemandDelta {
+    fn react(
+        &mut self,
+        inserted: Vec<nostr::Event>,
+        removed: Vec<nostr::Event>,
+    ) -> Result<DemandDelta, PersistenceError> {
         let drop_delta = self.drain_pending_drops();
         if inserted.is_empty() && removed.is_empty() {
-            return drop_delta;
+            return Ok(drop_delta);
         }
         self.metrics.recompute_passes += 1;
 
@@ -688,7 +701,7 @@ impl<S: EventStore> Engine<S> {
                 }
             }
         }
-        merge_deltas(drop_delta, self.run_recompute(seed))
+        Ok(merge_deltas(drop_delta, self.run_recompute(seed)?))
     }
 
     // ---- recompute rounds (shared by ingest + re-root) ------------------
@@ -697,7 +710,10 @@ impl<S: EventStore> Engine<S> {
     /// child is fully resolved before its parent is recomputed — the
     /// invariant that makes a single pass correct even when a node (e.g. a
     /// `SetOp`) has multiple simultaneously-dirty children (M1 plan §3.3).
-    fn run_recompute(&mut self, mut pending: BTreeSet<NodeId>) -> DemandDelta {
+    fn run_recompute(
+        &mut self,
+        mut pending: BTreeSet<NodeId>,
+    ) -> Result<DemandDelta, PersistenceError> {
         let mut acc = DeltaAcc::default();
         while !pending.is_empty() {
             let max_depth = pending
@@ -715,7 +731,7 @@ impl<S: EventStore> Engine<S> {
             }
             for id in this_round {
                 self.metrics.sets_reevaluated += 1;
-                let changed = self.recompute_node(id, &mut acc);
+                let changed = self.recompute_node(id, &mut acc)?;
                 if changed {
                     self.metrics.nodes_recomputed += 1;
                     match self.graph.parent_of(id) {
@@ -729,18 +745,18 @@ impl<S: EventStore> Engine<S> {
                 }
             }
         }
-        acc.into_delta()
+        Ok(acc.into_delta())
     }
 
     /// Recompute node `id`'s value from its (already-current) children.
     /// Returns whether the value changed. For a FilterNode, also diffs +
     /// applies its atom-set change into the global demand table via `acc`.
-    fn recompute_node(&mut self, id: NodeId, acc: &mut DeltaAcc) -> bool {
+    fn recompute_node(&mut self, id: NodeId, acc: &mut DeltaAcc) -> Result<bool, PersistenceError> {
         // Snapshot the node (cheap: M1 graphs are tiny) so we can mutate
         // `self.graph`/`self.store` in the match arms without fighting the
         // borrow checker over a live reference into `self.graph.nodes`.
         let snapshot = self.graph.node(id).clone();
-        match snapshot {
+        let changed = match snapshot {
             Node::Literal(_) => false,
             Node::Reactive(n) => {
                 let new = resolve_reactive(n.field, self.identity);
@@ -751,7 +767,7 @@ impl<S: EventStore> Engine<S> {
                     Some(cf) => {
                         let events: Vec<nostr::Event> = self
                             .store
-                            .query(&cf.to_nostr())
+                            .query(&cf.to_nostr())?
                             .into_iter()
                             .map(|se| se.event)
                             .collect();
@@ -776,7 +792,7 @@ impl<S: EventStore> Engine<S> {
                 let new_atoms = self.graph.compute_atoms(id);
                 let old_atoms = self.graph.set_filter_cached_atoms(id, new_atoms.clone());
                 if old_atoms == new_atoms {
-                    return false;
+                    return Ok(false);
                 }
                 let (source, access) = self.graph.context_of(id);
                 for a in old_atoms.difference(&new_atoms) {
@@ -801,7 +817,8 @@ impl<S: EventStore> Engine<S> {
                 }
                 true
             }
-        }
+        };
+        Ok(changed)
     }
 
     // ---- atom refcounting (M1 plan §3.2/§4) -----------------------------
@@ -853,20 +870,20 @@ impl<S: EventStore> Engine<S> {
         access: AccessContext,
         parent: ParentLink,
         depth: u32,
-    ) -> NodeId {
+    ) -> Result<NodeId, PersistenceError> {
         let id = self.graph.alloc_id();
 
         let mut bound = Vec::new();
         if let Some(b) = &filter.authors {
-            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1);
+            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1)?;
             bound.push((FieldSlot::Authors, bid));
         }
         if let Some(b) = &filter.ids {
-            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1);
+            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1)?;
             bound.push((FieldSlot::Ids, bid));
         }
         for (tag, b) in &filter.tags {
-            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1);
+            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1)?;
             bound.push((FieldSlot::Tag(*tag), bid));
         }
 
@@ -883,17 +900,22 @@ impl<S: EventStore> Engine<S> {
         self.graph.insert(id, Node::Filter(data), parent, depth);
         let atoms = self.graph.compute_atoms(id);
         self.graph.set_filter_cached_atoms(id, atoms);
-        id
+        Ok(id)
     }
 
-    fn build_binding_node(&mut self, binding: &Binding, parent: ParentLink, depth: u32) -> NodeId {
+    fn build_binding_node(
+        &mut self,
+        binding: &Binding,
+        parent: ParentLink,
+        depth: u32,
+    ) -> Result<NodeId, PersistenceError> {
         match binding {
             Binding::Literal(set) => {
                 let id = self.graph.alloc_id();
                 let resolved: ResolvedSet = set.iter().cloned().map(Element::Scalar).collect();
                 self.graph
                     .insert(id, Node::Literal(LiteralNode { resolved }), parent, depth);
-                id
+                Ok(id)
             }
             Binding::Reactive(field) => {
                 let id = self.graph.alloc_id();
@@ -908,7 +930,7 @@ impl<S: EventStore> Engine<S> {
                     depth,
                 );
                 self.reactive_nodes.insert(id);
-                id
+                Ok(id)
             }
             Binding::Derived(d) => {
                 let id = self.graph.alloc_id();
@@ -923,12 +945,12 @@ impl<S: EventStore> Engine<S> {
                     inner_access,
                     ParentLink::DerivedInner(id),
                     depth + 1,
-                );
+                )?;
                 let cached = match self.graph.wide_concrete(inner) {
                     Some(cf) => {
                         let events: Vec<nostr::Event> = self
                             .store
-                            .query(&cf.to_nostr())
+                            .query(&cf.to_nostr())?
                             .into_iter()
                             .map(|se| se.event)
                             .collect();
@@ -946,7 +968,7 @@ impl<S: EventStore> Engine<S> {
                     parent,
                     depth,
                 );
-                id
+                Ok(id)
             }
             Binding::SetOp(s) => {
                 let id = self.graph.alloc_id();
@@ -954,7 +976,7 @@ impl<S: EventStore> Engine<S> {
                     .operands
                     .iter()
                     .map(|op| self.build_binding_node(op, ParentLink::SetOpOperand(id), depth + 1))
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 let cached = {
                     let sets: Vec<&ResolvedSet> = operands
                         .iter()
@@ -972,7 +994,7 @@ impl<S: EventStore> Engine<S> {
                     parent,
                     depth,
                 );
-                id
+                Ok(id)
             }
         }
     }

@@ -123,20 +123,22 @@ fn newest_created_at_wins_replaceable() {
 
         let old = kind3_event(&k, 100);
         assert_eq!(
-            store.insert(old.clone(), observed("wss://r1", 1)),
+            store.insert(old.clone(), observed("wss://r1", 1)).unwrap(),
             InsertOutcome::Inserted
         );
 
         let newer = kind3_event(&k, 200);
         let newer_id = newer.id;
         assert_eq!(
-            store.insert(newer, observed("wss://r1", 2)),
+            store.insert(newer, observed("wss://r1", 2)).unwrap(),
             InsertOutcome::Superseded {
                 replaced: Box::new(stored(old, "wss://r1", 1))
             }
         );
 
-        let results = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+        let results = store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event.id, newer_id);
     });
@@ -162,11 +164,15 @@ fn lexically_smallest_id_wins_on_created_at_tie() {
         let larger = candidates[1].clone();
 
         assert_eq!(
-            store.insert(larger.clone(), observed("wss://r1", 1)),
+            store
+                .insert(larger.clone(), observed("wss://r1", 1))
+                .unwrap(),
             InsertOutcome::Inserted
         );
         assert_eq!(
-            store.insert(smallest.clone(), observed("wss://r1", 2)),
+            store
+                .insert(smallest.clone(), observed("wss://r1", 2))
+                .unwrap(),
             InsertOutcome::Superseded {
                 replaced: Box::new(stored(larger.clone(), "wss://r1", 1))
             }
@@ -174,11 +180,13 @@ fn lexically_smallest_id_wins_on_created_at_tie() {
 
         let third = candidates[2].clone();
         assert_eq!(
-            store.insert(third, observed("wss://r1", 3)),
+            store.insert(third, observed("wss://r1", 3)).unwrap(),
             InsertOutcome::Stale
         );
 
-        let results = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+        let results = store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event.id, smallest.id);
     });
@@ -191,17 +199,21 @@ fn stale_older_event_rejected() {
 
         let newer = kind3_event(&k, 200);
         assert_eq!(
-            store.insert(newer.clone(), observed("wss://r1", 1)),
+            store
+                .insert(newer.clone(), observed("wss://r1", 1))
+                .unwrap(),
             InsertOutcome::Inserted
         );
 
         let older = kind3_event(&k, 100);
         assert_eq!(
-            store.insert(older, observed("wss://r1", 2)),
+            store.insert(older, observed("wss://r1", 2)).unwrap(),
             InsertOutcome::Stale
         );
 
-        let results = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+        let results = store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event.id, newer.id);
     });
@@ -214,15 +226,19 @@ fn replaceable_keyed_by_pubkey_kind_not_by_id_alone() {
         let bob = keys();
 
         assert_eq!(
-            store.insert(kind3_event(&alice, 100), observed("wss://r1", 1)),
+            store
+                .insert(kind3_event(&alice, 100), observed("wss://r1", 1))
+                .unwrap(),
             InsertOutcome::Inserted
         );
         assert_eq!(
-            store.insert(kind3_event(&bob, 100), observed("wss://r1", 1)),
+            store
+                .insert(kind3_event(&bob, 100), observed("wss://r1", 1))
+                .unwrap(),
             InsertOutcome::Inserted
         );
 
-        let results = store.query(&Filter::new().kind(Kind::ContactList));
+        let results = store.query(&Filter::new().kind(Kind::ContactList)).unwrap();
         assert_eq!(results.len(), 2);
     });
 }
@@ -234,30 +250,34 @@ fn addressable_keyed_by_pubkey_kind_d_distinct_from_replaceable() {
 
         let g1_old = addressable_event(&k, 30_003, "g1", 100);
         assert_eq!(
-            store.insert(g1_old.clone(), observed("wss://r1", 1)),
+            store
+                .insert(g1_old.clone(), observed("wss://r1", 1))
+                .unwrap(),
             InsertOutcome::Inserted
         );
 
         let g2 = addressable_event(&k, 30_003, "g2", 100);
         assert_eq!(
-            store.insert(g2.clone(), observed("wss://r1", 1)),
+            store.insert(g2.clone(), observed("wss://r1", 1)).unwrap(),
             InsertOutcome::Inserted
         );
 
         let g1_new = addressable_event(&k, 30_003, "g1", 200);
         let g1_new_id = g1_new.id;
         assert_eq!(
-            store.insert(g1_new, observed("wss://r1", 2)),
+            store.insert(g1_new, observed("wss://r1", 2)).unwrap(),
             InsertOutcome::Superseded {
                 replaced: Box::new(stored(g1_old, "wss://r1", 1))
             }
         );
 
-        let mut results = store.query(
-            &Filter::new()
-                .kind(Kind::from(30_003u16))
-                .author(k.public_key()),
-        );
+        let mut results = store
+            .query(
+                &Filter::new()
+                    .kind(Kind::from(30_003u16))
+                    .author(k.public_key()),
+            )
+            .unwrap();
         results.sort_by_key(|se| se.event.id);
         let mut expected = vec![g1_new_id, g2.id];
         expected.sort();
@@ -275,11 +295,11 @@ fn query_returns_only_current_winners_never_superseded() {
 
         let old = kind3_event(&k, 100);
         let old_id = old.id;
-        store.insert(old, observed("wss://r1", 1));
+        store.insert(old, observed("wss://r1", 1)).unwrap();
         let newer = kind3_event(&k, 200);
-        store.insert(newer, observed("wss://r1", 2));
+        store.insert(newer, observed("wss://r1", 2)).unwrap();
 
-        let results = store.query(&Filter::new());
+        let results = store.query(&Filter::new()).unwrap();
         assert!(!results.iter().any(|se| se.event.id == old_id));
     });
 }
@@ -295,18 +315,20 @@ fn provenance_merges_across_relays() {
         let e = regular_event(&k, "hello");
 
         assert_eq!(
-            store.insert(e.clone(), observed("wss://a", 10)),
+            store.insert(e.clone(), observed("wss://a", 10)).unwrap(),
             InsertOutcome::Inserted
         );
         assert_eq!(
-            store.insert(e, observed("wss://b", 20)),
+            store.insert(e, observed("wss://b", 20)).unwrap(),
             InsertOutcome::Duplicate {
                 provenance_grew: true,
                 satisfied_intents: Vec::new(),
             }
         );
 
-        let results = store.query(&Filter::new().kind(Kind::TextNote).author(k.public_key()));
+        let results = store
+            .query(&Filter::new().kind(Kind::TextNote).author(k.public_key()))
+            .unwrap();
         assert_eq!(results.len(), 1);
         let seen = &results[0].provenance.seen;
         assert_eq!(seen.get(&relay("wss://a")), Some(&Timestamp::from(10u64)));
@@ -320,30 +342,32 @@ fn provenance_does_not_grow_on_earlier_or_equal_redelivery_from_same_relay() {
         let k = keys();
         let e = regular_event(&k, "hello");
 
-        store.insert(e.clone(), observed("wss://a", 10));
+        store.insert(e.clone(), observed("wss://a", 10)).unwrap();
         assert_eq!(
-            store.insert(e.clone(), observed("wss://a", 10)),
+            store.insert(e.clone(), observed("wss://a", 10)).unwrap(),
             InsertOutcome::Duplicate {
                 provenance_grew: false,
                 satisfied_intents: Vec::new(),
             }
         );
         assert_eq!(
-            store.insert(e.clone(), observed("wss://a", 5)),
+            store.insert(e.clone(), observed("wss://a", 5)).unwrap(),
             InsertOutcome::Duplicate {
                 provenance_grew: false,
                 satisfied_intents: Vec::new(),
             }
         );
         assert_eq!(
-            store.insert(e, observed("wss://a", 15)),
+            store.insert(e, observed("wss://a", 15)).unwrap(),
             InsertOutcome::Duplicate {
                 provenance_grew: true,
                 satisfied_intents: Vec::new(),
             }
         );
 
-        let results = store.query(&Filter::new().kind(Kind::TextNote).author(k.public_key()));
+        let results = store
+            .query(&Filter::new().kind(Kind::TextNote).author(k.public_key()))
+            .unwrap();
         assert_eq!(
             results[0].provenance.seen.get(&relay("wss://a")),
             Some(&Timestamp::from(15u64))
@@ -360,11 +384,13 @@ fn record_coverage_then_get_coverage_roundtrip() {
     for_each_backend(|store| {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+            )
+            .unwrap();
 
         let key = coverage_key(&atom(&s));
         let interval = store.get_coverage(key, &r).expect("row should exist");
@@ -387,11 +413,13 @@ fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
     for_each_backend(|store| {
         let unfloored = shape(&[1], None);
         let r = relay("wss://r1");
-        store.record_coverage(
-            &atom(&unfloored),
-            &r,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&unfloored),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+            )
+            .unwrap();
 
         // Same shape, `since` set (a floored refetch's atom) — must hash to
         // the SAME `CoverageKey` (ruling §1) and therefore find the same row.
@@ -434,18 +462,22 @@ fn coverage_merge_extends_across_two_record_coverage_calls() {
     for_each_backend(|store| {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+            )
+            .unwrap();
         // Planner floors the next REQ at covered_through + 1 — the common
         // contiguous-extension path.
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(101u64), Timestamp::from(200u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(101u64), Timestamp::from(200u64)),
+            )
+            .unwrap();
 
         let key = coverage_key(&atom(&s));
         let interval = store.get_coverage(key, &r).unwrap();
@@ -459,17 +491,21 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
     for_each_backend(|store| {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(300u64), Timestamp::from(400u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(300u64), Timestamp::from(400u64)),
+            )
+            .unwrap();
         // A disjoint, strictly-older interval must never overwrite it.
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(50u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(50u64)),
+            )
+            .unwrap();
 
         let key = coverage_key(&atom(&s));
         let interval = store.get_coverage(key, &r).unwrap();
@@ -488,18 +524,20 @@ fn gc_evicts_unclaimed_regular_event_and_shrinks_covering_watermark() {
         let k = keys();
         let e = regular_event_at(&k, "hello", 150);
         let e_id = e.id;
-        store.insert(e, observed("wss://r1", 1));
+        store.insert(e, observed("wss://r1", 1)).unwrap();
 
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
+            )
+            .unwrap();
 
         let claims = ClaimSet::new(vec![]); // nothing is live-claimed
-        let report = store.gc(&claims);
+        let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 1);
         assert_eq!(report.coverage_rows_shrunk, 1);
         assert_eq!(report.coverage_rows_deleted, 0);
@@ -511,7 +549,9 @@ fn gc_evicts_unclaimed_regular_event_and_shrinks_covering_watermark() {
         assert_eq!(interval.from, Timestamp::from(151u64));
         assert_eq!(interval.through, Timestamp::from(300u64));
 
-        let results = store.query(&Filter::new().kind(Kind::TextNote).author(k.public_key()));
+        let results = store
+            .query(&Filter::new().kind(Kind::TextNote).author(k.public_key()))
+            .unwrap();
         assert!(!results.iter().any(|se| se.event.id == e_id));
     });
 }
@@ -521,18 +561,20 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
     for_each_backend(|store| {
         let k = keys();
         let e = regular_event_at(&k, "hello", 100);
-        store.insert(e, observed("wss://r1", 1));
+        store.insert(e, observed("wss://r1", 1)).unwrap();
 
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(100u64)),
-        );
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(100u64)),
+            )
+            .unwrap();
 
         let claims = ClaimSet::new(vec![]);
-        let report = store.gc(&claims);
+        let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 1);
         assert_eq!(report.coverage_rows_deleted, 1);
         assert_eq!(report.coverage_rows_shrunk, 0);
@@ -550,20 +592,20 @@ fn gc_retains_claimed_event_and_replaceable_current_winner() {
         // A regular event that IS claimed by a live query -> must survive.
         let claimed = regular_event_at(&k, "hello", 50);
         let claimed_id = claimed.id;
-        store.insert(claimed, observed("wss://r1", 1));
+        store.insert(claimed, observed("wss://r1", 1)).unwrap();
 
         // A replaceable current winner -> must survive regardless of claims
         // (never a GC candidate at all).
         let winner = kind3_event(&k, 10);
         let winner_id = winner.id;
-        store.insert(winner, observed("wss://r1", 1));
+        store.insert(winner, observed("wss://r1", 1)).unwrap();
 
         let claims = ClaimSet::new(vec![shape(&[1], Some(&k))]);
 
-        let report = store.gc(&claims);
+        let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 0);
 
-        let results = store.query(&Filter::new());
+        let results = store.query(&Filter::new()).unwrap();
         assert!(results.iter().any(|se| se.event.id == claimed_id));
         assert!(results.iter().any(|se| se.event.id == winner_id));
     });
@@ -576,15 +618,15 @@ fn gc_evicts_unclaimed_event_even_when_unrelated_claims_exist() {
         let other = keys();
         let e = regular_event_at(&k, "hello", 50);
         let e_id = e.id;
-        store.insert(e, observed("wss://r1", 1));
+        store.insert(e, observed("wss://r1", 1)).unwrap();
 
         // A claim for an unrelated author's kind:1 shape does not protect e.
         let claims = ClaimSet::new(vec![shape(&[1], Some(&other))]);
 
-        let report = store.gc(&claims);
+        let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 1);
 
-        let results = store.query(&Filter::new());
+        let results = store.query(&Filter::new()).unwrap();
         assert!(!results.iter().any(|se| se.event.id == e_id));
     });
 }
@@ -601,14 +643,14 @@ fn superseded_returns_the_full_evicted_row() {
         let k = keys();
 
         let old = kind3_event(&k, 100);
-        store.insert(old.clone(), observed("wss://r1", 1));
+        store.insert(old.clone(), observed("wss://r1", 1)).unwrap();
         // A second relay observes the same old event before it is
         // superseded -- its provenance must merge into the returned row too,
         // not just the event.
-        store.insert(old.clone(), observed("wss://r2", 2));
+        store.insert(old.clone(), observed("wss://r2", 2)).unwrap();
 
         let newer = kind3_event(&k, 200);
-        match store.insert(newer, observed("wss://r1", 3)) {
+        match store.insert(newer, observed("wss://r1", 3)).unwrap() {
             InsertOutcome::Superseded { replaced } => {
                 assert_eq!(replaced.event, old);
                 assert_eq!(
@@ -632,15 +674,16 @@ fn remove_returns_the_removed_row_and_clears_indexes() {
 
         let e = kind3_event(&k, 100);
         let e_id = e.id;
-        store.insert(e.clone(), observed("wss://r1", 1));
+        store.insert(e.clone(), observed("wss://r1", 1)).unwrap();
 
         let removed = store
             .remove(e_id, RetractReason::Deleted)
+            .unwrap()
             .expect("the row was present");
         assert_eq!(removed.event, e);
 
         // Id index misses.
-        assert!(store.query(&Filter::new().id(e_id)).is_empty());
+        assert!(store.query(&Filter::new().id(e_id)).unwrap().is_empty());
 
         // Address index misses too: if `remove` had left `addr_index`
         // pointing at the now-gone `e_id`, inserting a fresh event at the
@@ -651,15 +694,20 @@ fn remove_returns_the_removed_row_and_clears_indexes() {
         let fresh = kind3_event(&k, 50);
         let fresh_id = fresh.id;
         assert_eq!(
-            store.insert(fresh, observed("wss://r1", 2)),
+            store.insert(fresh, observed("wss://r1", 2)).unwrap(),
             InsertOutcome::Inserted
         );
-        let results = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+        let results = store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event.id, fresh_id);
 
         // Removing an id no longer held is a no-op `None`.
-        assert!(store.remove(e_id, RetractReason::Deleted).is_none());
+        assert!(store
+            .remove(e_id, RetractReason::Deleted)
+            .unwrap()
+            .is_none());
     });
 }
 
@@ -676,15 +724,19 @@ fn refused_event_is_never_stored() {
 
         // Observed well after its expiration deadline.
         assert_eq!(
-            store.insert(expired, observed("wss://r1", 200)),
+            store.insert(expired, observed("wss://r1", 200)).unwrap(),
             InsertOutcome::Refused(RefuseReason::AlreadyExpired)
         );
 
         assert!(!store
             .query(&Filter::new())
+            .unwrap()
             .iter()
             .any(|se| se.event.id == expired_id));
-        assert!(store.remove(expired_id, RetractReason::Expired).is_none());
+        assert!(store
+            .remove(expired_id, RetractReason::Expired)
+            .unwrap()
+            .is_none());
     });
 }
 
@@ -712,25 +764,30 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
 
     {
         let mut store = RedbStore::open(&path).expect("open");
-        store.insert(old, observed("wss://r1", 1));
-        store.insert(newer, observed("wss://r1", 2));
-        store.insert(regular, observed("wss://r1", 3));
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64)),
-        );
+        store.insert(old, observed("wss://r1", 1)).unwrap();
+        store.insert(newer, observed("wss://r1", 2)).unwrap();
+        store.insert(regular, observed("wss://r1", 3)).unwrap();
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64)),
+            )
+            .unwrap();
         // `store` dropped here, closing the database file.
     }
 
     let store = RedbStore::open(&path).expect("reopen");
 
-    let contact_results =
-        store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+    let contact_results = store
+        .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+        .unwrap();
     assert_eq!(contact_results.len(), 1, "current winner only survives");
     assert_eq!(contact_results[0].event.id, newer_id);
 
-    let text_results = store.query(&Filter::new().kind(Kind::TextNote).author(k.public_key()));
+    let text_results = store
+        .query(&Filter::new().kind(Kind::TextNote).author(k.public_key()))
+        .unwrap();
     assert_eq!(text_results.len(), 1);
     assert_eq!(text_results[0].event.id, regular_id);
 
@@ -769,11 +826,13 @@ fn kind5_from_author_drops_held_target_and_returns_it() {
         let k = keys();
         let target = regular_event_at(&k, "delete me", 100);
         let target_id = target.id;
-        store.insert(target.clone(), observed("wss://r1", 1));
+        store
+            .insert(target.clone(), observed("wss://r1", 1))
+            .unwrap();
 
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
         let deletion_id = deletion.id;
-        match store.insert(deletion, observed("wss://r1", 2)) {
+        match store.insert(deletion, observed("wss://r1", 2)).unwrap() {
             InsertOutcome::Kind5Processed { deleted } => {
                 assert_eq!(deleted.len(), 1);
                 assert_eq!(deleted[0].event, target);
@@ -781,9 +840,15 @@ fn kind5_from_author_drops_held_target_and_returns_it() {
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
 
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
         // The kind:5 event itself is stored normally, re-servable.
-        assert_eq!(store.query(&Filter::new().id(deletion_id)).len(), 1);
+        assert_eq!(
+            store.query(&Filter::new().id(deletion_id)).unwrap().len(),
+            1
+        );
     });
 }
 
@@ -794,15 +859,17 @@ fn kind5_from_non_author_does_not_delete() {
         let attacker = keys();
         let target = regular_event_at(&author, "keep me", 100);
         let target_id = target.id;
-        store.insert(target.clone(), observed("wss://r1", 1));
+        store
+            .insert(target.clone(), observed("wss://r1", 1))
+            .unwrap();
 
         let deletion = deletion_event(&attacker, vec![Tag::event(target_id)], 200);
-        match store.insert(deletion, observed("wss://r1", 2)) {
+        match store.insert(deletion, observed("wss://r1", 2)).unwrap() {
             InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
 
-        let results = store.query(&Filter::new().id(target_id));
+        let results = store.query(&Filter::new().id(target_id)).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event, target);
     });
@@ -814,17 +881,22 @@ fn tombstoned_event_is_refused_on_redelivery() {
         let k = keys();
         let target = regular_event_at(&k, "delete me", 100);
         let target_id = target.id;
-        store.insert(target.clone(), observed("wss://r1", 1));
+        store
+            .insert(target.clone(), observed("wss://r1", 1))
+            .unwrap();
 
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
-        store.insert(deletion, observed("wss://r1", 2));
+        store.insert(deletion, observed("wss://r1", 2)).unwrap();
 
         // A relay replays the deleted event later -- never resurrected.
         assert_eq!(
-            store.insert(target, observed("wss://r2", 3)),
+            store.insert(target, observed("wss://r2", 3)).unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         );
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -838,16 +910,19 @@ fn kind5_before_target_arrives_still_tombstones_then_refuses() {
         // The deletion arrives BEFORE its target ever does -- arrival-order
         // independence.
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
-        match store.insert(deletion, observed("wss://r1", 1)) {
+        match store.insert(deletion, observed("wss://r1", 1)).unwrap() {
             InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
 
         assert_eq!(
-            store.insert(target, observed("wss://r2", 2)),
+            store.insert(target, observed("wss://r2", 2)).unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         );
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -862,21 +937,32 @@ fn unauthorized_kind5_cannot_resurrect_authorized_deletion() {
         let attacker = keys();
         let target = regular_event_at(&author, "delete me", 100);
         let target_id = target.id;
-        store.insert(target.clone(), observed("wss://r1", 1));
+        store
+            .insert(target.clone(), observed("wss://r1", 1))
+            .unwrap();
 
         // The real author deletes it -- authorized, permanent.
         let real_deletion = deletion_event(&author, vec![Tag::event(target_id)], 200);
-        match store.insert(real_deletion, observed("wss://r1", 2)) {
+        match store
+            .insert(real_deletion, observed("wss://r1", 2))
+            .unwrap()
+        {
             InsertOutcome::Kind5Processed { deleted } => assert_eq!(deleted.len(), 1),
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // An unrelated, unauthorized third party ALSO names the same id in
         // its own kind:5 -- structurally powerless (author-only), and must
         // not be able to overwrite or shadow the real author's claim.
         let attacker_deletion = deletion_event(&attacker, vec![Tag::event(target_id)], 300);
-        match store.insert(attacker_deletion, observed("wss://r1", 3)) {
+        match store
+            .insert(attacker_deletion, observed("wss://r1", 3))
+            .unwrap()
+        {
             InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
@@ -884,10 +970,13 @@ fn unauthorized_kind5_cannot_resurrect_authorized_deletion() {
         // The real author's authorized, permanent deletion must still
         // hold -- the attacker's claim must never resurrect it.
         assert_eq!(
-            store.insert(target, observed("wss://r2", 4)),
+            store.insert(target, observed("wss://r2", 4)).unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         );
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -902,18 +991,24 @@ fn kind5_id_claims_are_independent_per_author() {
         // `bystander` deletes an id it actually authored -- authorized.
         let bystanders_own = regular_event_at(&bystander, "bystander's own", 50);
         let bystanders_own_id = bystanders_own.id;
-        store.insert(bystanders_own.clone(), observed("wss://r1", 1));
+        store
+            .insert(bystanders_own.clone(), observed("wss://r1", 1))
+            .unwrap();
         let bystanders_deletion =
             deletion_event(&bystander, vec![Tag::event(bystanders_own_id)], 60);
-        store.insert(bystanders_deletion, observed("wss://r1", 1));
+        store
+            .insert(bystanders_deletion, observed("wss://r1", 1))
+            .unwrap();
 
         // `bystander` ALSO (unauthorized) names `author`'s target id in a
         // separate kind:5 -- structurally powerless.
         let authors_target = regular_event_at(&author, "author's own", 100);
         let authors_target_id = authors_target.id;
-        store.insert(authors_target.clone(), observed("wss://r1", 2));
+        store
+            .insert(authors_target.clone(), observed("wss://r1", 2))
+            .unwrap();
         let unauthorized = deletion_event(&bystander, vec![Tag::event(authors_target_id)], 200);
-        match store.insert(unauthorized, observed("wss://r1", 3)) {
+        match store.insert(unauthorized, observed("wss://r1", 3)).unwrap() {
             InsertOutcome::Kind5Processed { deleted } => assert!(deleted.is_empty()),
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
@@ -921,15 +1016,20 @@ fn kind5_id_claims_are_independent_per_author() {
         // `author`'s own event, which `author` never deleted, is
         // unaffected by `bystander`'s unrelated, unauthorized claim on the
         // same id.
-        let results = store.query(&Filter::new().id(authors_target_id));
+        let results = store.query(&Filter::new().id(authors_target_id)).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event, authors_target);
 
         // `bystander`'s own legitimate deletion is still correctly
         // tombstoned -- the fix didn't break the authorized case.
-        assert!(store.query(&Filter::new().id(bystanders_own_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(bystanders_own_id))
+            .unwrap()
+            .is_empty());
         assert_eq!(
-            store.insert(bystanders_own, observed("wss://r2", 4)),
+            store
+                .insert(bystanders_own, observed("wss://r2", 4))
+                .unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         );
     });
@@ -941,24 +1041,24 @@ fn kind5_a_tag_deletes_addressable_target_and_ceiling_blocks_older_redelivery() 
         let k = keys();
         let g1 = addressable_event(&k, 30_003, "g1", 100);
         let g1_id = g1.id;
-        store.insert(g1.clone(), observed("wss://r1", 1));
+        store.insert(g1.clone(), observed("wss://r1", 1)).unwrap();
 
         let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
         let deletion = deletion_event(&k, vec![Tag::coordinate(coord, None)], 200);
-        match store.insert(deletion, observed("wss://r1", 2)) {
+        match store.insert(deletion, observed("wss://r1", 2)).unwrap() {
             InsertOutcome::Kind5Processed { deleted } => {
                 assert_eq!(deleted.len(), 1);
                 assert_eq!(deleted[0].event, g1);
             }
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
-        assert!(store.query(&Filter::new().id(g1_id)).is_empty());
+        assert!(store.query(&Filter::new().id(g1_id)).unwrap().is_empty());
 
         // Older-than-the-deletion-ceiling event at the same address: still
         // blocked -- the ceiling, not just the specific id, is tombstoned.
         let older_replay = addressable_event(&k, 30_003, "g1", 150);
         assert_eq!(
-            store.insert(older_replay, observed("wss://r2", 3)),
+            store.insert(older_replay, observed("wss://r2", 3)).unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         );
 
@@ -967,14 +1067,16 @@ fn kind5_a_tag_deletes_addressable_target_and_ceiling_blocks_older_redelivery() 
         let fresh = addressable_event(&k, 30_003, "g1", 250);
         let fresh_id = fresh.id;
         assert_eq!(
-            store.insert(fresh, observed("wss://r2", 4)),
+            store.insert(fresh, observed("wss://r2", 4)).unwrap(),
             InsertOutcome::Inserted
         );
-        let results = store.query(
-            &Filter::new()
-                .kind(Kind::from(30_003u16))
-                .author(k.public_key()),
-        );
+        let results = store
+            .query(
+                &Filter::new()
+                    .kind(Kind::from(30_003u16))
+                    .author(k.public_key()),
+            )
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event.id, fresh_id);
     });
@@ -991,15 +1093,17 @@ fn tombstones_survive_reopen() {
 
     {
         let mut store = RedbStore::open(&path).expect("open");
-        store.insert(target.clone(), observed("wss://r1", 1));
+        store
+            .insert(target.clone(), observed("wss://r1", 1))
+            .unwrap();
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 200);
-        store.insert(deletion, observed("wss://r1", 2));
+        store.insert(deletion, observed("wss://r1", 2)).unwrap();
         // `store` dropped here, closing the database file.
     }
 
     let mut store = RedbStore::open(&path).expect("reopen");
     assert_eq!(
-        store.insert(target, observed("wss://r2", 3)),
+        store.insert(target, observed("wss://r2", 3)).unwrap(),
         InsertOutcome::Refused(RefuseReason::Tombstoned)
     );
 }
@@ -1013,18 +1117,18 @@ fn expiration_index_drains_due_and_reports_next() {
         let later = expiring_event(&k, "later", 1, 300);
         let later_id = later.id;
 
-        store.insert(soon, observed("wss://r1", 1));
-        store.insert(later, observed("wss://r1", 1));
+        store.insert(soon, observed("wss://r1", 1)).unwrap();
+        store.insert(later, observed("wss://r1", 1)).unwrap();
 
         assert_eq!(store.next_expiration(), Some(Timestamp::from(150u64)));
 
-        let due = store.expire_due(Timestamp::from(200u64));
+        let due = store.expire_due(Timestamp::from(200u64)).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].event.id, soon_id);
-        assert!(store.query(&Filter::new().id(soon_id)).is_empty());
+        assert!(store.query(&Filter::new().id(soon_id)).unwrap().is_empty());
 
         assert_eq!(store.next_expiration(), Some(Timestamp::from(300u64)));
-        let due2 = store.expire_due(Timestamp::from(300u64));
+        let due2 = store.expire_due(Timestamp::from(300u64)).unwrap();
         assert_eq!(due2.len(), 1);
         assert_eq!(due2[0].event.id, later_id);
         assert_eq!(store.next_expiration(), None);
@@ -1044,7 +1148,7 @@ fn expired_events_retract_at_reopen() {
         let mut store = RedbStore::open(&path).expect("open");
         // Observed well BEFORE its own deadline -- inserted normally.
         assert_eq!(
-            store.insert(expiring, observed("wss://r1", 1)),
+            store.insert(expiring, observed("wss://r1", 1)).unwrap(),
             InsertOutcome::Inserted
         );
         // `store` dropped here; the deadline passes while "offline".
@@ -1052,10 +1156,13 @@ fn expired_events_retract_at_reopen() {
 
     let mut store = RedbStore::open(&path).expect("reopen");
     assert_eq!(store.next_expiration(), Some(Timestamp::from(150u64)));
-    let due = store.expire_due(Timestamp::from(200u64));
+    let due = store.expire_due(Timestamp::from(200u64)).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].event.id, expiring_id);
-    assert!(store.query(&Filter::new().id(expiring_id)).is_empty());
+    assert!(store
+        .query(&Filter::new().id(expiring_id))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1071,20 +1178,30 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         let old_replaceable = kind3_event(&k, 70);
         let new_replaceable = kind3_event(&k, 80);
 
-        store.insert(deleted_target, observed("wss://r1", 1));
-        store.insert(expiring_target, observed("wss://r1", 1));
-        store.insert(old_replaceable, observed("wss://r1", 1));
-        store.record_coverage(
-            &atom(&s),
-            &r,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
-        );
+        store
+            .insert(deleted_target, observed("wss://r1", 1))
+            .unwrap();
+        store
+            .insert(expiring_target, observed("wss://r1", 1))
+            .unwrap();
+        store
+            .insert(old_replaceable, observed("wss://r1", 1))
+            .unwrap();
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
+            )
+            .unwrap();
 
         let key = coverage_key(&atom(&s));
         let before = store.get_coverage(key, &r).expect("row exists");
 
         assert!(matches!(
-            store.insert(new_replaceable, observed("wss://r1", 2)),
+            store
+                .insert(new_replaceable, observed("wss://r1", 2))
+                .unwrap(),
             InsertOutcome::Superseded { .. }
         ));
         assert_eq!(
@@ -1094,11 +1211,11 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         );
 
         let deletion = deletion_event(&k, vec![Tag::event(deleted_target_id)], 200);
-        store.insert(deletion, observed("wss://r1", 2));
+        store.insert(deletion, observed("wss://r1", 2)).unwrap();
         let after_delete = store.get_coverage(key, &r).expect("row still exists");
         assert_eq!(before, after_delete, "delete must not touch coverage");
 
-        store.expire_due(Timestamp::from(200u64));
+        store.expire_due(Timestamp::from(200u64)).unwrap();
         let after_expiry = store.get_coverage(key, &r).expect("row still exists");
         assert_eq!(before, after_expiry, "expiry must not touch coverage");
 
@@ -1133,8 +1250,8 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         );
 
         let gc_target = regular_event_at(&k, "gc me", 250);
-        store.insert(gc_target, observed("wss://r1", 3));
-        let report = store.gc(&ClaimSet::new(vec![]));
+        store.insert(gc_target, observed("wss://r1", 3)).unwrap();
+        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
         assert!(report.coverage_rows_shrunk + report.coverage_rows_deleted > 0);
         assert_ne!(
             store.get_coverage(key, &r),
@@ -1171,10 +1288,18 @@ fn query_returns_same_rows_after_indexing() {
         let alice_addressable = addressable_event(&alice, 30078, "app-data", 103);
         let alice_addressable_id = alice_addressable.id;
 
-        store.insert(alice_note.clone(), observed("wss://r1", 1));
-        store.insert(bob_note.clone(), observed("wss://r1", 1));
-        store.insert(alice_profile, observed("wss://r1", 1));
-        store.insert(alice_addressable, observed("wss://r1", 1));
+        store
+            .insert(alice_note.clone(), observed("wss://r1", 1))
+            .unwrap();
+        store
+            .insert(bob_note.clone(), observed("wss://r1", 1))
+            .unwrap();
+        store
+            .insert(alice_profile, observed("wss://r1", 1))
+            .unwrap();
+        store
+            .insert(alice_addressable, observed("wss://r1", 1))
+            .unwrap();
 
         // Noise: other authors' kind:3 rows -- present in the table, but
         // must never surface in any assertion below (a stray leak would
@@ -1182,17 +1307,20 @@ fn query_returns_same_rows_after_indexing() {
         // decoding it).
         for i in 0..20u64 {
             let noise = keys();
-            store.insert(kind3_event(&noise, 200 + i), observed("wss://r1", 200 + i));
+            store
+                .insert(kind3_event(&noise, 200 + i), observed("wss://r1", 200 + i))
+                .unwrap();
         }
 
         // by-id
-        let by_id = store.query(&Filter::new().id(alice_note_id));
+        let by_id = store.query(&Filter::new().id(alice_note_id)).unwrap();
         assert_eq!(by_id.len(), 1);
         assert_eq!(by_id[0].event.id, alice_note_id);
 
         // by-author: every one of alice's rows, none of bob's or the noise.
         let mut by_author: Vec<_> = store
             .query(&Filter::new().author(alice.public_key()))
+            .unwrap()
             .into_iter()
             .map(|se| se.event.id)
             .collect();
@@ -1205,6 +1333,7 @@ fn query_returns_same_rows_after_indexing() {
         // kind:3 noise or alice's own non-TextNote rows.
         let mut by_kind: Vec<_> = store
             .query(&Filter::new().kind(Kind::TextNote))
+            .unwrap()
             .into_iter()
             .map(|se| se.event.id)
             .collect();
@@ -1214,23 +1343,27 @@ fn query_returns_same_rows_after_indexing() {
         assert_eq!(by_kind, expected_by_kind);
 
         // author + kind intersection: only alice's TextNote.
-        let combo = store.query(
-            &Filter::new()
-                .author(alice.public_key())
-                .kind(Kind::TextNote),
-        );
+        let combo = store
+            .query(
+                &Filter::new()
+                    .author(alice.public_key())
+                    .kind(Kind::TextNote),
+            )
+            .unwrap();
         assert_eq!(combo.len(), 1);
         assert_eq!(combo[0].event.id, alice_note_id);
 
         // by-address shape (kind + author + #d): the one addressable row,
         // matched via the same author/kind narrowing plus `match_event`'s
         // own tag check -- not a separate address-index path.
-        let addr = store.query(
-            &Filter::new()
-                .author(alice.public_key())
-                .kind(Kind::from(30078))
-                .identifier("app-data"),
-        );
+        let addr = store
+            .query(
+                &Filter::new()
+                    .author(alice.public_key())
+                    .kind(Kind::from(30078))
+                    .identifier("app-data"),
+            )
+            .unwrap();
         assert_eq!(addr.len(), 1);
         assert_eq!(addr[0].event.id, alice_addressable_id);
     });

@@ -147,7 +147,7 @@ fn accept_write_inserts_pending_row_and_journal_in_one_txn() {
         // Same call: the row is already queryable, no separate visibility
         // mechanism (issue #2's "store mutation and the normal resolver/
         // invalidation path are the only visibility mechanism").
-        let rows = store.query(&Filter::new().id(frozen_id));
+        let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event.id, frozen_id);
     });
@@ -164,7 +164,9 @@ fn pending_row_projects_sig_state_and_is_queryable_like_any_row() {
 
         // Ordinary kind/author filtering, not just an id lookup — proves
         // participation in the SAME query path every other row uses.
-        let rows = store.query(&Filter::new().kind(Kind::TextNote).author(k.public_key()));
+        let rows = store
+            .query(&Filter::new().kind(Kind::TextNote).author(k.public_key()))
+            .unwrap();
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.event.id, frozen_id);
@@ -230,7 +232,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
     }
 
     // Same id, still the one live row at it — no remove/re-add churn.
-    let rows = store.query(&Filter::new().id(frozen_b_id));
+    let rows = store.query(&Filter::new().id(frozen_b_id)).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].event.sig, real_sig);
 
@@ -270,8 +272,14 @@ fn compensate_removes_pending_and_restores_displaced() {
         }
 
         // The rejected pending row is gone; the predecessor is back.
-        assert!(store.query(&Filter::new().id(frozen_b_id)).is_empty());
-        assert_eq!(store.query(&Filter::new().id(frozen_a_id)).len(), 1);
+        assert!(store
+            .query(&Filter::new().id(frozen_b_id))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.query(&Filter::new().id(frozen_a_id)).unwrap().len(),
+            1
+        );
 
         // NO TOMBSTONE (retraction doc §4.2: the row was never validly
         // signed, so `remove` writes none — this is the falsifier, not
@@ -282,7 +290,9 @@ fn compensate_removes_pending_and_restores_displaced() {
         // consistent by the compensation.
         let _ = RetractReason::Rejected; // documents which reason `compensate_write` used
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        let reinsert = store.insert(frozen_b, RelayObserved::new(relay, Timestamp::from(300)));
+        let reinsert = store
+            .insert(frozen_b, RelayObserved::new(relay, Timestamp::from(300)))
+            .unwrap();
         match reinsert {
             InsertOutcome::Superseded { replaced } => {
                 assert_eq!(replaced.event.id, frozen_a_id);
@@ -348,24 +358,27 @@ fn pending_row_is_not_gc_evicted_while_intent_open() {
         // an ordinary GC candidate the moment it stops being an open
         // intent.
         let claims = ClaimSet::new(Vec::new());
-        let report = store.gc(&claims);
+        let report = store.gc(&claims).unwrap();
         assert_eq!(
             report.events_evicted, 0,
             "an open, unsigned intent must never be GC-evicted"
         );
-        assert_eq!(store.query(&Filter::new().id(frozen_id)).len(), 1);
+        assert_eq!(store.query(&Filter::new().id(frozen_id)).unwrap().len(), 1);
 
         // Once promoted, it is an ordinary event again — GC-able under the
         // SAME empty claim set.
         store
             .promote_signed(intent_id, signed.sig)
             .expect("promote_signed persistence");
-        let report2 = store.gc(&claims);
+        let report2 = store.gc(&claims).unwrap();
         assert_eq!(
             report2.events_evicted, 1,
             "a signed row is GC-able like any other event"
         );
-        assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -415,7 +428,7 @@ fn accept_crash_is_all_or_nothing() {
 
     let store = RedbStore::open(&path).expect("reopen redb store");
 
-    let ok_rows = store.query(&Filter::new().id(frozen_ok_id));
+    let ok_rows = store.query(&Filter::new().id(frozen_ok_id)).unwrap();
     assert_eq!(ok_rows.len(), 1, "the accepted row must survive reopen");
     let recovered = store.recover_outbox();
     assert!(
@@ -428,7 +441,7 @@ fn accept_crash_is_all_or_nothing() {
         "a refused intent must leave no journal residue, even across a reopen"
     );
 
-    let exp_rows = store.query(&Filter::new().id(frozen_exp_id));
+    let exp_rows = store.query(&Filter::new().id(frozen_exp_id)).unwrap();
     assert!(
         exp_rows.is_empty(),
         "a refused intent must leave no row either, even across a reopen"
@@ -468,7 +481,7 @@ fn recover_outbox_reconstructs_inflight_after_reopen() {
     // The pending row itself is ALREADY live in the store post-reopen —
     // recovery does not re-insert it (plan §2.3: query-visible from the
     // first post-boot subscription, no separate replay-into-store step).
-    let rows = store.query(&Filter::new().id(frozen_id));
+    let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(matches!(
         rows[0].provenance.local,
@@ -1223,7 +1236,10 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
             .expect("accept_ephemeral persistence");
 
         // No pending row: `accept_ephemeral` never touches `EVENTS`.
-        assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_id))
+            .unwrap()
+            .is_empty());
         // No open-work/journal row: `recover_outbox` (OUTBOX_INTENTS-only)
         // sees nothing.
         assert!(store.recover_outbox().is_empty());
@@ -1245,7 +1261,10 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
     let store = RedbStore::open(&path).expect("reopen redb store");
 
     // Still no pending row, still no open-work row, after reopen.
-    assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
+    assert!(store
+        .query(&Filter::new().id(frozen_id))
+        .unwrap()
+        .is_empty());
     assert!(store.recover_outbox().is_empty());
 
     // But the receipt is reattachable, now correctly `Abandoned` — the
@@ -1268,7 +1287,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
     let receipt2_id = mem
         .accept_ephemeral(frozen2_id, k.public_key())
         .expect("accept_ephemeral persistence");
-    assert!(mem.query(&Filter::new().id(frozen2_id)).is_empty());
+    assert!(mem.query(&Filter::new().id(frozen2_id)).unwrap().is_empty());
     assert!(mem.recover_outbox().is_empty());
     let mem_receipt = mem
         .reattach_receipt(receipt2_id)
@@ -1444,7 +1463,10 @@ fn chained_local_supersession_cancel_displaced_then_cancel_newer_never_resurrect
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert!(store.query(&Filter::new().id(frozen_b_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_b_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -1467,11 +1489,15 @@ fn relay_supersession_orphans_pending_intent_still_compensable() {
             .sign_with_keys(&k)
             .expect("sign relay event");
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        let insert_outcome =
-            store.insert(relay_event, RelayObserved::new(relay, Timestamp::from(200)));
+        let insert_outcome = store
+            .insert(relay_event, RelayObserved::new(relay, Timestamp::from(200)))
+            .unwrap();
         assert!(matches!(insert_outcome, InsertOutcome::Superseded { .. }));
         assert!(
-            store.query(&Filter::new().id(frozen_a_id)).is_empty(),
+            store
+                .query(&Filter::new().id(frozen_a_id))
+                .unwrap()
+                .is_empty(),
             "A's row is gone, superseded by the relay-observed event"
         );
 
@@ -1502,13 +1528,17 @@ fn kind5_deletion_orphans_pending_intent_still_compensable() {
 
         let deletion = deletion_event(&k, vec![Tag::event(frozen_a_id)], 200);
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        let insert_outcome =
-            store.insert(deletion, RelayObserved::new(relay, Timestamp::from(200)));
+        let insert_outcome = store
+            .insert(deletion, RelayObserved::new(relay, Timestamp::from(200)))
+            .unwrap();
         assert!(matches!(
             insert_outcome,
             InsertOutcome::Kind5Processed { .. }
         ));
-        assert!(store.query(&Filter::new().id(frozen_a_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_a_id))
+            .unwrap()
+            .is_empty());
 
         let compensated = store
             .compensate_write(intent_a)
@@ -1535,9 +1565,12 @@ fn expiry_orphans_pending_intent_still_compensable() {
         let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
 
-        let due = store.expire_due(Timestamp::from(200u64));
+        let due = store.expire_due(Timestamp::from(200u64)).unwrap();
         assert_eq!(due.len(), 1);
-        assert!(store.query(&Filter::new().id(frozen_a_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_a_id))
+            .unwrap()
+            .is_empty());
 
         let compensated = store
             .compensate_write(intent_a)
@@ -1566,8 +1599,10 @@ fn kind5_immediate_delete_hides_target_before_relay_echo() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
-        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+        store
+            .insert(target, RelayObserved::new(relay, Timestamp::from(50)))
+            .unwrap();
+        assert_eq!(store.query(&Filter::new().id(target_id)).unwrap().len(), 1);
 
         // Locally compose + accept a kind:5 deleting it — BEFORE any relay
         // echo of the deletion itself.
@@ -1584,7 +1619,10 @@ fn kind5_immediate_delete_hides_target_before_relay_echo() {
 
         // Immediate, local, optimistic HIDE — the target disappears from
         // `query` right now, no relay round-trip needed.
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // It was never actually removed: cancelling brings it straight
         // back, reported via `revealed`.
@@ -1598,7 +1636,7 @@ fn kind5_immediate_delete_hides_target_before_relay_echo() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+        assert_eq!(store.query(&Filter::new().id(target_id)).unwrap().len(), 1);
     });
 }
 
@@ -1617,7 +1655,9 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+        store
+            .insert(target, RelayObserved::new(relay, Timestamp::from(50)))
+            .unwrap();
 
         let signed_deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let frozen_deletion = Event::new(
@@ -1633,7 +1673,10 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
         let outcome = do_accept(store, accept(frozen_deletion, k.public_key(), 100));
         let intent = outcome.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         let promoted = store
             .promote_signed(intent, signed_deletion.sig)
@@ -1647,7 +1690,10 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
             .expect("compensate persistence");
         assert!(matches!(compensated, CompensateOutcome::NotFound));
         assert!(
-            store.query(&Filter::new().id(target_id)).is_empty(),
+            store
+                .query(&Filter::new().id(target_id))
+                .unwrap()
+                .is_empty(),
             "promotion must not be reversible — the delete is now permanent"
         );
 
@@ -1659,10 +1705,12 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
             .expect("sign redelivered target");
         assert_eq!(redelivered.id, target_id);
         let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
-        let reinsert = store.insert(
-            redelivered,
-            RelayObserved::new(relay2, Timestamp::from(300)),
-        );
+        let reinsert = store
+            .insert(
+                redelivered,
+                RelayObserved::new(relay2, Timestamp::from(300)),
+            )
+            .unwrap();
         assert!(matches!(
             reinsert,
             InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -1687,28 +1735,38 @@ fn late_arrival_while_hidden_is_stored_not_refused_and_reveals_on_cancel() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            target.clone(),
-            RelayObserved::new(relay, Timestamp::from(50)),
-        );
+        store
+            .insert(
+                target.clone(),
+                RelayObserved::new(relay, Timestamp::from(50)),
+            )
+            .unwrap();
 
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
         let intent = outcome.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome, AcceptOutcome::Kind5Processed { .. }));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // A relay redelivery of the byte-identical target WHILE hidden —
         // must be accepted (dedup-by-id), NEVER `Refused`.
         let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
-        let reinsert = store.insert(target, RelayObserved::new(relay2, Timestamp::from(300)));
+        let reinsert = store
+            .insert(target, RelayObserved::new(relay2, Timestamp::from(300)))
+            .unwrap();
         assert!(
             matches!(reinsert, InsertOutcome::Duplicate { .. }),
             "a redelivered target hidden by a PENDING claim must be accepted, not refused, got {reinsert:?}"
         );
 
         // Still hidden — the claim is still open.
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // Cancel — reveals it, with the redelivered observation's
         // provenance intact (proving the row was never actually removed).
@@ -1726,7 +1784,7 @@ fn late_arrival_while_hidden_is_stored_not_refused_and_reveals_on_cancel() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+        assert_eq!(store.query(&Filter::new().id(target_id)).unwrap().len(), 1);
     });
 }
 
@@ -1756,23 +1814,30 @@ fn first_arrival_while_suppressed_is_retained_deduped_and_revealed_on_cancel() {
             AcceptOutcome::Kind5Processed { ref hidden, .. } if hidden.is_empty()
         ));
 
-        let first = store.insert(
-            target.clone(),
-            RelayObserved::new(
-                RelayUrl::parse("wss://relay1.example").expect("relay url"),
-                Timestamp::from(150),
-            ),
-        );
+        let first = store
+            .insert(
+                target.clone(),
+                RelayObserved::new(
+                    RelayUrl::parse("wss://relay1.example").expect("relay url"),
+                    Timestamp::from(150),
+                ),
+            )
+            .unwrap();
         assert!(matches!(first, InsertOutcome::Inserted));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
-        let second = store.insert(
-            target,
-            RelayObserved::new(
-                RelayUrl::parse("wss://relay2.example").expect("relay url"),
-                Timestamp::from(200),
-            ),
-        );
+        let second = store
+            .insert(
+                target,
+                RelayObserved::new(
+                    RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                    Timestamp::from(200),
+                ),
+            )
+            .unwrap();
         assert!(matches!(
             second,
             InsertOutcome::Duplicate {
@@ -1780,7 +1845,10 @@ fn first_arrival_while_suppressed_is_retained_deduped_and_revealed_on_cancel() {
                 ..
             }
         ));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         let cancelled = store
             .compensate_write(intent)
@@ -1793,7 +1861,7 @@ fn first_arrival_while_suppressed_is_retained_deduped_and_revealed_on_cancel() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        let rows = store.query(&Filter::new().id(target_id));
+        let rows = store.query(&Filter::new().id(target_id)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provenance.seen.len(), 2);
     });
@@ -1821,7 +1889,10 @@ fn target_signs_while_hidden() {
         let intent_d = outcome_d.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
         assert!(
-            store.query(&Filter::new().id(target_id)).is_empty(),
+            store
+                .query(&Filter::new().id(target_id))
+                .unwrap()
+                .is_empty(),
             "hidden while D is pending"
         );
 
@@ -1851,7 +1922,7 @@ fn target_signs_while_hidden() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        let rows = store.query(&Filter::new().id(target_id));
+        let rows = store.query(&Filter::new().id(target_id)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event.sig, signed_t.sig);
     });
@@ -1874,7 +1945,10 @@ fn target_cancels_while_hidden() {
         let outcome_d = do_accept(store, accept(deletion, k.public_key(), 100));
         let intent_d = outcome_d.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // Cancel the TARGET's own intent while hidden — must actually
         // remove it (the ordinary is-live compensate path, unaffected by
@@ -1901,7 +1975,10 @@ fn target_cancels_while_hidden() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -1918,7 +1995,9 @@ fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+        store
+            .insert(target, RelayObserved::new(relay, Timestamp::from(50)))
+            .unwrap();
 
         // D1 and D2: two DIFFERENT (non-byte-identical) kind:5 drafts,
         // both naming the same target.
@@ -1932,7 +2011,10 @@ fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
         let intent_2 = outcome_2.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_2, AcceptOutcome::Kind5Processed { .. }));
 
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // Cancel D1 — D2's claim still applies, target stays hidden.
         let compensated_1 = store
@@ -1947,7 +2029,10 @@ fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // Cancel D2 — the last claim; the target must reappear now.
         let compensated_2 = store
@@ -1960,7 +2045,7 @@ fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+        assert_eq!(store.query(&Filter::new().id(target_id)).unwrap().len(), 1);
     });
 }
 
@@ -1978,10 +2063,12 @@ fn independent_kind5_claims_cancel_then_promote_commit_the_remaining_delete() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            target.clone(),
-            RelayObserved::new(relay, Timestamp::from(50)),
-        );
+        store
+            .insert(
+                target.clone(),
+                RelayObserved::new(relay, Timestamp::from(50)),
+            )
+            .unwrap();
 
         let signed_1 = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let outcome_1 = do_accept(
@@ -2004,21 +2091,29 @@ fn independent_kind5_claims_cancel_then_promote_commit_the_remaining_delete() {
             cancelled,
             CompensateOutcome::Compensated { ref revealed, .. } if revealed.is_empty()
         ));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         let promoted = store
             .promote_signed(intent_2, signed_2.sig)
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
-        let replay = store.insert(
-            target,
-            RelayObserved::new(
-                RelayUrl::parse("wss://relay2.example").expect("relay url"),
-                Timestamp::from(300),
-            ),
-        );
+        let replay = store
+            .insert(
+                target,
+                RelayObserved::new(
+                    RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                    Timestamp::from(300),
+                ),
+            )
+            .unwrap();
         assert!(matches!(
             replay,
             InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -2040,10 +2135,12 @@ fn independent_kind5_claims_promote_then_cancel_preserve_permanent_delete() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            target.clone(),
-            RelayObserved::new(relay, Timestamp::from(50)),
-        );
+        store
+            .insert(
+                target.clone(),
+                RelayObserved::new(relay, Timestamp::from(50)),
+            )
+            .unwrap();
 
         let signed_1 = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let outcome_1 = do_accept(
@@ -2071,15 +2168,20 @@ fn independent_kind5_claims_promote_then_cancel_preserve_permanent_delete() {
             cancelled,
             CompensateOutcome::Compensated { ref revealed, .. } if revealed.is_empty()
         ));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
-        let replay = store.insert(
-            target,
-            RelayObserved::new(
-                RelayUrl::parse("wss://relay2.example").expect("relay url"),
-                Timestamp::from(300),
-            ),
-        );
+        let replay = store
+            .insert(
+                target,
+                RelayObserved::new(
+                    RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                    Timestamp::from(300),
+                ),
+            )
+            .unwrap();
         assert!(matches!(
             replay,
             InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -2100,14 +2202,18 @@ fn pending_kind5_claim_over_permanent_tombstone_cannot_reveal_target() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            target.clone(),
-            RelayObserved::new(relay.clone(), Timestamp::from(50)),
-        );
+        store
+            .insert(
+                target.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(50)),
+            )
+            .unwrap();
 
         let permanent = deletion_event(&k, vec![Tag::event(target_id)], 100);
         assert!(matches!(
-            store.insert(permanent, RelayObserved::new(relay, Timestamp::from(100))),
+            store
+                .insert(permanent, RelayObserved::new(relay, Timestamp::from(100)))
+                .unwrap(),
             InsertOutcome::Kind5Processed { .. }
         ));
 
@@ -2129,15 +2235,20 @@ fn pending_kind5_claim_over_permanent_tombstone_cannot_reveal_target() {
             cancelled,
             CompensateOutcome::Compensated { ref revealed, .. } if revealed.is_empty()
         ));
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
         assert!(matches!(
-            store.insert(
-                target,
-                RelayObserved::new(
-                    RelayUrl::parse("wss://relay2.example").expect("relay url"),
-                    Timestamp::from(300),
-                ),
-            ),
+            store
+                .insert(
+                    target,
+                    RelayObserved::new(
+                        RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                        Timestamp::from(300),
+                    ),
+                )
+                .unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         ));
     });
@@ -2162,11 +2273,15 @@ fn mixed_e_and_a_tag_kind5_intent_hides_and_reveals_both_targets() {
             .expect("sign addressable target");
         let addressable_id = addressable.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            regular,
-            RelayObserved::new(relay.clone(), Timestamp::from(50)),
-        );
-        store.insert(addressable, RelayObserved::new(relay, Timestamp::from(60)));
+        store
+            .insert(
+                regular,
+                RelayObserved::new(relay.clone(), Timestamp::from(50)),
+            )
+            .unwrap();
+        store
+            .insert(addressable, RelayObserved::new(relay, Timestamp::from(60)))
+            .unwrap();
 
         let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
         let signed_delete = deletion_event(
@@ -2189,8 +2304,14 @@ fn mixed_e_and_a_tag_kind5_intent_hides_and_reveals_both_targets() {
             }
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
-        assert!(store.query(&Filter::new().id(regular_id)).is_empty());
-        assert!(store.query(&Filter::new().id(addressable_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(regular_id))
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .query(&Filter::new().id(addressable_id))
+            .unwrap()
+            .is_empty());
 
         let cancelled = store
             .compensate_write(intent)
@@ -2229,14 +2350,18 @@ fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
             .expect("sign addressable target");
         let addressable_id = addressable.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            regular.clone(),
-            RelayObserved::new(relay.clone(), Timestamp::from(50)),
-        );
-        store.insert(
-            addressable,
-            RelayObserved::new(relay.clone(), Timestamp::from(60)),
-        );
+        store
+            .insert(
+                regular.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(50)),
+            )
+            .unwrap();
+        store
+            .insert(
+                addressable,
+                RelayObserved::new(relay.clone(), Timestamp::from(60)),
+            )
+            .unwrap();
 
         let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
         let signed_delete = deletion_event(
@@ -2260,14 +2385,22 @@ fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
             .promote_signed(intent, signed_delete.sig)
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
-        assert!(store.query(&Filter::new().id(regular_id)).is_empty());
-        assert!(store.query(&Filter::new().id(addressable_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(regular_id))
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .query(&Filter::new().id(addressable_id))
+            .unwrap()
+            .is_empty());
 
         assert!(matches!(
-            store.insert(
-                regular,
-                RelayObserved::new(relay.clone(), Timestamp::from(200)),
-            ),
+            store
+                .insert(
+                    regular,
+                    RelayObserved::new(relay.clone(), Timestamp::from(200)),
+                )
+                .unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         ));
         let address_replay = EventBuilder::new(Kind::from(30_003u16), "older replay")
@@ -2276,10 +2409,12 @@ fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
             .sign_with_keys(&k)
             .expect("sign address replay");
         assert!(matches!(
-            store.insert(
-                address_replay,
-                RelayObserved::new(relay, Timestamp::from(201)),
-            ),
+            store
+                .insert(
+                    address_replay,
+                    RelayObserved::new(relay, Timestamp::from(201)),
+                )
+                .unwrap(),
             InsertOutcome::Refused(RefuseReason::Tombstoned)
         ));
     });
@@ -2307,7 +2442,9 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+        store
+            .insert(target, RelayObserved::new(relay, Timestamp::from(50)))
+            .unwrap();
 
         let signed_deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let frozen_deletion = Event::new(
@@ -2332,7 +2469,10 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
         let intent_b = outcome_b.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
 
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // Promote B — must commit the deletion for real, permanently, AND
         // atomically advance A's own routing obligation too (A is a
@@ -2359,7 +2499,10 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
             "A's own journal is already Signed -- compensation is pre-signature only"
         );
         assert!(
-            store.query(&Filter::new().id(target_id)).is_empty(),
+            store
+                .query(&Filter::new().id(target_id))
+                .unwrap()
+                .is_empty(),
             "the target must stay permanently deleted"
         );
 
@@ -2371,10 +2514,12 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
             .expect("sign redelivered target");
         assert_eq!(redelivered.id, target_id);
         let relay2 = RelayUrl::parse("wss://relay2.example").expect("relay url");
-        let reinsert = store.insert(
-            redelivered,
-            RelayObserved::new(relay2, Timestamp::from(300)),
-        );
+        let reinsert = store
+            .insert(
+                redelivered,
+                RelayObserved::new(relay2, Timestamp::from(300)),
+            )
+            .unwrap();
         assert!(matches!(
             reinsert,
             InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -2402,7 +2547,7 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
         let g1_id = frozen_g1.id;
         let outcome_g1 = do_accept(store, accept(frozen_g1, k.public_key(), 50));
         assert!(matches!(outcome_g1, AcceptOutcome::Inserted { .. }));
-        assert_eq!(store.query(&Filter::new().id(g1_id)).len(), 1);
+        assert_eq!(store.query(&Filter::new().id(g1_id)).unwrap().len(), 1);
 
         let coord = Coordinate::new(Kind::from(30_003u16), k.public_key()).identifier("g1");
         let signed_deletion = EventBuilder::new(Kind::EventDeletion, "")
@@ -2430,7 +2575,7 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
             other => panic!("expected Kind5Processed, got {other:?}"),
         }
         assert!(
-            store.query(&Filter::new().id(g1_id)).is_empty(),
+            store.query(&Filter::new().id(g1_id)).unwrap().is_empty(),
             "the addressable winner must be hidden immediately"
         );
 
@@ -2439,7 +2584,7 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
             .expect("promote persistence");
         assert!(matches!(promoted_d, PromoteOutcome::Promoted { .. }));
         assert!(
-            store.query(&Filter::new().id(g1_id)).is_empty(),
+            store.query(&Filter::new().id(g1_id)).unwrap().is_empty(),
             "must stay gone — now permanently deleted"
         );
 
@@ -2452,10 +2597,12 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
             .sign_with_keys(&k)
             .expect("sign older replay");
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        let stale_reinsert = store.insert(
-            older_replay,
-            RelayObserved::new(relay, Timestamp::from(300)),
-        );
+        let stale_reinsert = store
+            .insert(
+                older_replay,
+                RelayObserved::new(relay, Timestamp::from(300)),
+            )
+            .unwrap();
         assert!(matches!(
             stale_reinsert,
             InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -2496,6 +2643,7 @@ fn address_claim_ceiling_does_not_hide_post_ceiling_winner() {
         assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
         assert!(store
             .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap()
             .is_empty());
 
         // A NEW winner, created AFTER the pending deletion's own
@@ -2509,7 +2657,9 @@ fn address_claim_ceiling_does_not_hide_post_ceiling_winner() {
         let outcome_r2 = do_accept(store, accept(frozen_r2, k.public_key(), 200));
         assert!(matches!(outcome_r2, AcceptOutcome::Superseded { .. }));
 
-        let rows = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+        let rows = store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap();
         assert_eq!(
             rows.len(),
             1,
@@ -2528,6 +2678,7 @@ fn address_claim_ceiling_does_not_hide_post_ceiling_winner() {
         assert_eq!(
             store
                 .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+                .unwrap()
                 .len(),
             1
         );
@@ -2587,6 +2738,7 @@ fn overlapping_address_claims_with_different_ceilings_compose_correctly() {
 
         assert!(store
             .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap()
             .is_empty());
 
         // Cancel D1 (the earlier ceiling) -- D2's LATER ceiling still
@@ -2605,6 +2757,7 @@ fn overlapping_address_claims_with_different_ceilings_compose_correctly() {
         }
         assert!(store
             .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap()
             .is_empty());
 
         // Cancel D2 too -- now nothing covers v1, it reappears.
@@ -2620,6 +2773,7 @@ fn overlapping_address_claims_with_different_ceilings_compose_correctly() {
         assert_eq!(
             store
                 .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+                .unwrap()
                 .len(),
             1
         );
@@ -2660,6 +2814,7 @@ fn address_claim_ceiling_survives_reopen() {
         assert!(matches!(outcome_d, AcceptOutcome::Kind5Processed { .. }));
         assert!(store
             .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap()
             .is_empty());
         intent_d
     };
@@ -2668,13 +2823,16 @@ fn address_claim_ceiling_survives_reopen() {
     // Still hidden after reopen.
     assert!(store
         .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+        .unwrap()
         .is_empty());
 
     // A post-ceiling winner still isn't hidden after reopen.
     let (frozen_r2, _signed_r2) = compose(&k, Kind::ContactList, "v2 post-ceiling", 200);
     let r2_id = frozen_r2.id;
     do_accept(&mut store, accept(frozen_r2, k.public_key(), 200));
-    let rows = store.query(&Filter::new().kind(Kind::ContactList).author(k.public_key()));
+    let rows = store
+        .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].event.id, r2_id);
 
@@ -2710,14 +2868,18 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
     let (intent_cancel, intent_promote) = {
         let mut store = RedbStore::open(&path).expect("open redb store");
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            target_cancel.clone(),
-            RelayObserved::new(relay.clone(), Timestamp::from(50)),
-        );
-        store.insert(
-            target_promote.clone(),
-            RelayObserved::new(relay, Timestamp::from(51)),
-        );
+        store
+            .insert(
+                target_cancel.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(50)),
+            )
+            .unwrap();
+        store
+            .insert(
+                target_promote.clone(),
+                RelayObserved::new(relay, Timestamp::from(51)),
+            )
+            .unwrap();
         let cancel_outcome = do_accept(
             &mut store,
             accept(
@@ -2741,8 +2903,14 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
     };
 
     let mut store = RedbStore::open(&path).expect("reopen redb store");
-    assert!(store.query(&Filter::new().id(target_cancel_id)).is_empty());
-    assert!(store.query(&Filter::new().id(target_promote_id)).is_empty());
+    assert!(store
+        .query(&Filter::new().id(target_cancel_id))
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .query(&Filter::new().id(target_promote_id))
+        .unwrap()
+        .is_empty());
     let recovered = store.recover_outbox();
     assert!(recovered.iter().any(|row| row.intent_id == intent_cancel));
     assert!(recovered.iter().any(|row| row.intent_id == intent_promote));
@@ -2755,21 +2923,32 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
         CompensateOutcome::Compensated { ref revealed, .. }
             if revealed.iter().any(|row| row.event.id == target_cancel_id)
     ));
-    assert_eq!(store.query(&Filter::new().id(target_cancel_id)).len(), 1);
+    assert_eq!(
+        store
+            .query(&Filter::new().id(target_cancel_id))
+            .unwrap()
+            .len(),
+        1
+    );
 
     let promoted = store
         .promote_signed(intent_promote, signed_promote_delete.sig)
         .expect("post-restart promotion");
     assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
-    assert!(store.query(&Filter::new().id(target_promote_id)).is_empty());
+    assert!(store
+        .query(&Filter::new().id(target_promote_id))
+        .unwrap()
+        .is_empty());
     assert!(matches!(
-        store.insert(
-            target_promote,
-            RelayObserved::new(
-                RelayUrl::parse("wss://relay2.example").expect("relay url"),
-                Timestamp::from(300),
-            ),
-        ),
+        store
+            .insert(
+                target_promote,
+                RelayObserved::new(
+                    RelayUrl::parse("wss://relay2.example").expect("relay url"),
+                    Timestamp::from(300),
+                ),
+            )
+            .unwrap(),
         InsertOutcome::Refused(RefuseReason::Tombstoned)
     ));
 }
@@ -2788,10 +2967,12 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
             .expect("sign gc target");
         let gc_target_id = gc_target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(
-            gc_target,
-            RelayObserved::new(relay.clone(), Timestamp::from(50)),
-        );
+        store
+            .insert(
+                gc_target,
+                RelayObserved::new(relay.clone(), Timestamp::from(50)),
+            )
+            .unwrap();
         let gc_delete = deletion_event(&k, vec![Tag::event(gc_target_id)], 100);
         let gc_outcome = do_accept(
             store,
@@ -2799,7 +2980,7 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
         );
         let gc_intent = gc_outcome.journaled_intent_id().expect("journaled");
 
-        let gc_report = store.gc(&ClaimSet::new(vec![]));
+        let gc_report = store.gc(&ClaimSet::new(vec![])).unwrap();
         assert_eq!(gc_report.events_evicted, 0);
         let cancelled = store
             .compensate_write(gc_intent)
@@ -2809,10 +2990,16 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
             CompensateOutcome::Compensated { ref revealed, .. }
                 if revealed.iter().any(|row| row.event.id == gc_target_id)
         ));
-        assert_eq!(store.query(&Filter::new().id(gc_target_id)).len(), 1);
-        let post_cancel_gc = store.gc(&ClaimSet::new(vec![]));
+        assert_eq!(
+            store.query(&Filter::new().id(gc_target_id)).unwrap().len(),
+            1
+        );
+        let post_cancel_gc = store.gc(&ClaimSet::new(vec![])).unwrap();
         assert_eq!(post_cancel_gc.events_evicted, 1);
-        assert!(store.query(&Filter::new().id(gc_target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(gc_target_id))
+            .unwrap()
+            .is_empty());
 
         let expiring_target = EventBuilder::new(Kind::TextNote, "expiry target")
             .tag(Tag::expiration(Timestamp::from(250u64)))
@@ -2820,10 +3007,12 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
             .sign_with_keys(&k)
             .expect("sign expiring target");
         let expiring_target_id = expiring_target.id;
-        store.insert(
-            expiring_target,
-            RelayObserved::new(relay, Timestamp::from(150)),
-        );
+        store
+            .insert(
+                expiring_target,
+                RelayObserved::new(relay, Timestamp::from(150)),
+            )
+            .unwrap();
         let expiry_delete = deletion_event(&k, vec![Tag::event(expiring_target_id)], 200);
         let expiry_outcome = do_accept(
             store,
@@ -2832,9 +3021,10 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
         let expiry_intent = expiry_outcome.journaled_intent_id().expect("journaled");
         assert!(store
             .query(&Filter::new().id(expiring_target_id))
+            .unwrap()
             .is_empty());
 
-        let expired = store.expire_due(Timestamp::from(300u64));
+        let expired = store.expire_due(Timestamp::from(300u64)).unwrap();
         assert!(expired.iter().any(|row| row.event.id == expiring_target_id));
         let cancelled = store
             .compensate_write(expiry_intent)
@@ -2845,6 +3035,7 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
         ));
         assert!(store
             .query(&Filter::new().id(expiring_target_id))
+            .unwrap()
             .is_empty());
     });
 }
@@ -2869,19 +3060,24 @@ fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
     let target_id = target.id;
     let intent = {
         let mut store = RedbStore::open(&path).expect("open redb store");
-        store.insert(
-            target,
-            RelayObserved::new(
-                RelayUrl::parse("wss://relay.example").expect("relay url"),
-                Timestamp::from(50),
-            ),
-        );
+        store
+            .insert(
+                target,
+                RelayObserved::new(
+                    RelayUrl::parse("wss://relay.example").expect("relay url"),
+                    Timestamp::from(50),
+                ),
+            )
+            .unwrap();
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let outcome = do_accept(
             &mut store,
             accept(frozen_from_signed(&deletion), k.public_key(), 100),
         );
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
         outcome.journaled_intent_id().expect("journaled")
     };
 
@@ -2921,7 +3117,7 @@ fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
         .compensate_write(intent)
         .expect("compensate persistence");
     assert!(matches!(cancelled, CompensateOutcome::Compensated { .. }));
-    let visible = store.query(&Filter::new().id(target_id));
+    let visible = store.query(&Filter::new().id(target_id)).unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].event.id, target_id);
 }
@@ -2956,7 +3152,7 @@ fn duplicate_pending_b_survives_cancel_of_canonical_a() {
             CompensateOutcome::Compensated { restored: None, .. }
         ));
 
-        let rows = store.query(&Filter::new().id(frozen_id));
+        let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
         assert_eq!(
             rows.len(),
             1,
@@ -2983,7 +3179,10 @@ fn duplicate_pending_b_survives_cancel_of_canonical_a() {
             compensated_b,
             CompensateOutcome::Compensated { restored: None, .. }
         ));
-        assert!(store.query(&Filter::new().id(frozen_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -3044,7 +3243,7 @@ fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
             "A's own journal is already Signed -- compensation is pre-signature only"
         );
 
-        let rows = store.query(&Filter::new().id(frozen_id));
+        let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
         assert_eq!(
             rows.len(),
             1,
@@ -3088,7 +3287,7 @@ fn duplicate_ownership_survives_restart() {
     };
 
     let store = RedbStore::open(&path).expect("reopen redb store");
-    let rows = store.query(&Filter::new().id(frozen_id));
+    let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
     assert_eq!(
         rows.len(),
         1,
@@ -3187,9 +3386,11 @@ fn duplicate_of_already_signed_relay_row_starts_signed() {
         let relay_id = relay_event.id;
         let relay_sig = relay_event.sig;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(relay_event, RelayObserved::new(relay, Timestamp::from(50)));
+        store
+            .insert(relay_event, RelayObserved::new(relay, Timestamp::from(50)))
+            .unwrap();
         // Sanity: purely relay-observed, no local provenance at all yet.
-        let rows = store.query(&Filter::new().id(relay_id));
+        let rows = store.query(&Filter::new().id(relay_id)).unwrap();
         assert!(rows[0].provenance.local.is_none());
 
         // D: a fresh LOCAL duplicate accepted against the relay-only row.
@@ -3244,7 +3445,7 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
         assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
 
         // Neither owner has signed yet -- the row is still Pending.
-        let rows = store.query(&Filter::new().id(frozen_id));
+        let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
         assert_eq!(
             rows[0].provenance.local.as_ref().unwrap().sig_state,
             SigState::Pending
@@ -3252,10 +3453,12 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
 
         // A relay independently delivers the REAL signed bytes.
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        let insert_outcome = store.insert(
-            signed_a.clone(),
-            RelayObserved::new(relay, Timestamp::from(100)),
-        );
+        let insert_outcome = store
+            .insert(
+                signed_a.clone(),
+                RelayObserved::new(relay, Timestamp::from(100)),
+            )
+            .unwrap();
         match insert_outcome {
             InsertOutcome::Duplicate {
                 provenance_grew: true,
@@ -3268,7 +3471,7 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
         }
 
         // The row must now carry the real signature and be Signed.
-        let rows = store.query(&Filter::new().id(frozen_id));
+        let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event.sig, signed_a.sig);
         let local = rows[0]
@@ -3387,7 +3590,10 @@ fn duplicate_accepted_while_stashed_joins_owner_set_and_survives_restore_and_can
             compensated_d,
             CompensateOutcome::Compensated { restored: None, .. }
         ));
-        assert!(store.query(&Filter::new().id(frozen_a_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_a_id))
+            .unwrap()
+            .is_empty());
     });
 }
 
@@ -3485,21 +3691,26 @@ fn reinsert_stashed_collision_with_relay_signed_row_adopts_and_fans_out() {
         // Remove B through the ORDINARY store door -- NOT compensate_write
         // -- freeing the address slot while B's own OUTBOX_INTENTS/
         // OUTBOX_DISPLACED entries (still holding A) are left untouched.
-        let removed_b = store.remove(frozen_b_id, RetractReason::Rejected);
+        let removed_b = store.remove(frozen_b_id, RetractReason::Rejected).unwrap();
         assert!(removed_b.is_some(), "B must have been live to remove");
-        assert!(store.query(&Filter::new().id(frozen_b_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(frozen_b_id))
+            .unwrap()
+            .is_empty());
 
         // A relay delivers A's REAL signed bytes through the ordinary
         // `insert` door. A is not live (B's slot is now empty) and not yet
         // in EVENTS -- this is a plain fresh insert: A becomes live with
         // `local: None`, a genuine (non-sentinel) signature.
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        let insert_outcome = store.insert(
-            signed_a.clone(),
-            RelayObserved::new(relay, Timestamp::from(100)),
-        );
+        let insert_outcome = store
+            .insert(
+                signed_a.clone(),
+                RelayObserved::new(relay, Timestamp::from(100)),
+            )
+            .unwrap();
         assert!(matches!(insert_outcome, InsertOutcome::Inserted));
-        let rows = store.query(&Filter::new().id(frozen_a_id));
+        let rows = store.query(&Filter::new().id(frozen_a_id)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event.sig, signed_a.sig);
         assert!(
@@ -3572,7 +3783,9 @@ fn duplicate_kind5_intent_b_keeps_target_hidden_after_canonical_a_cancels() {
             .expect("sign target");
         let target_id = target.id;
         let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        store.insert(target, RelayObserved::new(relay, Timestamp::from(50)));
+        store
+            .insert(target, RelayObserved::new(relay, Timestamp::from(50)))
+            .unwrap();
 
         let signed_deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
         let frozen_deletion = Event::new(
@@ -3593,7 +3806,10 @@ fn duplicate_kind5_intent_b_keeps_target_hidden_after_canonical_a_cancels() {
         let intent_b = outcome_b.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_b, AcceptOutcome::Duplicate { .. }));
 
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // Cancel the CANONICAL original A -- B's own independent claim
         // must keep the target hidden.
@@ -3609,7 +3825,10 @@ fn duplicate_kind5_intent_b_keeps_target_hidden_after_canonical_a_cancels() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert!(store.query(&Filter::new().id(target_id)).is_empty());
+        assert!(store
+            .query(&Filter::new().id(target_id))
+            .unwrap()
+            .is_empty());
 
         // Cancel B too -- now nothing claims it, the target reappears.
         let compensated_b = store
@@ -3622,7 +3841,7 @@ fn duplicate_kind5_intent_b_keeps_target_hidden_after_canonical_a_cancels() {
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
-        assert_eq!(store.query(&Filter::new().id(target_id)).len(), 1);
+        assert_eq!(store.query(&Filter::new().id(target_id)).unwrap().len(), 1);
     });
 }
 
@@ -3793,7 +4012,7 @@ fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
         );
 
         // The row must still carry the FIRST signature, never overwritten.
-        let rows = store.query(&Filter::new().id(frozen_id));
+        let rows = store.query(&Filter::new().id(frozen_id)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event.sig, signed.sig);
     });

@@ -92,6 +92,12 @@ pub struct DiagnosticsSnapshot {
     /// `EngineCore` itself cannot see the pool's slot table, so this stays
     /// `0` in the core-built snapshot and is set at the runtime edge.
     pub relays_rejected_over_cap: u64,
+    /// `Some(message)` once an ingest/read [`nmp_store::EventStore`] door has
+    /// returned a [`nmp_store::PersistenceError`] (issue #122): the local
+    /// cache has degraded to read-only and stopped accepting fresh
+    /// ingest/reads. `None` while persistence is healthy. Read-only, off the
+    /// data path — an observer-visible signal, never a routing input.
+    pub store_degraded: Option<String>,
 }
 
 /// Combine `diag` (subs/filters/lanes/authors_served — `nmp-router`-owned)
@@ -155,6 +161,10 @@ pub(crate) fn build(
         // Set at the runtime edge from the pool's own count — the core-built
         // snapshot has no view of the pool's slot table (see the field doc).
         relays_rejected_over_cap: 0,
+        // Filled in by `EngineCore::diagnostics_snapshot` (which owns the
+        // degrade flag); `build` itself is a pure projection of router/store
+        // facts and has no notion of persistence health.
+        store_degraded: None,
     }
 }
 

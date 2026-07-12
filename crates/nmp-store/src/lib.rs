@@ -959,18 +959,36 @@ pub trait EventStore {
     /// and, in the same call, drops every currently-held target it names
     /// whose author matches its own (NIP-09 author-only, enforced
     /// structurally) — see `Kind5Processed`.
-    fn insert(&mut self, event: Event, from: RelayObserved) -> InsertOutcome;
+    ///
+    /// Fallible (issue #122): the ingest door runs on every relay EVENT
+    /// frame, so a realistic persistence failure (disk full, I/O error) must
+    /// return `Err(PersistenceError)` rather than panic the embedding app.
+    /// The redb backend propagates the real redb error; `MemoryStore` never
+    /// actually returns `Err` (no I/O). Serde/logic invariant violations
+    /// (a corrupt stored row) remain `.expect()`-on-invariant, matching the
+    /// durable-write doors' established convention.
+    fn insert(
+        &mut self,
+        event: Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError>;
 
     /// Query current winners only (never a superseded/stale event), matched
     /// via `nostr::Filter::match_event`, each with its provenance attached.
-    fn query(&self, filter: &Filter) -> Vec<StoredEvent>;
+    /// Fallible for the same reason as [`EventStore::insert`] (issue #122):
+    /// a read-path I/O error surfaces as `Err` instead of panicking.
+    fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError>;
 
     /// Remove `id` from the store — clearing both the id index and, if `id`
     /// is the current replaceable/addressable winner for its address, the
     /// address index too — and hand back the removed row whole, or `None`
     /// if `id` was not held. Engine-facing only (kind:5 processing,
     /// optimistic-write rejection); never a general delete API.
-    fn remove(&mut self, id: EventId, reason: RetractReason) -> Option<StoredEvent>;
+    fn remove(
+        &mut self,
+        id: EventId,
+        reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError>;
 
     /// Drain every row whose NIP-40 `expiration` is `<= now`, removing each
     /// one (through the same [`EventStore::remove`] door) and returning the
@@ -978,7 +996,7 @@ pub trait EventStore {
     /// persistent `(expiry_ts -> {id})` index is maintained on every insert
     /// and every removal, so this drains in `O(log n + due)`, not a full
     /// scan.
-    fn expire_due(&mut self, now: Timestamp) -> Vec<StoredEvent>;
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError>;
 
     /// The earliest NIP-40 `expiration` deadline among currently stored
     /// rows, or `None` if nothing carries one. Index-backed: peeks the
@@ -997,7 +1015,7 @@ pub trait EventStore {
         atom: &ContextualAtom,
         relay: &RelayUrl,
         proven: CoverageInterval,
-    );
+    ) -> Result<(), PersistenceError>;
 
     /// The proven interval for `key` at `relay`, or `None` if no row exists.
     /// `None` means this relay has no persisted interval for this key; it
@@ -1020,7 +1038,7 @@ pub trait EventStore {
     /// winners, so an unsigned pending row can never be evicted before it
     /// ever signs. Once `promote_signed` flips it to `Signed`, it is an
     /// ordinary event again, GC-able like any other under `claims`.
-    fn gc(&mut self, claims: &ClaimSet) -> GcReport;
+    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError>;
 
     /// Accept a durably-owned local write intent (issues #2/#3): runs the
     /// SAME tombstone-refusal and replaceable/addressable supersession
@@ -1042,8 +1060,10 @@ pub trait EventStore {
     /// transaction fails, the caller receives an acceptance error and no
     /// pending row becomes visible"): a realistic persistence failure
     /// (disk full, I/O error) returns `Err` rather than panicking the
-    /// embedding app — unlike this crate's other, pre-existing doors,
-    /// which remain `.expect()`-on-invariant-violation by design.
+    /// embedding app. As of issue #122 the ingest/read doors above
+    /// (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) are
+    /// fallible on the same footing; only serde/logic invariant violations
+    /// (a corrupt persisted row) remain `.expect()`-on-invariant by design.
     /// `MemoryStore` never actually returns `Err` (no I/O).
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError>;
 

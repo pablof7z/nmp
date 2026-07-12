@@ -122,14 +122,18 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     )
     .sign_with_keys(&b)
     .expect("sign b's seed post");
-    store.insert(
-        a_post.clone(),
-        RelayObserved::new(seed_relay.clone(), Timestamp::now()),
-    );
-    store.insert(
-        b_post.clone(),
-        RelayObserved::new(seed_relay.clone(), Timestamp::now()),
-    );
+    store
+        .insert(
+            a_post.clone(),
+            RelayObserved::new(seed_relay.clone(), Timestamp::now()),
+        )
+        .unwrap();
+    store
+        .insert(
+            b_post.clone(),
+            RelayObserved::new(seed_relay.clone(), Timestamp::now()),
+        )
+        .unwrap();
 
     // Empty directory -- no write relays known for anyone. The read side
     // never needs one (the local store already answers the first batch);

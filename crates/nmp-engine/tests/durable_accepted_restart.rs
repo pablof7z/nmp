@@ -297,7 +297,7 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let rows = store.query(&nostr::Filter::new().id(frozen_id));
+    let rows = store.query(&nostr::Filter::new().id(frozen_id)).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].provenance.local.as_ref().unwrap().sig_state,
@@ -325,7 +325,10 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
     core.handle(EngineMsg::CancelWrite(id));
     drop(core);
     let store = RedbStore::open(&path).unwrap();
-    assert!(store.query(&nostr::Filter::new().id(frozen_id)).is_empty());
+    assert!(store
+        .query(&nostr::Filter::new().id(frozen_id))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
