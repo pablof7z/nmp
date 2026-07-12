@@ -1389,6 +1389,7 @@ dependencies = [
  "libc",
  "negentropy",
  "nmp-grammar",
+ "nmp-nip51",
  "nmp-resolver",
  "nmp-router",
  "nmp-signer",
@@ -1410,6 +1411,8 @@ version = "0.1.0"
 dependencies = [
  "nmp",
  "nmp-grammar",
+ "nmp-nip29",
+ "nmp-nip51",
  "nostr 0.44.4",
  "redb",
  "tempfile",
@@ -1423,6 +1426,25 @@ dependencies = [
  "blake3",
  "nostr 0.44.4",
  "serde_json",
+]
+
+[[package]]
+name = "nmp-nip29"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nmp-nip51",
+ "nmp-ownership",
+ "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip51"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nmp-ownership",
+ "nostr 0.44.4",
 ]
 
 [[package]]

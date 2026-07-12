@@ -60,3 +60,8 @@ libc = "0.2"
 # the one test that needs to speak it from the SERVER side.
 tungstenite = "0.29"
 serde_json = "1"
+# #108: proves nmp-nip51's active_account_demand() reroots/reconstructs
+# correctly against a REAL engine (SetActivePubkey) -- a cross-crate
+# integration proof, not something nmp-nip51 itself (deliberately
+# engine-free) can assert on its own.
+nmp-nip51.workspace = true
