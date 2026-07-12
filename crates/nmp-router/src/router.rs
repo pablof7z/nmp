@@ -9,23 +9,34 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
-use nmp_store::coverage_key;
+use nmp_store::{coverage_key, CoverageKey};
 
-use crate::coalesce::{CoalesceEntry, RuleRegistry};
+use crate::coalesce::RuleRegistry;
 use crate::diag::{self, Diagnostics};
 use crate::facts::{DiscoveryKinds, PubkeyHex, RelayDirectory, RelayLimits, RelayUrl};
 use crate::plan::{diff_plans, RelayPlan, SubId, WireDelta, WireReq};
 use crate::route::{self, AtomClass, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall};
 
-/// Push `(filter, provenance, coverage_key(filter))` into `bag[relay]` for
-/// every `(relay, provenance)` pair in `routes`, tagged with `source`/
-/// `access` (#106: equal-context-only coalescing, Fable D) — the shared
+/// The equal-context-only coalescing gate (Fable D, "locus fixed"): two
+/// atoms only ever share wire work if their FULL context matches. Bagged
+/// and coalesced entirely inside `Router::compile` -- `coalesce.rs` itself
+/// stays PURE selection-only and never learns this type exists.
+type ContextKey = (SourceAuthority, AccessContext);
+
+/// One relay's not-yet-coalesced bag entry, PER context partition: a
+/// materialized (filter, single-lane provenance, absorbed coverage-key)
+/// triple -- selection-only, exactly what `coalesce.rs::coalesce_with`
+/// (unchanged, context-free) has always taken.
+type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+
+/// Push `(filter, provenance, coverage_key(atom))` into `bag[relay][ctx]`
+/// for every `(relay, provenance)` pair in `routes` — the shared
 /// materialization step `compile` uses for every lane. A no-op when
 /// `routes` is empty (no configured relays for that lane, or the lane's
 /// gate didn't fire).
 fn push_routes(
-    bag: &mut BTreeMap<RelayUrl, Vec<CoalesceEntry>>,
+    bag: &mut BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>>,
     filter: &ConcreteFilter,
     source: SourceAuthority,
     access: AccessContext,
@@ -40,13 +51,11 @@ fn push_routes(
         access,
     });
     for (relay, prov) in routes {
-        bag.entry(relay).or_default().push(CoalesceEntry {
-            filter: filter.clone(),
-            source,
-            access,
-            provenance: vec![prov],
-            absorbed: BTreeSet::from([key]),
-        });
+        bag.entry(relay)
+            .or_default()
+            .entry((source, access))
+            .or_default()
+            .push((filter.clone(), vec![prov], BTreeSet::from([key])));
     }
 }
 
@@ -116,7 +125,7 @@ impl Router {
         // contributes exactly one key, later unioned by `coalesce_with`
         // alongside provenance as same-skeleton, SAME-CONTEXT atoms merge
         // (Fable D: equal-context-only).
-        let mut bag: BTreeMap<RelayUrl, Vec<CoalesceEntry>> = BTreeMap::new();
+        let mut bag: BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>> = BTreeMap::new();
         let mut uncovered_authors: BTreeMap<PubkeyHex, Shortfall> = BTreeMap::new();
 
         for ((skeleton, access), authors) in &outbox_groups {
@@ -137,13 +146,11 @@ impl Router {
                     source,
                     access,
                 });
-                bag.entry(relay).or_default().push(CoalesceEntry {
-                    filter,
-                    source,
-                    access,
-                    provenance: vec![prov],
-                    absorbed: BTreeSet::from([key]),
-                });
+                bag.entry(relay)
+                    .or_default()
+                    .entry((source, access))
+                    .or_default()
+                    .push((filter, vec![prov], BTreeSet::from([key])));
             }
 
             // Additive indexer + app lanes: both route the group's FULL
@@ -189,13 +196,11 @@ impl Router {
                 access,
             });
             for (relay, prov) in route::provenance_for_pinned(atom, dir) {
-                bag.entry(relay).or_default().push(CoalesceEntry {
-                    filter: atom.clone(),
-                    source,
-                    access,
-                    provenance: vec![prov],
-                    absorbed: BTreeSet::from([key]),
-                });
+                bag.entry(relay)
+                    .or_default()
+                    .entry((source, access))
+                    .or_default()
+                    .push((atom.clone(), vec![prov], BTreeSet::from([key])));
             }
 
             // App lane routes every atom, including authorless/pinned ones
@@ -204,25 +209,28 @@ impl Router {
             push_routes(&mut bag, atom, source, access, app);
         }
 
-        // Step 4 + 5: per relay, dedup + widen-only coalesce (equal-context-
-        // only, Fable D), then assign stable sub-ids (context-folded,
-        // `SubId::for_wire` — atlas's 3rd proof floor).
+        // Step 4 + 5: per relay, PER CONTEXT PARTITION, dedup + widen-only
+        // coalesce (`coalesce.rs` stays pure selection-only, Fable D "locus
+        // fixed" -- partitioning by `ContextKey` here is what makes
+        // coalescing equal-context-only, never a change to the rule
+        // engine itself), then assign stable sub-ids (context-folded,
+        // `SubId::for_wire` — atlas's 3rd proof floor / Fable D's wire
+        // consequence).
         let mut reqs: BTreeMap<RelayUrl, Vec<WireReq>> = BTreeMap::new();
-        for (relay, entries) in bag {
-            let merged = self.rules.coalesce_with(entries);
-            let mut relay_reqs: Vec<WireReq> = merged
-                .into_iter()
-                .map(|entry| {
-                    let sub_id =
-                        SubId::for_wire(relay.clone(), &entry.filter, entry.source, entry.access);
+        for (relay, by_context) in bag {
+            let mut relay_reqs: Vec<WireReq> = Vec::new();
+            for ((source, access), entries) in by_context {
+                let merged = self.rules.coalesce_with(entries);
+                relay_reqs.extend(merged.into_iter().map(|(filter, provenance, absorbed)| {
+                    let sub_id = SubId::for_wire(relay.clone(), &filter, source, access);
                     WireReq {
                         sub_id,
-                        filter: entry.filter,
-                        provenance: entry.provenance,
-                        absorbed: entry.absorbed,
+                        filter,
+                        provenance,
+                        absorbed,
                     }
-                })
-                .collect();
+                }));
+            }
             relay_reqs.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
             reqs.insert(relay, relay_reqs);
         }
@@ -656,6 +664,50 @@ mod tests {
         assert_eq!(
             router.diagnostics().uncovered_authors[&a].reason,
             ShortfallReason::NoCandidates
+        );
+    }
+
+    /// #106/Fable's falsifier 6 (coalescing correctness), re-homed here per
+    /// Fable D's "locus fixed" -- equal-context-only coalescing is a
+    /// property of `Router::compile`'s per-relay CONTEXT PARTITIONING, not
+    /// of `coalesce.rs` itself (which stays pure and untouched). The
+    /// IDENTICAL selection, declared under two different `SourceAuthority`s
+    /// (the new expressible behavior Fable's owner-flag names: `Public` on
+    /// an author-bearing selection is legal), routes to the SAME relay via
+    /// two entirely different lanes (outbox-solve vs pinned/group-host
+    /// lookup) -- they must ship as TWO separate `WireReq`s with distinct
+    /// `SubId`s, never merged into one.
+    #[test]
+    fn different_context_same_relay_same_filter_never_merges_into_one_wire_req() {
+        let a = pk('a');
+        let shared = test_relay(0);
+        let filter = cf(1, &[a.as_str()]);
+        let dir = FixtureDirectory::new()
+            .with_write(a.clone(), [shared.clone()])
+            .with_group_host(filter.clone(), shared.clone());
+        let mut router = Router::new(
+            RelayLimits::default(),
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        let demand = BTreeSet::from([
+            as_atom(filter.clone(), SourceAuthority::AuthorOutboxes),
+            as_atom(filter.clone(), SourceAuthority::Public),
+        ]);
+        let _ = router.compile(&demand, &dir, 10);
+
+        let reqs = &router.plan().reqs[&shared];
+        assert_eq!(
+            reqs.len(),
+            2,
+            "identical selection under different SourceAuthority must ship as two separate WireReqs, never merged: {reqs:?}"
+        );
+        let sub_ids: BTreeSet<_> = reqs.iter().map(|r| r.sub_id.clone()).collect();
+        assert_eq!(
+            sub_ids.len(),
+            2,
+            "the two WireReqs must carry distinct SubIds (the wire-side anti-alias fix)"
         );
     }
 }

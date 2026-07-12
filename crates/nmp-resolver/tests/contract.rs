@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    Binding, ConcreteFilter, Demand, DemandOp, Derived, Filter, IdentityField, IndexedTagName,
-    Selector, SetAlgebra, SetOp,
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, DemandOp, Derived, Filter,
+    IdentityField, IndexedTagName, Selector, SetAlgebra, SetOp, SourceAuthority,
 };
 use nmp_resolver::testkit::{
     addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
@@ -54,6 +54,31 @@ fn cf_coord(kind: u16, author: &str, d: &str) -> ConcreteFilter {
         tags,
         ..ConcreteFilter::default()
     }
+}
+
+/// Wrap a filter into a `ContextualAtom` under `source` (#106: `DemandOp`
+/// carries the full atom now, not a bare `ConcreteFilter` -- Fable's
+/// ratified shape). `access` is always `Public` in these tests.
+fn atom(filter: ConcreteFilter, source: SourceAuthority) -> ContextualAtom {
+    ContextualAtom {
+        filter,
+        source,
+        access: AccessContext::Public,
+    }
+}
+
+/// `Demand::from_filter`'s static default for any filter whose root FilterNode
+/// binds `authors` at all (my_follows/follows_minus_mutes/address_coord's
+/// root atoms) -- `AuthorOutboxes`.
+fn outbox_atom(filter: ConcreteFilter) -> ContextualAtom {
+    atom(filter, SourceAuthority::AuthorOutboxes)
+}
+
+/// `Demand::from_filter`'s static default for a filter whose root FilterNode
+/// does NOT bind `authors` at all (nip29_groups/bookmarks' root and outer
+/// atoms, which bind only tags) -- `Public`.
+fn public_atom(filter: ConcreteFilter) -> ContextualAtom {
+    atom(filter, SourceAuthority::Public)
 }
 
 // ---- LiveQuery shape builders --------------------------------------------
@@ -229,8 +254,8 @@ fn depth1_myfollows_surgical_delta() {
     assert_eq!(
         delta.ops,
         vec![
-            DemandOp::Close(atom_c.clone()),
-            DemandOp::Open(atom_d.clone())
+            DemandOp::Close(outbox_atom(atom_c.clone())),
+            DemandOp::Open(outbox_atom(atom_d.clone()))
         ]
     );
     let after = h.metrics();
@@ -274,7 +299,10 @@ fn depth2_nip29_groups_cascade_one_level() {
     let delta = h.deliver(vec![kind39002(&a, "g3", &[a.public_key()], 101)]);
     let outer_g3 = cf_kinds_tag(&outer_kinds, 'd', &["g3"]);
 
-    assert_eq!(delta.ops, vec![DemandOp::Open(outer_g3.clone())]);
+    assert_eq!(
+        delta.ops,
+        vec![DemandOp::Open(public_atom(outer_g3.clone()))]
+    );
     let after = h.metrics();
     assert_eq!(
         after.atoms_opened - before.atoms_opened,
@@ -333,20 +361,27 @@ fn identity_reroot_closes_old_before_new() {
         }
     }
 
-    let closes: BTreeSet<ConcreteFilter> = delta.closed().into_iter().cloned().collect();
+    let closes: BTreeSet<ContextualAtom> = delta.closed().into_iter().cloned().collect();
     assert_eq!(
         closes,
-        BTreeSet::from([old_inner.clone(), old_a.clone(), old_b.clone()]),
+        BTreeSet::from([
+            outbox_atom(old_inner.clone()),
+            outbox_atom(old_a.clone()),
+            outbox_atom(old_b.clone())
+        ]),
         "all old atoms closed"
     );
     // Reverse-of-open order: the inner (foundation, opened first at
     // construction) is closed LAST.
-    assert_eq!(delta.closed().last(), Some(&&old_inner));
+    assert_eq!(
+        delta.closed().last(),
+        Some(&&outbox_atom(old_inner.clone()))
+    );
 
     let new_inner = cf_kinds_authors(&[3], &[&b.public_key().to_hex()]);
     assert_eq!(
         delta.opened(),
-        vec![&new_inner],
+        vec![&outbox_atom(new_inner.clone())],
         "only the new inner atom opens"
     );
 
@@ -363,8 +398,11 @@ fn identity_reroot_closes_old_before_new() {
     let delta2 = h.deliver(vec![kind3(&b, &[e.public_key(), f.public_key()], 100)]);
     let atom_e = cf_kinds_authors(&[1], &[&e.public_key().to_hex()]);
     let atom_f = cf_kinds_authors(&[1], &[&f.public_key().to_hex()]);
-    let opened: BTreeSet<ConcreteFilter> = delta2.opened().into_iter().cloned().collect();
-    assert_eq!(opened, BTreeSet::from([atom_e, atom_f]));
+    let opened: BTreeSet<ContextualAtom> = delta2.opened().into_iter().cloned().collect();
+    assert_eq!(
+        opened,
+        BTreeSet::from([outbox_atom(atom_e), outbox_atom(atom_f)])
+    );
 }
 
 // ---- 4. stale_older_kind3_rejected_without_firing -----------------------
@@ -473,7 +511,13 @@ fn concurrent_depth2_changes_batch_one_delta() {
     let outer_kinds = [39_000u16, 39_001, 39_002];
     let g1 = cf_kinds_tag(&outer_kinds, 'd', &["g1"]);
     let g3 = cf_kinds_tag(&outer_kinds, 'd', &["g3"]);
-    assert_eq!(delta.ops, vec![DemandOp::Close(g1), DemandOp::Open(g3)]);
+    assert_eq!(
+        delta.ops,
+        vec![
+            DemandOp::Close(public_atom(g1)),
+            DemandOp::Open(public_atom(g3))
+        ]
+    );
 
     let after = h.metrics();
     assert_eq!(
@@ -510,7 +554,7 @@ fn identical_descriptors_share_graph() {
     assert_eq!(h.demand(), demand_with_both);
 
     let close_second = h.unsubscribe(handle2.id());
-    assert_eq!(close_second.closed(), vec![&inner]);
+    assert_eq!(close_second.closed(), vec![&outbox_atom(inner.clone())]);
     assert!(h.demand().is_empty());
 }
 
@@ -545,7 +589,10 @@ fn follows_minus_mutes_surgical() {
     let before = h.metrics();
     let delta = h.deliver(vec![kind10000_mutes(&a, &[a.public_key()], 100)]);
 
-    assert_eq!(delta.ops, vec![DemandOp::Close(atom_a.clone())]);
+    assert_eq!(
+        delta.ops,
+        vec![DemandOp::Close(outbox_atom(atom_a.clone()))]
+    );
     let after = h.metrics();
     assert_eq!(after.atoms_opened - before.atoms_opened, 0);
     assert_eq!(after.atoms_closed - before.atoms_closed, 1);
@@ -598,7 +645,7 @@ fn address_coord_fans_out_per_coordinate() {
     let delta = h.deliver(vec![addressable(&a, 30_003, "g3", 100)]);
     let atom_g3 = cf_coord(30_003, &a_hex, "g3");
 
-    assert_eq!(delta.ops, vec![DemandOp::Open(atom_g3)]);
+    assert_eq!(delta.ops, vec![DemandOp::Open(outbox_atom(atom_g3))]);
     let after = h.metrics();
     assert_eq!(after.atoms_opened - before.atoms_opened, 1);
     assert_eq!(after.atoms_closed - before.atoms_closed, 0);
@@ -619,8 +666,11 @@ fn arbitrary_depth1_shape_needs_no_engine_change() {
 
     let atom_e1 = cf_kinds_tag(&[1], 'e', &[&e1.to_hex()]);
     let atom_e2 = cf_kinds_tag(&[1], 'e', &[&e2.to_hex()]);
-    let opened: BTreeSet<ConcreteFilter> = delta.opened().into_iter().cloned().collect();
-    assert_eq!(opened, BTreeSet::from([atom_e1.clone(), atom_e2.clone()]));
+    let opened: BTreeSet<ContextualAtom> = delta.opened().into_iter().cloned().collect();
+    assert_eq!(
+        opened,
+        BTreeSet::from([public_atom(atom_e1.clone()), public_atom(atom_e2.clone())])
+    );
     assert!(h.demand().contains(&atom_e1));
     assert!(h.demand().contains(&atom_e2));
 }
@@ -657,7 +707,9 @@ fn derived_set_retracts_deleted_member_that_new_winner_does_not_match() {
     let delta = h.deliver(vec![deletion(&a, &[g1_id], 200)]);
 
     assert!(
-        delta.ops.contains(&DemandOp::Close(outer_g1.clone())),
+        delta
+            .ops
+            .contains(&DemandOp::Close(public_atom(outer_g1.clone()))),
         "deleting g1's membership event must close its derived atom even \
          though the deleting kind:5 event itself matches no inner filter: \
          {:?}",
@@ -698,7 +750,7 @@ fn metrics_witness_only_retracted_member_atoms_churn() {
     let outer_kinds = [39_000u16, 39_001, 39_002];
     let outer_g1 = cf_kinds_tag(&outer_kinds, 'd', &["g1"]);
 
-    assert_eq!(delta.ops, vec![DemandOp::Close(outer_g1)]);
+    assert_eq!(delta.ops, vec![DemandOp::Close(public_atom(outer_g1))]);
     let after = h.metrics();
     assert_eq!(
         after.atoms_closed - before.atoms_closed,

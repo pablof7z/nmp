@@ -1925,7 +1925,7 @@ impl RedbStore {
     /// cheap string check, independent of `CoverageKey`'s own hash-level
     /// version tag (`nmp-store::coverage::COVERAGE_KEY_VERSION`) -- `gc`'s
     /// legacy-purge pass greps for the ABSENCE of this exact prefix.
-    const COVERAGE_ROW_KEY_PREFIX: &'static str = "v2:";
+    const COVERAGE_ROW_KEY_PREFIX: &'static str = "d2:";
 
     fn coverage_row_key(key: CoverageKey, relay: &RelayUrl) -> String {
         use std::fmt::Write as _;

@@ -10,6 +10,7 @@ pub use nmp::Binding
 pub use nmp::CacheMode
 pub use nmp::CoverageInterval
 pub use nmp::Demand
+pub use nmp::DemandError
 pub use nmp::Derived
 pub use nmp::DiagnosticsSnapshot
 pub use nmp::Durability
@@ -3332,6 +3333,201 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                         },
                                                                         "name": "from_filter",
                                                                         "visibility": "public"
+                                                                      },
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "function": {
+                                                                            "default_unstable": null,
+                                                                            "generics": {
+                                                                              "params": [],
+                                                                              "where_predicates": []
+                                                                            },
+                                                                            "has_body": true,
+                                                                            "header": {
+                                                                              "abi": "Rust",
+                                                                              "is_async": false,
+                                                                              "is_const": false,
+                                                                              "is_unsafe": false
+                                                                            },
+                                                                            "sig": {
+                                                                              "inputs": [
+                                                                                [
+                                                                                  "selection",
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "Filter",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::binding::Filter"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::binding::Filter"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ],
+                                                                                [
+                                                                                  "source",
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "SourceAuthority",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ],
+                                                                                [
+                                                                                  "access",
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "AccessContext",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::AccessContext"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::AccessContext"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ]
+                                                                              ],
+                                                                              "is_c_variadic": false,
+                                                                              "output": {
+                                                                                "resolved_path": {
+                                                                                  "args": {
+                                                                                    "angle_bracketed": {
+                                                                                      "args": [
+                                                                                        {
+                                                                                          "type": {
+                                                                                            "generic": "Self"
+                                                                                          }
+                                                                                        },
+                                                                                        {
+                                                                                          "type": {
+                                                                                            "resolved_path": {
+                                                                                              "args": null,
+                                                                                              "path": "DemandError",
+                                                                                              "resolved_item": {
+                                                                                                "definition": {
+                                                                                                  "attrs": [],
+                                                                                                  "inner": {
+                                                                                                    "enum": {
+                                                                                                      "generics": {
+                                                                                                        "params": [],
+                                                                                                        "where_predicates": []
+                                                                                                      },
+                                                                                                      "has_stripped_variants": false,
+                                                                                                      "variants": [
+                                                                                                        {
+                                                                                                          "attrs": [],
+                                                                                                          "inner": {
+                                                                                                            "variant": {
+                                                                                                              "discriminant": null,
+                                                                                                              "kind": "plain"
+                                                                                                            }
+                                                                                                          },
+                                                                                                          "name": "AuthorOutboxesRequiresBoundAuthors",
+                                                                                                          "visibility": "default"
+                                                                                                        }
+                                                                                                      ]
+                                                                                                    }
+                                                                                                  },
+                                                                                                  "name": "DemandError",
+                                                                                                  "visibility": "public"
+                                                                                                },
+                                                                                                "path": "nmp_grammar::descriptor::DemandError"
+                                                                                              }
+                                                                                            }
+                                                                                          }
+                                                                                        }
+                                                                                      ],
+                                                                                      "constraints": []
+                                                                                    }
+                                                                                  },
+                                                                                  "path": "Result",
+                                                                                  "resolved_item": {
+                                                                                    "path": "core::result::Result"
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        },
+                                                                        "name": "new",
+                                                                        "visibility": "public"
+                                                                      },
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "function": {
+                                                                            "default_unstable": null,
+                                                                            "generics": {
+                                                                              "params": [],
+                                                                              "where_predicates": []
+                                                                            },
+                                                                            "has_body": true,
+                                                                            "header": {
+                                                                              "abi": "Rust",
+                                                                              "is_async": false,
+                                                                              "is_const": false,
+                                                                              "is_unsafe": false
+                                                                            },
+                                                                            "sig": {
+                                                                              "inputs": [
+                                                                                [
+                                                                                  "self",
+                                                                                  {
+                                                                                    "borrowed_ref": {
+                                                                                      "is_mutable": false,
+                                                                                      "lifetime": null,
+                                                                                      "type": {
+                                                                                        "generic": "Self"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ]
+                                                                              ],
+                                                                              "is_c_variadic": false,
+                                                                              "output": {
+                                                                                "tuple": [
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "SourceAuthority",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::SourceAuthority"
+                                                                                      }
+                                                                                    }
+                                                                                  },
+                                                                                  {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "AccessContext",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_grammar::descriptor::AccessContext"
+                                                                                        },
+                                                                                        "path": "nmp_grammar::descriptor::AccessContext"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ]
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        },
+                                                                        "name": "atom_context",
+                                                                        "visibility": "public"
                                                                       }
                                                                     ]
                                                                   }
@@ -4249,6 +4445,10 @@ reexport nmp::CoverageInterval => nmp_store::coverage::CoverageInterval
 reexport nmp::Demand => nmp_grammar::descriptor::Demand
 {
   "previously_defined": "nmp_grammar::descriptor::Demand"
+}
+reexport nmp::DemandError => nmp_grammar::descriptor::DemandError
+{
+  "previously_defined": "nmp_grammar::descriptor::DemandError"
 }
 reexport nmp::Derived => nmp_grammar::binding::Derived
 {

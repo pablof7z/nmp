@@ -59,8 +59,8 @@ pub use subscription::{DiagnosticsSubscription, ObservationCancel, Subscription}
 // -- `LiveQuery::from_filter` applies `Demand`'s static default so existing
 // `Filter`-only call sites need no source/access reasoning of their own.
 pub use nmp_grammar::{
-    AccessContext, Binding, CacheMode, Demand, Derived, Filter, IdentityField, IndexedTagName,
-    Selector, SetAlgebra, SetOp, SourceAuthority,
+    AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, IdentityField,
+    IndexedTagName, Selector, SetAlgebra, SetOp, SourceAuthority,
 };
 pub use nmp_resolver::LiveQuery;
 

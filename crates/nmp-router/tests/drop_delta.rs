@@ -73,7 +73,7 @@ fn dropped_handle_close_reaches_wire() {
         drop_delta
             .closed()
             .iter()
-            .any(|cf| cf.authors.as_ref() == Some(&BTreeSet::from([author_hex.clone()]))),
+            .any(|atom| atom.filter.authors.as_ref() == Some(&BTreeSet::from([author_hex.clone()]))),
         "the resolver's own delta must surface the dropped atom's Close"
     );
 

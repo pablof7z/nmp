@@ -92,15 +92,19 @@ fn deletions_by_etag_filter() -> Filter {
     }
 }
 
-/// The `DemandOp::Open` atoms of a delta, as a set (op ORDER is the
-/// resolver's internal `BTreeSet` ordering — these tests assert on the SET,
-/// keeping them robust to that ordering while still exact on membership).
+/// The `DemandOp::Open` atoms of a delta, as a SELECTION-only set (op ORDER
+/// is the resolver's internal `BTreeSet` ordering — these tests assert on
+/// the SET, keeping them robust to that ordering while still exact on
+/// membership). `DemandOp` carries a full `ContextualAtom` (#106), but
+/// every fixture in this file is `my_follows_filter()`-shaped (uniformly
+/// `AuthorOutboxes`), so these tests are about atom identity, not context;
+/// extracting `.filter` keeps every existing assertion unchanged.
 fn opened(delta: &nmp_grammar::DemandDelta) -> BTreeSet<ConcreteFilter> {
     delta
         .ops
         .iter()
         .filter_map(|op| match op {
-            DemandOp::Open(cf) => Some(cf.clone()),
+            DemandOp::Open(atom) => Some(atom.filter.clone()),
             DemandOp::Close(_) => None,
         })
         .collect()
@@ -111,7 +115,7 @@ fn closed(delta: &nmp_grammar::DemandDelta) -> BTreeSet<ConcreteFilter> {
         .ops
         .iter()
         .filter_map(|op| match op {
-            DemandOp::Close(cf) => Some(cf.clone()),
+            DemandOp::Close(atom) => Some(atom.filter.clone()),
             DemandOp::Open(_) => None,
         })
         .collect()

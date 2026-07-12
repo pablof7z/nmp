@@ -73,6 +73,31 @@ pub struct Demand {
     pub cache: CacheMode,
 }
 
+/// The one unconstructible `Demand` combination (#106, Fable's ratified
+/// shape): `SourceAuthority::AuthorOutboxes` declared over a selection
+/// whose `authors` field is not bound AT ALL. There is no author whose
+/// outbox could possibly be chased, so `Demand::new` refuses this at
+/// construction rather than silently producing a Demand whose `classify`/
+/// outbox-solve path resolves zero candidates forever (mirrors #107's
+/// empty-pinned-fails misuse-resistance pattern).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DemandError {
+    AuthorOutboxesRequiresBoundAuthors,
+}
+
+impl std::fmt::Display for DemandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DemandError::AuthorOutboxesRequiresBoundAuthors => write!(
+                f,
+                "SourceAuthority::AuthorOutboxes requires a selection whose `authors` field is bound"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DemandError {}
+
 impl Demand {
     /// The default-preservation constructor (#106 acceptance criterion): a
     /// bare `Filter` lowers to `AuthorOutboxes` iff its `selection`
@@ -97,6 +122,38 @@ impl Demand {
             access: AccessContext::Public,
             cache: CacheMode::Agnostic,
         }
+    }
+
+    /// Explicit constructor (#106, Fable's ratified shape) for a caller who
+    /// wants a NON-default `source`/`access` combination -- e.g. `Public`
+    /// on an author-bearing selection ("these authors, generic facts only,
+    /// no outbox chase"; the one new expressible behavior #106 adds,
+    /// Fable's falsifier 1 / landing-review owner nod). Validates the ONE
+    /// unconstructible combination (see [`DemandError`]); every other
+    /// combination is legal.
+    pub fn new(
+        selection: Filter,
+        source: SourceAuthority,
+        access: AccessContext,
+    ) -> Result<Self, DemandError> {
+        if matches!(source, SourceAuthority::AuthorOutboxes) && selection.authors.is_none() {
+            return Err(DemandError::AuthorOutboxesRequiresBoundAuthors);
+        }
+        Ok(Self {
+            selection,
+            source,
+            access,
+            cache: CacheMode::Agnostic,
+        })
+    }
+
+    /// The ONE identity projection (#106, Fable's ratified shape): which
+    /// fields participate in atom/wire/coverage identity
+    /// (`ContextualAtom`) -- `cache` is deliberately excluded (see
+    /// [`CacheMode`]'s doc), which is what makes #107's addition of that
+    /// field a one-line, identity-neutral change.
+    pub fn atom_context(&self) -> (SourceAuthority, AccessContext) {
+        (self.source, self.access)
     }
 }
 
@@ -145,6 +202,51 @@ mod tests {
         assert_eq!(
             Demand::from_filter(my_follows).source,
             SourceAuthority::AuthorOutboxes
+        );
+    }
+
+    /// #106's falsifier 7 (constructor validation): `AuthorOutboxes`
+    /// declared over an authorless selection is unconstructible.
+    #[test]
+    fn new_rejects_author_outboxes_over_an_authorless_selection() {
+        let err = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                ..Filter::default()
+            },
+            SourceAuthority::AuthorOutboxes,
+            AccessContext::Public,
+        )
+        .unwrap_err();
+        assert_eq!(err, DemandError::AuthorOutboxesRequiresBoundAuthors);
+    }
+
+    /// The new expressible behavior #106 adds (Fable's owner-flagged
+    /// landing-review nod): `Public` on an author-bearing selection is
+    /// LEGAL -- "these authors, generic facts only, no outbox chase."
+    #[test]
+    fn new_allows_public_over_an_author_bearing_selection() {
+        let demand = Demand::new(
+            Filter {
+                authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
+                ..Filter::default()
+            },
+            SourceAuthority::Public,
+            AccessContext::Public,
+        )
+        .expect("Public over an author-bearing selection is legal");
+        assert_eq!(demand.source, SourceAuthority::Public);
+    }
+
+    #[test]
+    fn atom_context_projects_source_and_access_only() {
+        let demand = Demand::from_filter(Filter {
+            authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
+            ..Filter::default()
+        });
+        assert_eq!(
+            demand.atom_context(),
+            (SourceAuthority::AuthorOutboxes, AccessContext::Public)
         );
     }
 }

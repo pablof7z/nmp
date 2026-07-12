@@ -153,17 +153,17 @@ pub struct GraphSnapshot {
 /// §3.6/§4) regardless of which code path fed them in.
 #[derive(Default)]
 struct DeltaAcc {
-    closes: Vec<ConcreteFilter>,
-    opens: Vec<ConcreteFilter>,
+    closes: Vec<ContextualAtom>,
+    opens: Vec<ContextualAtom>,
 }
 
 impl DeltaAcc {
-    fn push_close(&mut self, cf: ConcreteFilter) {
-        self.closes.push(cf);
+    fn push_close(&mut self, atom: ContextualAtom) {
+        self.closes.push(atom);
     }
 
-    fn push_open(&mut self, cf: ConcreteFilter) {
-        self.opens.push(cf);
+    fn push_open(&mut self, atom: ContextualAtom) {
+        self.opens.push(atom);
     }
 
     fn into_delta(mut self) -> DemandDelta {
@@ -358,8 +358,8 @@ impl<S: EventStore> Engine<S> {
             return (handle, merge_deltas(drop_delta, acc.into_delta()));
         }
 
-        let root =
-            self.build_filter_node(&q.0.selection, q.0.source, q.0.access, ParentLink::Root, 0);
+        let (source, access) = q.0.atom_context();
+        let root = self.build_filter_node(&q.0.selection, source, access, ParentLink::Root, 0);
         self.descriptor_to_root.insert(key.clone(), root);
         self.graph_entries.insert(
             root,
@@ -806,21 +806,23 @@ impl<S: EventStore> Engine<S> {
 
     // ---- atom refcounting (M1 plan §3.2/§4) -----------------------------
 
-    /// Refcounts a [`ContextualAtom`] (identity domain), but pushes only its
-    /// bare `ConcreteFilter` into the wire-facing `DemandDelta` (two-hash-
-    /// domains: the wire REQ never carries context, per atlas's #106/#107
-    /// seam ruling). Two atoms with the same `filter` but different
-    /// `source`/`access` refcount in SEPARATE buckets, so BOTH can surface
-    /// an `Open` with an identical `ConcreteFilter` payload -- the router/
-    /// transport layer (`SubId::for_wire`) is responsible for not re-
-    /// aliasing those two REQs' attribution.
+    /// Refcounts a [`ContextualAtom`] (identity domain) and pushes the SAME
+    /// full atom into `DemandDelta` (#106, Fable's ratified shape --
+    /// `DemandOp::Open/Close(ContextualAtom)`, not a bare `ConcreteFilter`):
+    /// the delta reflects exactly what the refcount table keys on. Two
+    /// atoms with the same `filter` but different `source`/`access`
+    /// refcount in SEPARATE buckets, so BOTH can surface an `Open` here --
+    /// downstream (the router's per-relay context partitioning + wire-
+    /// domain `ConcreteFilter::hash`/`SubId::for_wire`) is what keeps their
+    /// WIRE identity distinct without ever needing `ConcreteFilter` itself
+    /// to widen (two-hash-domains).
     fn ref_atom(&mut self, atom: &ContextualAtom, acc: &mut DeltaAcc) {
         let hash = atom.hash();
         let entry = self.atoms.entry(hash).or_insert_with(|| (atom.clone(), 0));
         entry.1 += 1;
         if entry.1 == 1 {
             self.metrics.atoms_opened += 1;
-            acc.push_open(atom.filter.clone());
+            acc.push_open(atom.clone());
         }
     }
 
@@ -831,7 +833,7 @@ impl<S: EventStore> Engine<S> {
             if entry.1 == 0 {
                 self.atoms.remove(&hash);
                 self.metrics.atoms_closed += 1;
-                acc.push_close(atom.filter.clone());
+                acc.push_close(atom.clone());
             }
         }
     }
@@ -914,10 +916,11 @@ impl<S: EventStore> Engine<S> {
                 // `access` come from ITSELF, never from the enclosing
                 // FilterNode's context -- a Demand's context is never
                 // inherited across a `Binding::Derived` boundary.
+                let (inner_source, inner_access) = d.inner.atom_context();
                 let inner = self.build_filter_node(
                     &d.inner.selection,
-                    d.inner.source,
-                    d.inner.access,
+                    inner_source,
+                    inner_access,
                     ParentLink::DerivedInner(id),
                     depth + 1,
                 );
