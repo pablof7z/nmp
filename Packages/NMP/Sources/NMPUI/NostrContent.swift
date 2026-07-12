@@ -76,6 +76,16 @@ public struct NostrContent: View {
     }
 
     private func fragments(for block: NostrContentBlock) -> [Fragment] {
+        if !block.inlines.contains(where: \.requiresNativeFlow) {
+            return [
+                Fragment(
+                    id: "\(block.id)-text-runs",
+                    role: .inline,
+                    view: AnyView(NMPStyledTextRuns(inlines: block.inlines))
+                )
+            ]
+        }
+
         var result: [Fragment] = []
         for (inlineIndex, inline) in block.inlines.enumerated() {
             switch inline {
@@ -270,6 +280,46 @@ private struct NMPStyledText: View {
     }
 }
 
+private struct NMPStyledTextRuns: View {
+    let inlines: [NostrContentInline]
+
+    var body: some View {
+        composed
+    }
+
+    private var composed: Text {
+        inlines.reduce(Text("")) { partial, inline in
+            switch inline {
+            case .text(let text, _, let styles):
+                return partial + styled(text, styles: styles)
+            case .softBreak:
+                return partial + Text(" ")
+            case .hardBreak:
+                return partial + Text("\n")
+            case .reference, .hashtag, .link:
+                return partial
+            }
+        }
+    }
+
+    private func styled(_ value: String, styles: [NostrContentInlineStyle]) -> Text {
+        var text = Text(value)
+        if styles.contains(.code) {
+            text = text.font(.system(.body, design: .monospaced))
+        }
+        if styles.contains(.strong) {
+            text = text.bold()
+        }
+        if styles.contains(.emphasis) {
+            text = text.italic()
+        }
+        if styles.contains(.strikethrough) {
+            text = text.strikethrough()
+        }
+        return text
+    }
+}
+
 private struct NMPReferenceClaimModifier: ViewModifier {
     @ObservedObject var session: NostrContentSession
     let referenceID: UInt64
@@ -291,5 +341,14 @@ private extension View {
     @ViewBuilder
     func italic(_ enabled: Bool) -> some View {
         if enabled { italic() } else { self }
+    }
+}
+
+private extension NostrContentInline {
+    var requiresNativeFlow: Bool {
+        switch self {
+        case .reference, .hashtag, .link: return true
+        case .text, .softBreak, .hardBreak: return false
+        }
     }
 }
