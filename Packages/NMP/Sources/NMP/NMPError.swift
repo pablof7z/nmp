@@ -35,6 +35,13 @@ public enum NMPError: Error, Sendable, Equatable {
     case storeOpenFailed(String)
     case invalidSignature(String)
     case engineClosed
+    /// `decodeNostrEntity`'s input was not valid bech32, had an
+    /// unrecognized HRP prefix, or had a malformed inner TLV payload
+    /// (#116).
+    case invalidNostrEntity(String)
+    /// `decodeNostrEntity`'s input decoded to `nsec`/`ncryptsec` -- refused
+    /// rather than decoded (#116).
+    case nostrEntitySecretKeyRejected
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -48,6 +55,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed
+        case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)
+        case .NostrEntitySecretKeyRejected: self = .nostrEntitySecretKeyRejected
         }
     }
 }

@@ -41,6 +41,13 @@ sealed class NMPError(message: String) : Exception(message) {
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
+    /** `decodeNostrEntity`'s input was not valid bech32, had an
+     * unrecognized HRP prefix, or had a malformed inner TLV payload (#116). */
+    data class InvalidNostrEntity(val reason: String) : NMPError("invalid nostr entity: $reason")
+    /** `decodeNostrEntity`'s input decoded to `nsec`/`ncryptsec` -- refused
+     * rather than decoded (#116). */
+    object NostrEntitySecretKeyRejected :
+        NMPError("refusing to decode a secret-key entity")
 
     companion object {
         fun from(ffi: FfiException): NMPError =
@@ -55,6 +62,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed
+                is FfiException.InvalidNostrEntity -> InvalidNostrEntity(ffi.reason)
+                is FfiException.NostrEntitySecretKeyRejected -> NostrEntitySecretKeyRejected
             }
     }
 }

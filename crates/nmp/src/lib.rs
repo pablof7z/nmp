@@ -64,6 +64,13 @@ pub use nmp_grammar::{
 };
 pub use nmp_resolver::LiveQuery;
 
+// Bech32 nostr-entity DECODE (#116) -- npub/nprofile/note/nevent/naddr ->
+// hex id/pubkey + relay hints. A pure codec, unrelated to the two nouns
+// above, but "shared, protocol-level" per #116's own framing: a direct-Rust
+// app gets it here for the identical reason `nmp-ffi` gets it at the FFI
+// boundary, rather than each hand-rolling its own bech32 decode.
+pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
+
 // The write plane a `WriteIntent` is built from, and its receipt stream.
 // `NarrowOnly`/`PrivateRoute` are deliberately NOT re-exported here: their
 // constructor validates only that a set can never widen after construction,
