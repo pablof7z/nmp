@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, Lane, RouteKind, Router,
-    RuleRegistry, ShortfallReason,
+    test_relay, DiscoveryKinds, FixtureDirectory, Lane, RouteKind, Router, RuleRegistry,
+    ShortfallReason,
 };
 
 fn pk(c: char) -> String {
