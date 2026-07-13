@@ -1,12 +1,13 @@
 //! [`RedbStore`] — the persistent, `redb`-backed `EventStore` (M3 step A1).
 //!
 //! Canonical events use an immutable portable binary note value addressed by
-//! a compact monotonic `u64` key. Raw event ids map to that key, mutable
-//! provenance/local state lives in its own compact sidecar, and every ordered
-//! secondary index points straight at the key. Queries borrow note fields from
-//! redb guards and materialize an owned `nostr::Event` only for returned rows.
-//! Displaced outbox rows remain self-contained binary snapshots; other
-//! outbox/coverage metadata remains typed JSON.
+//! a compact monotonic `u64` key. Raw event ids map to that key, optional local
+//! state has a dedicated compact value, and relay observations are fixed-width
+//! `(event, interned-relay) -> timestamp` rows. Every ordered secondary index
+//! points straight at the event key. Queries borrow note fields from redb
+//! guards and join provenance only for returned rows. Displaced outbox rows
+//! remain self-contained binary snapshots; other outbox/coverage metadata
+//! remains typed JSON.
 //!
 //! `redb`'s own errors (`TableError`/`StorageError`/…) are all invariant
 //! violations for this crate's purposes — a healthy embedded DB file does
@@ -63,18 +64,34 @@ fn persist_err(e: impl std::fmt::Display) -> PersistenceError {
 }
 
 type EventKey = u64;
+type RelayKey = u32;
 
-/// Breaking v3 event schema. Compatibility is intentionally not carried:
-/// immutable notes, mutable metadata, raw-id lookup, and compact primary keys
-/// are independent tables from the first byte written.
-const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events_v3");
-const EVENT_IDS: TableDefinition<&[u8], EventKey> = TableDefinition::new("event_ids_v3");
-const EVENT_METADATA: TableDefinition<EventKey, &[u8]> = TableDefinition::new("event_metadata_v3");
+/// Breaking v4 event schema. Compatibility is intentionally not carried:
+/// immutable notes, local state, interned relay observations, raw-id lookup,
+/// and compact primary keys are independent tables from the first byte.
+const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events_v4");
+const EVENT_IDS: TableDefinition<&[u8], EventKey> = TableDefinition::new("event_ids_v4");
+const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> = TableDefinition::new("event_local_v4");
 const EVENT_STORE_META: TableDefinition<&str, EventKey> =
-    TableDefinition::new("event_store_meta_v3");
+    TableDefinition::new("event_store_meta_v4");
 const NEXT_EVENT_KEY: &str = "next_event_key";
-const LEGACY_EVENT_TABLES: [&str; 3] = ["events", "events_v2", "outbox_displaced_v2"];
-const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index_v3");
+const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays_v4");
+const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys_v4");
+const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs_v4");
+const RELAY_META: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_meta_v4");
+const NEXT_RELAY_KEY: &str = "next_relay_key";
+/// Fixed-width key: `event_key:u64-be | relay_key:u32-be`; value is the
+/// greatest observation timestamp in seconds.
+const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
+    TableDefinition::new("event_observations_v4");
+const LEGACY_EVENT_TABLES: [&str; 5] = [
+    "events",
+    "events_v2",
+    "events_v3",
+    "outbox_displaced_v2",
+    "outbox_displaced_v3",
+];
+const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index_v4");
 const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
 /// Permanent kind:5 tombstones for individual event ids
 /// (retraction-and-negative-deltas.md §2/§7). Key: `"{id_hex}:{author_hex}"`
@@ -97,15 +114,15 @@ const ADDR_TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("addr_
 /// byte-lexicographic order matches numeric deadline order); value: the
 /// canonical event's compact surrogate key.
 const EXPIRATION_INDEX: TableDefinition<&str, EventKey> =
-    TableDefinition::new("expiration_index_v3");
+    TableDefinition::new("expiration_index_v4");
 /// Binary ordered indexes all end in the same sortable suffix:
 /// `created_at:u64-be | !event_id:[u8;32]`. Reverse scans therefore yield
 /// `created_at DESC, event_id ASC` and can stop exactly at the visible limit.
-const BY_CREATED_AT: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_created_at_v2");
-const BY_AUTHOR: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_author_time_v2");
-const BY_KIND: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_kind_time_v2");
+const BY_CREATED_AT: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_created_at_v3");
+const BY_AUTHOR: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_author_time_v3");
+const BY_KIND: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_kind_time_v3");
 const BY_AUTHOR_KIND: TableDefinition<&[u8], EventKey> =
-    TableDefinition::new("by_author_kind_time_v2");
+    TableDefinition::new("by_author_kind_time_v3");
 /// NIP-01 single-letter tag index, borrowing nostrdb's clustered
 /// `(tag,value,created_at)` layout. The binary key is:
 ///
@@ -118,7 +135,7 @@ const BY_AUTHOR_KIND: TableDefinition<&[u8], EventKey> =
 /// parsing hex.
 /// Values are compact event keys, so a hit dereferences the immutable note
 /// directly without rebuilding or hex-encoding its NIP-01 id.
-const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v2");
+const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v3");
 /// The durable write-outbox journal (crashsafe-accepted-2-3-plan.md §2.2,
 /// Fable checkpoint Q2 — APPROVED as co-resident in this same `Database`:
 /// redb atomicity is a per-`Database` property, so the one crash-atomic
@@ -138,7 +155,7 @@ const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox
 /// `NMPE` value. See [`encode_stored_event`]/[`decode_stored_event`]. Deleted
 /// durably by `promote_signed` (R6) or `compensate_write`; never by
 /// `recover_outbox` (read-only).
-const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> = TableDefinition::new("outbox_displaced_v3");
+const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> = TableDefinition::new("outbox_displaced_v4");
 /// Per-`(intent, relay, ordinal)` durable attempt evidence
 /// (crashsafe-accepted-2-3-plan.md §5) — schema created here so the table
 /// exists for the dispatch-time attempt writer to come (U3/U4: "Persist
@@ -940,14 +957,53 @@ fn encode_stored_event_record(record: &StoredEventRecord) -> Vec<u8> {
     encode_stored_event(&record_to_stored_event(record))
 }
 
+fn observation_key(event_key: EventKey, relay_key: RelayKey) -> [u8; 12] {
+    let mut key = [0u8; 12];
+    key[..8].copy_from_slice(&event_key.to_be_bytes());
+    key[8..].copy_from_slice(&relay_key.to_be_bytes());
+    key
+}
+
+fn observation_range(event_key: EventKey) -> ([u8; 12], [u8; 12]) {
+    (
+        observation_key(event_key, RelayKey::MIN),
+        observation_key(event_key, RelayKey::MAX),
+    )
+}
+
+fn observation_relay_key(key: &[u8]) -> RelayKey {
+    RelayKey::from_be_bytes(
+        key[8..12]
+            .try_into()
+            .expect("validated observation key is twelve bytes"),
+    )
+}
+
+#[cfg(test)]
+fn observation_event_key(key: &[u8]) -> EventKey {
+    EventKey::from_be_bytes(
+        key[..8]
+            .try_into()
+            .expect("validated observation key is twelve bytes"),
+    )
+}
+
 /// Tables that jointly own one canonical event row. Keeping them behind one
 /// value makes it hard for a write path to mutate the immutable note without
-/// also considering its raw-id mapping and metadata sidecar.
+/// also considering its raw-id mapping, local state, and relay observations.
 struct CanonicalWriteTables<'txn> {
     events: redb::Table<'txn, EventKey, &'static [u8]>,
     event_ids: redb::Table<'txn, &'static [u8], EventKey>,
-    metadata: redb::Table<'txn, EventKey, &'static [u8]>,
+    local: redb::Table<'txn, EventKey, &'static [u8]>,
     store_meta: redb::Table<'txn, &'static str, EventKey>,
+    observations: redb::Table<'txn, &'static [u8; 12], u64>,
+    relays: redb::Table<'txn, RelayKey, &'static str>,
+    relay_keys: redb::Table<'txn, &'static str, RelayKey>,
+    relay_refs: redb::Table<'txn, RelayKey, u64>,
+    relay_meta: redb::Table<'txn, &'static str, RelayKey>,
+    /// Effective counts touched by this transaction. Busy batches commonly
+    /// share one relay, so the durable hot row is read and written once.
+    relay_ref_counts: HashMap<RelayKey, u64>,
 }
 
 impl<'txn> CanonicalWriteTables<'txn> {
@@ -955,10 +1011,18 @@ impl<'txn> CanonicalWriteTables<'txn> {
         Ok(Self {
             events: write_txn.open_table(EVENTS).map_err(persist_err)?,
             event_ids: write_txn.open_table(EVENT_IDS).map_err(persist_err)?,
-            metadata: write_txn.open_table(EVENT_METADATA).map_err(persist_err)?,
+            local: write_txn.open_table(EVENT_LOCAL).map_err(persist_err)?,
             store_meta: write_txn
                 .open_table(EVENT_STORE_META)
                 .map_err(persist_err)?,
+            observations: write_txn
+                .open_table(EVENT_OBSERVATIONS)
+                .map_err(persist_err)?,
+            relays: write_txn.open_table(RELAYS).map_err(persist_err)?,
+            relay_keys: write_txn.open_table(RELAY_KEYS).map_err(persist_err)?,
+            relay_refs: write_txn.open_table(RELAY_REFS).map_err(persist_err)?,
+            relay_meta: write_txn.open_table(RELAY_META).map_err(persist_err)?,
+            relay_ref_counts: HashMap::new(),
         })
     }
 
@@ -974,28 +1038,50 @@ impl<'txn> CanonicalWriteTables<'txn> {
         let Some(event_bytes) = self.events.get(key).map_err(persist_err)? else {
             return Ok(None);
         };
-        let metadata_bytes = self
-            .metadata
-            .get(key)
-            .map_err(persist_err)?
-            .expect("redb: every canonical event has metadata");
+        let local_bytes = self.local.get(key).map_err(persist_err)?;
         let event = StoredEventView::from_trusted(event_bytes.value())
             .expect("redb: decode canonical event view")
             .materialize_event()
             .expect("redb: materialize canonical event");
-        let provenance = binary_event::decode_provenance(metadata_bytes.value())
-            .expect("redb: decode canonical provenance");
+        let local = local_bytes.map(|bytes| {
+            binary_event::decode_local(bytes.value()).expect("redb: decode canonical local state")
+        });
+        let provenance = Provenance {
+            seen: self.load_seen(key)?,
+            local,
+        };
         Ok(Some(StoredEvent { event, provenance }))
     }
 
-    fn load_provenance(&self, key: EventKey) -> Result<Provenance, PersistenceError> {
-        let bytes = self
-            .metadata
-            .get(key)
+    fn load_local(&self, key: EventKey) -> Result<Option<LocalOrigin>, PersistenceError> {
+        Ok(self.local.get(key).map_err(persist_err)?.map(|bytes| {
+            binary_event::decode_local(bytes.value()).expect("redb: decode canonical local state")
+        }))
+    }
+
+    fn load_seen(
+        &self,
+        event_key: EventKey,
+    ) -> Result<BTreeMap<RelayUrl, Timestamp>, PersistenceError> {
+        let (lower, upper) = observation_range(event_key);
+        let mut seen = BTreeMap::new();
+        for entry in self
+            .observations
+            .range::<&[u8; 12]>(&lower..=&upper)
             .map_err(persist_err)?
-            .expect("redb: every canonical event has metadata");
-        Ok(binary_event::decode_provenance(bytes.value())
-            .expect("redb: decode canonical provenance"))
+        {
+            let (encoded_key, at) = entry.map_err(persist_err)?;
+            let relay_key = observation_relay_key(encoded_key.value());
+            let relay = self
+                .relays
+                .get(relay_key)
+                .map_err(persist_err)?
+                .expect("redb: observation relay key exists");
+            let relay =
+                RelayUrl::parse(relay.value()).expect("redb: interned relay URL remains canonical");
+            assert!(seen.insert(relay, Timestamp::from(at.value())).is_none());
+        }
+        Ok(seen)
     }
 
     fn load_by_id(
@@ -1024,6 +1110,162 @@ impl<'txn> CanonicalWriteTables<'txn> {
         Ok(next)
     }
 
+    fn allocate_relay_key(&mut self) -> Result<RelayKey, PersistenceError> {
+        let next = self
+            .relay_meta
+            .get(NEXT_RELAY_KEY)
+            .map_err(persist_err)?
+            .map(|guard| guard.value())
+            .unwrap_or(1);
+        let following = next
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("relay key space exhausted".to_owned()))?;
+        self.relay_meta
+            .insert(NEXT_RELAY_KEY, following)
+            .map_err(persist_err)?;
+        Ok(next)
+    }
+
+    fn intern_relay(&mut self, relay: &RelayUrl) -> Result<RelayKey, PersistenceError> {
+        if let Some(existing) = self.relay_keys.get(relay.as_str()).map_err(persist_err)? {
+            return Ok(existing.value());
+        }
+        let key = self.allocate_relay_key()?;
+        self.relays
+            .insert(key, relay.as_str())
+            .map_err(persist_err)?;
+        self.relay_keys
+            .insert(relay.as_str(), key)
+            .map_err(persist_err)?;
+        self.relay_refs.insert(key, 0).map_err(persist_err)?;
+        Ok(key)
+    }
+
+    fn effective_relay_ref(&mut self, relay_key: RelayKey) -> Result<u64, PersistenceError> {
+        if let Some(current) = self.relay_ref_counts.get(&relay_key) {
+            return Ok(*current);
+        }
+        let current = self
+            .relay_refs
+            .get(relay_key)
+            .map_err(persist_err)?
+            .expect("redb: interned relay has refcount")
+            .value();
+        self.relay_ref_counts.insert(relay_key, current);
+        Ok(current)
+    }
+
+    fn increment_relay_ref(&mut self, relay_key: RelayKey) -> Result<(), PersistenceError> {
+        let current = self.effective_relay_ref(relay_key)?;
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError("relay reference count exhausted".to_owned()))?;
+        self.relay_ref_counts.insert(relay_key, next);
+        Ok(())
+    }
+
+    fn decrement_relay_ref(&mut self, relay_key: RelayKey) -> Result<(), PersistenceError> {
+        let current = self.effective_relay_ref(relay_key)?;
+        let next = current
+            .checked_sub(1)
+            .ok_or_else(|| PersistenceError("relay reference count underflow".to_owned()))?;
+        self.relay_ref_counts.insert(relay_key, next);
+        Ok(())
+    }
+
+    fn flush_relay_refs(&mut self) -> Result<(), PersistenceError> {
+        for (relay_key, effective) in std::mem::take(&mut self.relay_ref_counts) {
+            let persisted = self
+                .relay_refs
+                .get(relay_key)
+                .map_err(persist_err)?
+                .expect("redb: interned relay has refcount")
+                .value();
+            if effective > 0 {
+                if effective == persisted {
+                    continue;
+                }
+                self.relay_refs
+                    .insert(relay_key, effective)
+                    .map_err(persist_err)?;
+                continue;
+            }
+            let relay = self
+                .relays
+                .get(relay_key)
+                .map_err(persist_err)?
+                .expect("redb: interned relay exists")
+                .value()
+                .to_owned();
+            self.relay_refs.remove(relay_key).map_err(persist_err)?;
+            self.relays.remove(relay_key).map_err(persist_err)?;
+            self.relay_keys
+                .remove(relay.as_str())
+                .map_err(persist_err)?;
+        }
+        Ok(())
+    }
+
+    fn merge_observation(
+        &mut self,
+        event_key: EventKey,
+        relay: &RelayUrl,
+        at: Timestamp,
+    ) -> Result<bool, PersistenceError> {
+        let relay_key = self.intern_relay(relay)?;
+        let encoded_key = observation_key(event_key, relay_key);
+        let existing = self
+            .observations
+            .get(&encoded_key)
+            .map_err(persist_err)?
+            .map(|guard| guard.value());
+        if existing.is_some_and(|existing| existing >= at.as_secs()) {
+            return Ok(false);
+        }
+        self.observations
+            .insert(&encoded_key, at.as_secs())
+            .map_err(persist_err)?;
+        if existing.is_none() {
+            self.increment_relay_ref(relay_key)?;
+        }
+        Ok(true)
+    }
+
+    fn remove_observation(
+        &mut self,
+        event_key: EventKey,
+        relay_key: RelayKey,
+    ) -> Result<(), PersistenceError> {
+        let encoded_key = observation_key(event_key, relay_key);
+        if self
+            .observations
+            .remove(&encoded_key)
+            .map_err(persist_err)?
+            .is_some()
+        {
+            self.decrement_relay_ref(relay_key)?;
+        }
+        Ok(())
+    }
+
+    fn remove_all_observations(&mut self, event_key: EventKey) -> Result<(), PersistenceError> {
+        let (lower, upper) = observation_range(event_key);
+        let relay_keys = self
+            .observations
+            .range::<&[u8; 12]>(&lower..=&upper)
+            .map_err(persist_err)?
+            .map(|entry| {
+                entry
+                    .map(|(key, _)| observation_relay_key(key.value()))
+                    .map_err(persist_err)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for relay_key in relay_keys {
+            self.remove_observation(event_key, relay_key)?;
+        }
+        Ok(())
+    }
+
     fn insert_new(
         &mut self,
         event: &Event,
@@ -1033,17 +1275,22 @@ impl<'txn> CanonicalWriteTables<'txn> {
         let key = self.allocate_key()?;
         let event_bytes =
             binary_event::encode_event(event).expect("redb: encode immutable canonical event");
-        let metadata_bytes =
-            binary_event::encode_provenance(provenance).expect("redb: encode canonical provenance");
         self.events
             .insert(key, event_bytes.as_slice())
             .map_err(persist_err)?;
         self.event_ids
             .insert(event.id.as_bytes().as_slice(), key)
             .map_err(persist_err)?;
-        self.metadata
-            .insert(key, metadata_bytes.as_slice())
-            .map_err(persist_err)?;
+        if let Some(local) = &provenance.local {
+            let encoded =
+                binary_event::encode_local(local).expect("redb: encode canonical local state");
+            self.local
+                .insert(key, encoded.as_slice())
+                .map_err(persist_err)?;
+        }
+        for (relay, at) in &provenance.seen {
+            self.merge_observation(key, relay, *at)?;
+        }
         Ok(key)
     }
 
@@ -1061,11 +1308,52 @@ impl<'txn> CanonicalWriteTables<'txn> {
         key: EventKey,
         provenance: &Provenance,
     ) -> Result<(), PersistenceError> {
-        let encoded =
-            binary_event::encode_provenance(provenance).expect("redb: encode canonical provenance");
-        self.metadata
-            .insert(key, encoded.as_slice())
-            .map_err(persist_err)?;
+        let existing = self.load_seen(key)?;
+        for relay in existing.keys() {
+            if !provenance.seen.contains_key(relay) {
+                let relay_key = self
+                    .relay_keys
+                    .get(relay.as_str())
+                    .map_err(persist_err)?
+                    .expect("redb: observed relay remains interned")
+                    .value();
+                self.remove_observation(key, relay_key)?;
+            }
+        }
+        for (relay, at) in &provenance.seen {
+            if existing.get(relay) != Some(at) {
+                let relay_key = self.intern_relay(relay)?;
+                let encoded_key = observation_key(key, relay_key);
+                let was_absent = self
+                    .observations
+                    .get(&encoded_key)
+                    .map_err(persist_err)?
+                    .is_none();
+                self.observations
+                    .insert(&encoded_key, at.as_secs())
+                    .map_err(persist_err)?;
+                if was_absent {
+                    self.increment_relay_ref(relay_key)?;
+                }
+            }
+        }
+        self.replace_local(key, provenance.local.clone())
+    }
+
+    fn replace_local(
+        &mut self,
+        key: EventKey,
+        local: Option<LocalOrigin>,
+    ) -> Result<(), PersistenceError> {
+        if let Some(local) = local {
+            let encoded =
+                binary_event::encode_local(&local).expect("redb: encode canonical local state");
+            self.local
+                .insert(key, encoded.as_slice())
+                .map_err(persist_err)?;
+        } else {
+            self.local.remove(key).map_err(persist_err)?;
+        }
         Ok(())
     }
 
@@ -1074,7 +1362,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
         self.event_ids
             .remove(id.as_bytes().as_slice())
             .map_err(persist_err)?;
-        self.metadata.remove(key).map_err(persist_err)?;
+        self.local.remove(key).map_err(persist_err)?;
+        self.remove_all_observations(key)?;
         Ok(())
     }
 }
@@ -1248,20 +1537,27 @@ fn ordered_index_created_at(key: &[u8]) -> u64 {
     )
 }
 
-/// Test-only raw-table audit for the referential integrity introduced by v3
-/// surrogate keys. Every governed crash/reopen proof calls this directly,
-/// without going through query paths that could hide an orphan pointer.
+/// Test-only raw-table audit for v4 event/relay surrogate integrity. Every
+/// governed crash/reopen proof calls this directly, without going through
+/// query paths that could hide a missing or orphan pointer.
 #[cfg(test)]
 fn assert_canonical_integrity(db: &Database) {
     let read_txn = db.begin_read().expect("begin canonical integrity audit");
     let events = read_txn.open_table(EVENTS).expect("audit events");
     let event_ids = read_txn.open_table(EVENT_IDS).expect("audit event ids");
-    let metadata = read_txn
-        .open_table(EVENT_METADATA)
-        .expect("audit event metadata");
+    let local = read_txn
+        .open_table(EVENT_LOCAL)
+        .expect("audit event local metadata");
     let store_meta = read_txn
         .open_table(EVENT_STORE_META)
         .expect("audit event store meta");
+    let observations = read_txn
+        .open_table(EVENT_OBSERVATIONS)
+        .expect("audit event observations");
+    let relays = read_txn.open_table(RELAYS).expect("audit relays");
+    let relay_keys = read_txn.open_table(RELAY_KEYS).expect("audit relay keys");
+    let relay_refs = read_txn.open_table(RELAY_REFS).expect("audit relay refs");
+    let relay_meta = read_txn.open_table(RELAY_META).expect("audit relay meta");
 
     let mut canonical = BTreeMap::new();
     for entry in events.iter().expect("iterate audit events") {
@@ -1277,11 +1573,6 @@ fn assert_canonical_integrity(db: &Database) {
                 .value(),
             key
         );
-        let provenance = metadata
-            .get(key)
-            .expect("audit metadata lookup")
-            .expect("every event has metadata");
-        binary_event::decode_provenance(provenance.value()).expect("audit provenance value");
         assert!(canonical.insert(key, event).is_none());
     }
 
@@ -1298,14 +1589,10 @@ fn assert_canonical_integrity(db: &Database) {
         assert_eq!(raw_id.value(), event.id.as_bytes().as_slice());
     }
 
-    assert_eq!(
-        metadata.len().expect("count audit metadata"),
-        canonical.len() as u64
-    );
-    for entry in metadata.iter().expect("iterate audit metadata") {
-        let (event_key, value) = entry.expect("read audit metadata");
+    for entry in local.iter().expect("iterate audit local metadata") {
+        let (event_key, value) = entry.expect("read audit local metadata");
         assert!(canonical.contains_key(&event_key.value()));
-        binary_event::decode_provenance(value.value()).expect("audit provenance sidecar");
+        binary_event::decode_local(value.value()).expect("audit local metadata sidecar");
     }
 
     if let Some(max_key) = canonical.keys().next_back() {
@@ -1315,6 +1602,76 @@ fn assert_canonical_integrity(db: &Database) {
             .expect("nonempty canonical store has next event key")
             .value();
         assert!(next > *max_key, "surrogate allocator must not reuse keys");
+    }
+
+    let mut expected_relay_refs = BTreeMap::<RelayKey, u64>::new();
+    for entry in observations.iter().expect("iterate audit observations") {
+        let (encoded_key, _at) = entry.expect("read audit observation");
+        let encoded_key = encoded_key.value();
+        assert_eq!(encoded_key.len(), 12);
+        let event_key = observation_event_key(encoded_key);
+        let relay_key = observation_relay_key(encoded_key);
+        assert!(
+            canonical.contains_key(&event_key),
+            "observation points at live event"
+        );
+        assert!(
+            relays.get(relay_key).expect("audit relay lookup").is_some(),
+            "observation points at interned relay"
+        );
+        *expected_relay_refs.entry(relay_key).or_default() += 1;
+    }
+    assert_eq!(
+        relays.len().expect("count audit relays"),
+        expected_relay_refs.len() as u64
+    );
+    assert_eq!(
+        relay_keys.len().expect("count audit relay keys"),
+        expected_relay_refs.len() as u64
+    );
+    assert_eq!(
+        relay_refs.len().expect("count audit relay refs"),
+        expected_relay_refs.len() as u64
+    );
+    for entry in relays.iter().expect("iterate audit relays") {
+        let (relay_key, encoded_url) = entry.expect("read audit relay");
+        let relay_key = relay_key.value();
+        RelayUrl::parse(encoded_url.value()).expect("interned relay is canonical");
+        assert_eq!(
+            relay_keys
+                .get(encoded_url.value())
+                .expect("audit reverse relay lookup")
+                .expect("relay has reverse key")
+                .value(),
+            relay_key
+        );
+        assert_eq!(
+            relay_refs
+                .get(relay_key)
+                .expect("audit relay ref lookup")
+                .expect("relay has refcount")
+                .value(),
+            expected_relay_refs[&relay_key]
+        );
+    }
+    for entry in relay_keys.iter().expect("iterate audit reverse relays") {
+        let (encoded_url, relay_key) = entry.expect("read audit reverse relay");
+        assert_eq!(
+            relays
+                .get(relay_key.value())
+                .expect("audit forward relay lookup")
+                .expect("reverse relay has forward row")
+                .value(),
+            encoded_url.value()
+        );
+    }
+    if let Some(max_key) = expected_relay_refs.keys().next_back() {
+        let next = relay_meta
+            .get(NEXT_RELAY_KEY)
+            .expect("audit next relay key")
+            .expect("nonempty relay dictionary has next key")
+            .value();
+        assert!(next > *max_key, "relay allocator must not reuse keys");
     }
 
     let actual_ordered = |definition: TableDefinition<&[u8], EventKey>| {
@@ -2275,6 +2632,7 @@ enum RedbCrashPoint {
     LaneStartBeforeCommit,
     LaneHandoffBeforeCommit,
     LaneCloseBeforeCommit,
+    ObservationBeforeCommit,
 }
 
 pub struct RedbStore {
@@ -2333,8 +2691,8 @@ impl RedbStore {
     /// all tables exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
-        // Schema v3 deliberately carries no event-row migration. Refuse any
-        // older NMP event epoch before creating a single v3 table: otherwise
+        // Schema v4 deliberately carries no event-row migration. Refuse any
+        // older NMP event epoch before creating a single v4 table: otherwise
         // canonical events would appear empty while unversioned durable
         // outbox/coverage/tombstone facts from the old epoch remained live.
         // A caller opting into this breaking release must recreate the whole
@@ -2345,15 +2703,20 @@ impl RedbStore {
                 .list_tables()?
                 .any(|table| LEGACY_EVENT_TABLES.contains(&table.name()));
             if legacy_epoch {
-                return Err(redb::Error::UpgradeRequired(3));
+                return Err(redb::Error::UpgradeRequired(4));
             }
         }
         let write_txn = db.begin_write()?;
         {
             write_txn.open_table(EVENTS)?;
             write_txn.open_table(EVENT_IDS)?;
-            write_txn.open_table(EVENT_METADATA)?;
+            write_txn.open_table(EVENT_LOCAL)?;
             write_txn.open_table(EVENT_STORE_META)?;
+            write_txn.open_table(EVENT_OBSERVATIONS)?;
+            write_txn.open_table(RELAYS)?;
+            write_txn.open_table(RELAY_KEYS)?;
+            write_txn.open_table(RELAY_REFS)?;
+            write_txn.open_table(RELAY_META)?;
             write_txn.open_table(ADDR_INDEX)?;
             write_txn.open_table(COVERAGE)?;
             write_txn.open_table(TOMBSTONES)?;
@@ -2470,16 +2833,65 @@ impl RedbStore {
     /// counts every row `query` actually pays the owned-event cost for,
     /// regardless of which of `query`'s three paths (id/indexed/full-scan)
     /// reached it.
-    fn decode_row(&self, view: StoredEventView<'_>, metadata: &[u8]) -> StoredEvent {
+    fn read_provenance(
+        &self,
+        event_key: EventKey,
+        local_bytes: Option<&[u8]>,
+        observations: &redb::ReadOnlyTable<&'static [u8; 12], u64>,
+        relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
+        relay_cache: &mut HashMap<RelayKey, RelayUrl>,
+    ) -> Result<Provenance, PersistenceError> {
+        let local = local_bytes.map(|bytes| {
+            binary_event::decode_local(bytes).expect("redb: decode canonical local state")
+        });
+        let (lower, upper) = observation_range(event_key);
+        let mut seen = BTreeMap::new();
+        for entry in observations
+            .range::<&[u8; 12]>(&lower..=&upper)
+            .map_err(persist_err)?
+        {
+            let (encoded_key, at) = entry.map_err(persist_err)?;
+            let relay_key = observation_relay_key(encoded_key.value());
+            let relay = if let Some(relay) = relay_cache.get(&relay_key) {
+                relay.clone()
+            } else {
+                let encoded_relay =
+                    relays.get(relay_key).map_err(persist_err)?.ok_or_else(|| {
+                        PersistenceError(format!("observation points at missing relay {relay_key}"))
+                    })?;
+                let relay = RelayUrl::parse(encoded_relay.value())
+                    .expect("redb: interned relay URL remains canonical");
+                relay_cache.insert(relay_key, relay.clone());
+                relay
+            };
+            assert!(seen.insert(relay, Timestamp::from(at.value())).is_none());
+        }
+        Ok(Provenance { seen, local })
+    }
+
+    fn decode_row(
+        &self,
+        event_key: EventKey,
+        view: StoredEventView<'_>,
+        local_bytes: Option<&[u8]>,
+        observations: &redb::ReadOnlyTable<&'static [u8; 12], u64>,
+        relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
+        relay_cache: &mut HashMap<RelayKey, RelayUrl>,
+    ) -> Result<StoredEvent, PersistenceError> {
         #[cfg(test)]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
-        StoredEvent {
+        Ok(StoredEvent {
             event: view
                 .materialize_event()
                 .expect("redb: materialize validated portable event"),
-            provenance: binary_event::decode_provenance(metadata)
-                .expect("redb: decode canonical provenance"),
-        }
+            provenance: self.read_provenance(
+                event_key,
+                local_bytes,
+                observations,
+                relays,
+                relay_cache,
+            )?,
+        })
     }
 
     /// Reverse-merge one or more ranges from the planner's chosen index.
@@ -2495,7 +2907,11 @@ impl RedbStore {
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
-        let metadata = read_txn.open_table(EVENT_METADATA).map_err(persist_err)?;
+        let local = read_txn.open_table(EVENT_LOCAL).map_err(persist_err)?;
+        let observations = read_txn
+            .open_table(EVENT_OBSERVATIONS)
+            .map_err(persist_err)?;
+        let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let index = read_txn.open_table(index).map_err(persist_err)?;
         let outbox_suppress_by_id = read_txn
             .open_table(OUTBOX_SUPPRESS_BY_ID)
@@ -2505,7 +2921,8 @@ impl RedbStore {
             .map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
-        let materialize_if_visible =
+        let mut relay_cache = HashMap::new();
+        let mut materialize_if_visible =
             |event_key: EventKey| -> Result<Option<StoredEvent>, PersistenceError> {
                 let Some(value) = events.get(event_key).map_err(persist_err)? else {
                     return Err(PersistenceError(format!(
@@ -2517,11 +2934,15 @@ impl RedbStore {
                 if !view.matches_filter(filter) {
                     return Ok(None);
                 }
-                let metadata_value = metadata
-                    .get(event_key)
-                    .map_err(persist_err)?
-                    .expect("redb: every canonical event has metadata");
-                let stored = self.decode_row(view, metadata_value.value());
+                let local_value = local.get(event_key).map_err(persist_err)?;
+                let stored = self.decode_row(
+                    event_key,
+                    view,
+                    local_value.as_ref().map(|value| value.value()),
+                    &observations,
+                    &relays,
+                    &mut relay_cache,
+                )?;
                 if is_suppressed_in_txn(
                     &outbox_suppress_by_id,
                     &outbox_suppress_by_addr,
@@ -2769,8 +3190,8 @@ fn insert_with_tables(
             // through `Provenance::merge_observation` (not a re-derived
             // copy) so the persisted backend can never diverge from
             // `MemoryStore`'s merge semantics.
-            let mut provenance = canonical.load_provenance(event_key)?;
-            let grew = provenance.merge_observation(&from);
+            let mut local = canonical.load_local(event_key)?;
+            let grew = canonical.merge_observation(event_key, &from.relay, from.at)?;
             // Architecture review requirement (issue #2 P0 correction,
             // codex-nova ruling): a relay delivering the real signed
             // event for a still-Pending local draft is functionally the
@@ -2780,19 +3201,17 @@ fn insert_with_tables(
             // own sentinel forever (`event` here is, by this door's own
             // contract, always a genuine relay delivery, never our OWN
             // sentinel, so its signature is always safe to adopt).
-            let needs_adoption = provenance
-                .local
+            let needs_adoption = local
                 .as_ref()
                 .is_some_and(|l| l.sig_state == SigState::Pending);
             let mut fan_out_owners: Option<BTreeSet<IntentId>> = None;
             if needs_adoption {
-                let mut local = provenance
-                    .local
+                let mut adopted = local
                     .clone()
                     .expect("just checked this row carries local provenance");
-                local.sig_state = SigState::Signed;
-                fan_out_owners = Some(local.owners.clone());
-                provenance.local = Some(local);
+                adopted.sig_state = SigState::Signed;
+                fan_out_owners = Some(adopted.owners.clone());
+                local = Some(adopted);
             }
             // `merge_observation` never touches `local` (a relay echo
             // of an already-local row keeps its local provenance,
@@ -2800,11 +3219,7 @@ fn insert_with_tables(
             // unchanged, written straight back.
             if fan_out_owners.is_some() {
                 canonical.replace_event(event_key, &event)?;
-            }
-            // An exact/equal-or-earlier relay redelivery with no signature
-            // adoption is a true physical no-op: no COW page churn at all.
-            if grew || fan_out_owners.is_some() {
-                canonical.replace_provenance(event_key, &provenance)?;
+                canonical.replace_local(event_key, local)?;
             }
             let satisfied_intents = if let Some(owners) = &fan_out_owners {
                 fan_out_signed_in_txn(
@@ -2988,8 +3403,12 @@ impl EventStore for RedbStore {
         let write_txn = self.db.begin_write().map_err(persist_err)?;
         let outcome = {
             let mut tables = InsertWriteTables::open(&write_txn)?;
-            insert_with_tables(&mut tables, event, from)?
+            let outcome = insert_with_tables(&mut tables, event, from)?;
+            tables.canonical.flush_relay_refs()?;
+            outcome
         };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::ObservationBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(outcome)
     }
@@ -3008,7 +3427,10 @@ impl EventStore for RedbStore {
             for (event, from) in events {
                 outcomes.push(insert_with_tables(&mut tables, event, from)?);
             }
+            tables.canonical.flush_relay_refs()?;
         }
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::ObservationBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(outcomes)
     }
@@ -3017,7 +3439,12 @@ impl EventStore for RedbStore {
         let read_txn = self.db.begin_read().map_err(persist_err)?;
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
-        let metadata = read_txn.open_table(EVENT_METADATA).map_err(persist_err)?;
+        let local = read_txn.open_table(EVENT_LOCAL).map_err(persist_err)?;
+        let observations = read_txn
+            .open_table(EVENT_OBSERVATIONS)
+            .map_err(persist_err)?;
+        let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
+        let mut relay_cache = HashMap::new();
         let outbox_suppress_by_id = read_txn
             .open_table(OUTBOX_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
@@ -3058,11 +3485,15 @@ impl EventStore for RedbStore {
                 if !view.matches_filter(filter) {
                     continue;
                 }
-                let metadata_value = metadata
-                    .get(event_key)
-                    .map_err(persist_err)?
-                    .expect("redb: every canonical event has metadata");
-                let se = self.decode_row(view, metadata_value.value());
+                let local_value = local.get(event_key).map_err(persist_err)?;
+                let se = self.decode_row(
+                    event_key,
+                    view,
+                    local_value.as_ref().map(|value| value.value()),
+                    &observations,
+                    &relays,
+                    &mut relay_cache,
+                )?;
                 if visible(&se.event)? {
                     out.push(se);
                 }
@@ -3088,11 +3519,15 @@ impl EventStore for RedbStore {
                     if !view.matches_filter(filter) {
                         continue;
                     }
-                    let metadata_value = metadata
-                        .get(event_key)
-                        .map_err(persist_err)?
-                        .expect("redb: every canonical event has metadata");
-                    let se = self.decode_row(view, metadata_value.value());
+                    let local_value = local.get(event_key).map_err(persist_err)?;
+                    let se = self.decode_row(
+                        event_key,
+                        view,
+                        local_value.as_ref().map(|value| value.value()),
+                        &observations,
+                        &relays,
+                        &mut relay_cache,
+                    )?;
                     if visible(&se.event)? {
                         out.push(se);
                     }
@@ -3108,11 +3543,15 @@ impl EventStore for RedbStore {
                     if !view.matches_filter(filter) {
                         continue;
                     }
-                    let metadata_value = metadata
-                        .get(key.value())
-                        .map_err(persist_err)?
-                        .expect("redb: every canonical event has metadata");
-                    let se = self.decode_row(view, metadata_value.value());
+                    let local_value = local.get(key.value()).map_err(persist_err)?;
+                    let se = self.decode_row(
+                        key.value(),
+                        view,
+                        local_value.as_ref().map(|value| value.value()),
+                        &observations,
+                        &relays,
+                        &mut relay_cache,
+                    )?;
                     if visible(&se.event)? {
                         out.push(se);
                     }
@@ -3203,7 +3642,7 @@ impl EventStore for RedbStore {
             let mut by_kind = write_txn.open_table(BY_KIND).map_err(persist_err)?;
             let mut by_author_kind = write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
             let mut by_tag = write_txn.open_table(BY_TAG).map_err(persist_err)?;
-            remove_row_in_txn(
+            let removed = remove_row_in_txn(
                 &mut canonical,
                 &mut addr_index,
                 &mut expiration_index,
@@ -3214,7 +3653,9 @@ impl EventStore for RedbStore {
                 &mut by_tag,
                 id,
                 |_| true,
-            )?
+            )?;
+            canonical.flush_relay_refs()?;
+            removed
         };
         write_txn.commit().map_err(persist_err)?;
         Ok(removed)
@@ -3267,6 +3708,7 @@ impl EventStore for RedbStore {
                     removed.push(row);
                 }
             }
+            canonical.flush_relay_refs()?;
             removed
         };
         write_txn.commit().map_err(persist_err)?;
@@ -3375,18 +3817,17 @@ impl EventStore for RedbStore {
                     .expect("redb: decode canonical event view")
                     .materialize_event()
                     .expect("redb: materialize canonical event");
-                let provenance = binary_event::decode_provenance(
-                    canonical
-                        .metadata
-                        .get(key.value())
-                        .map_err(persist_err)?
-                        .expect("redb: every canonical event has metadata")
-                        .value(),
-                )
-                .expect("redb: decode canonical provenance");
+                let local = canonical
+                    .local
+                    .get(key.value())
+                    .map_err(persist_err)?
+                    .map(|value| {
+                        binary_event::decode_local(value.value())
+                            .expect("redb: decode canonical local state")
+                    });
                 if address_key_for(&event).is_none()
                     && !matches!(
-                        provenance.local,
+                        local,
                         Some(LocalOrigin {
                             sig_state: SigState::Pending,
                             ..
@@ -3504,6 +3945,7 @@ impl EventStore for RedbStore {
                 coverage.remove(row_key.as_str()).map_err(persist_err)?;
                 report.legacy_coverage_rows_purged += 1;
             }
+            canonical.flush_relay_refs()?;
         }
         write_txn.commit().map_err(persist_err)?;
 
@@ -3648,13 +4090,7 @@ impl EventStore for RedbStore {
                 });
                 match &dup_loc {
                     DupLoc::Live(event_key, _stored) => {
-                        canonical.replace_provenance(
-                            *event_key,
-                            &Provenance {
-                                seen: existing_record.provenance.clone(),
-                                local: existing_record.local.clone(),
-                            },
-                        )?;
+                        canonical.replace_local(*event_key, existing_record.local.clone())?;
                     }
                     DupLoc::Stash(key) => {
                         let encoded = encode_stored_event_record(&existing_record);
@@ -3958,6 +4394,7 @@ impl EventStore for RedbStore {
                     .map_err(persist_err)?;
             }
 
+            canonical.flush_relay_refs()?;
             result
         };
         #[cfg(test)]
@@ -4094,13 +4531,7 @@ impl EventStore for RedbStore {
                             record.local = Some(local);
                             record.event = signed_frozen_event.clone();
                             canonical.replace_event(event_key, &record.event)?;
-                            canonical.replace_provenance(
-                                event_key,
-                                &Provenance {
-                                    seen: record.provenance.clone(),
-                                    local: record.local.clone(),
-                                },
-                            )?;
+                            canonical.replace_local(event_key, record.local.clone())?;
                         }
                         let owners = record
                             .local
@@ -4228,6 +4659,7 @@ impl EventStore for RedbStore {
                     }
                 }
             };
+            canonical.flush_relay_refs()?;
             outcome
         };
         #[cfg(test)]
@@ -4333,13 +4765,7 @@ impl EventStore for RedbStore {
                                 )?;
                             } else {
                                 record.local = Some(local);
-                                canonical.replace_provenance(
-                                    *event_key,
-                                    &Provenance {
-                                        seen: record.provenance,
-                                        local: record.local,
-                                    },
-                                )?;
+                                canonical.replace_local(*event_key, record.local)?;
                             }
                         } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
                             &outbox_displaced,
@@ -4539,6 +4965,7 @@ impl EventStore for RedbStore {
                     }
                 }
             };
+            canonical.flush_relay_refs()?;
             outcome
         };
         #[cfg(test)]
@@ -5944,7 +6371,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_event_epoch_is_rejected_before_any_v3_table_is_created() {
+    fn legacy_event_epoch_is_rejected_before_any_v4_table_is_created() {
         const LEGACY_EVENTS_V2: TableDefinition<&str, &[u8]> = TableDefinition::new("events_v2");
 
         let dir = tempfile::tempdir().unwrap();
@@ -5956,10 +6383,10 @@ mod tests {
         drop(db);
 
         let error = match RedbStore::open(&path) {
-            Ok(_) => panic!("legacy event epoch must not open as an empty v3 store"),
+            Ok(_) => panic!("legacy event epoch must not open as an empty v4 store"),
             Err(error) => error,
         };
-        assert!(matches!(error, redb::Error::UpgradeRequired(3)));
+        assert!(matches!(error, redb::Error::UpgradeRequired(4)));
 
         let db = Database::create(&path).unwrap();
         let read_txn = db.begin_read().unwrap();
@@ -6247,11 +6674,11 @@ mod tests {
             .expect("sign room event")
     }
 
-    fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Vec<u8>) {
+    fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Option<Vec<u8>>) {
         let read_txn = store.db.begin_read().unwrap();
         let event_ids = read_txn.open_table(EVENT_IDS).unwrap();
         let events = read_txn.open_table(EVENTS).unwrap();
-        let metadata = read_txn.open_table(EVENT_METADATA).unwrap();
+        let local = read_txn.open_table(EVENT_LOCAL).unwrap();
         let event_key = event_ids
             .get(id.as_bytes().as_slice())
             .unwrap()
@@ -6263,13 +6690,25 @@ mod tests {
             .expect("raw event row")
             .value()
             .to_vec();
-        let metadata_bytes = metadata
+        let local_bytes = local
             .get(event_key)
             .unwrap()
-            .expect("raw metadata row")
-            .value()
-            .to_vec();
-        (event_key, event_bytes, metadata_bytes)
+            .map(|value| value.value().to_vec());
+        (event_key, event_bytes, local_bytes)
+    }
+
+    fn raw_observation_rows(store: &RedbStore, event_key: EventKey) -> Vec<(Vec<u8>, u64)> {
+        let read_txn = store.db.begin_read().unwrap();
+        let observations = read_txn.open_table(EVENT_OBSERVATIONS).unwrap();
+        let (lower, upper) = observation_range(event_key);
+        observations
+            .range::<&[u8; 12]>(&lower..=&upper)
+            .unwrap()
+            .map(|entry| {
+                let (key, at) = entry.unwrap();
+                (key.value().to_vec(), at.value())
+            })
+            .collect()
     }
 
     #[test]
@@ -6287,7 +6726,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_observation_updates_only_the_metadata_sidecar() {
+    fn duplicate_observation_adds_one_fixed_row_without_rewriting_event_or_local_state() {
         use nostr::EventBuilder;
 
         let dir = tempfile::tempdir().unwrap();
@@ -6306,7 +6745,8 @@ mod tests {
                 RelayObserved::new(first, Timestamp::from(20u64)),
             )
             .unwrap();
-        let (event_key, before_event, before_metadata) = raw_canonical_row(&store, event.id);
+        let (event_key, before_event, before_local) = raw_canonical_row(&store, event.id);
+        let before_observations = raw_observation_rows(&store, event_key);
 
         let outcome = store
             .insert(
@@ -6321,13 +6761,16 @@ mod tests {
                 ..
             }
         ));
-        let (after_key, after_event, after_metadata) = raw_canonical_row(&store, event.id);
+        let (after_key, after_event, after_local) = raw_canonical_row(&store, event.id);
         assert_eq!(after_key, event_key, "surrogate identity is stable");
         assert_eq!(
             after_event, before_event,
             "immutable event bytes were rewritten"
         );
-        assert_ne!(after_metadata, before_metadata);
+        assert_eq!(after_local, before_local, "local state was rewritten");
+        let after_observations = raw_observation_rows(&store, event_key);
+        assert_eq!(before_observations.len(), 1);
+        assert_eq!(after_observations.len(), 2);
         assert_eq!(
             store.query(&Filter::new().id(event.id)).unwrap()[0]
                 .provenance
@@ -6357,6 +6800,7 @@ mod tests {
             )
             .unwrap();
         let before = raw_canonical_row(&store, event.id);
+        let before_observations = raw_observation_rows(&store, before.0);
 
         let outcome = store
             .insert(
@@ -6372,6 +6816,245 @@ mod tests {
             }
         ));
         assert_eq!(raw_canonical_row(&store, event.id), before);
+        assert_eq!(raw_observation_rows(&store, before.0), before_observations);
+    }
+
+    #[test]
+    fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
+        use nostr::EventBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay-refcounts.redb");
+        let mut store = RedbStore::open(&path).unwrap();
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://shared-relay.example").unwrap();
+        let make_event = |created_at| {
+            EventBuilder::new(Kind::TextNote, format!("event-{created_at}"))
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let first = make_event(1);
+        let second = make_event(2);
+        store
+            .insert(
+                first.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(10u64)),
+            )
+            .unwrap();
+        store
+            .insert(
+                second.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(20u64)),
+            )
+            .unwrap();
+
+        let first_relay_key = {
+            let read_txn = store.db.begin_read().unwrap();
+            let relay_keys = read_txn.open_table(RELAY_KEYS).unwrap();
+            let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
+            let relay_key = relay_keys.get(relay.as_str()).unwrap().unwrap().value();
+            assert_eq!(relay_refs.get(relay_key).unwrap().unwrap().value(), 2);
+            relay_key
+        };
+        assert_canonical_integrity(&store.db);
+
+        store.remove(first.id, RetractReason::Deleted).unwrap();
+        {
+            let read_txn = store.db.begin_read().unwrap();
+            let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
+            assert_eq!(relay_refs.get(first_relay_key).unwrap().unwrap().value(), 1);
+        }
+        assert_canonical_integrity(&store.db);
+
+        store.remove(second.id, RetractReason::Deleted).unwrap();
+        {
+            let read_txn = store.db.begin_read().unwrap();
+            assert!(read_txn
+                .open_table(RELAY_KEYS)
+                .unwrap()
+                .get(relay.as_str())
+                .unwrap()
+                .is_none());
+            assert_eq!(read_txn.open_table(RELAYS).unwrap().len().unwrap(), 0);
+            assert_eq!(read_txn.open_table(RELAY_REFS).unwrap().len().unwrap(), 0);
+            assert_eq!(
+                read_txn
+                    .open_table(EVENT_OBSERVATIONS)
+                    .unwrap()
+                    .len()
+                    .unwrap(),
+                0
+            );
+        }
+        assert_canonical_integrity(&store.db);
+
+        let third = make_event(3);
+        store
+            .insert(
+                third,
+                RelayObserved::new(relay.clone(), Timestamp::from(30u64)),
+            )
+            .unwrap();
+        let read_txn = store.db.begin_read().unwrap();
+        let new_relay_key = read_txn
+            .open_table(RELAY_KEYS)
+            .unwrap()
+            .get(relay.as_str())
+            .unwrap()
+            .unwrap()
+            .value();
+        assert!(new_relay_key > first_relay_key);
+    }
+
+    #[test]
+    fn batch_relay_refcounts_flush_once_per_distinct_relay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay-refcount-batch.redb");
+        let store = RedbStore::open(&path).unwrap();
+        let relay = RelayUrl::parse("wss://one-hot-refcount.example").unwrap();
+        let write_txn = store.db.begin_write().unwrap();
+        {
+            let mut canonical = CanonicalWriteTables::open(&write_txn).unwrap();
+            let relay_key = canonical.intern_relay(&relay).unwrap();
+            for _ in 0..1_114 {
+                canonical.increment_relay_ref(relay_key).unwrap();
+            }
+            assert_eq!(canonical.relay_ref_counts.len(), 1);
+            assert_eq!(canonical.relay_ref_counts[&relay_key], 1_114);
+            assert_eq!(
+                canonical
+                    .relay_refs
+                    .get(relay_key)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                0,
+                "the durable hot row stays untouched until the batch flush"
+            );
+            canonical.flush_relay_refs().unwrap();
+            assert!(canonical.relay_ref_counts.is_empty());
+            assert_eq!(
+                canonical
+                    .relay_refs
+                    .get(relay_key)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                1_114
+            );
+        }
+        // This is a white-box write-coalescing proof, not a valid canonical
+        // store state, so abort rather than committing the synthetic count.
+        write_txn.abort().unwrap();
+    }
+
+    #[test]
+    fn batch_net_zero_observation_reclaims_new_relay_dictionary_row() {
+        use nostr::EventBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay-refcount-net-zero.redb");
+        let mut store = RedbStore::open(&path).unwrap();
+        let keys = nostr::Keys::generate();
+        let old = EventBuilder::new(Kind::ContactList, "old")
+            .custom_created_at(Timestamp::from(1u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let new = EventBuilder::new(Kind::ContactList, "new")
+            .custom_created_at(Timestamp::from(2u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let old_relay = RelayUrl::parse("wss://superseded-in-batch.example").unwrap();
+        let new_relay = RelayUrl::parse("wss://winner-in-batch.example").unwrap();
+
+        let outcomes = store
+            .insert_batch(vec![
+                (
+                    old,
+                    RelayObserved::new(old_relay.clone(), Timestamp::from(1u64)),
+                ),
+                (
+                    new,
+                    RelayObserved::new(new_relay.clone(), Timestamp::from(2u64)),
+                ),
+            ])
+            .unwrap();
+        assert!(matches!(outcomes[0], InsertOutcome::Inserted));
+        assert!(matches!(outcomes[1], InsertOutcome::Superseded { .. }));
+        assert_canonical_integrity(&store.db);
+
+        let read_txn = store.db.begin_read().unwrap();
+        let relay_keys = read_txn.open_table(RELAY_KEYS).unwrap();
+        assert!(relay_keys.get(old_relay.as_str()).unwrap().is_none());
+        let winner_key = relay_keys.get(new_relay.as_str()).unwrap().unwrap().value();
+        assert_eq!(
+            read_txn
+                .open_table(RELAY_REFS)
+                .unwrap()
+                .get(winner_key)
+                .unwrap()
+                .unwrap()
+                .value(),
+            1
+        );
+    }
+
+    #[test]
+    fn later_same_relay_updates_only_one_timestamp_value() {
+        use nostr::EventBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay-timestamp.redb");
+        let mut store = RedbStore::open(&path).unwrap();
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://timestamp-relay.example").unwrap();
+        let event = EventBuilder::new(Kind::TextNote, "timestamp")
+            .custom_created_at(Timestamp::from(1u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        store
+            .insert(
+                event.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(10u64)),
+            )
+            .unwrap();
+        let canonical_before = raw_canonical_row(&store, event.id);
+        let before = raw_observation_rows(&store, canonical_before.0);
+
+        let outcome = store
+            .insert(
+                event.clone(),
+                RelayObserved::new(relay, Timestamp::from(20u64)),
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            InsertOutcome::Duplicate {
+                provenance_grew: true,
+                ..
+            }
+        ));
+        assert_eq!(raw_canonical_row(&store, event.id), canonical_before);
+        let after = raw_observation_rows(&store, canonical_before.0);
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1);
+        assert_eq!(before[0].0, after[0].0);
+        assert_eq!(before[0].1, 10);
+        assert_eq!(after[0].1, 20);
+        let read_txn = store.db.begin_read().unwrap();
+        let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
+        assert_eq!(
+            relay_refs
+                .iter()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .1
+                .value(),
+            1
+        );
     }
 
     #[test]

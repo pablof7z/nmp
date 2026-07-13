@@ -3047,10 +3047,10 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
 /// that same one row again.
 #[test]
 fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
-    const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v3");
-    const EVENT_IDS_TABLE: TableDefinition<&[u8], u64> = TableDefinition::new("event_ids_v3");
+    const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v4");
+    const EVENT_IDS_TABLE: TableDefinition<&[u8], u64> = TableDefinition::new("event_ids_v4");
     const DISPLACED_TABLE: TableDefinition<&str, &[u8]> =
-        TableDefinition::new("outbox_displaced_v3");
+        TableDefinition::new("outbox_displaced_v4");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
