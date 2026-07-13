@@ -29,6 +29,6 @@ mod engine;
 pub mod testkit;
 
 pub use engine::{
-    Engine, GraphNodeInfo, GraphSnapshot, HandleId, LiveQuery, Metrics, QueryHandle,
-    RelayIngestResult,
+    CommittedCurrentRow, CommittedRowChanges, Engine, GraphNodeInfo, GraphSnapshot, HandleId,
+    LiveQuery, Metrics, QueryHandle, RelayIngestResult,
 };
