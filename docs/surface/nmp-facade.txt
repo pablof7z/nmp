@@ -70,6 +70,8 @@ pub nmp::EngineError::ReceiptCorrelationIdExhausted
 pub nmp::EngineError::SignerMissingPublicKey
 pub nmp::EngineError::StoreOpenFailed
 pub nmp::EngineError::StoreOpenFailed::reason: alloc::string::String
+pub nmp::EngineError::StoreResetFailed
+pub nmp::EngineError::StoreResetFailed::reason: alloc::string::String
 impl core::clone::Clone for nmp::EngineError
 pub fn nmp::EngineError::clone(&self) -> nmp::EngineError
 impl core::cmp::Eq for nmp::EngineError
@@ -114,6 +116,7 @@ pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::res
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::remove_signer(&self, nmp_engine::runtime::SignerRegistration) -> core::result::Result<bool, nmp::EngineError>
+pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
 impl core::ops::drop::Drop for nmp::Engine

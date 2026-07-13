@@ -82,6 +82,10 @@ pub enum FfiError {
     StoreOpenFailed {
         reason: String,
     },
+    /// The requested closed persistent store could not be removed.
+    StoreResetFailed {
+        reason: String,
+    },
     /// A `FfiWritePayload::Signed`'s `sig` did not parse as a valid 64-byte
     /// hex schnorr signature.
     InvalidSignature {
@@ -131,6 +135,7 @@ impl From<nmp::EngineError> for FfiError {
         match err {
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
+            nmp::EngineError::StoreResetFailed { reason } => Self::StoreResetFailed { reason },
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
@@ -157,6 +162,7 @@ impl std::fmt::Display for FfiError {
                 write!(f, "receipt correlation id namespace exhausted")
             }
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
+            Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
             Self::InvalidNostrEntity { reason } => write!(f, "invalid nostr entity: {reason}"),

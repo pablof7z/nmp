@@ -121,6 +121,16 @@ pub struct NmpEngineConfig {
 /// on [`NmpEngineConfig::max_relays`] above — they must match.
 pub const DEFAULT_MAX_RELAYS: u32 = 0;
 
+/// Destructively reset a closed persistent NMP store. This removes all
+/// canonical engine state at `store_path`, while leaving any separately
+/// configured native account checkpoint untouched. The operation is
+/// idempotent when the store does not exist.
+#[uniffi::export]
+pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
+    nmp::Engine::reset_persistent_store(store_path)?;
+    Ok(())
+}
+
 // Compile-time guard that the Rust `Default` derive for `NmpEngineConfig`
 // (which yields `0` for `max_relays`) still agrees with `DEFAULT_MAX_RELAYS`.
 // If the owner raises the const without giving `NmpEngineConfig` a matching
@@ -491,6 +501,27 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn ffi_persistent_store_reset_is_destructive_and_idempotent() {
+        let fixture = tempfile::tempdir().expect("tempdir");
+        let path = fixture.path().join("nmp.redb");
+        let config = NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        };
+        let engine = NmpEngine::new(config.clone()).expect("persistent engine must build");
+        engine.shutdown();
+
+        reset_persistent_store(path.to_string_lossy().into_owned())
+            .expect("closed FFI store must reset");
+        assert!(!path.exists(), "FFI reset must remove the canonical store");
+        reset_persistent_store(path.to_string_lossy().into_owned())
+            .expect("missing FFI store is already reset");
+
+        let reopened = NmpEngine::new(config).expect("reset store must reopen fresh");
+        reopened.shutdown();
+    }
 
     #[test]
     fn reattachment_mapping_is_exhaustive_and_distinct() {

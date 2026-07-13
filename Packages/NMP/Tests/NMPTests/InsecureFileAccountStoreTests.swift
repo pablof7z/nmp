@@ -53,6 +53,27 @@ final class InsecureFileAccountStoreTests: XCTestCase {
         }
     }
 
+    func testPersistentStoreResetPreservesAccountCheckpoint() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let database = fixture.root.appendingPathComponent("nmp.redb")
+        let config = NMPConfig(storePath: database.path)
+
+        let first = try NMPEngine(config: config, localAccountStore: fixture.store)
+        let pubkey = try await first.addAccount(secretKey: secretOne)
+        try first.setActiveAccount(pubkey)
+        first.shutdown()
+
+        try NMPEngine.resetPersistentStore(at: database.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.checkpoint.path))
+        try NMPEngine.resetPersistentStore(at: database.path)
+
+        let restored = try NMPEngine(config: config, localAccountStore: fixture.store)
+        XCTAssertEqual(try restored.activeAccount(), publicOne)
+        restored.shutdown()
+    }
+
     private func makeFixture() throws -> (
         root: URL,
         checkpoint: URL,

@@ -89,10 +89,14 @@ about current code:
   and router caps exist, but graph, derived-set, wire, relay, result, receipt,
   ingestion, and scheduler bounds do not yet share an explicit shortfall
   contract. Silent first-N behavior is forbidden.
-- **Destructive trust-domain reset is missing as a defined contract.** One
-  engine is one shared cache across accounts. A mutually-untrusted-user logout
-  must atomically clear cached events, pending writes, receipts,
-  coverage/evidence, and related local state.
+- **~~Destructive trust-domain reset is missing as a defined contract~~ CLOSED
+  (#232).** `Engine::reset_persistent_store`, the UniFFI operation, and the
+  Swift/Kotlin `NMPEngine.resetPersistentStore` projections idempotently remove
+  one closed canonical store. The caller must first close every engine using
+  that path; doing so drops live capabilities, then reset clears cached events,
+  pending writes, receipts, coverage/evidence, and related persisted state.
+  Separately configured platform account checkpoints are intentionally outside
+  the store path and remain untouched.
 - **Public syntax remains provisional; its promotion protocol is now enforced.**
   Pinned snapshots cover the canonical `nmp` Rust facade and the
   language-independent UniFFI proc-macro component metadata. CI requires exact

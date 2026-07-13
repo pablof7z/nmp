@@ -21,7 +21,9 @@
 //! `EngineError::EngineClosed` once `shutdown` has run -- see [`Engine`]'s
 //! own doc for the serialized lifecycle gate that makes this true even under
 //! concurrent use, and its `Drop` impl for the case where a caller never
-//! calls `shutdown` at all.
+//! calls `shutdown` at all. [`Engine::reset_persistent_store`] is the explicit
+//! destructive recovery/trust-domain boundary after every engine using the
+//! store path has been shut down and dropped.
 //!
 //! Everything below `Engine` -- `EngineThread`, `Handle`, `LiveDirectory`,
 //! `RedbStore`/`MemoryStore`, `PoolConfig`, `LocalKeySigner` -- is no longer

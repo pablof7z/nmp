@@ -72,7 +72,12 @@ Remember the three distinct questions:
 
 One engine has one shared cache; changing current pubkey is not a privacy wipe.
 Use explicit destructive reset before handing the engine to an untrusted local
-user.
+user. Shut down every engine using the path first, then call
+`Engine::reset_persistent_store(path)` in Rust,
+`NMPEngine.resetPersistentStore(at:)` in Swift, or
+`NMPEngine.resetPersistentStore(path)` in Kotlin. The operation destroys the
+canonical store but does not remove a separately configured platform account
+checkpoint.
 
 ## Diagnostics delivery
 
