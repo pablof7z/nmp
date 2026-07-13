@@ -64,17 +64,20 @@ pub struct FfiNip46Invitation {
 struct Nip46Attachment {
     signer: Option<nmp::Nip46Signer>,
     registration: Option<nmp::SignerRegistration>,
+    available: bool,
 }
 
 /// Owns one remote-signer session. The native connection handle, not the
 /// engine, owns this value: `disconnect()`/drop therefore detach
-/// deterministically instead of accumulating sessions until engine shutdown. The session
-/// callback retains only a `Weak` reference, avoiding an ownership cycle.
+/// deterministically instead of accumulating sessions until engine shutdown.
+/// Connection workers and callbacks retain only `Weak` references, avoiding
+/// both an ownership cycle and a pending-handshake keepalive.
 #[derive(uniffi::Object)]
 pub struct Nip46Connection {
     engine: Arc<nmp::Engine>,
     observer: Arc<dyn Nip46ConnectionObserver>,
     attachment: Mutex<Nip46Attachment>,
+    cancellation: nmp_signer::Nip46Cancellation,
     closed: AtomicBool,
 }
 
@@ -86,7 +89,9 @@ impl Nip46Connection {
             attachment: Mutex::new(Nip46Attachment {
                 signer: None,
                 registration: None,
+                available: false,
             }),
+            cancellation: nmp_signer::Nip46Cancellation::default(),
             closed: AtomicBool::new(false),
         })
     }
@@ -102,6 +107,7 @@ impl Nip46Connection {
                     .attachment
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
+                attachment.available = true;
                 if attachment.registration.is_none() {
                     if let Some(signer) = attachment.signer.clone() {
                         match self.engine.add_signer(signer) {
@@ -119,12 +125,14 @@ impl Nip46Connection {
                 }
             }
             nmp::Nip46ConnectionEvent::Unavailable => {
-                let registration = self
-                    .attachment
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .registration
-                    .take();
+                let registration = {
+                    let mut attachment = self
+                        .attachment
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    attachment.available = false;
+                    attachment.registration.take()
+                };
                 if let Some(registration) = registration {
                     let _ = self.engine.remove_signer(registration);
                 }
@@ -150,9 +158,12 @@ impl Nip46Connection {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        match self.engine.add_signer(signer.clone()) {
+        attachment.signer = Some(signer.clone());
+        if !attachment.available {
+            return;
+        }
+        match self.engine.add_signer(signer) {
             Ok(registration) => {
-                attachment.signer = Some(signer);
                 attachment.registration = Some(registration);
                 drop(attachment);
                 if !self.closed.load(Ordering::Acquire) {
@@ -177,6 +188,7 @@ impl Nip46Connection {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.cancellation.cancel();
         let registration = {
             let mut attachment = self
                 .attachment
@@ -306,7 +318,12 @@ impl NmpEngine {
         let engine = Arc::clone(&self.engine);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
-        spawn_bunker_connection(Arc::clone(&connection), bunker_uri, timeout_millis);
+        spawn_bunker_connection(
+            Arc::downgrade(&connection),
+            connection.cancellation.clone(),
+            bunker_uri,
+            timeout_millis,
+        );
         connection
     }
 
@@ -329,25 +346,36 @@ impl NmpEngine {
         let engine = Arc::clone(&self.engine);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
-        spawn_invitation_connection(Arc::clone(&connection), invitation, timeout_millis);
+        spawn_invitation_connection(
+            Arc::downgrade(&connection),
+            connection.cancellation.clone(),
+            invitation,
+            timeout_millis,
+        );
         Ok(connection)
     }
 }
 
 fn spawn_bunker_connection(
-    connection: Arc<Nip46Connection>,
+    connection: Weak<Nip46Connection>,
+    cancellation: nmp_signer::Nip46Cancellation,
     bunker_uri: String,
     timeout_millis: u64,
 ) {
     thread::spawn(move || {
-        let events = lifecycle_sink(Arc::downgrade(&connection));
-        match nmp::Nip46Signer::connect_bunker_observed(
+        let events = lifecycle_sink(connection.clone());
+        let result = nmp::Nip46Signer::connect_bunker_observed_with_cancellation(
             &bunker_uri,
             None,
             nmp::Nip46ClientMetadata::default(),
             Duration::from_millis(timeout_millis),
             events,
-        ) {
+            &cancellation,
+        );
+        let Some(connection) = connection.upgrade() else {
+            return;
+        };
+        match result {
             Ok(signer) => connection.attach(signer),
             Err(error) => connection.fail(error.to_string()),
         }
@@ -355,13 +383,22 @@ fn spawn_bunker_connection(
 }
 
 fn spawn_invitation_connection(
-    connection: Arc<Nip46Connection>,
+    connection: Weak<Nip46Connection>,
+    cancellation: nmp_signer::Nip46Cancellation,
     invitation: nmp::Nip46Invitation,
     timeout_millis: u64,
 ) {
     thread::spawn(move || {
-        let events = lifecycle_sink(Arc::downgrade(&connection));
-        match invitation.connect_observed(Duration::from_millis(timeout_millis), events) {
+        let events = lifecycle_sink(connection.clone());
+        let result = invitation.connect_observed_with_cancellation(
+            Duration::from_millis(timeout_millis),
+            events,
+            &cancellation,
+        );
+        let Some(connection) = connection.upgrade() else {
+            return;
+        };
+        match result {
             Ok(signer) => connection.attach(signer),
             Err(error) => connection.fail(error.to_string()),
         }
@@ -402,7 +439,11 @@ fn event_to_ffi(event: nmp::Nip46ConnectionEvent) -> FfiNip46ConnectionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+
+    use nostr::Keys;
 
     struct CloseCountingObserver {
         closed: Arc<AtomicUsize>,
@@ -474,6 +515,77 @@ mod tests {
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
         drop(connection_b);
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn unavailable_before_attach_is_retained_as_attachment_state() {
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let connection = Nip46Connection::new(
+            Arc::clone(&engine),
+            Arc::new(CloseCountingObserver {
+                closed: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        connection.on_event(nmp::Nip46ConnectionEvent::Available);
+        connection.on_event(nmp::Nip46ConnectionEvent::Unavailable);
+
+        let attachment = connection
+            .attachment
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(!attachment.available);
+        assert!(attachment.registration.is_none());
+        drop(attachment);
+        connection.disconnect();
+        engine.shutdown();
+    }
+
+    #[test]
+    fn pending_handshake_worker_does_not_retain_dropped_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = format!("ws://{}", listener.local_addr().unwrap());
+        let remote = Keys::generate();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            accepted_tx.send(()).unwrap();
+            while socket.read().is_ok() {}
+            closed_tx.send(()).unwrap();
+        });
+
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let closed = Arc::new(AtomicUsize::new(0));
+        let connection = Nip46Connection::new(
+            Arc::clone(&engine),
+            Arc::new(CloseCountingObserver {
+                closed: Arc::clone(&closed),
+            }),
+        );
+        let weak = Arc::downgrade(&connection);
+        let uri = format!(
+            "bunker://{}?relay={}&secret=pending-drop",
+            remote.public_key().to_hex(),
+            url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+        );
+        spawn_bunker_connection(weak.clone(), connection.cancellation.clone(), uri, 60_000);
+        accepted_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the pending handshake opens its socket");
+
+        drop(connection);
+
+        assert!(
+            weak.upgrade().is_none(),
+            "the worker owns no strong connection Arc"
+        );
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+        closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("connection drop cancels the pending handshake socket");
         engine.shutdown();
     }
 }

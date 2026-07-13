@@ -3,6 +3,101 @@
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
+type Cancel = Box<dyn FnOnce() + Send + 'static>;
+
+/// One cancellable asynchronous signer result.
+///
+/// Dropping an unfinished value invokes the adapter-owned cancellation hook.
+/// This matters for direct Rust callers: abandoning or timing out a remote
+/// RPC must release its bounded correlation slot even when the signer never
+/// sends a response.
+pub struct PendingSignerOp<T: Send + 'static> {
+    receiver: Option<Receiver<Result<T, SignerError>>>,
+    cancel: Option<Cancel>,
+}
+
+impl<T: Send + 'static> PendingSignerOp<T> {
+    fn new(receiver: Receiver<Result<T, SignerError>>, cancel: Option<Cancel>) -> Self {
+        Self {
+            receiver: Some(receiver),
+            cancel,
+        }
+    }
+
+    /// Block until the adapter resolves this operation.
+    pub fn recv(mut self) -> Result<T, SignerError> {
+        let result = self
+            .receiver
+            .take()
+            .expect("pending signer receiver is consumed exactly once")
+            .recv()
+            .unwrap_or(Err(SignerError::Disconnected));
+        self.cancel = None;
+        result
+    }
+
+    fn recv_timeout(mut self, timeout: Duration) -> Result<T, SignerError> {
+        match self
+            .receiver
+            .as_ref()
+            .expect("pending signer receiver is consumed exactly once")
+            .recv_timeout(timeout)
+        {
+            Ok(result) => {
+                self.receiver = None;
+                self.cancel = None;
+                result
+            }
+            Err(RecvTimeoutError::Timeout) => Err(SignerError::Timeout),
+            Err(RecvTimeoutError::Disconnected) => {
+                self.receiver = None;
+                self.cancel = None;
+                Err(SignerError::Disconnected)
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Option<Result<T, SignerError>> {
+        match self
+            .receiver
+            .as_ref()
+            .expect("pending signer receiver is consumed exactly once")
+            .try_recv()
+        {
+            Ok(result) => {
+                self.receiver = None;
+                self.cancel = None;
+                Some(result)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.receiver = None;
+                self.cancel = None;
+                Some(Err(SignerError::Disconnected))
+            }
+        }
+    }
+
+    pub(crate) fn into_parts(mut self) -> (Receiver<Result<T, SignerError>>, Option<Cancel>) {
+        let receiver = self
+            .receiver
+            .take()
+            .expect("pending signer receiver is consumed exactly once");
+        let cancel = self.cancel.take();
+        (receiver, cancel)
+    }
+}
+
+impl<T: Send + 'static> Drop for PendingSignerOp<T> {
+    fn drop(&mut self) {
+        if self.receiver.is_some() {
+            if let Some(cancel) = self.cancel.take() {
+                cancel();
+            }
+        }
+    }
+}
+
 /// An op that may complete synchronously (`Ready`) or later (`Pending`).
 /// `Pending` carries a receiver that yields exactly one result when the
 /// operation completes — the engine's blocking recv loop polls it
@@ -16,7 +111,7 @@ pub enum SignerOp<T: Send + 'static> {
     /// Operation completed synchronously.
     Ready(Result<T, SignerError>),
     /// Operation is pending — poll or wait on `rx` for the result.
-    Pending(Receiver<Result<T, SignerError>>),
+    Pending(PendingSignerOp<T>),
 }
 
 impl<T: Send + 'static> SignerOp<T> {
@@ -32,15 +127,32 @@ impl<T: Send + 'static> SignerOp<T> {
         Self::Ready(Err(error))
     }
 
+    /// Construct an asynchronous operation without adapter cancellation.
+    /// This is the portable constructor for custom `nmp`-only signers.
+    #[must_use]
+    pub fn pending(receiver: Receiver<Result<T, SignerError>>) -> Self {
+        Self::Pending(PendingSignerOp::new(receiver, None))
+    }
+
+    pub(crate) fn pending_with_cancel(
+        receiver: Receiver<Result<T, SignerError>>,
+        cancel: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self::Pending(PendingSignerOp::new(receiver, Some(Box::new(cancel))))
+    }
+
+    pub(crate) fn pending_from_parts(
+        receiver: Receiver<Result<T, SignerError>>,
+        cancel: Option<Cancel>,
+    ) -> Self {
+        Self::Pending(PendingSignerOp::new(receiver, cancel))
+    }
+
     /// Block the current thread for up to `timeout` waiting for the result.
     pub fn wait(self, timeout: Duration) -> Result<T, SignerError> {
         match self {
             Self::Ready(r) => r,
-            Self::Pending(rx) => match rx.recv_timeout(timeout) {
-                Ok(r) => r,
-                Err(RecvTimeoutError::Timeout) => Err(SignerError::Timeout),
-                Err(RecvTimeoutError::Disconnected) => Err(SignerError::Disconnected),
-            },
+            Self::Pending(pending) => pending.recv_timeout(timeout),
         }
     }
 
@@ -60,11 +172,13 @@ impl<T: Send + 'static> SignerOp<T> {
                     }
                 }
             }
-            Self::Pending(rx) => match rx.try_recv() {
-                Ok(r) => Some(r),
-                Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => Some(Err(SignerError::Disconnected)),
-            },
+            Self::Pending(pending) => {
+                let result = pending.poll();
+                if result.is_some() {
+                    *self = Self::Ready(Err(SignerError::Unavailable));
+                }
+                result
+            }
         }
     }
 }
@@ -125,6 +239,8 @@ impl std::error::Error for SignerError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn terminal_classification_is_explicit() {
@@ -140,8 +256,21 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), SignerError>>();
         drop(tx);
         assert_eq!(
-            SignerOp::Pending(rx).wait(Duration::from_millis(10)),
+            SignerOp::pending(rx).wait(Duration::from_millis(10)),
             Err(SignerError::Disconnected)
         );
+    }
+
+    #[test]
+    fn timeout_cancels_the_adapter_owned_pending_slot_once() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<(), SignerError>>();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_for_op = Arc::clone(&cancelled);
+        let op = SignerOp::pending_with_cancel(rx, move || {
+            cancelled_for_op.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(op.wait(Duration::from_millis(1)), Err(SignerError::Timeout));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
     }
 }

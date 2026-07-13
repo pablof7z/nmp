@@ -4942,7 +4942,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Owns one remote-signer session. The native connection handle, not the\nengine, owns this value: `disconnect()`/drop therefore detach\ndeterministically instead of accumulating sessions until engine shutdown. The session\ncallback retains only a `Weak` reference, avoiding an ownership cycle.",
+        "Owns one remote-signer session. The native connection handle, not the\nengine, owns this value: `disconnect()`/drop therefore detach\ndeterministically instead of accumulating sessions until engine shutdown.\nConnection workers and callbacks retain only `Weak` references, avoiding\nboth an ownership cycle and a pending-handshake keepalive.",
     ),
 }
 

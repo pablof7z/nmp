@@ -40,4 +40,45 @@ final class RemoteSignerTests: XCTestCase {
             appSpecific.dropFirst("primalconnect".count)
         )
     }
+
+    func testObserverProjectsReadyThenFinishesOnClose() async {
+        let observer = NIP46Observer()
+        var states = observer.stream.makeAsyncIterator()
+
+        observer.onReady(userPublicKey: "user-key")
+        observer.onClosed()
+
+        let ready = await states.next()
+        let completed = await states.next()
+        XCTAssertEqual(ready, .ready(userPublicKey: "user-key"))
+        XCTAssertNil(completed)
+    }
+
+    func testConnectionCloseAndDeinitAreIdempotentAndStreamScoped() {
+        let lock = NSLock()
+        var closedA = 0
+        var closedB = 0
+        var connectionA: NMPNip46Connection? = NMPNip46Connection(
+            observer: NIP46Observer(),
+            closeAction: {
+                lock.withLock { closedA += 1 }
+            }
+        )
+        var connectionB: NMPNip46Connection? = NMPNip46Connection(
+            observer: NIP46Observer(),
+            closeAction: {
+                lock.withLock { closedB += 1 }
+            }
+        )
+
+        connectionA?.close()
+        connectionA?.close()
+        connectionA = nil
+        XCTAssertEqual(lock.withLock { closedA }, 1)
+        XCTAssertEqual(lock.withLock { closedB }, 0)
+
+        connectionB?.close()
+        connectionB = nil
+        XCTAssertEqual(lock.withLock { closedB }, 1)
+    }
 }

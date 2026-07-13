@@ -192,6 +192,62 @@ fn spawn_mock_remote_signer(
     (relay_url, remote_signer, user, seen_rx)
 }
 
+fn spawn_unresponsive_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay_url = format!("ws://{}", listener.local_addr().unwrap());
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let remote_thread = remote.clone();
+    let user_thread = user.clone();
+    let (closed_tx, closed_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = tungstenite::accept(stream).unwrap();
+        let mut subscription_id = None;
+        while let Ok(Message::Text(text)) = socket.read() {
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            match parts.first().and_then(Value::as_str) {
+                Some("REQ") => {
+                    subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                }
+                Some("EVENT") => {
+                    let event = Event::from_json(parts[1].to_string()).unwrap();
+                    let plaintext = nip44::decrypt(
+                        remote_thread.secret_key(),
+                        &event.pubkey,
+                        event.content.as_bytes(),
+                    )
+                    .unwrap();
+                    let request: Value = serde_json::from_str(&plaintext).unwrap();
+                    let id = request["id"].as_str().unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    let result = match method {
+                        "connect" => Some("ack".to_string()),
+                        "get_public_key" => Some(user_thread.public_key().to_hex()),
+                        "switch_relays" | "sign_event" => None,
+                        other => panic!("unexpected method {other}"),
+                    };
+                    if let Some(result) = result {
+                        let response =
+                            response_event(&remote_thread, event.pubkey, id, Some(result), None);
+                        socket
+                            .send(Message::Text(
+                                event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                            ))
+                            .unwrap();
+                    }
+                }
+                _ => {}
+            }
+        }
+        let _ = closed_tx.send(());
+    });
+
+    (relay_url, remote, user, closed_rx)
+}
+
 #[test]
 fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
     let (relay, remote, user, seen) = spawn_mock_remote_signer(false);
@@ -374,7 +430,53 @@ fn unavailable_signer_operation_is_retryable() {
     let (tx, rx) = mpsc::channel::<Result<String, nmp_signer::SignerError>>();
     drop(tx);
     assert_eq!(
-        SignerOp::Pending(rx).wait(Duration::from_millis(10)),
+        SignerOp::pending(rx).wait(Duration::from_millis(10)),
         Err(nmp_signer::SignerError::Disconnected)
+    );
+}
+
+#[test]
+fn ignored_switch_relays_cannot_keep_the_session_alive_after_signer_drop() {
+    let (relay, remote, _user, closed) = spawn_unresponsive_remote_signer();
+    let uri = format!(
+        "bunker://{}?relay={}&secret=ignored-switch",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+    );
+    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+
+    drop(signer);
+
+    closed
+        .recv_timeout(Duration::from_secs(2))
+        .expect("dropping the signer closes the session even when switch_relays never answers");
+}
+
+#[test]
+fn abandoned_remote_operations_release_every_bounded_pending_slot() {
+    let (relay, remote, user, _closed) = spawn_unresponsive_remote_signer();
+    let uri = format!(
+        "bunker://{}?relay={}&secret=abandoned-ops",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+    );
+    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_002),
+        Kind::TextNote,
+        Vec::new(),
+        "never answered",
+    );
+
+    for _ in 0..64 {
+        drop(signer.sign(unsigned.clone()));
+    }
+    thread::sleep(Duration::from_millis(100));
+
+    assert_eq!(
+        signer.sign(unsigned).wait(Duration::from_millis(50)),
+        Err(SignerError::Timeout),
+        "the next request is admitted; it is not rejected by leaked pending slots",
     );
 }

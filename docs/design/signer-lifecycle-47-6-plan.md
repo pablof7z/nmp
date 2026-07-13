@@ -60,7 +60,7 @@ absence is **terminal**, not durable-waiting:
 
 The substrate this frame plugs into (preserve, do not rebuild): `SigningCapability`
 (`sign(UnsignedEvent) -> SignerOp<SignedEvent>`, `nmp-signer/src/capability.rs`),
-the `SignerOp::Ready | Pending(rx)` pollable thunk already driven **without a
+the `SignerOp::Ready | Pending(pending)` pollable thunk already driven **without a
 poll loop** by the runtime's single blocking-recv thread (`runtime/mod.rs:560-571`,
 D8-clean), the pubkey-keyed `SignerRegistry`, and #2/#3's `OUTBOX_INTENTS`
 journal + `accept_write`/recovery doors.
@@ -236,7 +236,8 @@ no parallel machinery.
 
 ### 4.1 Shape
 
-- `Nip46Signer::sign(unsigned)` returns `SignerOp::Pending(rx)`. The runtime's
+- `Nip46Signer::sign(unsigned)` returns a cancellable `SignerOp::Pending`.
+  Dropping or timing out that operation releases its correlation slot. The runtime's
   existing Pending arm (`runtime/mod.rs:560`) already spawns **one blocking recv
   thread** per pending op and forwards exactly one `SignerCompleted` — D8-clean,
   no poll loop, no engine-thread block. #6 reuses this verbatim.
@@ -453,7 +454,7 @@ surface; do not add a second public publish entry point.
 - **NIP-46 `Pending` reuses the existing thread:** the runtime's Pending arm
   (`runtime/mod.rs:~560`) already spawns one blocking-recv thread per op and
   forwards exactly one `SignerCompleted`. `Nip46Signer::sign` returning
-  `SignerOp::Pending(rx)` plugs in verbatim — no new thread model, no poll.
+  cancellable `SignerOp::Pending` plugs in verbatim — no new thread model, no poll.
 
 ### The five decisions
 

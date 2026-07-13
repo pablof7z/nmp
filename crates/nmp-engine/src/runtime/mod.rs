@@ -69,7 +69,7 @@ use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
-use nmp_signer::{SignerError, SignerOp, SigningCapability};
+use nmp_signer::{SignerOp, SigningCapability};
 use nmp_store::EventStore;
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp};
 
@@ -1011,14 +1011,14 @@ fn dispatch_effect(
                         id, generation, result,
                     )));
                 }
-                SignerOp::Pending(rx) => {
+                SignerOp::Pending(pending) => {
                     // A single blocking recv on a fresh thread, then exactly
                     // one forwarded message -- D8-compliant (no poll loop),
                     // and keeps the engine thread itself from ever blocking
                     // on a remote signer round-trip.
                     let inbox = self_inbox.clone();
                     thread::spawn(move || {
-                        let result = rx.recv().unwrap_or(Err(SignerError::Disconnected));
+                        let result = pending.recv();
                         let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
                             id, generation, result,
                         )));

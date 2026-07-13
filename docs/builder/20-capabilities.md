@@ -105,7 +105,10 @@ The Rust facade ships `Nip46Invitation` and `Nip46Signer`. It supports both
 `nostrconnect://` and `bunker://`, keeps the signer communication key distinct
 from the user's signing key, responds to relay AUTH, preserves one correlated
 request through `auth_url`, asks the signer to `switch_relays`, and validates
-the returned event before the engine validates it again at promotion.
+the returned event before the engine validates it again at promotion. Pending
+RPCs are cancellation-owned: direct-Rust timeout/drop releases the bounded
+correlation slot, and an unanswered `switch_relays` request holds only a weak,
+bounded reference to the session.
 
 Swift exposes `NMPLocalSignerDiscovery`, `nip46Invitation`, `connectNip46`, and
 `oneClickConnectNip46`. Primal is detected with its app-specific
@@ -117,7 +120,10 @@ the same pubkey.
 
 Kotlin/JVM exposes the same connection flow plus package-filtered Android
 discovery. `androidHandoff` returns the generated URI and exact package name;
-an Android host launches that pair with an explicit package. The current
+both are resolved again from the Rust catalog by signer id, so a copied native
+value cannot redirect the secret-bearing URI to another package. Lifecycle
+facts use one bounded multicast `SharedFlow`. An Android host launches the
+handoff pair with an explicit package. The current
 package is a JVM falsifier, not an Android AAR, so it deliberately does not
 import `Intent` or `PackageManager` itself. Amber is catalogued as Android
 NIP-55-only and is not offered as a NIP-46 connection.

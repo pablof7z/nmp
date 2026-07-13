@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -28,6 +28,62 @@ use crate::{
 
 const DEFAULT_PERMISSIONS: &str = "sign_event,nip44_encrypt,nip44_decrypt";
 const MAX_PENDING_REQUESTS: usize = 64;
+const SWITCH_RELAYS_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct Nip46CancellationInner {
+    cancelled: AtomicBool,
+    commands: Mutex<Option<Sender<WorkerMsg>>>,
+}
+
+/// Explicit cancellation for a connection attempt that has not produced a
+/// [`Nip46Signer`] yet. Native wrappers own one handle and cancel it from
+/// close/drop, so a pending handshake cannot outlive its connection object.
+#[derive(Clone)]
+pub struct Nip46Cancellation {
+    inner: Arc<Nip46CancellationInner>,
+}
+
+impl Default for Nip46Cancellation {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Nip46CancellationInner {
+                cancelled: AtomicBool::new(false),
+                commands: Mutex::new(None),
+            }),
+        }
+    }
+}
+
+impl Nip46Cancellation {
+    fn bind(&self, commands: Sender<WorkerMsg>) {
+        let mut current = self
+            .inner
+            .commands
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if self.inner.cancelled.load(Ordering::Acquire) {
+            let _ = commands.send(WorkerMsg::Shutdown);
+        } else {
+            *current = Some(commands);
+        }
+    }
+
+    /// Idempotently terminate the currently-bound handshake/session worker.
+    pub fn cancel(&self) {
+        if self.inner.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let commands = self
+            .inner
+            .commands
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if let Some(commands) = commands {
+            let _ = commands.send(WorkerMsg::Shutdown);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Nip46ClientMetadata {
@@ -211,7 +267,25 @@ impl Nip46Invitation {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let session = Session::spawn(self.relays, self.client_keys, None);
+        self.connect_observed_inner(timeout, event_sink, None)
+    }
+
+    pub fn connect_observed_with_cancellation(
+        self,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+    ) -> Result<Nip46Signer, Nip46Error> {
+        self.connect_observed_inner(timeout, event_sink, Some(cancellation))
+    }
+
+    fn connect_observed_inner(
+        self,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: Option<&Nip46Cancellation>,
+    ) -> Result<Nip46Signer, Nip46Error> {
+        let session = Session::spawn(self.relays, self.client_keys, None, cancellation);
         forward_events(&session, event_sink);
         session.wait_available(timeout)?;
         let remote_signer_public_key = session
@@ -283,12 +357,42 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
     ) -> Result<Self, Nip46Error> {
+        Self::connect_bunker_observed_inner(uri, permissions, metadata, timeout, event_sink, None)
+    }
+
+    pub fn connect_bunker_observed_with_cancellation(
+        uri: &str,
+        permissions: Option<String>,
+        metadata: Nip46ClientMetadata,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+    ) -> Result<Self, Nip46Error> {
+        Self::connect_bunker_observed_inner(
+            uri,
+            permissions,
+            metadata,
+            timeout,
+            event_sink,
+            Some(cancellation),
+        )
+    }
+
+    fn connect_bunker_observed_inner(
+        uri: &str,
+        permissions: Option<String>,
+        metadata: Nip46ClientMetadata,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: Option<&Nip46Cancellation>,
+    ) -> Result<Self, Nip46Error> {
         let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
         let remote_signer_public_key = parsed.remote_signer_public_key;
         let session = Session::spawn(
             parsed.relays,
             Keys::generate(),
             Some(remote_signer_public_key),
+            cancellation,
         );
         forward_events(&session, event_sink);
         session.wait_available(timeout)?;
@@ -474,6 +578,7 @@ enum WorkerMsg {
         reply: Sender<Result<PublicKey, Nip46Error>>,
     },
     ReplaceRelays(Vec<RelayUrl>),
+    CancelRequest(String),
     Shutdown,
 }
 
@@ -493,7 +598,12 @@ struct Session {
 }
 
 impl Session {
-    fn spawn(relays: Vec<RelayUrl>, client_keys: Keys, remote: Option<PublicKey>) -> Arc<Self> {
+    fn spawn(
+        relays: Vec<RelayUrl>,
+        client_keys: Keys,
+        remote: Option<PublicKey>,
+        cancellation: Option<&Nip46Cancellation>,
+    ) -> Arc<Self> {
         let (commands, inbox) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let session = Arc::new(Self {
@@ -501,6 +611,9 @@ impl Session {
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
         });
+        if let Some(cancellation) = cancellation {
+            cancellation.bind(session.commands.clone());
+        }
         let weak = Arc::downgrade(&session);
         thread::Builder::new()
             .name("nmp-nip46".to_string())
@@ -571,12 +684,9 @@ impl Session {
 
     fn request_switch_relays(self: &Arc<Self>) {
         let op = request_string(self, "switch_relays", Vec::new());
-        let session = Arc::clone(self);
+        let session = Arc::downgrade(self);
         thread::spawn(move || {
-            let SignerOp::Pending(rx) = op else {
-                return;
-            };
-            let Ok(Ok(result)) = rx.recv() else {
+            let Ok(result) = op.wait(SWITCH_RELAYS_TIMEOUT) else {
                 return;
             };
             if result == "null" {
@@ -598,6 +708,9 @@ impl Session {
                 }
             }
             if !parsed.is_empty() {
+                let Some(session) = session.upgrade() else {
+                    return;
+                };
                 let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
             }
         });
@@ -664,6 +777,9 @@ impl SessionWorker {
                     reply,
                 } => self.invitation = Some((expected_secret, reply)),
                 WorkerMsg::ReplaceRelays(relays) => self.replace_relays(relays),
+                WorkerMsg::CancelRequest(id) => {
+                    self.pending.remove(&id);
+                }
                 WorkerMsg::Shutdown => break,
             }
         }
@@ -673,6 +789,10 @@ impl SessionWorker {
         if let Some((_, reply)) = self.invitation.take() {
             let _ = reply.send(Err(Nip46Error::Disconnected));
         }
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
         self.pool.shutdown();
     }
 
@@ -937,7 +1057,7 @@ fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> 
     if session
         .commands
         .send(WorkerMsg::Request {
-            id,
+            id: id.clone(),
             method: method.to_string(),
             params,
             reply: tx,
@@ -946,7 +1066,10 @@ fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> 
     {
         return SignerOp::err(SignerError::Disconnected);
     }
-    SignerOp::Pending(rx)
+    let commands = session.commands.clone();
+    SignerOp::pending_with_cancel(rx, move || {
+        let _ = commands.send(WorkerMsg::CancelRequest(id));
+    })
 }
 
 fn map_string<T, F>(op: SignerOp<String>, map: F) -> SignerOp<T>
@@ -957,7 +1080,8 @@ where
     match op {
         SignerOp::Ready(Ok(value)) => SignerOp::Ready(map(value)),
         SignerOp::Ready(Err(error)) => SignerOp::Ready(Err(error)),
-        SignerOp::Pending(rx) => {
+        SignerOp::Pending(pending) => {
+            let (rx, cancel) = pending.into_parts();
             let (tx, mapped_rx) = mpsc::channel();
             thread::spawn(move || {
                 let result = match rx.recv() {
@@ -967,7 +1091,7 @@ where
                 };
                 let _ = tx.send(result);
             });
-            SignerOp::Pending(mapped_rx)
+            SignerOp::pending_from_parts(mapped_rx, cancel)
         }
     }
 }

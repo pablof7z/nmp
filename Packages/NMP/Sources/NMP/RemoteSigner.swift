@@ -132,18 +132,37 @@ final class NIP46Observer: Nip46ConnectionObserver, @unchecked Sendable {
 public final class NMPNip46Connection: @unchecked Sendable {
     public let states: AsyncStream<NMPNip46ConnectionState>
     fileprivate let observer: NIP46Observer
-    private let ffiConnection: Nip46Connection
+    private let closeAction: () -> Void
+    private let closeLock = NSLock()
+    private var isClosed = false
 
     fileprivate init(observer: NIP46Observer, ffiConnection: Nip46Connection) {
         self.observer = observer
-        self.ffiConnection = ffiConnection
+        closeAction = { ffiConnection.disconnect() }
+        states = observer.stream
+    }
+
+    init(observer: NIP46Observer, closeAction: @escaping () -> Void) {
+        self.observer = observer
+        self.closeAction = closeAction
         states = observer.stream
     }
 
     /// Idempotently detach this exact signer session and finish `states`.
     /// Dropping the last connection reference has the same effect.
     public func close() {
-        ffiConnection.disconnect()
+        closeLock.lock()
+        guard !isClosed else {
+            closeLock.unlock()
+            return
+        }
+        isClosed = true
+        closeLock.unlock()
+        closeAction()
+    }
+
+    deinit {
+        close()
     }
 }
 

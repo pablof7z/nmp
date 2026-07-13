@@ -1,9 +1,10 @@
 package com.nmp.sdk
 
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import uniffi.nmp_ffi.FfiLocalSignerApp
@@ -76,17 +77,19 @@ sealed interface NMPNip46ConnectionState {
     /** Stronger than [Connected]: the signer is attached to this engine. */
     data class Ready(val userPublicKey: String) : NMPNip46ConnectionState
     data class Failed(val reason: String) : NMPNip46ConnectionState
+    object Closed : NMPNip46ConnectionState
 }
 
 internal class NMPNip46Observer : Nip46ConnectionObserver {
-    private val channel = Channel<NMPNip46ConnectionState>(
-        capacity = 32,
+    private val mutableStates = MutableSharedFlow<NMPNip46ConnectionState>(
+        replay = 1,
+        extraBufferCapacity = 31,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    val states: Flow<NMPNip46ConnectionState> = channel.receiveAsFlow()
+    val states: SharedFlow<NMPNip46ConnectionState> = mutableStates.asSharedFlow()
 
     override fun onEvent(event: FfiNip46ConnectionEvent) {
-        channel.trySend(
+        mutableStates.tryEmit(
             when (event) {
                 FfiNip46ConnectionEvent.Connecting -> NMPNip46ConnectionState.Connecting
                 FfiNip46ConnectionEvent.Available -> NMPNip46ConnectionState.Available
@@ -102,27 +105,35 @@ internal class NMPNip46Observer : Nip46ConnectionObserver {
     }
 
     override fun onReady(userPublicKey: String) {
-        channel.trySend(NMPNip46ConnectionState.Ready(userPublicKey))
+        mutableStates.tryEmit(NMPNip46ConnectionState.Ready(userPublicKey))
     }
 
     override fun onFailed(reason: String) {
-        channel.trySend(NMPNip46ConnectionState.Failed(reason))
+        mutableStates.tryEmit(NMPNip46ConnectionState.Failed(reason))
     }
 
     override fun onClosed() {
-        channel.close()
+        mutableStates.tryEmit(NMPNip46ConnectionState.Closed)
     }
 }
 
 class NMPNip46Connection internal constructor(
     internal val observer: NMPNip46Observer,
-    private val ffiConnection: Nip46Connection,
+    private val disconnect: () -> Unit,
 ) : AutoCloseable {
-    val states: Flow<NMPNip46ConnectionState> = observer.states
+    internal constructor(observer: NMPNip46Observer, ffiConnection: Nip46Connection) : this(
+        observer,
+        ffiConnection::disconnect,
+    )
 
-    /** Idempotently detach this exact signer session and finish [states]. */
+    private val closed = AtomicBoolean(false)
+    val states: SharedFlow<NMPNip46ConnectionState> = observer.states
+
+    /** Idempotently detach this exact signer session and emit [NMPNip46ConnectionState.Closed]. */
     override fun close() {
-        ffiConnection.disconnect()
+        if (closed.compareAndSet(false, true)) {
+            disconnect()
+        }
     }
 }
 
@@ -135,12 +146,14 @@ class NMPNip46Invitation internal constructor(internal val ffi: FfiNip46Invitati
      * `Intent.setPackage(packageName)`; OS acceptance is not signer readiness,
      * which is reported later as [NMPNip46ConnectionState.Ready]. */
     fun androidHandoff(signer: NMPLocalSigner): NMPAndroidSignerHandoff {
-        if (NMPLocalSignerProtocol.Nip46 !in signer.protocols) {
-            throw NMPError.InvalidSigner("${signer.displayName} does not support NIP-46")
+        val canonical = NMPLocalSignerDiscovery.known.singleOrNull { it.id == signer.id }
+            ?: throw NMPError.InvalidSigner("unknown local signer id ${signer.id}")
+        if (NMPLocalSignerProtocol.Nip46 !in canonical.protocols) {
+            throw NMPError.InvalidSigner("${canonical.displayName} does not support NIP-46")
         }
-        val packageName = signer.androidPackageId
-            ?: throw NMPError.InvalidSigner("${signer.displayName} has no Android package")
-        return NMPAndroidSignerHandoff(uri = uri(signer), packageName = packageName)
+        val packageName = canonical.androidPackageId
+            ?: throw NMPError.InvalidSigner("${canonical.displayName} has no Android package")
+        return NMPAndroidSignerHandoff(uri = uri(canonical), packageName = packageName)
     }
 }
 

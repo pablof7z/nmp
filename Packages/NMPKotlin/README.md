@@ -38,7 +38,7 @@ val invitation = nmp.nip46Invitation(relays)
 val handoff = invitation.androidHandoff(primal)
 val connection = nmp.connectNip46(invitation) // listen before launch
 startActivity(Intent(ACTION_VIEW, Uri.parse(handoff.uri)).setPackage(handoff.packageName))
-// later: connection.close() // idempotent; also finishes connection.states
+// later: connection.close() // idempotent; emits Closed to every collector
 ```
 
 The Android app must declare package visibility for the packages/schemes it
@@ -48,7 +48,9 @@ queries. Launch acceptance is not connection readiness; collect
 Amber appears in discovery as NIP-55-only and is rejected by
 `androidHandoff`; NIP-55 execution belongs to the future Android AAR.
 `NMPNip46Connection` is `AutoCloseable`, and closing it detaches only its exact
-session even if another connection has since replaced the same pubkey.
+session even if another connection has since replaced the same pubkey. Its
+bounded `SharedFlow` multicasts lifecycle facts; UI and lifecycle collectors
+cannot split `Ready`, `Failed`, or `Closed` between themselves.
 
 The same package also exposes the optional content substrate:
 

@@ -29,6 +29,7 @@ pub use capability::{CryptoCapability, SigningCapability};
 pub use catalog::{known_local_signers, LocalSignerApp, LocalSignerProtocol};
 pub use local::LocalKeySigner;
 pub use nip46::{
-    Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer,
+    Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Error, Nip46Invitation,
+    Nip46Signer,
 };
-pub use op::{SignerError, SignerOp};
+pub use op::{PendingSignerOp, SignerError, SignerOp};

@@ -27,6 +27,7 @@ path = "uniffi-bindgen.rs"
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp.workspace = true
+nmp-signer.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 # #108: the read-only NIP-29 host-browser projection. Direct deps here
 # (not proxied through the `nmp` facade) -- these stay opt-in, app-chosen
@@ -45,3 +46,5 @@ nmp-content.workspace = true
 [dev-dependencies]
 redb = "4.1"
 tempfile = "3"
+tungstenite = "0.29"
+url = "2"
