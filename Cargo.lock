@@ -1451,6 +1451,7 @@ dependencies = [
  "nmp-nip02",
  "nmp-nip29",
  "nmp-nip51",
+ "nmp-signer",
  "nostr 0.44.4",
  "redb",
  "tempfile",
