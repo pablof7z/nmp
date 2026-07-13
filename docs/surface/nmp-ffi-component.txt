@@ -4962,6 +4962,52 @@ object Object {
     ],
     methods: [
         Method {
+            name: "active_account",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: String,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_active_account",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Return the account currently rooting reactive identity and unsigned\nwrites. The secret and signer capability remain engine-owned; native\ncallers receive only the public key needed for presentation.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_active_account",
+            checksum: Some(
+                50911,
+            ),
+        },
+        Method {
             name: "add_account",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
