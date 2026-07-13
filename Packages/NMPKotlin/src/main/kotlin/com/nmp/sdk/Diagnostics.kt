@@ -83,6 +83,7 @@ data class DiagnosticsSnapshot(
     val relays: List<RelayDiagnostics> = emptyList(),
     val uncoveredAuthorCount: UInt = 0u,
     val droppedMergeRules: List<String> = emptyList(),
+    val transportDegraded: String? = null,
 ) {
     companion object {
         fun from(ffi: FfiDiagnosticsSnapshot): DiagnosticsSnapshot =
@@ -90,6 +91,7 @@ data class DiagnosticsSnapshot(
                 relays = ffi.relays.map { RelayDiagnostics.from(it) },
                 uncoveredAuthorCount = ffi.uncoveredAuthorCount,
                 droppedMergeRules = ffi.droppedMergeRules,
+                transportDegraded = ffi.transportDegraded,
             )
     }
 }

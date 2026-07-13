@@ -1,308 +1,463 @@
-//! Ingest-time signature verification gate (M3 plan §3.2 hardening) --
-//! network-boundary, kind-blind: this module has no notion of "kind" at
-//! all, only "is this wire frame an `EVENT`, and if so is its signature
-//! genuine". Every `EVENT` frame off the wire is schnorr-verified via
-//! rust-nostr's [`Event::verify`] (id + signature) exactly once per
-//! distinct event id -- never hand-rolled crypto. A redelivery of an
-//! already-verified id (the same event relayed by a second/third relay,
-//! the common case for any outbox-routed author) is accepted by a cheap
-//! signature STRING compare against the previously-verified value, never a
-//! second schnorr operation.
+//! Persistent ingest-time signature verification workers.
 //!
-//! A frame that fails verification on first sight, or whose signature
-//! mismatches a previously-verified id, is dropped HERE: it never becomes
-//! a [`super::PoolEvent::Frame`], so it never reaches the engine, the
-//! store, or any routing decision. This is what makes bug-ledger #5's own
-//! mechanism text ("ids/signatures never re-derived post-verification")
-//! honest -- the verification step it presupposes now actually exists, at
-//! the one seam every inbound byte already passes through.
-//!
-//! Not this module's job: anything kind-aware (routing, coverage, demand).
-//! Not this module's job either: deciding what happens to a relay that
-//! misbehaves -- it only counts the fact via [`RelayHealth`] and lets the
-//! caller (or a future policy layer) decide.
+//! Parsing and relay-frame policy live at the translator boundary. This module
+//! deliberately accepts already-parsed [`Event`] values so the same parse can
+//! be reused by routing, caching, and persistence. The translator recomputes
+//! each candidate's event id once before dispatch; these workers perform only
+//! the schnorr half, avoiding a second content/tag hash. Native targets keep a
+//! bounded set of workers alive for the lifetime of the pool; each worker owns
+//! one secp256k1 verification context and reuses it for every event. That avoids
+//! per-burst thread creation and gives each worker a context-local verification
+//! hot path. wasm32 has the same ordered API but verifies deterministically on
+//! the calling thread.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event, EventId, JsonUtil};
+use nostr::Event;
 
 use crate::health::RelayHealth;
 
-use super::RelayFrame;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{self, Receiver, SyncSender};
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread::JoinHandle;
 
-/// Outcome of the gate for one inbound [`RelayFrame`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GateVerdict {
-    /// Not an `EVENT` frame (or an `EVENT`-shaped frame whose payload did
-    /// not even parse as a full [`Event`]) -- passed through unchanged,
-    /// exactly this gate's predecessor behavior. A payload that doesn't
-    /// parse as a full event is still safely handled downstream by the
-    /// engine's own `RelayMessage::from_json` (malformed frame -> dropped
-    /// there, same as always) -- this gate only has an opinion on frames it
-    /// can fully parse.
-    PassThrough,
-    /// A verified (fresh or redelivered-and-matching) `EVENT` frame.
-    Accept,
-    /// A forged/tampered `EVENT` frame: bad schnorr signature on first
-    /// sight, or a signature that does not match the previously-verified
-    /// value already on file for the same event id. Never forwarded.
-    Reject,
-}
+#[cfg(target_arch = "wasm32")]
+use nostr::secp256k1::{Secp256k1, VerifyOnly};
 
-/// Verify a translator-sized burst concurrently, then update the shared
-/// id/signature cache in input order. Parsing stays per frame; expensive
-/// schnorr checks for distinct first-seen ids run across scoped native
-/// threads. Redeliveries already in `verified` remain byte comparisons.
-pub(super) fn gate_batch(
-    verified: &mut HashMap<EventId, Signature>,
-    frames: &[&RelayFrame],
-) -> Vec<GateVerdict> {
-    let parsed: Vec<Option<Event>> = frames
-        .iter()
-        .map(|frame| {
-            let RelayFrame::Text(text) = frame else {
-                return None;
-            };
-            let event_json = sniff_event_payload(text)?;
-            Event::from_json(event_json).ok()
-        })
-        .collect();
-    let mut verdicts = vec![GateVerdict::PassThrough; frames.len()];
-    let mut unknown = Vec::new();
-    for (index, event) in parsed.iter().enumerate() {
-        let Some(event) = event else { continue };
-        if let Some(known_sig) = verified.get(&event.id) {
-            verdicts[index] = if *known_sig == event.sig {
-                GateVerdict::Accept
-            } else {
-                GateVerdict::Reject
-            };
-        } else {
-            unknown.push((index, event));
-        }
-    }
-
-    let checks = verify_unknown(&unknown);
-    for ((index, event), valid) in unknown.into_iter().zip(checks) {
-        if !valid {
-            verdicts[index] = GateVerdict::Reject;
-            continue;
-        }
-        verdicts[index] = match verified.get(&event.id) {
-            Some(known_sig) if *known_sig != event.sig => GateVerdict::Reject,
-            Some(_) => GateVerdict::Accept,
-            None => {
-                verified.insert(event.id, event.sig);
-                GateVerdict::Accept
-            }
-        };
-    }
-    verdicts
-}
-
-fn verify_unknown(events: &[(usize, &Event)]) -> Vec<bool> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if events.len() > 1 {
-        let workers = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(events.len());
-        if workers > 1 {
-            let chunk_len = events.len().div_ceil(workers);
-            return std::thread::scope(|scope| {
-                let handles: Vec<_> = events
-                    .chunks(chunk_len)
-                    .map(|chunk| {
-                        scope.spawn(move || {
-                            chunk
-                                .iter()
-                                .map(|(_index, event)| event.verify().is_ok())
-                                .collect::<Vec<_>>()
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .flat_map(|handle| handle.join().expect("verification worker panicked"))
-                    .collect()
-            });
-        }
-    }
-    events
-        .iter()
-        .map(|(_index, event)| event.verify().is_ok())
-        .collect()
-}
-
-/// Peek `frame`; verify at most once per distinct event id.
+/// Default number of queued verification tasks per native worker.
 ///
-/// `verified` is the pool-global cache of event id -> the signature that
-/// passed [`Event::verify`] the first time that id was seen, from ANY
-/// relay -- shared across every slot (via [`super::inner::PoolInner`], the
-/// single owner of every slot) so a redelivery from a second relay never
-/// re-runs the schnorr check, only a byte-for-byte signature compare.
-pub(super) fn gate(verified: &mut HashMap<EventId, Signature>, frame: &RelayFrame) -> GateVerdict {
-    let RelayFrame::Text(text) = frame else {
-        return GateVerdict::PassThrough;
-    };
-    let Some(event_json) = sniff_event_payload(text) else {
-        return GateVerdict::PassThrough;
-    };
-    let Ok(event) = Event::from_json(event_json) else {
-        return GateVerdict::PassThrough;
-    };
+/// The bounded queues apply backpressure to the translator instead of letting
+/// a relay burst allocate an unbounded backlog. A queue belongs to one worker,
+/// so no mutex is needed around task receipt or the worker's secp context.
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_QUEUE_CAPACITY: usize = 64;
 
-    if let Some(known_sig) = verified.get(&event.id) {
-        return if *known_sig == event.sig {
-            GateVerdict::Accept
-        } else {
-            GateVerdict::Reject
-        };
+/// Persistent, bounded signature-verification executor.
+///
+/// Results returned by [`VerifierPool::verify_batch`] always correspond to the
+/// input order even though native workers may complete out of order. Dropping
+/// the pool drains accepted work, asks every worker to stop, and joins every
+/// thread.
+pub(super) struct VerifierPool {
+    #[cfg(not(target_arch = "wasm32"))]
+    workers: Vec<Worker>,
+    #[cfg(not(target_arch = "wasm32"))]
+    next_worker: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    queue_capacity: usize,
+    #[cfg(target_arch = "wasm32")]
+    secp: Secp256k1<VerifyOnly>,
+}
+
+/// Fail-closed result for one verification task.
+///
+/// `Unavailable` is deliberately distinct from a bad signature: an internal
+/// worker failure must drop the affected event and become visible as relay
+/// health, but must not falsely accuse the relay of cryptographic misbehavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerificationOutcome {
+    Valid,
+    Invalid,
+    Unavailable,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct Worker {
+    tasks: SyncSender<Task>,
+    join: Option<JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum Task {
+    Verify {
+        index: usize,
+        event: Arc<Event>,
+        results: mpsc::Sender<(usize, bool)>,
+    },
+    Shutdown,
+}
+
+impl VerifierPool {
+    /// Build a pool with explicit native worker and per-worker queue bounds.
+    ///
+    /// Both values are clamped to one. They are retained in the wasm signature
+    /// so callers can construct the pool without target-specific application
+    /// code; wasm still executes sequentially and does not create queues.
+    pub(super) fn new(worker_count: usize, queue_capacity: usize) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let worker_count = worker_count.max(1);
+            let queue_capacity = queue_capacity.max(1);
+            let workers = (0..worker_count)
+                .map(|index| Worker::spawn(index, queue_capacity))
+                .collect();
+            Self {
+                workers,
+                next_worker: 0,
+                queue_capacity,
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (worker_count, queue_capacity);
+            Self {
+                secp: Secp256k1::verification_only(),
+            }
+        }
     }
 
-    if event.verify().is_ok() {
-        verified.insert(event.id, event.sig);
-        GateVerdict::Accept
-    } else {
-        GateVerdict::Reject
+    /// Verify a batch and return one validity bit per event, in input order.
+    ///
+    /// `Arc<Event>` lets the translator hand the exact parsed value to a
+    /// worker and later reuse it without cloning its strings or tags.
+    pub(super) fn verify_batch(&mut self, events: &[Arc<Event>]) -> Vec<VerificationOutcome> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if events.is_empty() {
+                return Vec::new();
+            }
+
+            let (results_tx, results_rx) = mpsc::channel();
+            let first_worker = self.next_worker;
+            self.next_worker = self.next_worker.wrapping_add(events.len());
+            for (offset, event) in events.iter().enumerate() {
+                let worker = first_worker.wrapping_add(offset) % self.workers.len();
+                let task = Task::Verify {
+                    index: offset,
+                    event: Arc::clone(event),
+                    results: results_tx.clone(),
+                };
+                if let Err(error) = self.workers[worker].tasks.send(task) {
+                    // Retire and replace the failed lane immediately. The
+                    // affected task remains fail-closed for this batch, but a
+                    // dead worker can never poison every Nth future event.
+                    let replacement = Worker::spawn(worker, self.queue_capacity);
+                    let mut failed = std::mem::replace(&mut self.workers[worker], replacement);
+                    if let Some(join) = failed.join.take() {
+                        let _ = join.join();
+                    }
+                    drop(error.0);
+                }
+            }
+            drop(results_tx);
+
+            // Start fail-closed. Successfully completed tasks overwrite their
+            // slot; tasks rejected by a dead worker or abandoned by a worker
+            // panic remain `Unavailable`. Iteration ends once every task-held
+            // result sender has either replied or been dropped.
+            let mut ordered = vec![VerificationOutcome::Unavailable; events.len()];
+            for (index, valid) in results_rx {
+                ordered[index] = if valid {
+                    VerificationOutcome::Valid
+                } else {
+                    VerificationOutcome::Invalid
+                };
+            }
+            ordered
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            events
+                .iter()
+                .map(|event| {
+                    if event.verify_signature_with_ctx(&self.secp) {
+                        VerificationOutcome::Valid
+                    } else {
+                        VerificationOutcome::Invalid
+                    }
+                })
+                .collect()
+        }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn stop_worker(&mut self, index: usize) {
+        let worker = &mut self.workers[index];
+        let _ = worker.tasks.send(Task::Shutdown);
+        if let Some(join) = worker.join.take() {
+            join.join().expect("test worker must stop cleanly");
+        }
     }
 }
 
-/// Cheap peek: `["EVENT", <sub_id>, {...}]` -> the embedded event object's
-/// raw JSON text, or `None` for anything else (not an `EVENT` frame, or a
-/// malformed array shape). Mirrors `pool::frame::classify_text`'s
-/// fast-path-substring-before-parsing style, for the same reason: avoid
-/// paying a `serde_json` parse for the (overwhelmingly common) non-EVENT
-/// frames (`EOSE`/`OK`/`NOTICE`/`CLOSED`/`NEG-*`).
-fn sniff_event_payload(text: &str) -> Option<String> {
-    if !text.contains("\"EVENT\"") {
-        return None;
+impl Default for VerifierPool {
+    fn default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let workers = std::thread::available_parallelism().map_or(1, usize::from);
+            Self::new(workers, DEFAULT_QUEUE_CAPACITY)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::new(1, 1)
+        }
     }
-    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
-    let arr = parsed.as_array()?;
-    if arr.len() < 3 || arr[0].as_str() != Some("EVENT") {
-        return None;
-    }
-    Some(arr[2].to_string())
 }
 
-/// Bump the misbehavior counter on `health` for a rejected frame -- the
-/// relay-health signal the app can observe via `Pool::health` (ledger's own
-/// "surface it, never just narrate it" rule). Kept as its own tiny function
-/// so the call site in `apply_worker_event` reads as one clear step.
+#[cfg(not(target_arch = "wasm32"))]
+impl Worker {
+    fn spawn(index: usize, queue_capacity: usize) -> Self {
+        let (tasks_tx, tasks_rx) = mpsc::sync_channel(queue_capacity);
+        let join = std::thread::Builder::new()
+            .name(format!("nmp-verify-{index}"))
+            .spawn(move || worker_loop(tasks_rx))
+            .expect("failed to start signature-verification worker");
+        Self {
+            tasks: tasks_tx,
+            join: Some(join),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn worker_loop(tasks: Receiver<Task>) {
+    let secp = nostr::secp256k1::Secp256k1::verification_only();
+    while let Ok(task) = tasks.recv() {
+        match task {
+            Task::Verify {
+                index,
+                event,
+                results,
+            } => {
+                let valid = event.verify_signature_with_ctx(&secp);
+                // Completion means every worker-owned reference is gone, so
+                // the engine can structurally unwrap the frame Arc without a
+                // race into the deep-clone fallback.
+                drop(event);
+                // A caller may abandon a batch while the pool is shutting
+                // down; that must not kill an otherwise healthy worker.
+                let _ = results.send((index, valid));
+            }
+            Task::Shutdown => break,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for VerifierPool {
+    fn drop(&mut self) {
+        for worker in &self.workers {
+            // A disconnected worker has already stopped and will be joined
+            // below. A full queue drains before this bounded send completes.
+            let _ = worker.tasks.send(Task::Shutdown);
+        }
+        for worker in &mut self.workers {
+            if let Some(join) = worker.join.take() {
+                // Drop must remain non-panicking even if a worker encountered
+                // an unexpected panic while executing application work.
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+/// Bump the observable relay-misbehavior counter for a rejected event.
 pub(super) fn record_misbehavior(health: &mut RelayHealth) {
     health.invalid_signature_count += 1;
+}
+
+/// Surface an internal verifier outage without attributing it to the relay.
+pub(super) fn record_unavailable(health: &mut RelayHealth) {
+    health.last_error = Some("signature verification worker unavailable".to_string());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage};
 
-    fn signed_event_frame(keys: &Keys, content: &str) -> (RelayFrame, Event) {
-        let event = EventBuilder::new(Kind::TextNote, content)
+    fn signed_event(keys: &Keys, content: &str) -> Event {
+        EventBuilder::new(Kind::TextNote, content)
             .sign_with_keys(keys)
-            .expect("test fixture must sign cleanly");
-        let frame = RelayFrame::Text(
-            nostr::RelayMessage::event(nostr::SubscriptionId::new("s"), event.clone()).as_json(),
-        );
-        (frame, event)
+            .expect("test fixture must sign cleanly")
     }
 
     #[test]
-    fn fresh_valid_event_is_accepted_and_cached() {
+    fn batch_results_match_sequential_verification_and_input_order() {
         let keys = Keys::generate();
-        let (frame, event) = signed_event_frame(&keys, "hello");
-        let mut verified = HashMap::new();
-
-        assert_eq!(gate(&mut verified, &frame), GateVerdict::Accept);
-        assert_eq!(verified.get(&event.id), Some(&event.sig));
-    }
-
-    #[test]
-    fn tampered_event_is_rejected_and_not_cached() {
-        let keys = Keys::generate();
-        let (_, mut event) = signed_event_frame(&keys, "genuine");
-        event.content = "forged".to_string();
-        let forged_frame = RelayFrame::Text(
-            nostr::RelayMessage::event(nostr::SubscriptionId::new("s"), event.clone()).as_json(),
-        );
-        let mut verified = HashMap::new();
-
-        assert_eq!(gate(&mut verified, &forged_frame), GateVerdict::Reject);
-        assert!(
-            verified.is_empty(),
-            "a rejected event must never be cached as verified"
-        );
-    }
-
-    #[test]
-    fn redelivery_of_a_verified_id_is_accepted_without_a_second_schnorr_check() {
-        let keys = Keys::generate();
-        let (frame, _event) = signed_event_frame(&keys, "same event, two relays");
-        let mut verified = HashMap::new();
-        assert_eq!(gate(&mut verified, &frame), GateVerdict::Accept);
-
-        // Simulate a second relay delivering the exact same signed bytes:
-        // the identical frame, fed through the gate again. The cache-hit
-        // path (a signature STRING compare, not a schnorr op) is the only
-        // way this can succeed a second time without re-parsing sec256k1
-        // internals differently -- `redelivery_with_a_mismatched_signature_
-        // for_a_known_id_is_rejected` below is what actually falsifies that
-        // this is a compare and not just "always accept a known id".
-        assert_eq!(gate(&mut verified, &frame), GateVerdict::Accept);
-        assert_eq!(verified.len(), 1, "no new cache entry for a redelivery");
-    }
-
-    #[test]
-    fn batch_gate_accepts_and_caches_distinct_valid_events_in_order() {
-        let keys = Keys::generate();
-        let frames: Vec<_> = (0..16)
-            .map(|index| signed_event_frame(&keys, &format!("batch-{index}")).0)
+        let events: Vec<_> = (0..97)
+            .map(|index| {
+                let mut event = signed_event(&keys, &format!("event-{index}"));
+                if index % 7 == 0 {
+                    event.content.push_str("-tampered");
+                } else if index % 11 == 0 {
+                    event.sig = signed_event(&keys, &format!("other-{index}")).sig;
+                }
+                Arc::new(event)
+            })
             .collect();
-        let refs: Vec<_> = frames.iter().collect();
-        let mut verified = HashMap::new();
+        let expected: Vec<_> = events
+            .iter()
+            .map(|event| {
+                if event.verify_signature() {
+                    VerificationOutcome::Valid
+                } else {
+                    VerificationOutcome::Invalid
+                }
+            })
+            .collect();
+        let mut pool = VerifierPool::new(4, 2);
 
-        let verdicts = gate_batch(&mut verified, &refs);
-
-        assert_eq!(verdicts, vec![GateVerdict::Accept; 16]);
-        assert_eq!(verified.len(), 16);
+        assert_eq!(pool.verify_batch(&events), expected);
     }
 
     #[test]
-    fn redelivery_with_a_mismatched_signature_for_a_known_id_is_rejected() {
-        // Construct two DIFFERENT signed events that happen to share an id
-        // by directly forging a second `Event` value with event A's id but
-        // event B's signature -- modeling a relay that redelivers a known
-        // id with a corrupted/substituted signature.
+    fn persistent_pool_can_verify_multiple_bursts() {
         let keys = Keys::generate();
-        let (frame_a, event_a) = signed_event_frame(&keys, "event a");
-        let (_, event_b) = signed_event_frame(&keys, "event b");
+        let mut pool = VerifierPool::new(3, 1);
 
-        let mut verified = HashMap::new();
-        assert_eq!(gate(&mut verified, &frame_a), GateVerdict::Accept);
+        for burst in 0..8 {
+            let events: Vec<_> = (0..13)
+                .map(|index| Arc::new(signed_event(&keys, &format!("{burst}-{index}"))))
+                .collect();
+            assert_eq!(
+                pool.verify_batch(&events),
+                vec![VerificationOutcome::Valid; events.len()]
+            );
+        }
 
-        let mut mismatched = event_a.clone();
-        mismatched.sig = event_b.sig;
-        let mismatched_frame = RelayFrame::Text(
-            nostr::RelayMessage::event(nostr::SubscriptionId::new("s"), mismatched).as_json(),
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(pool.worker_count(), 3);
+    }
+
+    #[test]
+    fn empty_batch_is_empty() {
+        let mut pool = VerifierPool::new(2, 1);
+        assert!(pool.verify_batch(&[]).is_empty());
+    }
+
+    #[test]
+    fn zero_configuration_is_clamped_and_drop_joins_workers() {
+        let pool = VerifierPool::new(0, 0);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(pool.worker_count(), 1);
+        drop(pool);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stopped_worker_fails_affected_batch_closed_without_panicking() {
+        let keys = Keys::generate();
+        let events = vec![Arc::new(signed_event(&keys, "must not escape"))];
+        let mut pool = VerifierPool::new(1, 1);
+        pool.stop_worker(0);
+
+        assert_eq!(
+            pool.verify_batch(&events),
+            vec![VerificationOutcome::Unavailable]
         );
-
-        assert_eq!(gate(&mut verified, &mismatched_frame), GateVerdict::Reject);
+        assert_eq!(
+            pool.verify_batch(&events),
+            vec![VerificationOutcome::Valid],
+            "the stopped worker lane must be replaced for future batches"
+        );
     }
 
     #[test]
-    fn non_event_frame_passes_through_untouched() {
-        let frame =
-            RelayFrame::Text(nostr::RelayMessage::eose(nostr::SubscriptionId::new("s")).as_json());
-        let mut verified = HashMap::new();
-        assert_eq!(gate(&mut verified, &frame), GateVerdict::PassThrough);
+    fn verifier_outage_is_health_not_false_relay_misbehavior() {
+        let mut health = RelayHealth::default();
+        record_unavailable(&mut health);
+
+        assert_eq!(health.invalid_signature_count, 0);
+        assert_eq!(
+            health.last_error.as_deref(),
+            Some("signature verification worker unavailable")
+        );
     }
 
+    /// Reproducible real-corpus proof for #168.
+    ///
+    /// `NMP_CORPUS` is JSONL with one canonical event object per line. The
+    /// harness wraps each object in its real relay EVENT envelope without
+    /// reparsing it during setup, then times exactly one typed relay-message
+    /// parse per frame, persistent-worker first-seen verification, and the
+    /// known-redelivery signature-compare path for the required burst matrix.
     #[test]
-    fn auth_frame_passes_through_untouched() {
-        let frame = RelayFrame::Auth("challenge".to_string());
-        let mut verified = HashMap::new();
-        assert_eq!(gate(&mut verified, &frame), GateVerdict::PassThrough);
+    #[ignore = "requires NMP_CORPUS real-event JSONL"]
+    fn real_corpus_verify_matrix() {
+        use std::collections::HashMap;
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let path = std::env::var("NMP_CORPUS").expect("set NMP_CORPUS to event JSONL");
+        let source = std::fs::read_to_string(&path).expect("read real corpus");
+        let wire: Vec<_> = source
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|event_json| format!(r#"["EVENT","nmp-bench",{event_json}]"#))
+            .collect();
+        assert!(!wire.is_empty(), "real corpus is empty");
+
+        fn median(mut samples: Vec<Duration>) -> Duration {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        println!("corpus={path}");
+        println!("corpus_events={}", wire.len());
+        for requested in [1usize, 2, 8, 32, 128, 512, wire.len()] {
+            let size = requested.min(wire.len());
+            let mut parse_samples = Vec::new();
+            let mut verify_samples = Vec::new();
+            let mut known_samples = Vec::new();
+            for _ in 0..3 {
+                let started = Instant::now();
+                let frames: Vec<_> = wire[..size]
+                    .iter()
+                    .map(|raw| {
+                        let parsed: RelayMessage<'static> =
+                            RelayMessage::from_json(raw).expect("parse real relay EVENT once");
+                        crate::pool::RelayFrame::from(parsed)
+                    })
+                    .collect();
+                let events: Vec<_> = frames
+                    .iter()
+                    .map(|frame| Arc::clone(frame.event().expect("fixture wrapper must be EVENT")))
+                    .collect();
+                parse_samples.push(started.elapsed());
+
+                let mut pool = VerifierPool::default();
+                let started = Instant::now();
+                assert!(events.iter().all(|event| event.verify_id()));
+                let valid = pool.verify_batch(black_box(&events));
+                verify_samples.push(started.elapsed());
+                assert!(valid
+                    .iter()
+                    .all(|outcome| *outcome == VerificationOutcome::Valid));
+
+                let known: HashMap<_, _> =
+                    events.iter().map(|event| (event.id, event.sig)).collect();
+                let started = Instant::now();
+                let hits = events
+                    .iter()
+                    .filter(|event| event.verify_id() && known.get(&event.id) == Some(&event.sig))
+                    .count();
+                known_samples.push(started.elapsed());
+                assert_eq!(hits, events.len());
+            }
+            println!("size={size}");
+            println!("  parse_count={size}");
+            println!(
+                "  parse_once_median_ms={:.3}",
+                median(parse_samples).as_secs_f64() * 1_000.0
+            );
+            println!(
+                "  first_seen_verify_median_ms={:.3}",
+                median(verify_samples).as_secs_f64() * 1_000.0
+            );
+            println!(
+                "  known_redelivery_median_ms={:.3}",
+                median(known_samples).as_secs_f64() * 1_000.0
+            );
+        }
     }
 }

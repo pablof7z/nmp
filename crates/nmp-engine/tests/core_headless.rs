@@ -28,9 +28,7 @@ use nmp_store::{
     RecoveredRouteRevision, RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
-use nostr::{
-    JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent,
-};
+use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
 
 use std::collections::BTreeSet;
 
@@ -593,11 +591,11 @@ fn publish_private<S: EventStore>(
 }
 
 fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
-    RelayFrame::Text(RelayMessage::event(SubscriptionId::new(sub), event).as_json())
+    RelayFrame::from(RelayMessage::event(SubscriptionId::new(sub), event))
 }
 
 fn eose_frame(sub: &str) -> RelayFrame {
-    RelayFrame::Text(RelayMessage::eose(SubscriptionId::new(sub)).as_json())
+    RelayFrame::from(RelayMessage::eose(SubscriptionId::new(sub)))
 }
 
 // ---- test 1 analog: subscribe -> Wire; ingest -> Wire + EmitRows --------
@@ -2402,7 +2400,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
             slot: 0,
             generation: 1,
         },
-        RelayFrame::Text(RelayMessage::ok(signed.id, false, "policy rejection").as_json()),
+        RelayFrame::from(RelayMessage::ok(signed.id, false, "policy rejection")),
     ));
     assert!(!all_row_deltas(&rejected)
         .iter()
@@ -2649,7 +2647,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
             slot: 0,
             generation: 1,
         },
-        RelayFrame::Text(RelayMessage::ok(signed.id, true, "").as_json()),
+        RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
@@ -2664,7 +2662,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
             slot: 1,
             generation: 1,
         },
-        RelayFrame::Text(RelayMessage::ok(signed.id, false, "no").as_json()),
+        RelayFrame::from(RelayMessage::ok(signed.id, false, "no")),
     ));
     assert!(nacked.iter().any(|effect| matches!(
         effect,
@@ -3327,7 +3325,7 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
             slot: 0,
             generation: 1,
         },
-        RelayFrame::Text(RelayMessage::ok(signed.id, true, "").as_json()),
+        RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
@@ -3542,7 +3540,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
                 slot: 0,
                 generation: 1,
             },
-            RelayFrame::Text(RelayMessage::ok(old_event.id, true, "").as_json()),
+            RelayFrame::from(RelayMessage::ok(old_event.id, true, "")),
         ));
         assert!(acked.iter().any(|effect| matches!(
             effect,
@@ -3672,7 +3670,7 @@ fn write_ack_per_relay() {
         "a durable AuthorOutbox write reaches both of the author's write relays"
     );
 
-    let ok_frame = RelayFrame::Text(RelayMessage::ok(signed.id, true, "").as_json());
+    let ok_frame = RelayFrame::from(RelayMessage::ok(signed.id, true, ""));
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -3684,8 +3682,7 @@ fn write_ack_per_relay() {
         |e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Acked(r)) if *rid == id && r == &relay_ok)
     ));
 
-    let nack_frame =
-        RelayFrame::Text(RelayMessage::ok(signed.id, false, "blocked: spam").as_json());
+    let nack_frame = RelayFrame::from(RelayMessage::ok(signed.id, false, "blocked: spam"));
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 1,
@@ -3739,7 +3736,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
         generation,
         Ok(signed.clone()),
     ));
-    let frame = || RelayFrame::Text(RelayMessage::ok(signed.id, true, "").as_json());
+    let frame = || RelayFrame::from(RelayMessage::ok(signed.id, true, ""));
     let failed = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -3793,23 +3790,17 @@ fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
 // selection --------------------------------------------------------------
 
 fn neg_msg_frame(sub: &str, message_hex: &str) -> RelayFrame {
-    RelayFrame::Text(
-        RelayMessage::NegMsg {
-            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(sub)),
-            message: std::borrow::Cow::Owned(message_hex.to_string()),
-        }
-        .as_json(),
-    )
+    RelayFrame::from(RelayMessage::NegMsg {
+        subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(sub)),
+        message: std::borrow::Cow::Owned(message_hex.to_string()),
+    })
 }
 
 fn neg_err_frame(sub: &str) -> RelayFrame {
-    RelayFrame::Text(
-        RelayMessage::NegErr {
-            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(sub)),
-            message: std::borrow::Cow::Owned("blocked: unsupported".to_string()),
-        }
-        .as_json(),
-    )
+    RelayFrame::from(RelayMessage::NegErr {
+        subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(sub)),
+        message: std::borrow::Cow::Owned("blocked: unsupported".to_string()),
+    })
 }
 
 /// Test 3 (ledger #8) first half: an unprobed relay (never even connected,
@@ -4652,4 +4643,73 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
     );
     // The reducer survives and keeps handling messages (no poisoned state).
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
+}
+
+/// Reproducible real-corpus resolver/store handoff matrix for issue #168.
+///
+/// Transport parsing and verification have their own checked harness in
+/// `nmp-transport`; this measures the next stage from an already typed,
+/// verified relay batch through governed resolver ingest and one crash-atomic
+/// redb transaction. Setup, database creation, and event cloning are outside
+/// the timed interval.
+#[test]
+#[ignore = "requires NMP_CORPUS real-event JSONL"]
+fn real_corpus_typed_batch_to_redb_matrix() {
+    use std::hint::black_box;
+
+    use nostr::{Event, JsonUtil};
+
+    let path = std::env::var("NMP_CORPUS").expect("set NMP_CORPUS to event JSONL");
+    let source = std::fs::read_to_string(&path).expect("read real corpus");
+    let corpus: Vec<Event> = source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| Event::from_json(line).expect("parse real event fixture"))
+        .collect();
+    assert!(!corpus.is_empty(), "real corpus is empty");
+
+    fn median(mut samples: Vec<Duration>) -> Duration {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    let relay = RelayUrl::parse("wss://real-corpus-bench.invalid").unwrap();
+    let handle = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    println!("corpus={path}");
+    println!("corpus_events={}", corpus.len());
+    for requested in [1usize, 2, 8, 32, 128, 512, corpus.len()] {
+        let size = requested.min(corpus.len());
+        let mut samples = Vec::new();
+        for _ in 0..3 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let store = RedbStore::open(dir.path().join("bench.redb")).expect("open redb");
+            let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+            let _ = core.handle(EngineMsg::RelayConnected(handle, relay.clone()));
+            let frames: Vec<_> = corpus[..size]
+                .iter()
+                .cloned()
+                .map(|event| {
+                    (
+                        handle,
+                        RelayFrame::from(RelayMessage::event(
+                            SubscriptionId::new("nmp-bench"),
+                            event,
+                        )),
+                    )
+                })
+                .collect();
+
+            let started = Instant::now();
+            black_box(core.handle(EngineMsg::RelayFrames(frames)));
+            samples.push(started.elapsed());
+        }
+        println!("size={size}");
+        println!(
+            "  typed_resolver_redb_median_ms={:.3}",
+            median(samples).as_secs_f64() * 1_000.0
+        );
+    }
 }

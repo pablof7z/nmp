@@ -26,7 +26,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::TcpStream;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -160,7 +160,7 @@ pub(super) fn spawn(
     slot: u32,
     worker_id: u32,
     url: String,
-    event_tx: Sender<WorkerEvent>,
+    event_tx: SyncSender<WorkerEvent>,
     keepalive_idle: Duration,
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
@@ -205,7 +205,7 @@ fn run_worker(
     slot: u32,
     worker_id: u32,
     url: String,
-    event_tx: Sender<WorkerEvent>,
+    event_tx: SyncSender<WorkerEvent>,
     command_rx: Receiver<WorkerCommand>,
     waker_slot: Arc<Mutex<Option<Waker>>>,
     keepalive_idle: Duration,
@@ -351,7 +351,7 @@ fn run_worker(
 /// health transition are rejected synchronously by `PoolInner`.
 fn drain_permanently_disconnected(
     command_rx: &Receiver<WorkerCommand>,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
 ) {
@@ -377,7 +377,7 @@ fn drain_permanently_disconnected(
 /// meaning the whole pool is gone) is the only way it's ever NOT delivered,
 /// which is the same fate every other `WorkerEvent` already has.
 fn resolve_correlation(
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
     correlation: AttemptCorrelation,
@@ -403,7 +403,7 @@ fn resolve_correlation(
 ///   resolves `Ambiguous` — the bytes MAY have reached the relay, so
 ///   nothing may treat it as a fresh, never-attempted send.
 fn resolve_generation_end(
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
@@ -442,7 +442,7 @@ fn wait_before_reconnect(
     pending: &mut VecDeque<String>,
     preamble: &mut Vec<String>,
     delay: Duration,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
 ) -> bool {
@@ -481,7 +481,7 @@ fn wait_before_reconnect(
 fn run_connected(
     slot: u32,
     generation: u64,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     pending: &mut VecDeque<String>,
@@ -512,7 +512,7 @@ fn run_connected(
 fn run_connected_inner(
     slot: u32,
     generation: u64,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     pending: &mut VecDeque<String>,
@@ -639,7 +639,7 @@ fn drain_commands(
     pending: &mut VecDeque<String>,
     preamble: &mut Vec<String>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
 ) -> Drain {
@@ -692,7 +692,7 @@ fn flush_writes(
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     socket: &mut RelaySocket,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
 ) -> FlushResult {
@@ -733,7 +733,7 @@ fn flush_message(
     socket: &mut RelaySocket,
     message: Message,
     write_accepted: &mut Vec<AttemptCorrelation>,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
 ) -> FlushResult {
@@ -752,7 +752,7 @@ fn flush_message(
 fn flush_socket_and_settle(
     socket: &mut RelaySocket,
     write_accepted: &mut Vec<AttemptCorrelation>,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
 ) -> FlushResult {
@@ -782,7 +782,7 @@ fn flush_socket(socket: &mut RelaySocket) -> FlushResult {
 fn drain_reads(
     slot: u32,
     generation: u64,
-    event_tx: &Sender<WorkerEvent>,
+    event_tx: &SyncSender<WorkerEvent>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
 ) -> Option<ConnectedOutcome> {
@@ -919,6 +919,7 @@ mod tests {
     use tungstenite::protocol::{Role, WebSocketConfig};
 
     const LARGE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_EVENT_QUEUE_CAPACITY: usize = 8;
 
     fn real_buffered_socket() -> (RelaySocket, TcpStream) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -939,7 +940,7 @@ mod tests {
     fn begin_real_unconfirmed_write(
         socket: &mut RelaySocket,
         correlation: AttemptCorrelation,
-        event_tx: &Sender<WorkerEvent>,
+        event_tx: &SyncSender<WorkerEvent>,
         write_accepted: &mut Vec<AttemptCorrelation>,
     ) {
         let mut pending = VecDeque::new();
@@ -1003,7 +1004,7 @@ mod tests {
 
     #[test]
     fn generation_end_classifies_queued_and_write_accepted_exactly() {
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
         let queued = AttemptCorrelation(10);
         let accepted = AttemptCorrelation(11);
         let mut durable = VecDeque::from([(queued, "queued".to_string())]);
@@ -1025,7 +1026,7 @@ mod tests {
     #[test]
     fn real_socket_write_ok_unconfirmed_flush_then_generation_end_is_ambiguous() {
         let (mut socket, peer) = real_buffered_socket();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
         let correlation = AttemptCorrelation(31);
         let mut write_accepted = Vec::new();
         begin_real_unconfirmed_write(&mut socket, correlation, &event_tx, &mut write_accepted);
@@ -1043,7 +1044,7 @@ mod tests {
     #[test]
     fn successful_control_flush_settles_prior_durable_write_as_written() {
         let (mut socket, mut peer) = real_buffered_socket();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
         let correlation = AttemptCorrelation(32);
         let mut write_accepted = Vec::new();
         begin_real_unconfirmed_write(&mut socket, correlation, &event_tx, &mut write_accepted);
@@ -1088,7 +1089,7 @@ mod tests {
     #[test]
     fn permanent_disconnect_drains_every_accepted_durable_command_once() {
         let (command_tx, command_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
         let first = AttemptCorrelation(21);
         let second = AttemptCorrelation(22);
         let drain = std::thread::spawn(move || {

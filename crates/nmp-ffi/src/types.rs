@@ -468,6 +468,9 @@ pub struct FfiDiagnosticsSnapshot {
     /// `max_relays` ceiling was already reached (issue #121, worker-exhaustion
     /// defense). Always `0` when no cap is configured.
     pub relays_rejected_over_cap: u64,
+    /// Latest transport acceptance/verifier failure, if any. This is
+    /// observational diagnostics and never changes routing or trust policy.
+    pub transport_degraded: Option<String>,
 }
 
 /// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is

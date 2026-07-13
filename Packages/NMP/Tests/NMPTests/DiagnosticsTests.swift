@@ -32,6 +32,7 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertEqual(snapshot.relays.count, 0)
         XCTAssertEqual(snapshot.uncoveredAuthorCount, 0)
         XCTAssertEqual(snapshot.droppedMergeRules.count, 0)
+        XCTAssertNil(snapshot.transportDegraded)
     }
 
     /// Subscribing to a literal-author query with NO write relay known for
