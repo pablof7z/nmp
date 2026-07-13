@@ -98,6 +98,9 @@ pub struct DiagnosticsSnapshot {
     /// ingest/reads. `None` while persistence is healthy. Read-only, off the
     /// data path — an observer-visible signal, never a routing input.
     pub store_degraded: Option<String>,
+    /// Latest transport acceptance/verifier failure surfaced by the pool.
+    /// Observational only; it never changes routing or trust policy.
+    pub transport_degraded: Option<String>,
 }
 
 /// Combine `diag` (subs/filters/lanes/authors_served — `nmp-router`-owned)
@@ -165,6 +168,7 @@ pub(crate) fn build(
         // degrade flag); `build` itself is a pure projection of router/store
         // facts and has no notion of persistence health.
         store_degraded: None,
+        transport_degraded: None,
     }
 }
 

@@ -62,16 +62,13 @@ mod tests {
             .sign_with_keys(&nostr::Keys::generate())
             .expect("signed event");
         let raw = RelayMessage::event(nostr::SubscriptionId::new("sub"), event.clone()).as_json();
-        match classify_text(&raw).expect("valid EVENT").into_message() {
-            RelayMessage::Event {
-                subscription_id,
-                event: parsed,
-            } => {
-                assert_eq!(subscription_id.as_str(), "sub");
-                assert_eq!(parsed.as_ref(), &event);
-            }
-            other => panic!("expected Event, got {other:?}"),
-        }
+        let frame = classify_text(&raw).expect("valid EVENT");
+        assert_eq!(
+            std::sync::Arc::strong_count(frame.event().expect("EVENT allocation")),
+            1,
+            "classification owns one shared allocation, not a deep copy"
+        );
+        assert_eq!(frame.into_event().expect("EVENT frame"), event);
     }
 
     #[test]

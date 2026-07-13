@@ -2,7 +2,9 @@
 //!
 //! Parsing and relay-frame policy live at the translator boundary. This module
 //! deliberately accepts already-parsed [`Event`] values so the same parse can
-//! be reused by routing, caching, and persistence. Native targets keep a
+//! be reused by routing, caching, and persistence. The translator recomputes
+//! each candidate's event id once before dispatch; these workers perform only
+//! the schnorr half, avoiding a second content/tag hash. Native targets keep a
 //! bounded set of workers alive for the lifetime of the pool; each worker owns
 //! one secp256k1 verification context and reuses it for every event. That avoids
 //! per-burst thread creation and gives each worker a context-local verification
@@ -15,8 +17,6 @@ use nostr::Event;
 
 use crate::health::RelayHealth;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, Receiver, SyncSender};
 #[cfg(not(target_arch = "wasm32"))]
@@ -43,7 +43,9 @@ pub(super) struct VerifierPool {
     #[cfg(not(target_arch = "wasm32"))]
     workers: Vec<Worker>,
     #[cfg(not(target_arch = "wasm32"))]
-    next_worker: AtomicUsize,
+    next_worker: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    queue_capacity: usize,
     #[cfg(target_arch = "wasm32")]
     secp: Secp256k1<VerifyOnly>,
 }
@@ -92,7 +94,8 @@ impl VerifierPool {
                 .collect();
             Self {
                 workers,
-                next_worker: AtomicUsize::new(0),
+                next_worker: 0,
+                queue_capacity,
             }
         }
 
@@ -109,7 +112,7 @@ impl VerifierPool {
     ///
     /// `Arc<Event>` lets the translator hand the exact parsed value to a
     /// worker and later reuse it without cloning its strings or tags.
-    pub(super) fn verify_batch(&self, events: &[Arc<Event>]) -> Vec<VerificationOutcome> {
+    pub(super) fn verify_batch(&mut self, events: &[Arc<Event>]) -> Vec<VerificationOutcome> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if events.is_empty() {
@@ -117,14 +120,26 @@ impl VerifierPool {
             }
 
             let (results_tx, results_rx) = mpsc::channel();
-            let first_worker = self.next_worker.fetch_add(events.len(), Ordering::Relaxed);
+            let first_worker = self.next_worker;
+            self.next_worker = self.next_worker.wrapping_add(events.len());
             for (offset, event) in events.iter().enumerate() {
                 let worker = first_worker.wrapping_add(offset) % self.workers.len();
-                let _ = self.workers[worker].tasks.send(Task::Verify {
+                let task = Task::Verify {
                     index: offset,
                     event: Arc::clone(event),
                     results: results_tx.clone(),
-                });
+                };
+                if let Err(error) = self.workers[worker].tasks.send(task) {
+                    // Retire and replace the failed lane immediately. The
+                    // affected task remains fail-closed for this batch, but a
+                    // dead worker can never poison every Nth future event.
+                    let replacement = Worker::spawn(worker, self.queue_capacity);
+                    let mut failed = std::mem::replace(&mut self.workers[worker], replacement);
+                    if let Some(join) = failed.join.take() {
+                        let _ = join.join();
+                    }
+                    drop(error.0);
+                }
             }
             drop(results_tx);
 
@@ -148,7 +163,7 @@ impl VerifierPool {
             events
                 .iter()
                 .map(|event| {
-                    if event.verify_with_ctx(&self.secp).is_ok() {
+                    if event.verify_signature_with_ctx(&self.secp) {
                         VerificationOutcome::Valid
                     } else {
                         VerificationOutcome::Invalid
@@ -213,7 +228,11 @@ fn worker_loop(tasks: Receiver<Task>) {
                 event,
                 results,
             } => {
-                let valid = event.verify_with_ctx(&secp).is_ok();
+                let valid = event.verify_signature_with_ctx(&secp);
+                // Completion means every worker-owned reference is gone, so
+                // the engine can structurally unwrap the frame Arc without a
+                // race into the deep-clone fallback.
+                drop(event);
                 // A caller may abandon a batch while the pool is shutting
                 // down; that must not kill an otherwise healthy worker.
                 let _ = results.send((index, valid));
@@ -279,14 +298,14 @@ mod tests {
         let expected: Vec<_> = events
             .iter()
             .map(|event| {
-                if event.verify().is_ok() {
+                if event.verify_signature() {
                     VerificationOutcome::Valid
                 } else {
                     VerificationOutcome::Invalid
                 }
             })
             .collect();
-        let pool = VerifierPool::new(4, 2);
+        let mut pool = VerifierPool::new(4, 2);
 
         assert_eq!(pool.verify_batch(&events), expected);
     }
@@ -294,7 +313,7 @@ mod tests {
     #[test]
     fn persistent_pool_can_verify_multiple_bursts() {
         let keys = Keys::generate();
-        let pool = VerifierPool::new(3, 1);
+        let mut pool = VerifierPool::new(3, 1);
 
         for burst in 0..8 {
             let events: Vec<_> = (0..13)
@@ -312,7 +331,7 @@ mod tests {
 
     #[test]
     fn empty_batch_is_empty() {
-        let pool = VerifierPool::new(2, 1);
+        let mut pool = VerifierPool::new(2, 1);
         assert!(pool.verify_batch(&[]).is_empty());
     }
 
@@ -335,6 +354,11 @@ mod tests {
         assert_eq!(
             pool.verify_batch(&events),
             vec![VerificationOutcome::Unavailable]
+        );
+        assert_eq!(
+            pool.verify_batch(&events),
+            vec![VerificationOutcome::Valid],
+            "the stopped worker lane must be replaced for future batches"
         );
     }
 
@@ -387,21 +411,23 @@ mod tests {
             let mut known_samples = Vec::new();
             for _ in 0..3 {
                 let started = Instant::now();
-                let events: Vec<_> = wire[..size]
+                let frames: Vec<_> = wire[..size]
                     .iter()
                     .map(|raw| {
                         let parsed: RelayMessage<'static> =
                             RelayMessage::from_json(raw).expect("parse real relay EVENT once");
-                        let RelayMessage::Event { event, .. } = parsed else {
-                            panic!("fixture wrapper must be EVENT")
-                        };
-                        Arc::new(event.into_owned())
+                        crate::pool::RelayFrame::from(parsed)
                     })
+                    .collect();
+                let events: Vec<_> = frames
+                    .iter()
+                    .map(|frame| Arc::clone(frame.event().expect("fixture wrapper must be EVENT")))
                     .collect();
                 parse_samples.push(started.elapsed());
 
-                let pool = VerifierPool::default();
+                let mut pool = VerifierPool::default();
                 let started = Instant::now();
+                assert!(events.iter().all(|event| event.verify_id()));
                 let valid = pool.verify_batch(black_box(&events));
                 verify_samples.push(started.elapsed());
                 assert!(valid
@@ -413,7 +439,7 @@ mod tests {
                 let started = Instant::now();
                 let hits = events
                     .iter()
-                    .filter(|event| known.get(&event.id) == Some(&event.sig))
+                    .filter(|event| event.verify_id() && known.get(&event.id) == Some(&event.sig))
                     .count();
                 known_samples.push(started.elapsed());
                 assert_eq!(hits, events.len());

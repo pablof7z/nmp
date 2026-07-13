@@ -54,7 +54,7 @@ use nmp_store::{
     RelayObserved, WriteDurability,
 };
 use nmp_transport::{
-    AttemptCorrelation, HandoffResult, RelayFrame, RelayHandle as TransportRelayHandle,
+    AttemptCorrelation, HandoffResult, RelayFrame, RelayHandle as TransportRelayHandle, RelayHealth,
 };
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
@@ -223,6 +223,7 @@ pub enum EngineMsg {
     Publish(WriteIntent, Box<dyn ReceiptSink>),
     RelayConnected(TransportRelayHandle, RelayUrl),
     RelayDisconnected(u32),
+    RelayHealth(u32, RelayHealth),
     RelayFrame(TransportRelayHandle, RelayFrame),
     RelayFrames(Vec<(TransportRelayHandle, RelayFrame)>),
     SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
@@ -514,6 +515,7 @@ pub struct EngineCore<S: EventStore> {
     /// nothing). Enforcing degrade (short-circuiting further writes) would be
     /// the richer policy explicitly deferred here.
     store_degraded: Option<String>,
+    transport_degraded: Option<String>,
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
@@ -564,6 +566,7 @@ impl<S: EventStore> EngineCore<S> {
             admission: RelayAdmissionPolicy::default(),
             discovered_private_relays_rejected: 0,
             store_degraded: None,
+            transport_degraded: None,
         }
     }
 
@@ -1020,6 +1023,7 @@ impl<S: EventStore> EngineCore<S> {
         // door has failed — the one persistence-health fact `build` cannot
         // see on its own.
         snapshot.store_degraded = self.store_degraded.clone();
+        snapshot.transport_degraded = self.transport_degraded.clone();
         snapshot
     }
 
@@ -1134,6 +1138,7 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::Publish(intent, sink) => self.on_publish(intent, sink),
             EngineMsg::RelayConnected(handle, url) => self.on_relay_connected(handle, url),
             EngineMsg::RelayDisconnected(slot) => self.on_relay_disconnected(slot),
+            EngineMsg::RelayHealth(slot, health) => self.on_relay_health(slot, health),
             EngineMsg::RelayFrame(handle, frame) => self.on_relay_frame(handle, frame),
             EngineMsg::RelayFrames(frames) => self.on_relay_frames(frames),
             EngineMsg::SignerCompleted(id, generation, result) => {
@@ -1149,6 +1154,18 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::Tick(now) => self.tick(now),
         }
+    }
+
+    fn on_relay_health(&mut self, slot: u32, health: RelayHealth) -> Vec<Effect> {
+        self.transport_degraded = health.last_error.or_else(|| {
+            (health.invalid_signature_count > 0).then(|| {
+                format!(
+                    "relay slot {slot} rejected {} invalid signature frame(s)",
+                    health.invalid_signature_count
+                )
+            })
+        });
+        vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
     }
 
     // ---- subscribe / unsubscribe / re-root ------------------------------
@@ -2252,18 +2269,18 @@ impl<S: EventStore> EngineCore<S> {
         let mut effects = Vec::new();
         let mut events = Vec::new();
         for (handle, frame) in frames {
-            if matches!(frame.as_message(), RelayMessage::Event { .. }) {
-                let RelayMessage::Event { event, .. } = frame.into_message() else {
-                    unreachable!("RelayFrame message was matched as EVENT")
-                };
-                let Some(relay) = self.slot_to_url.get(&handle.slot).cloned() else {
+            match frame.into_event() {
+                Ok(event) => {
+                    let Some(relay) = self.slot_to_url.get(&handle.slot).cloned() else {
+                        self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                        continue;
+                    };
+                    events.push((event, RelayObserved::new(relay, self.clock)));
+                }
+                Err(frame) => {
                     self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
-                    continue;
-                };
-                events.push((event.into_owned(), RelayObserved::new(relay, self.clock)));
-            } else {
-                self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
-                effects.extend(self.on_relay_frame(handle, frame));
+                    effects.extend(self.on_relay_frame(handle, frame));
+                }
             }
         }
         self.ingest_relay_events(events, &mut effects);
@@ -3621,5 +3638,33 @@ mod relay_admission_tests {
             "a public host with a per-user path must pass admission -- the path is not a host"
         );
         assert_eq!(core.discovered_private_relays_rejected, 0);
+    }
+}
+
+#[cfg(test)]
+mod relay_health_tests {
+    use super::*;
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+
+    #[test]
+    fn verifier_outage_reaches_engine_diagnostics_without_false_misbehavior() {
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+        let health = RelayHealth {
+            last_error: Some("signature verification worker unavailable".to_string()),
+            invalid_signature_count: 0,
+            ..RelayHealth::default()
+        };
+
+        let effects = core.handle(EngineMsg::RelayHealth(7, health));
+        assert!(effects.iter().any(|effect| {
+            matches!(effect, Effect::EmitDiagnostics(snapshot)
+                if snapshot.transport_degraded.as_deref()
+                    == Some("signature verification worker unavailable"))
+        }));
+        assert_eq!(
+            core.diagnostics_snapshot().transport_degraded.as_deref(),
+            Some("signature verification worker unavailable")
+        );
     }
 }
