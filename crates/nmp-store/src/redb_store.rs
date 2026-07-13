@@ -21,7 +21,9 @@
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::AtomicU8;
+#[cfg(any(test, feature = "bench-instrumentation"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::secp256k1::schnorr::Signature;
@@ -3145,14 +3147,14 @@ pub struct RedbStore {
     #[cfg(test)]
     crash_point: AtomicU8,
     /// Owned rows materialized after borrowed filtering.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     examined_rows: AtomicU64,
     /// Ordered index entries consumed, including one prefetched head per OR
     /// range needed to establish global ordering.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     query_index_rows: AtomicU64,
     /// Canonical binary event values dereferenced for borrowed post-filtering.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     query_event_values: AtomicU64,
     /// Number of rows yielded by bounded attempt-table ranges. Tests reset
     /// this to prove work follows the target lane count, not total history.
@@ -3350,11 +3352,11 @@ impl RedbStore {
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]
             crash_point: AtomicU8::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             examined_rows: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             query_index_rows: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             query_event_values: AtomicU64::new(0),
             #[cfg(test)]
             attempt_range_rows: AtomicU64::new(0),
@@ -3412,15 +3414,15 @@ impl RedbStore {
         self.examined_rows.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    fn reset_query_work(&self) {
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub fn reset_query_work(&self) {
         self.examined_rows.store(0, Ordering::Relaxed);
         self.query_index_rows.store(0, Ordering::Relaxed);
         self.query_event_values.store(0, Ordering::Relaxed);
     }
 
-    #[cfg(test)]
-    fn query_work(&self) -> (u64, u64, u64) {
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub fn query_work(&self) -> (u64, u64, u64) {
         (
             self.query_index_rows.load(Ordering::Relaxed),
             self.query_event_values.load(Ordering::Relaxed),
@@ -3500,7 +3502,7 @@ impl RedbStore {
         relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<StoredEvent, PersistenceError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "bench-instrumentation"))]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
         Ok(StoredEvent {
             event: view
@@ -3537,7 +3539,7 @@ impl RedbStore {
                 .rev()
             {
                 let (_key, value) = entry.map_err(persist_err)?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
                 if let Some(stored) = materialize_if_visible(value.value())? {
                     out.push(stored);
@@ -3556,7 +3558,7 @@ impl RedbStore {
         let mut heap = BinaryHeap::new();
         for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
             if let Some(head) = cursor.next_head(cursor_index)? {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
                 heap.push(head);
             }
@@ -3575,7 +3577,7 @@ impl RedbStore {
                 }
             }
             if let Some(next) = cursors[head.cursor].next_head(head.cursor)? {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
                 heap.push(next);
             }
@@ -3604,7 +3606,7 @@ impl RedbStore {
                 .rev()
             {
                 let (_key, value) = entry.map_err(persist_err)?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
                 if let Some(stored) = materialize_if_visible(value.value())? {
                     out.push(stored);
@@ -3623,7 +3625,7 @@ impl RedbStore {
         let mut heap = BinaryHeap::new();
         for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
             if let Some(head) = cursor.next_head(cursor_index)? {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
                 heap.push(head);
             }
@@ -3642,7 +3644,7 @@ impl RedbStore {
                 }
             }
             if let Some(next) = cursors[head.cursor].next_head(head.cursor)? {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
                 heap.push(next);
             }
@@ -3679,7 +3681,7 @@ impl RedbStore {
         let prepared_filter = PreparedFilter::new(filter);
         let mut materialize_if_visible =
             |event_key: EventKey| -> Result<Option<StoredEvent>, PersistenceError> {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_event_values.fetch_add(1, Ordering::Relaxed);
                 let Some(value) = events.get(event_key).map_err(persist_err)? else {
                     return Err(PersistenceError(format!(
