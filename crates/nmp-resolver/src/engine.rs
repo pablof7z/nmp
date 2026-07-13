@@ -23,6 +23,11 @@ use nostr::RelayUrl;
 pub struct RelayIngestResult {
     pub delta: DemandDelta,
     pub satisfied_intents: Vec<(nmp_store::IntentId, nostr::Event)>,
+    /// App/query handles whose row projection can have changed as a direct
+    /// consequence of this committed batch. This is the post-commit
+    /// subscription-notification set: callers need not re-query unrelated
+    /// handles merely to prove they stayed unchanged.
+    pub affected_handles: BTreeSet<HandleId>,
 }
 
 use crate::eval::{project_events, resolve_reactive, resolve_setop};
@@ -186,6 +191,12 @@ fn merge_deltas(mut first: DemandDelta, second: DemandDelta) -> DemandDelta {
 struct GraphEntry {
     descriptor: AcquisitionKey,
     refcount: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionShape {
+    root_atoms: BTreeSet<ConcreteFilter>,
+    subtree_atoms: BTreeSet<ContextualAtom>,
 }
 
 /// The graph engine (M1 plan §2.3): owns the store, the graph, the
@@ -527,8 +538,14 @@ impl<S: EventStore> Engine<S> {
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<RelayIngestResult, PersistenceError> {
+        // Snapshot only graph/filter shapes, never store rows. This is the
+        // cheap side of targeted invalidation: after recompute we can tell
+        // exactly which shared roots changed without re-querying every
+        // handle's current result set.
+        let before_shapes = self.projection_shapes();
         let mut inserted: Vec<nostr::Event> = Vec::new();
         let mut removed: Vec<nostr::Event> = Vec::new();
+        let mut provenance_grew: Vec<nostr::Event> = Vec::new();
         let mut satisfied_intents = Vec::new();
         let input_events: Vec<_> = events.iter().map(|(event, _from)| event.clone()).collect();
         let outcomes = self.store.insert_batch(events)?;
@@ -548,20 +565,87 @@ impl<S: EventStore> Engine<S> {
                 // and a refused event (already-expired, or tombstoned)
                 // never entered it at all.
                 InsertOutcome::Duplicate {
+                    provenance_grew: grew,
                     satisfied_intents: owners,
-                    ..
-                } => satisfied_intents.extend(
-                    owners
-                        .into_iter()
-                        .map(|intent_id| (intent_id, event.clone())),
-                ),
+                } => {
+                    if grew {
+                        provenance_grew.push(event.clone());
+                    }
+                    satisfied_intents.extend(
+                        owners
+                            .into_iter()
+                            .map(|intent_id| (intent_id, event.clone())),
+                    );
+                }
                 InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
             }
         }
+        let changed_events: Vec<_> = inserted
+            .iter()
+            .chain(removed.iter())
+            .chain(provenance_grew.iter())
+            .cloned()
+            .collect();
+        let delta = self.react(inserted, removed)?;
+        let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(RelayIngestResult {
-            delta: self.react(inserted, removed)?,
+            delta,
             satisfied_intents,
+            affected_handles,
         })
+    }
+
+    /// One shape per shared acquisition root. Multiple handles that dedup to
+    /// the same root share this snapshot and therefore share the same
+    /// invalidation decision; their per-handle cache projection is applied
+    /// later by `nmp-engine`.
+    fn projection_shapes(&self) -> HashMap<NodeId, ProjectionShape> {
+        self.handle_to_root
+            .values()
+            .copied()
+            .map(|root| {
+                let shape = ProjectionShape {
+                    root_atoms: self.graph.cached_atoms_of(root).clone(),
+                    subtree_atoms: self
+                        .graph
+                        .atoms_in_structural_order(root)
+                        .into_iter()
+                        .collect(),
+                };
+                (root, shape)
+            })
+            .collect()
+    }
+
+    /// Resolve committed row/graph changes to the exact live handles that
+    /// may project different rows or evidence. Matching is intentionally the
+    /// same generic Nostr filter predicate used by resolver dirty-marking;
+    /// there are no kind/tag special cases here.
+    fn affected_handles(
+        &self,
+        before_shapes: &HashMap<NodeId, ProjectionShape>,
+        changed_events: &[nostr::Event],
+    ) -> BTreeSet<HandleId> {
+        let after_shapes = self.projection_shapes();
+        let affected_roots: BTreeSet<NodeId> = after_shapes
+            .iter()
+            .filter_map(|(root, after)| {
+                let shape_changed = before_shapes.get(root) != Some(after);
+                let rows_changed = !changed_events.is_empty()
+                    && after.root_atoms.iter().any(|atom| {
+                        let filter = atom.to_nostr();
+                        changed_events
+                            .iter()
+                            .any(|event| filter.match_event(event, MatchEventOptions::new()))
+                    });
+                (shape_changed || rows_changed).then_some(*root)
+            })
+            .collect();
+
+        self.handle_to_root
+            .iter()
+            .filter_map(|(handle, root)| affected_roots.contains(root).then_some(*handle))
+            .collect()
     }
 
     /// The local-authorship mirror of [`Self::ingest_observed`]
