@@ -47,7 +47,8 @@ use nmp_grammar::{
     WriteRouting,
 };
 use nmp_resolver::{
-    CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle,
+    CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery,
+    LocalAcceptResult, QueryHandle,
 };
 use nmp_router::{
     DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, Router, RuleRegistry, SubId,
@@ -1082,24 +1083,23 @@ impl<S: EventStore> EngineCore<S> {
         self.clock = now;
         let mut effects = Vec::new();
 
-        // NIP-40 expiry (retraction-and-negative-deltas.md §3.2) — manual
-        // for now, same caveat as the neg-liveness sweep below: nothing yet
-        // drives `Tick` on its own cadence (the `recv_timeout`
-        // deadline-armed runtime driver is a separate #23 child, §3.3).
+        // NIP-40 expiry (retraction-and-negative-deltas.md §3.2). The
+        // deadline-armed runtime driver above dispatches this tick at the
+        // store's next indexed expiration; this reducer owns the atomic
+        // removal and projection reaction.
         // Drain every row whose expiration is due straight through the
         // store's own index (`O(log n + due)`, never a scan), then route
         // the removed rows through the SAME retraction lane a kind:5
         // delete already uses inside `ingest_observed` — `resolver.retract`
-        // seeds dirty-marks from `removed` alone, `recompile` + `refresh_
-        // all_handles` do the rest, and `RowDelta::Removed` falls out the
-        // ordinary way.
+        // seeds dirty-marks from `removed` alone, then stable simple handles
+        // consume the exact committed removals while demand-changing or
+        // complex shapes retain the broad refresh oracle.
         match self.resolver.store_mut().expire_due(now) {
             Ok(expired) if !expired.is_empty() => {
                 let removed: Vec<_> = expired.into_iter().map(|se| se.event).collect();
-                match self.resolver.retract(removed) {
-                    Ok(_delta) => {
-                        self.recompile(&mut effects);
-                        self.refresh_all_handles(&mut effects);
+                match self.resolver.retract_detailed(removed) {
+                    Ok(committed) => {
+                        self.apply_committed_mutation(committed, &mut effects);
                     }
                     Err(e) => self.degrade_store(e, &mut effects),
                 }
@@ -1342,7 +1342,7 @@ impl<S: EventStore> EngineCore<S> {
             Err(reason) => return self.fail_unaccepted(sink, reason),
         };
 
-        let (id, intent_id, already_signed, accepted_signed_event) = if durability
+        let (id, intent_id, already_signed, accepted_signed_event, committed) = if durability
             == Durability::Ephemeral
         {
             match self
@@ -1350,7 +1350,7 @@ impl<S: EventStore> EngineCore<S> {
                 .store_mut()
                 .accept_ephemeral(frozen.id, signing_pubkey)
             {
-                Ok(receipt_id) => (ReceiptId(receipt_id), None, false, None),
+                Ok(receipt_id) => (ReceiptId(receipt_id), None, false, None, None),
                 Err(err) => return self.fail_unaccepted(sink, err.to_string()),
             }
         } else {
@@ -1377,10 +1377,11 @@ impl<S: EventStore> EngineCore<S> {
                 },
                 accepted_at: self.clock,
             };
-            let (outcome, _delta) = match self.resolver.accept_local(accept) {
-                Ok(value) => value,
-                Err(err) => return self.fail_unaccepted(sink, err.to_string()),
-            };
+            let LocalAcceptResult { outcome, committed } =
+                match self.resolver.accept_local_detailed(accept) {
+                    Ok(value) => value,
+                    Err(err) => return self.fail_unaccepted(sink, err.to_string()),
+                };
             let Some(intent_id) = outcome.journaled_intent_id() else {
                 let AcceptOutcome::Refused(reason) = outcome else {
                     unreachable!("only Refused omits journal ids")
@@ -1408,6 +1409,7 @@ impl<S: EventStore> EngineCore<S> {
                 Some(intent_id),
                 accepted_signed_event.is_some(),
                 accepted_signed_event,
+                Some(committed),
             )
         };
 
@@ -1436,11 +1438,12 @@ impl<S: EventStore> EngineCore<S> {
             },
         );
 
-        if durability != Durability::Ephemeral {
-            // The pending row was committed before Accepted. Expose it only
-            // through ordinary demand recompilation/query refresh.
-            self.recompile(&mut effects);
-            self.refresh_all_handles(&mut effects);
+        if let Some(committed) = committed {
+            // A local pending row was committed before Accepted. When it did
+            // not alter reactive demand/router shape, expose its exact row
+            // facts through the same O(committed delta) projection path as a
+            // relay batch. Any demand change keeps the broad refresh oracle.
+            self.apply_committed_mutation(committed, &mut effects);
         }
 
         match payload {
@@ -1930,11 +1933,10 @@ impl<S: EventStore> EngineCore<S> {
                     // (issue #122) degrades to read-only rather than panics.
                     match self
                         .resolver
-                        .react_to_compensation(pending.frozen.clone(), &outcome)
+                        .react_to_compensation_detailed(pending.frozen.clone(), &outcome)
                     {
-                        Ok(_delta) => {
-                            self.recompile(effects);
-                            self.refresh_all_handles(effects);
+                        Ok(committed) => {
+                            self.apply_committed_mutation(committed, effects);
                         }
                         Err(e) => self.degrade_store(e, effects),
                     }
@@ -3013,6 +3015,28 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Project one governed store mutation after its crash-atomic commit.
+    /// Reactive demand changes may alter router/evidence shape and therefore
+    /// keep the broad full-refresh oracle. A stable shape can deliver the
+    /// exact durable row facts through #195's fail-safe incremental algebra.
+    fn apply_committed_mutation(
+        &mut self,
+        committed: CommittedMutationResult,
+        effects: &mut Vec<Effect>,
+    ) {
+        let CommittedMutationResult {
+            delta,
+            affected_handles,
+            row_changes,
+        } = committed;
+        if delta.is_empty() {
+            self.apply_committed_row_changes(affected_handles, &row_changes, effects);
+        } else {
+            self.recompile(effects);
+            self.refresh_all_handles(effects);
+        }
+    }
+
     /// Apply a committed writer batch directly to ordinary one-root handle
     /// projections. This is the other half of #177's targeted invalidation:
     /// once the resolver has already proven which handles are affected, a
@@ -3518,6 +3542,92 @@ impl EngineCore<nmp_store::RedbStore> {
         );
         effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
         self.refresh_handles(ingest.affected_handles, &mut effects);
+        effects
+    }
+
+    /// Commit a benchmark local write through the real governed
+    /// `accept_write`/resolver door, then use the production projection
+    /// policy added by #228. Receipt/signing/routing orchestration is outside
+    /// the measured mutation seam and deliberately omitted.
+    #[doc(hidden)]
+    pub fn bench_accept_local(&mut self, accept: AcceptWrite) -> Vec<Effect> {
+        let accepted = self
+            .resolver
+            .accept_local_detailed(accept)
+            .expect("benchmark local acceptance commit");
+        assert!(
+            accepted.outcome.journaled_intent_id().is_some(),
+            "benchmark local acceptance must be journaled"
+        );
+        let mut effects = Vec::new();
+        self.apply_committed_mutation(accepted.committed, &mut effects);
+        effects
+    }
+
+    /// Exact pre-#228 comparison for the same local acceptance commit: keep
+    /// reactive-demand fallback behavior, but force stable-shape handles
+    /// through the former full-refresh projection.
+    #[doc(hidden)]
+    pub fn bench_accept_local_with_forced_refresh(&mut self, accept: AcceptWrite) -> Vec<Effect> {
+        let accepted = self
+            .resolver
+            .accept_local_detailed(accept)
+            .expect("benchmark local acceptance commit");
+        assert!(
+            accepted.outcome.journaled_intent_id().is_some(),
+            "benchmark local acceptance must be journaled"
+        );
+        let CommittedMutationResult {
+            delta,
+            affected_handles: _,
+            row_changes: _,
+        } = accepted.committed;
+        assert!(delta.is_empty(), "benchmark local write changed demand");
+        let mut effects = Vec::new();
+        self.recompile(&mut effects);
+        self.refresh_all_handles(&mut effects);
+        effects
+    }
+
+    /// Expire due rows through the production store/retraction/projection
+    /// path. The fixture supplies exactly one due row per measured call.
+    #[doc(hidden)]
+    pub fn bench_expire_due(&mut self, now: Timestamp) -> Vec<Effect> {
+        self.bench_expire_due_with_mode(now, false)
+    }
+
+    /// Exact pre-#228 expiry comparison: same governed store mutation and
+    /// resolver reaction, former affected-handle full refresh.
+    #[doc(hidden)]
+    pub fn bench_expire_due_with_forced_refresh(&mut self, now: Timestamp) -> Vec<Effect> {
+        self.bench_expire_due_with_mode(now, true)
+    }
+
+    fn bench_expire_due_with_mode(&mut self, now: Timestamp, force_refresh: bool) -> Vec<Effect> {
+        let expired = self
+            .resolver
+            .store_mut()
+            .expire_due(now)
+            .expect("benchmark expiry commit");
+        assert_eq!(expired.len(), 1, "benchmark owns exactly one due row");
+        let removed = expired.into_iter().map(|row| row.event).collect();
+        let committed = self
+            .resolver
+            .retract_detailed(removed)
+            .expect("benchmark expiry reaction");
+        let mut effects = Vec::new();
+        if force_refresh {
+            let CommittedMutationResult {
+                delta,
+                affected_handles: _,
+                row_changes: _,
+            } = committed;
+            assert!(delta.is_empty(), "benchmark expiry changed demand");
+            self.recompile(&mut effects);
+            self.refresh_all_handles(&mut effects);
+        } else {
+            self.apply_committed_mutation(committed, &mut effects);
+        }
         effects
     }
 }
@@ -4207,6 +4317,15 @@ mod affected_handle_invalidation_tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
+
+    impl ReceiptSink for CapturingReceiptSink {
+        fn on_status(&self, status: WriteStatus) {
+            self.0.lock().unwrap().push(status);
+        }
+    }
+
     fn room_event(keys: &Keys, room: usize, ordinal: usize, created_at: u64) -> SignedEvent {
         EventBuilder::new(Kind::from(9u16), format!("room-{room}-event-{ordinal}"))
             .tag(Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap())
@@ -4241,6 +4360,14 @@ mod affected_handle_invalidation_tests {
         })
     }
 
+    fn pinned_signed_intent(event: SignedEvent, relay: &RelayUrl) -> WriteIntent {
+        WriteIntent {
+            payload: WritePayload::Signed(event),
+            durability: Durability::Durable,
+            routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
+        }
+    }
+
     fn subscribed_handle(effects: &[Effect]) -> HandleId {
         effects
             .iter()
@@ -4266,6 +4393,473 @@ mod affected_handle_invalidation_tests {
             })
             .collect();
         assert_eq!(core.handles[&id].last_rows, oracle);
+    }
+
+    #[test]
+    fn local_signed_acceptance_updates_unlimited_handle_without_projection_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-delta.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+
+        let initial = room_event(&keys, 7, 0, 10);
+        core.resolver
+            .store_mut()
+            .insert(
+                initial,
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )
+            .unwrap();
+        let rows = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(
+            unlimited_room_query(7),
+            Box::new(rows.clone()),
+        ));
+        let handle = subscribed_handle(&subscribe);
+        rows.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+
+        let arriving = room_event(&keys, 7, 1, 12);
+        let effects = core.on_publish(
+            pinned_signed_intent(arriving.clone(), &relay),
+            Box::new(CapturingReceiptSink::default()),
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        assert!(effects.iter().any(|effect| match effect {
+            Effect::EmitRows(id, deltas, _) if *id == handle => {
+                matches!(deltas.as_slice(), [RowDelta::Added(row)]
+                    if row.event.id == arriving.id)
+            }
+            _ => false,
+        }));
+        let batches = rows.0.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(matches!(
+            batches[0].as_slice(),
+            [RowDelta::Added(row)]
+                if row.event.id == arriving.id && row.sources.is_empty()
+        ));
+        drop(batches);
+        assert_remembered_rows_match_oracle(&core, handle);
+    }
+
+    #[test]
+    fn demand_changing_local_acceptance_keeps_the_full_refresh_oracle() {
+        let author = Keys::generate();
+        let followed = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-demand-change.example").unwrap();
+        let followed_post = nmp_resolver::testkit::kind1(&followed, "already cached", 10);
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                followed_post.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+
+        let follows_query = LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                inner: nmp_grammar::Demand::from_filter(Filter {
+                    kinds: Some(BTreeSet::from([3u16])),
+                    authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                    ..Filter::default()
+                }),
+                project: nmp_grammar::Selector::Tag("p".to_owned()),
+            }))),
+            ..Filter::default()
+        });
+        let rows = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(follows_query, Box::new(rows.clone())));
+        let handle = subscribed_handle(&subscribe);
+        rows.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+
+        let contact_list = nmp_resolver::testkit::kind3(&author, &[followed.public_key()], 20);
+        let effects = core.on_publish(
+            pinned_signed_intent(contact_list, &relay),
+            Box::new(CapturingReceiptSink::default()),
+        );
+
+        assert_eq!(core.router_compiles.get(), 1);
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert!(effects.iter().any(|effect| match effect {
+            Effect::EmitRows(id, deltas, _) if *id == handle => deltas
+                .iter()
+                .any(|delta| matches!(delta, RowDelta::Added(row)
+                    if row.event.id == followed_post.id)),
+            _ => false,
+        }));
+        assert_remembered_rows_match_oracle(&core, handle);
+    }
+
+    #[test]
+    fn local_compensation_removes_pending_row_without_projection_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-compensation.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        core.active_pubkey = Some(keys.public_key());
+        let rows = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(
+            unlimited_room_query(9),
+            Box::new(rows.clone()),
+        ));
+        let handle = subscribed_handle(&subscribe);
+        rows.0.lock().unwrap().clear();
+
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(21u64),
+            Kind::from(9u16),
+            vec![Tag::parse(["h".to_owned(), "room-9".to_owned()]).unwrap()],
+            "pending local row",
+        );
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        let accepted = core.on_publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned),
+                durability: Durability::Durable,
+                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+            },
+            Box::new(CapturingReceiptSink::default()),
+        );
+        let receipt = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                _ => None,
+            })
+            .expect("local acceptance emits its receipt");
+        let pending_id = rows.0.lock().unwrap()[0]
+            .iter()
+            .find_map(|delta| match delta {
+                RowDelta::Added(row) => Some(row.event.id),
+                _ => None,
+            })
+            .expect("pending row was projected");
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+
+        rows.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        let cancelled = core.on_cancel_write(receipt);
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        assert!(cancelled.iter().any(|effect| match effect {
+            Effect::EmitRows(id, deltas, _) if *id == handle => {
+                matches!(deltas.as_slice(), [RowDelta::Removed(event_id)]
+                    if *event_id == pending_id)
+            }
+            _ => false,
+        }));
+        let batches = rows.0.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(matches!(
+            batches[0].as_slice(),
+            [RowDelta::Removed(event_id)] if *event_id == pending_id
+        ));
+        drop(batches);
+        assert_remembered_rows_match_oracle(&core, handle);
+    }
+
+    #[test]
+    fn local_top_n_compensation_uses_one_bounded_backfill_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-top-n.example").unwrap();
+        let oldest = room_event(&keys, 10, 0, 10);
+        let retained = room_event(&keys, 10, 1, 20);
+        let mut store = MemoryStore::new();
+        store
+            .insert_batch(
+                [oldest.clone(), retained]
+                    .into_iter()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(21u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 21);
+        core.active_pubkey = Some(keys.public_key());
+        let rows = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(
+            room_query_for_kind(10, 9, 2),
+            Box::new(rows.clone()),
+        ));
+        let handle = subscribed_handle(&subscribe);
+        rows.0.lock().unwrap().clear();
+
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        let accepted = core.on_publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(30u64),
+                    Kind::from(9u16),
+                    vec![Tag::parse(["h".to_owned(), "room-10".to_owned()]).unwrap()],
+                    "newest pending",
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
+            },
+            Box::new(CapturingReceiptSink::default()),
+        );
+        let receipt = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                _ => None,
+            })
+            .expect("local acceptance emits its receipt");
+        let pending_id = rows.0.lock().unwrap()[0]
+            .iter()
+            .find_map(|delta| match delta {
+                RowDelta::Added(row) => Some(row.event.id),
+                _ => None,
+            })
+            .expect("new pending row is visible");
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        assert!(rows.0.lock().unwrap()[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == oldest.id)));
+        assert_remembered_rows_match_oracle(&core, handle);
+
+        rows.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        core.on_cancel_write(receipt);
+
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert_eq!(core.router_compiles.get(), 0);
+        let batches = rows.0.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == pending_id)));
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == oldest.id)));
+        drop(batches);
+        assert_remembered_rows_match_oracle(&core, handle);
+    }
+
+    #[test]
+    fn local_replaceable_compensation_restores_predecessor_without_projection_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-replaceable.example").unwrap();
+        let predecessor = EventBuilder::new(Kind::ContactList, "old")
+            .tag(Tag::public_key(Keys::generate().public_key()))
+            .custom_created_at(Timestamp::from(10u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                predecessor.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        core.active_pubkey = Some(keys.public_key());
+        let rows = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(
+            LiveQuery::from_filter(Filter::default()),
+            Box::new(rows.clone()),
+        ));
+        let handle = subscribed_handle(&subscribe);
+        rows.0.lock().unwrap().clear();
+
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        let accepted = core.on_publish(
+            WriteIntent {
+                payload: WritePayload::UnsignedReplaceableEdit {
+                    unsigned: UnsignedEvent::new(
+                        keys.public_key(),
+                        Timestamp::from(20u64),
+                        Kind::ContactList,
+                        vec![Tag::public_key(Keys::generate().public_key())],
+                        "new",
+                    ),
+                    expected_base: Some(predecessor.id),
+                },
+                durability: Durability::Durable,
+                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+            },
+            Box::new(CapturingReceiptSink::default()),
+        );
+        let receipt = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                _ => None,
+            })
+            .expect("replaceable acceptance emits its receipt");
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        let accepted_batches = rows.0.lock().unwrap();
+        assert_eq!(accepted_batches.len(), 1);
+        let pending_id = accepted_batches[0]
+            .iter()
+            .find_map(|delta| match delta {
+                RowDelta::Added(row) => Some(row.event.id),
+                _ => None,
+            })
+            .expect("new pending winner was added");
+        assert!(accepted_batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == predecessor.id)));
+        drop(accepted_batches);
+        assert_remembered_rows_match_oracle(&core, handle);
+
+        rows.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        core.on_cancel_write(receipt);
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        let cancelled_batches = rows.0.lock().unwrap();
+        assert_eq!(cancelled_batches.len(), 1);
+        assert!(cancelled_batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == predecessor.id)));
+        assert!(cancelled_batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == pending_id)));
+        drop(cancelled_batches);
+        assert_remembered_rows_match_oracle(&core, handle);
+    }
+
+    #[test]
+    fn local_kind5_compensation_reveals_target_without_projection_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-kind5.example").unwrap();
+        let target = room_event(&keys, 13, 0, 10);
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                target.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        core.active_pubkey = Some(keys.public_key());
+        let rows = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(
+            unlimited_room_query(13),
+            Box::new(rows.clone()),
+        ));
+        let handle = subscribed_handle(&subscribe);
+        rows.0.lock().unwrap().clear();
+
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        let accepted = core.on_publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(20u64),
+                    Kind::EventDeletion,
+                    vec![Tag::event(target.id)],
+                    "",
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+            },
+            Box::new(CapturingReceiptSink::default()),
+        );
+        let receipt = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                _ => None,
+            })
+            .expect("kind5 acceptance emits its receipt");
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        assert!(matches!(
+            rows.0.lock().unwrap().as_slice(),
+            [batch]
+                if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == target.id)
+        ));
+        assert_remembered_rows_match_oracle(&core, handle);
+
+        rows.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        core.on_cancel_write(receipt);
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        assert!(matches!(
+            rows.0.lock().unwrap().as_slice(),
+            [batch]
+                if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == target.id)
+        ));
+        assert_remembered_rows_match_oracle(&core, handle);
+    }
+
+    #[test]
+    fn nip40_expiry_removes_unlimited_row_without_projection_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-expiry.example").unwrap();
+        let expiring = EventBuilder::new(Kind::from(9u16), "expires")
+            .tag(Tag::parse(["h".to_owned(), "room-11".to_owned()]).unwrap())
+            .tag(Tag::expiration(Timestamp::from(100u64)))
+            .custom_created_at(Timestamp::from(50u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                expiring.clone(),
+                RelayObserved::new(relay, Timestamp::from(51u64)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 51);
+        let rows = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(
+            unlimited_room_query(11),
+            Box::new(rows.clone()),
+        ));
+        let handle = subscribed_handle(&subscribe);
+        rows.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+
+        let effects = core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        assert!(effects.iter().any(|effect| match effect {
+            Effect::EmitRows(id, deltas, _) if *id == handle => {
+                matches!(deltas.as_slice(), [RowDelta::Removed(event_id)]
+                    if *event_id == expiring.id)
+            }
+            _ => false,
+        }));
+        let batches = rows.0.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(matches!(
+            batches[0].as_slice(),
+            [RowDelta::Removed(event_id)] if *event_id == expiring.id
+        ));
+        drop(batches);
+        assert_remembered_rows_match_oracle(&core, handle);
     }
 
     #[test]
