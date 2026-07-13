@@ -1,0 +1,13 @@
+[package]
+name = "nmp-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Shared process-level test seams for NMP integration tests."
+
+[dependencies]
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

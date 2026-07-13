@@ -1428,6 +1428,7 @@ dependencies = [
  "nmp-router",
  "nmp-signer",
  "nmp-store",
+ "nmp-test-support",
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
@@ -1565,10 +1566,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-test-support"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "nmp-transport"
 version = "0.1.0"
 dependencies = [
  "mio",
+ "nmp-test-support",
  "nostr 0.44.4",
  "nostr-relay-builder",
  "rustls",

@@ -18,7 +18,7 @@
 //! `Event` type across both crate versions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,6 +36,7 @@ use nmp_store::{
     sentinel_signature, AcceptWrite, EventStore, IntentSigState, MemoryStore, RedbStore,
     RelayObserved, WriteDurability,
 };
+use nmp_test_support::ConnectionOwner;
 use nmp_transport::PoolConfig;
 use nostr::{
     EventId, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag, Timestamp,
@@ -60,12 +61,15 @@ fn expect_attached(result: ReceiptReattachment) -> Receiver<WriteStatus> {
 
 use tungstenite::Message;
 
-/// Reserve an ephemeral TCP port by binding then immediately dropping the
-/// listener, so a *second* relay instance (the reconnect half of the test)
-/// can rebind the exact same port the first one used.
+/// Reserve an ephemeral backend port. The reconnect test's client-facing
+/// address is owned separately by [`ConnectionOwner`].
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     listener.local_addr().expect("local_addr").port()
+}
+
+fn loopback(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
 
 /// Re-derive the identical keypair under `nostr-relay-builder`'s OWN (0.45-
@@ -163,7 +167,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
-    let port = free_port();
+    let port_a = free_port();
 
     let a = Keys::generate();
     let b = Keys::generate();
@@ -171,10 +175,14 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
 
     let relay_a = LocalRelay::builder()
         .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .port(port)
+        .port(port_a)
         .build();
     relay_a.run().await.expect("run relay_a");
-    let url = RelayUrl::parse(&relay_a.url().await.to_string()).expect("parse relay url");
+    let connection_owner = ConnectionOwner::bind(loopback(0), loopback(port_a))
+        .await
+        .expect("bind client-facing relay connection owner");
+    let public_addr = connection_owner.local_addr();
+    let url = RelayUrl::parse(&format!("ws://{public_addr}")).expect("parse relay url");
 
     // b's post is seeded BEFORE anyone follows b -- store holds it, but it
     // must not surface until a's contact list widens demand to include it
@@ -199,6 +207,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         10,
         PoolConfig {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
+            reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
@@ -269,20 +278,17 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         "b's pre-seeded post must surface once a's contact list names b"
     );
 
-    // -- reconnect: kill relay_a, rebind a fresh relay_b on the SAME port
-    // (a fresh instance has its own, empty database -- exactly like
-    // `nmp-transport`'s own test 7), then seed a NEW post from b directly
-    // into it. The test never calls `subscribe` again: the only way this
-    // new post can reach `rows_rx` is if the reconnect replayed the engine's
-    // current wire subs (both kind:3-by-a and kind:1-by-b) onto the new
-    // generation -- test 6's exact falsifier, driven through the full
-    // Handle/EngineThread stack instead of raw `Pool`.
-    relay_a.shutdown();
+    // -- reconnect: start a fresh relay backend with its own empty database,
+    // then synchronously shut down the owner of the exact live TCP stream and
+    // rebind the same public address to the new backend. The test never calls
+    // `subscribe` again: the only way this new post can reach `rows_rx` is if
+    // the production reconnect path replayed the engine's current wire
+    // subscriptions onto the new generation.
+    let port_b = free_port();
     let relay_b = LocalRelay::builder()
         .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .port(port)
+        .port(port_b)
         .build();
-    tokio::time::sleep(Duration::from_millis(150)).await;
     relay_b.run().await.expect("run relay_b");
 
     let second_post: RelayEvent = RelayEventBuilder::text_note("b's second post, post-reconnect")
@@ -292,9 +298,17 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         .add_event(second_post.clone())
         .await
         .expect("seed b's second post into relay_b");
+    connection_owner
+        .shutdown()
+        .await
+        .expect("sever the exact established relay connection");
+    let connection_owner_b = ConnectionOwner::bind(public_addr, loopback(port_b))
+        .await
+        .expect("rebind the public relay address to relay_b");
+    relay_a.shutdown();
 
     assert!(
-        wait_for_rows(&rows_rx, Duration::from_secs(15), |rows| rows
+        wait_for_rows(&rows_rx, Duration::from_secs(10), |rows| rows
             .iter()
             .any(|r| r.id.to_hex() == second_post.id.to_hex())),
         "reconnect must replay the current subs with no gap -- b's post-reconnect note must surface without the app resubscribing"
@@ -302,6 +316,10 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
 
     handle.shutdown();
     engine_thread.join();
+    connection_owner_b
+        .shutdown()
+        .await
+        .expect("shut down relay_b connection owner");
     relay_b.shutdown();
 }
 
