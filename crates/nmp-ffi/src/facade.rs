@@ -481,9 +481,28 @@ impl Drop for NmpDiagnosticsHandle {
 mod tests {
     use super::*;
     use crate::types::{FfiDurability, FfiWritePayload, FfiWriteRouting, FfiWriteStatus};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    struct CountingSigner {
+        pubkey: nostr::PublicKey,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl nmp_signer::SigningCapability for CountingSigner {
+        fn public_key(&self) -> Option<nostr::PublicKey> {
+            Some(self.pubkey)
+        }
+
+        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            nmp_signer::SignerOp::err(nmp_signer::SignerError::Rejected(
+                "counting signer must not be reached".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn reattachment_mapping_is_exhaustive_and_distinct() {
@@ -569,6 +588,135 @@ mod tests {
         );
 
         engine.shutdown();
+    }
+
+    /// #156 account-switch falsifier through the public native boundary.
+    /// Composition snapshots A, but switching to B is serialized ahead of
+    /// publish on the sole engine command path. Acceptance must reject the
+    /// stale A draft before either registered signer, canonical storage, or
+    /// the durable outbox journal can observe it.
+    #[test]
+    fn ffi_group_message_composed_as_a_cannot_publish_after_switching_to_b() {
+        use redb::{ReadableDatabase, ReadableTableMetadata};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("stale-account.redb");
+        let engine = NmpEngine::new(NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let a = nostr::Keys::generate().public_key();
+        let b = nostr::Keys::generate().public_key();
+        let a_calls = Arc::new(AtomicUsize::new(0));
+        let b_calls = Arc::new(AtomicUsize::new(0));
+        engine
+            .engine
+            .add_signer(CountingSigner {
+                pubkey: a,
+                calls: Arc::clone(&a_calls),
+            })
+            .expect("engine must remain open");
+        engine
+            .engine
+            .add_signer(CountingSigner {
+                pubkey: b,
+                calls: Arc::clone(&b_calls),
+            })
+            .expect("engine must remain open");
+
+        engine
+            .set_active_account(Some(a.to_hex()))
+            .expect("A must activate");
+        let intent = engine
+            .group_message_intent(
+                "wss://group-host.example.com".to_string(),
+                "group-a".to_string(),
+                "stale A message".to_string(),
+                vec![],
+                None,
+                vec![],
+            )
+            .expect("composition as active A must succeed");
+        engine
+            .set_active_account(Some(b.to_hex()))
+            .expect("B must activate before publish");
+
+        let (tx, rx) = mpsc::channel();
+        let receipt_id = engine
+            .publish_composed(
+                intent,
+                Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) }),
+            )
+            .expect("pre-acceptance failure still has a stream-local correlation id");
+        match rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stale author must fail deterministically")
+        {
+            FfiWriteStatus::Failed { reason } => assert_eq!(
+                reason,
+                "unsigned draft author does not match current active account"
+            ),
+            other => panic!("Failed must be first, before Accepted; got {other:?}"),
+        }
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected),
+            "Failed must be the sole receipt fact"
+        );
+        assert_eq!(a_calls.load(Ordering::SeqCst), 0, "A signer was invoked");
+        assert_eq!(b_calls.load(Ordering::SeqCst), 0, "B signer was invoked");
+
+        // Reuse the protocol selection but ask the empty configured Public
+        // lane, so this is a canonical-cache assertion with no relay dial.
+        let mut cache_probe = nmp_nip29::group_content_demand(
+            nostr::RelayUrl::parse("wss://group-host.example.com").unwrap(),
+            "group-a",
+        );
+        cache_probe.source = nmp::SourceAuthority::Public;
+        let subscription = engine
+            .engine
+            .observe(nmp::LiveQuery(cache_probe))
+            .expect("canonical query must open");
+        let (deltas, _evidence) = subscription
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canonical query must deliver its current empty snapshot");
+        assert!(
+            !deltas
+                .iter()
+                .any(|delta| matches!(delta, nmp::RowDelta::Added(_))),
+            "a pre-acceptance rejection must create no canonical row"
+        );
+        drop(subscription);
+
+        let (reattach_tx, reattach_rx) = mpsc::channel();
+        let outcome = engine
+            .reattach_receipt(
+                receipt_id,
+                Box::new(ChannelReceiptObserver {
+                    tx: Mutex::new(reattach_tx),
+                }),
+            )
+            .expect("reattach lookup must succeed");
+        assert_eq!(outcome, FfiReceiptReattachment::NotFound);
+        assert_eq!(
+            reattach_rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+        engine.shutdown();
+
+        let db = redb::Database::open(&path).expect("reopen store for residue audit");
+        let read = db.begin_read().expect("begin residue audit");
+        for table_name in ["outbox_intents", "outbox_receipts", "outbox_meta"] {
+            let definition: redb::TableDefinition<&str, &str> =
+                redb::TableDefinition::new(table_name);
+            let table = read.open_table(definition).expect("open outbox table");
+            assert_eq!(
+                table.len().expect("count outbox rows"),
+                0,
+                "pre-acceptance rejection left journal residue in {table_name}"
+            );
+        }
     }
 
     /// #99: PR #97's FFI reattach coverage stopped at `reattachment_to_ffi`,

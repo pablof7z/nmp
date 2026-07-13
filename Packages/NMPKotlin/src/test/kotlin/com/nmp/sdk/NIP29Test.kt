@@ -11,6 +11,194 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.fail
 import org.junit.jupiter.api.Test
+import java.io.ByteArrayOutputStream
+import java.io.EOFException
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.Base64
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
+
+/** A real local WebSocket relay for the generated-native ACK falsifier.
+ * It performs the RFC 6455 handshake, reads the masked EVENT frame emitted
+ * by NMP's production transport, and returns a real Nostr OK frame. */
+private class LocalAckRelay : AutoCloseable {
+    private val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+    private val accepted = AtomicReference<Socket?>()
+    private val closed = AtomicBoolean(false)
+    private val failure = AtomicReference<Throwable?>()
+    private val events = LinkedBlockingQueue<String>()
+    val url: String = "ws://127.0.0.1:${server.localPort}"
+
+    private val worker =
+        thread(name = "nmp-kotlin-local-ack-relay", isDaemon = true) {
+            try {
+                val socket = server.accept()
+                accepted.set(socket)
+                socket.tcpNoDelay = true
+                val input = socket.getInputStream()
+                val output = socket.getOutputStream()
+                completeHandshake(input, output)
+                while (!socket.isClosed) {
+                    val frame = readFrame(input) ?: break
+                    when (frame.opcode) {
+                        0x1 -> {
+                            val text = frame.payload.toString(StandardCharsets.UTF_8)
+                            if (text.startsWith("[\"EVENT\",")) {
+                                val id =
+                                    Regex("\\\"id\\\"\\s*:\\s*\\\"([0-9a-f]{64})\\\"")
+                                        .find(text)
+                                        ?.groupValues
+                                        ?.get(1)
+                                        ?: error("EVENT frame had no canonical id: $text")
+                                events.put(text)
+                                writeFrame(
+                                    output,
+                                    0x1,
+                                    "[\"OK\",\"$id\",true,\"saved\"]"
+                                        .toByteArray(StandardCharsets.UTF_8),
+                                )
+                            }
+                        }
+                        0x8 -> break
+                        0x9 -> writeFrame(output, 0xA, frame.payload)
+                    }
+                }
+            } catch (error: Throwable) {
+                if (!closed.get()) failure.set(error)
+            }
+        }
+
+    fun awaitEvent(): String {
+        val event = events.poll(10, TimeUnit.SECONDS)
+        failure.get()?.let { throw AssertionError("local relay failed", it) }
+        return event ?: throw AssertionError("local relay never received an EVENT frame")
+    }
+
+    override fun close() {
+        closed.set(true)
+        accepted.get()?.close()
+        server.close()
+        worker.join(2_000)
+        failure.get()?.let { throw AssertionError("local relay failed", it) }
+    }
+
+    private fun completeHandshake(
+        input: InputStream,
+        output: OutputStream,
+    ) {
+        val bytes = ByteArrayOutputStream()
+        var matched = 0
+        val terminator = byteArrayOf(13, 10, 13, 10)
+        while (matched < terminator.size) {
+            val next = input.read()
+            if (next < 0) throw EOFException("client closed during WebSocket handshake")
+            bytes.write(next)
+            matched = if (next.toByte() == terminator[matched]) matched + 1 else 0
+            check(bytes.size() <= 16_384) { "oversized WebSocket handshake" }
+        }
+        val request = bytes.toString(StandardCharsets.US_ASCII)
+        val key =
+            request
+                .lineSequence()
+                .firstOrNull { it.startsWith("Sec-WebSocket-Key:", ignoreCase = true) }
+                ?.substringAfter(':')
+                ?.trim()
+                ?: error("WebSocket handshake omitted Sec-WebSocket-Key")
+        val accept =
+            Base64.getEncoder().encodeToString(
+                MessageDigest.getInstance("SHA-1")
+                    .digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").toByteArray()),
+            )
+        output.write(
+            ("HTTP/1.1 101 Switching Protocols\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Sec-WebSocket-Accept: $accept\r\n\r\n")
+                .toByteArray(StandardCharsets.US_ASCII),
+        )
+        output.flush()
+    }
+
+    private data class Frame(
+        val opcode: Int,
+        val payload: ByteArray,
+    )
+
+    private fun readFrame(input: InputStream): Frame? {
+        val first = input.read()
+        if (first < 0) return null
+        val second = input.read()
+        if (second < 0) throw EOFException("truncated WebSocket frame")
+        var length = (second and 0x7f).toLong()
+        if (length == 126L) {
+            length = ((input.readRequired() shl 8) or input.readRequired()).toLong()
+        } else if (length == 127L) {
+            length = 0
+            repeat(8) { length = (length shl 8) or input.readRequired().toLong() }
+        }
+        check(length <= Int.MAX_VALUE) { "oversized WebSocket frame" }
+        val mask = if ((second and 0x80) != 0) input.readExactly(4) else null
+        val payload = input.readExactly(length.toInt())
+        if (mask != null) {
+            for (index in payload.indices) {
+                payload[index] = (payload[index].toInt() xor mask[index % 4].toInt()).toByte()
+            }
+        }
+        return Frame(first and 0x0f, payload)
+    }
+
+    private fun writeFrame(
+        output: OutputStream,
+        opcode: Int,
+        payload: ByteArray,
+    ) {
+        output.write(0x80 or opcode)
+        when {
+            payload.size < 126 -> output.write(payload.size)
+            payload.size <= 0xffff -> {
+                output.write(126)
+                output.write(payload.size shr 8)
+                output.write(payload.size)
+            }
+            else -> {
+                output.write(127)
+                repeat(4) { output.write(0) }
+                output.write(payload.size shr 24)
+                output.write(payload.size shr 16)
+                output.write(payload.size shr 8)
+                output.write(payload.size)
+            }
+        }
+        output.write(payload)
+        output.flush()
+    }
+
+    private fun InputStream.readRequired(): Int {
+        val value = read()
+        if (value < 0) throw EOFException("truncated WebSocket frame")
+        return value
+    }
+
+    private fun InputStream.readExactly(size: Int): ByteArray {
+        val bytes = ByteArray(size)
+        var offset = 0
+        while (offset < size) {
+            val read = read(bytes, offset, size - offset)
+            if (read < 0) throw EOFException("truncated WebSocket frame payload")
+            offset += read
+        }
+        return bytes
+    }
+}
 
 // The read-only NIP-29 host-browser projection (#108) -- construction/
 // mapping tests only. No network: these are pure Demand constructors and
@@ -111,7 +299,7 @@ class NIP29Test {
                         tags = listOf(listOf("h", groupId)),
                         content = "earlier",
                         sig = "sig",
-                        sources = emptyList(),
+                        sources = listOf(host),
                     )
 
                 val intent =
@@ -146,6 +334,51 @@ class NIP29Test {
                     ),
                     row?.tags,
                 )
+            }
+        }
+    }
+
+    @Test
+    fun generatedNativeGroupMessageReachesRelayAckAndCanonicalReadBack() {
+        LocalAckRelay().use { relay ->
+            runBlocking {
+                NMPEngine(NMPConfig()).use { engine ->
+                    val author = engine.addAccount("0".repeat(63) + "1")
+                    engine.setActiveAccount(author)
+                    val groupId = "group-acked"
+                    val receipt =
+                        engine.publishComposed(
+                            engine.groupMessageIntent(
+                                host = relay.url,
+                                groupId = groupId,
+                                content = "generated native ack",
+                            ),
+                        )
+
+                    val acked =
+                        withTimeoutOrNull(10_000) {
+                            receipt.status.first { it is WriteStatus.Acked }
+                        } as? WriteStatus.Acked
+                    assertNotNull(acked, "generated Kotlin API must observe a real relay Acked fact")
+                    assertTrue(acked!!.relay.startsWith(relay.url))
+                    val wireEvent = relay.awaitEvent()
+                    assertTrue(wireEvent.startsWith("[\"EVENT\","))
+                    assertTrue(wireEvent.contains("\"content\":\"generated native ack\""))
+
+                    val row =
+                        withTimeoutOrNull(10_000) {
+                            engine.observe(groupContentDemand(relay.url, groupId))
+                                .first { batch ->
+                                    batch.rows.any { it.content == "generated native ack" }
+                                }
+                                .rows
+                                .first { it.content == "generated native ack" }
+                        }
+                    assertNotNull(row, "the Acked event must read back through canonical NMP query state")
+                    assertEquals(author, row?.pubkey)
+                    assertEquals(9u.toUShort(), row?.kind)
+                    assertTrue(row?.tags?.contains(listOf("h", groupId)) == true)
+                }
             }
         }
     }

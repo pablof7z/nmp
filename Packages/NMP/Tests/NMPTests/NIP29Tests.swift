@@ -99,7 +99,7 @@ final class NIP29Tests: XCTestCase {
             tags: [["h", groupID]],
             content: "earlier",
             sig: "sig",
-            sources: []
+            sources: [host]
         )
 
         let intent = try engine.groupMessageIntent(

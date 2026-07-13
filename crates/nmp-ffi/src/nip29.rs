@@ -171,15 +171,18 @@ pub(crate) fn group_message_intent(
             let id = EventId::from_hex(&row.id).map_err(|_| FfiError::InvalidEventId {
                 got: row.id.clone(),
             })?;
-            Ok((id, row.created_at, row.tags))
+            let sources = row
+                .sources
+                .into_iter()
+                .filter_map(|source| RelayUrl::parse(&source).ok())
+                .collect();
+            Ok((id, row.created_at, row.tags, sources))
         })
         .collect::<Result<Vec<_>, FfiError>>()?;
-    let previous = nmp_nip29::GroupTimelineEvidence::from_events(&group_id, rows);
+    let context = nmp_nip29::GroupMessageContext::from_delivered_rows(host, group_id, rows);
 
-    let intent = nmp_nip29::compose_group_message(
-        engine, host, &group_id, content, recipients, reply_to, &previous,
-    )
-    .map_err(FfiError::from)?;
+    let intent = nmp_nip29::compose_group_message(engine, &context, content, recipients, reply_to)
+        .map_err(FfiError::from)?;
 
     Ok(FfiComposedWriteIntent::new(intent))
 }
@@ -303,6 +306,56 @@ mod tests {
             Err(error) => assert_eq!(error, FfiError::NoActiveAccount),
             Ok(_) => panic!("signed-out group composition must fail"),
         }
+        engine.shutdown();
+    }
+
+    #[test]
+    fn semantic_group_message_previous_is_bound_to_the_pinned_host() {
+        let engine = nmp::Engine::new(EngineConfig::default()).unwrap();
+        engine
+            .set_active_account(Some(nostr::Keys::generate().public_key()))
+            .unwrap();
+        let host_x = "wss://host-x.example.com";
+        let host_y = "wss://host-y.example.com";
+        let row = |byte: &str, created_at, sources: Vec<String>| FfiRow {
+            id: byte.repeat(64),
+            pubkey: "author".to_string(),
+            created_at,
+            kind: 9,
+            tags: vec![vec!["h".to_string(), "group-a".to_string()]],
+            content: "earlier".to_string(),
+            sig: "sig".to_string(),
+            sources,
+        };
+
+        let wrapped = group_message_intent(
+            &engine,
+            host_y.to_string(),
+            "group-a".to_string(),
+            "hello".to_string(),
+            vec![],
+            None,
+            vec![
+                row("1", 200, vec![host_x.to_string()]),
+                row("2", 100, vec![host_y.to_string()]),
+            ],
+        )
+        .unwrap();
+        let intent = wrapped.take().unwrap();
+        let WritePayload::Unsigned(unsigned) = intent.payload else {
+            panic!("semantic group messages must produce unsigned intents")
+        };
+        let rows = unsigned
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect::<Vec<_>>();
+
+        assert!(rows.contains(&vec!["previous".to_string(), "22222222".to_string(),]));
+        assert!(
+            !rows.iter().flatten().any(|value| value == "11111111"),
+            "same-group evidence delivered only by host X must not contribute to a write pinned to Y"
+        );
         engine.shutdown();
     }
 

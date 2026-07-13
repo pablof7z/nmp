@@ -48,3 +48,5 @@ redb = "4.1"
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"
+nmp = { workspace = true, features = ["unstable-mechanism"] }
+nmp-signer.workspace = true

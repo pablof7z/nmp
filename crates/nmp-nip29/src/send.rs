@@ -9,8 +9,11 @@
 //! `WriteIntent`/`WriteRouting`/`HostAuthority` etc. live in `nmp-grammar`
 //! (#115's Fork 3 dependency ruling relocated them there from
 //! `nmp-engine::outbox` for exactly this reason: a protocol module composing
-//! a `WriteIntent` must not gain an engine dependency to do so). This crate
-//! still has no router/resolver/store/engine dep -- falsifier 9 proves it.
+//! a `WriteIntent` must not gain an engine dependency to do so). This module
+//! and the crate's default feature set still have no router/resolver/store/
+//! engine dependency -- falsifier 9 proves it. The optional `engine` feature
+//! adds the semantic kind:9 operation in `message.rs` without changing this
+//! lower-level seam.
 
 use nostr::{EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
