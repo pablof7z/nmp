@@ -6373,6 +6373,86 @@ impl EventStore for RedbStore {
         Ok(lane)
     }
 
+    fn suspend_lane_attempt(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        at: Timestamp,
+        cause: TransientCause,
+        raw_reason: Option<String>,
+        auth: bool,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if raw_reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > 4_096)
+        {
+            return Err(PersistenceError(
+                "transient raw reason exceeds 4096 bytes".into(),
+            ));
+        }
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let lane = {
+            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut deadlines = write_txn
+                .open_table(OUTBOX_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            let mut details = write_txn
+                .open_table(OUTBOX_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let storage_key = lane_key(key);
+            let json = lanes
+                .get(storage_key.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            let current = decode_lane(&storage_key, &json)?;
+            if current.revision != expected_revision
+                || current.last_ordinal != ordinal
+                || ordinal == 0
+            {
+                return Err(PersistenceError("stale suspended attempt".into()));
+            }
+            let detail_key = attempt_key(key.intent_id, &key.relay, ordinal);
+            let detail_json = details
+                .get(detail_key.as_str())
+                .map_err(persist_err)?
+                .map(|g| g.value().to_string())
+                .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            let mut detail = decode_attempt_details(&detail_key, &detail_json)?;
+            detail.transient = Some(AttemptTransientDetail {
+                eligible_at: at,
+                cause,
+                raw_reason,
+            });
+            details
+                .insert(
+                    detail_key.as_str(),
+                    encode_json(&detail, "attempt details")?.as_str(),
+                )
+                .map_err(persist_err)?;
+            replace_lane_in_txn(
+                &mut lanes,
+                &mut deadlines,
+                &mut deadlines_by_intent,
+                key,
+                expected_revision,
+                if auth {
+                    LaneState::WaitingAuth
+                } else {
+                    LaneState::WaitingConnection
+                },
+            )?
+        };
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
+        write_txn.commit().map_err(persist_err)?;
+        Ok(lane)
+    }
+
     fn start_lane_attempt(
         &mut self,
         key: &LaneKey,

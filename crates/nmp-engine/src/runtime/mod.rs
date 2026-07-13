@@ -997,6 +997,9 @@ fn dispatch_effect(
                 let _ = self_inbox.send(Cmd::Engine(EngineMsg::EventHandoff(correlation, result)));
             }
         }
+        Effect::EnsureRelay(url) => {
+            pool.ensure_open(&url);
+        }
         // The signer frozen into this exact accepted template is looked up
         // by pubkey on every request. A later active-account switch cannot
         // redirect outstanding work. No matching registered signer is

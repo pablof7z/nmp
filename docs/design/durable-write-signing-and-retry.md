@@ -1,8 +1,9 @@
 # Durable writes, signing, and retry
 
-- **Status:** TARGET CONTRACT - receipts and publishing exist, but crash-safe
-  acceptance, canonical unsigned rows, signer reattachment, and durable retry
-  do not yet satisfy this contract.
+- **Status:** IMPLEMENTED IN THE RUST MECHANISM - crash-safe acceptance,
+  canonical pending rows, signer reattachment, and the one durable retry
+  scheduler satisfy this contract. Governed lane-state projection across
+  Rust/FFI/Swift/Kotlin remains #96.
 - **Owns:** the meaning of `Accepted`, pending-row semantics, signer selection,
   receipt persistence, and retry ownership.
 

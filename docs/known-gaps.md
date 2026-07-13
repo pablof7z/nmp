@@ -18,8 +18,9 @@ about current code:
   exact per-relay/filter intervals as a distinct type. `AwaitingAuth` and
   `AuthDenied` land with #8, and `Error` lands with #51. Full source-authority
   and access-context identity remains part of the descriptor gap above (#49).
-- **Crash-safe acceptance and Rust restart reattachment are built; bounded
-  retry policy is not.** One transaction owns the intent, stable receipt,
+- **Crash-safe acceptance, Rust restart reattachment, and the bounded retry
+  scheduler are built; governed SDK observation remains #96.** One transaction
+  owns the intent, stable receipt,
   frozen body, canonical pending row and displaced state. Rust boot recovery
   rebuilds ownership without reinsertion, resumes the frozen signer, persists
   versioned exact-byte `(intent, relay, ordinal)` Started facts before wire,
@@ -30,9 +31,15 @@ about current code:
   sets are first committed as append-only route revisions, so restart owns
   their union even if the live directory is empty or changed. Failure to
   persist the route revision is reported separately and makes no false claim
-  that the exact URL survived a crash. Retry eligibility, backoff, caps,
-  terminal lane cleanup and the single deadline fold remain issue #79; there
-  is no polling/busy-spin placeholder.
+  that the exact URL survived a crash. One typed engine reducer now owns stable
+  due ordering, 32-global/1-per-relay caps, deterministic 3s-to-300s backoff,
+  30s ACK expiry, handoff and standardized relay-result classification, and
+  every eligibility transition. Offline and AUTH waits allocate no attempt and
+  arm no polling deadline; Durable retry advances the persisted ordinal, while
+  AtMostOnce ambiguity becomes terminal `OutcomeUnknown`. The deadline exposed
+  by `next_deadline()` is consumed before it can be rearmed, including bounded
+  batch draining, so there is no zero-timeout busy-spin. #96 still owns the
+  governed Rust/FFI/Swift/Kotlin projection of these lane states.
 - **The NIP-46 reconnect path is built; standard platform vault providers are not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
