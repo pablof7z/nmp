@@ -53,6 +53,21 @@ bounded multicast `Flow` replays lifecycle facts; UI and lifecycle collectors
 cannot split `Ready`, `Failed`, or `Closed` between themselves. `Closed` is
 terminal: no later callback is delivered and ordinary collection completes.
 
+For explicit personal/development autologin without Keystore, the JVM SDK also
+ships a deliberately plaintext file provider:
+
+```kotlin
+val accountStore = NMPInsecureFileAccountStore(appSupport.resolve("local-account.nsec"))
+NMPEngine(config, accountStore).use { nmp ->
+    val restoredPubkey = nmp.activeAccount()
+}
+```
+
+With that provider configured, a successful `addAccount` is checkpointed and
+the next engine construction restores and activates it. Sign-out calls
+`clearPersistedAccount()` before closing the credential-owning engine. This is
+not encrypted, Keystore-backed, or a secure production-vault claim.
+
 The same package also exposes the optional content substrate:
 
 ```kotlin

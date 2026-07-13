@@ -51,6 +51,23 @@ Android/NIP-55-only and is not falsely offered as an iOS NIP-46 signer.
 `close()` is idempotent; it detaches only that exact session and finishes the
 state stream. Dropping the last connection reference has the same effect.
 
+For a personal app that explicitly prefers autologin over Keychain, NMP also
+ships a deliberately plaintext file provider:
+
+```swift
+let accountStore = NMPInsecureFileAccountStore(
+    fileURL: applicationSupport.appendingPathComponent("local-account.nsec")
+)
+let nmp = try NMPEngine(config: config, localAccountStore: accountStore)
+let restoredPubkey = try nmp.activeAccount()
+```
+
+With that provider configured, a successful `addAccount` is checkpointed and
+the next engine construction restores and activates it. Sign-out calls
+`clearPersistedAccount()` before shutting down the credential-owning engine.
+This provider is not encrypted, Keychain-backed, Secure-Enclave-backed, or a
+production-vault claim.
+
 See `Sources/NMP/Engine.swift` and
 [`docs/builder/34-content.md`](../../docs/builder/34-content.md).
 For the SwiftUI product and live Gallery, see

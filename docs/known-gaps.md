@@ -43,10 +43,13 @@ about current code:
   Kotlin/JVM projects package-filtered Android discovery and an exact
   URI/package handoff contract. Connections own scoped registrations, so a
   stale session cannot detach its replacement, and close/drop deterministically
-  finishes only that session. Still open under #47/#51: explicit per-write
-  identity override, standard Keychain/Keystore providers and automatic vault
-  restore, NIP-55 execution/Android AAR integration, and permanent signer
-  connection/correlation counters in engine diagnostics.
+  finishes only that session. An explicitly insecure SDK-owned plaintext file
+  checkpoint now provides opt-in personal/development autologin (#197), while
+  remaining distinct from the secure-provider contract. Still open under
+  #47/#51: explicit per-write identity override, standard Keychain/Keystore
+  providers and automatic secure-vault restore, NIP-55 execution/Android AAR
+  integration, and permanent signer connection/correlation counters in engine
+  diagnostics.
 - **Protocol-module composition is unbuilt.** The existing ownership design
   incorrectly makes kind ownership gate all route authority. Modules must claim
   only exact NIP-defined schemas while typed contextual operations may add their

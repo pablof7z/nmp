@@ -33,8 +33,12 @@ Swift uses `AsyncSequence`, ARC, and optional `@Observable` conveniences. A
 view/model's existing task supplies scope. NMP does not add an environment
 container or scene-phase coordinator.
 
-The SDK supplies a standard Keychain-backed signer provider. The app owns
-identity policy and may attach remote/hardware/custom providers.
+The standard Keychain-backed signer provider remains tracked work. The app owns
+identity policy and may attach remote/hardware/custom providers. For explicit
+personal/development opt-in, `NMPInsecureFileAccountStore(fileURL:)` provides
+plaintext app-sandbox autologin without placing secret material in the Rust
+event/outbox store; pass it to `NMPEngine` and call
+`clearPersistedAccount()` before destroying the live signer on sign-out.
 
 For the currently built local remote-signer path, add `primalconnect` to the
 host app's `LSApplicationQueriesSchemes`, call
@@ -49,10 +53,15 @@ reattachable rather than relying on an unbounded `AsyncStream` backlog.
 Kotlin uses cold `Flow` and deterministic `awaitClose` cancellation. The app
 chooses coroutine scope, `stateIn`, and Compose/ViewModel structure.
 
-The Android product includes a standard Keystore-backed provider and proves
+The Android product must include a standard Keystore-backed provider and prove
 process-death receipt/signer reattachment, not merely JVM binding generation.
 Newest-state observation is bounded/conflated while receipt history remains
 recoverable.
+
+The current JVM projection also exposes `NMPInsecureFileAccountStore(Path)` for
+explicit plaintext sandbox persistence. It provides the same restore/clear
+semantics as Swift and the same warning: it is not Keystore or a secure Android
+production provider.
 
 The current desktop-JVM projection can already consume Android package-query
 results through `installedAndroid(packageIds)` and produce an exact

@@ -147,6 +147,11 @@ This README describes the v2 north star. NMP is still pre-v2: the core store, re
 
 NMP runs in the host application and communicates with Nostr relays. It owns local cache and write-obligation state; the app owns identity import, backup, removal, and user-facing trust policy. Production readiness of key handling, secure signer providers, persistence, and reset behavior is tracked explicitly in [known gaps](docs/known-gaps.md)—the north-star description above is not a substitute for that status.
 
+The platform SDKs include an explicitly insecure plaintext file checkpoint for
+personal/development apps that knowingly prioritize autologin over Keychain or
+Keystore. It is opt-in, separate from the canonical event/outbox store, and does
+not close the secure-provider gap.
+
 ## Contributing
 
 Every unit of work starts with a GitHub issue that captures why it matters and links the relevant invariant when one exists. Read [`AGENTS.md`](AGENTS.md), then choose from the [open issues](https://github.com/pablof7z/nmp/issues).

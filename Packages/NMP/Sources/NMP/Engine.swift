@@ -54,30 +54,68 @@ public struct NMPConfig: Sendable {
 /// entire adoption cost.
 public final class NMPEngine: Sendable {
     let ffi: NmpEngineProtocol
+    private let localAccountStore: NMPInsecureFileAccountStore?
 
-    public init(config: NMPConfig) throws {
-        ffi = try nmpRethrowing { try NmpEngine(config: config.toFfi()) }
+    /// Construct an engine and, when explicitly configured, restore the local
+    /// account held by NMP's plaintext app-sandbox file provider.
+    public init(
+        config: NMPConfig,
+        localAccountStore: NMPInsecureFileAccountStore? = nil
+    ) throws {
+        let ffi = try nmpRethrowing { try NmpEngine(config: config.toFfi()) }
+        self.ffi = ffi
+        self.localAccountStore = localAccountStore
+        do {
+            if let secretKey = try localAccountStore?.loadSecretKey() {
+                let pubkey = try nmpRethrowing {
+                    try ffi.addAccount(secretKey: secretKey)
+                }
+                try nmpRethrowing { try ffi.setActiveAccount(pubkey: pubkey) }
+            }
+        } catch {
+            ffi.shutdown()
+            throw error
+        }
     }
 
     /// Only for tests / fakes: wrap an already-constructed FFI object.
     init(ffi: NmpEngineProtocol) {
         self.ffi = ffi
+        localAccountStore = nil
     }
 
     // MARK: - Identity (P3; multi-account)
 
     /// Register an account from its secret key (hex or bech32 `nsec`). The
     /// key crosses this boundary exactly once and lives engine-side from
-    /// this point on. Returns the account's hex public key. Does NOT make
-    /// the account active -- call `setActiveAccount` for that.
+    /// this point on. When an `NMPInsecureFileAccountStore` was explicitly
+    /// configured, NMP also checkpoints it for restart restoration. Returns
+    /// the account's hex public key. Does NOT make the account active -- call
+    /// `setActiveAccount` for that.
     public func addAccount(secretKey: String) async throws -> String {
-        try nmpRethrowing { try ffi.addAccount(secretKey: secretKey) }
+        let pubkey = try nmpRethrowing {
+            try ffi.addAccount(secretKey: secretKey)
+        }
+        try localAccountStore?.saveSecretKey(secretKey)
+        return pubkey
     }
 
     /// Re-root every reactive query AND the active signing capability
     /// together onto `pubkey` (`nil` -> logged-out / read-only browsing).
     public func setActiveAccount(_ pubkey: String?) throws {
         try nmpRethrowing { try ffi.setActiveAccount(pubkey: pubkey) }
+    }
+
+    /// The Rust-owned account currently rooting reactive identity and writes.
+    /// No secret or signer capability crosses this boundary.
+    public func activeAccount() throws -> String? {
+        try nmpRethrowing { try ffi.activeAccount() }
+    }
+
+    /// Remove the configured plaintext checkpoint. The live signer remains in
+    /// this engine until the caller shuts the engine down.
+    public func clearPersistedAccount() throws {
+        try localAccountStore?.clear()
     }
 
     // MARK: - Read noun
