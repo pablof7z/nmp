@@ -13,7 +13,7 @@ use nmp_store::{coverage_key, CoverageKey};
 
 use crate::coalesce::RuleRegistry;
 use crate::diag::{self, Diagnostics};
-use crate::facts::{DiscoveryKinds, PubkeyHex, RelayDirectory, RelayLimits, RelayUrl};
+use crate::facts::{DiscoveryKinds, PubkeyHex, RelayDirectory, RelayUrl};
 use crate::plan::{diff_plans, RelayPlan, SubId, WireDelta, WireReq};
 use crate::route::{self, AtomClass, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall};
@@ -60,8 +60,6 @@ fn push_routes(
 }
 
 pub struct Router {
-    #[allow(dead_code)] // carried for API completeness / future limit-enforcement (M3)
-    limits: RelayLimits,
     discovery: DiscoveryKinds,
     rules: RuleRegistry,
     prev_plan: RelayPlan,
@@ -69,9 +67,8 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn new(limits: RelayLimits, discovery: DiscoveryKinds, rules: RuleRegistry) -> Self {
+    pub fn new(discovery: DiscoveryKinds, rules: RuleRegistry) -> Self {
         Self {
-            limits,
             discovery,
             rules,
             prev_plan: RelayPlan::default(),
@@ -336,7 +333,6 @@ mod tests {
             .with_write(pk('a'), [test_relay(0), test_relay(1)])
             .with_write(pk('b'), [test_relay(2), test_relay(3)]);
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -363,7 +359,6 @@ mod tests {
             .with_write(pk('c'), [test_relay(2), test_relay(3)])
             .with_write(pk('d'), [test_relay(2), test_relay(3)]);
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -392,7 +387,6 @@ mod tests {
     fn every_wire_req_traces_to_a_route() {
         let dir = FixtureDirectory::new().with_write(pk('a'), [test_relay(0), test_relay(1)]);
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -422,7 +416,6 @@ mod tests {
             .with_write(pk('a'), [shared.clone()])
             .with_indexer(shared.clone());
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -482,7 +475,6 @@ mod tests {
             .with_indexer(shared.clone())
             .with_indexer(indexer_only.clone());
         let mut router2 = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -520,7 +512,6 @@ mod tests {
             .with_write(a.clone(), [test_relay(0)])
             .with_indexer(indexer.clone());
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -557,7 +548,6 @@ mod tests {
             .with_write(a.clone(), [test_relay(0)]) // deliberately under-min
             .with_app([app_relay.clone()]);
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -609,7 +599,6 @@ mod tests {
             .with_write(a.clone(), [test_relay(0)]) // under-min
             .with_fallback([fallback_relay.clone()]);
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -636,7 +625,6 @@ mod tests {
             .with_fallback([fallback_relay.clone()])
             .with_app([app_relay.clone()]);
         let mut router2 = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -667,7 +655,6 @@ mod tests {
         let indexer = test_relay(99);
         let dir = FixtureDirectory::new().with_indexer(indexer.clone());
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -716,7 +703,6 @@ mod tests {
             .with_write(a.clone(), [shared.clone()])
             .with_group_host(filter.clone(), shared.clone());
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
@@ -767,7 +753,6 @@ mod tests {
             .with_fallback([fallback_relay.clone()])
             .with_indexer(indexer.clone());
         let mut router = Router::new(
-            RelayLimits::default(),
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );

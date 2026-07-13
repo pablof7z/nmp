@@ -47,7 +47,7 @@ use nmp_grammar::{
 };
 use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
 use nmp_router::{
-    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayLimits, Router, RuleRegistry,
+    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, Router, RuleRegistry,
     SubId, WireDelta, WireOp, WireReq,
 };
 use nmp_signer::SignerError;
@@ -547,7 +547,6 @@ impl<S: EventStore> EngineCore<S> {
         Self {
             resolver: ResolverEngine::new(store),
             router: Router::new(
-                RelayLimits::default(),
                 DiscoveryKinds::default(),
                 RuleRegistry::default_widen_only(),
             ),

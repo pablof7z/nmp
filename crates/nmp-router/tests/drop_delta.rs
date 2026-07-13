@@ -17,7 +17,7 @@ use nmp_resolver::LiveQuery;
 use nostr::Keys;
 
 use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, RelayLimits, Router, RuleRegistry, WireOp,
+    test_relay, DiscoveryKinds, FixtureDirectory, Router, RuleRegistry, WireOp,
 };
 
 fn literal_author_filter(author_hex: &str) -> Filter {
@@ -36,7 +36,6 @@ fn dropped_handle_close_reaches_wire() {
     let dir =
         FixtureDirectory::new().with_write(author_hex.clone(), [test_relay(0), test_relay(1)]);
     let mut router = Router::new(
-        RelayLimits::default(),
         DiscoveryKinds::default(),
         RuleRegistry::default_widen_only(),
     );

@@ -169,26 +169,6 @@ pub trait RelayDirectory {
     fn ingest_read_relays(&mut self, _author: PubkeyHex, _relays: Vec<LanedRelay>) {}
 }
 
-/// Configurable relay limits — the kill measurement (test 16) asserts the
-/// compiled plan stays within these. Defaults reflect v1 evidence (relays
-/// accept large author arrays but cap concurrent subscriptions).
-#[derive(Clone, Copy, Debug)]
-pub struct RelayLimits {
-    pub max_subs_per_relay: usize,
-    pub max_filter_authors: usize,
-    pub max_filter_terms: usize,
-}
-
-impl Default for RelayLimits {
-    fn default() -> Self {
-        Self {
-            max_subs_per_relay: 20,
-            max_filter_authors: 1_000,
-            max_filter_terms: 1_000,
-        }
-    }
-}
-
 /// The discovery-kind set (default `{0, 3} ∪ 10000..=19999` -- every
 /// NIP-01 REPLACEABLE-range kind, plus kind:0/3 -- owner-affirmed semantics:
 /// "discovery = 0/3/1xxxx". An atom whose `kinds` is a (non-empty) subset of
