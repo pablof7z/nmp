@@ -42,7 +42,8 @@ pub enum WriteStatus {
     /// The relay remains an owned, nonterminal delivery lane, but the
     /// durable `AttemptOutcome::Started` fact could not be committed. No
     /// wire EVENT was emitted. Recovery rediscovers the exact URL from its
-    /// committed route revision; #79 owns when an in-process retry occurs.
+    /// committed route revision; the engine's single lane scheduler owns when
+    /// an in-process retry occurs.
     PersistenceBlocked(RelayUrl),
     /// The resolved relay is known in this process, but the append-only
     /// route revision itself could not be committed. No attempt or wire EVENT

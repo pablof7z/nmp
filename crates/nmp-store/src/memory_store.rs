@@ -2239,6 +2239,53 @@ impl EventStore for MemoryStore {
         Ok(recovered)
     }
 
+    fn suspend_lane_attempt(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        ordinal: u64,
+        at: Timestamp,
+        cause: TransientCause,
+        raw_reason: Option<String>,
+        auth: bool,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if raw_reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > 4_096)
+        {
+            return Err(PersistenceError(
+                "transient raw reason exceeds 4096 bytes".into(),
+            ));
+        }
+        let lane = self
+            .get_lane(key)
+            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+        if lane.revision != expected_revision || lane.last_ordinal != ordinal || ordinal == 0 {
+            return Err(PersistenceError("stale suspended attempt".into()));
+        }
+        self.outbox_attempt_details
+            .get(&(key.intent_id, key.relay.clone(), ordinal))
+            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+        let recovered = self.replace_lane(
+            key,
+            expected_revision,
+            if auth {
+                LaneState::WaitingAuth
+            } else {
+                LaneState::WaitingConnection
+            },
+        )?;
+        self.outbox_attempt_details
+            .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
+            .expect("validated attempt detail")
+            .transient = Some(AttemptTransientDetail {
+            eligible_at: at,
+            cause,
+            raw_reason,
+        });
+        Ok(recovered)
+    }
+
     fn start_lane_attempt(
         &mut self,
         key: &LaneKey,

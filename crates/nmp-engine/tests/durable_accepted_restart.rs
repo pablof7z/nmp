@@ -12,7 +12,7 @@ use nmp_store::{
     sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState, RedbStore,
     SigState, WriteDurability,
 };
-use nmp_transport::{RelayFrame, RelayHandle};
+use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
     EventBuilder, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
@@ -90,6 +90,13 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             Box::new(directory(keys.public_key(), relay.clone())),
             10,
         );
+        core.handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            relay.clone(),
+        ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event.clone()),
@@ -122,14 +129,14 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         10,
     );
     let recovery = core.recover_on_boot();
-    assert!(recovery.iter().any(|effect| matches!(effect,
-        Effect::PublishEvent(r, e, _) if r == &relay && e == &event
-    )));
     assert!(
-        recovery.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e, _) if r == &appended && e == &event
-        )),
-        "a newly resolved relay appends a first lane without overwriting the recovered one"
+        recovery
+            .iter()
+            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay))
+            && recovery
+                .iter()
+                .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &appended)),
+        "recovery preserves both lanes but allocates no attempt while offline"
     );
     assert!(
         !recovery
@@ -159,13 +166,34 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)),
         "a recovered Started attempt predates transport Written and cannot replay as Sent"
     );
-    core.handle(EngineMsg::RelayConnected(
+    let relay_retry = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
             generation: 1,
         },
         relay.clone(),
     ));
+    assert!(relay_retry.iter().any(|effect| matches!(effect,
+        Effect::PublishEvent(r, e, _) if r == &relay && e == &event
+    )));
+    let appended_first = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        appended.clone(),
+    ));
+    assert!(appended_first.iter().any(|effect| matches!(effect,
+        Effect::PublishEvent(r, e, _) if r == &appended && e == &event
+    )));
+    let correlation = relay_retry
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PublishEvent(r, _, correlation) if r == &relay => Some(*correlation),
+            _ => None,
+        })
+        .unwrap();
+    core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
     let acked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -180,13 +208,20 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     )));
     drop(core);
     let store = RedbStore::open(&path).unwrap();
-    let original_attempt = store
+    let original_attempts = store
         .recover_attempts(intent)
         .unwrap()
         .into_iter()
-        .find(|attempt| attempt.relay == relay)
-        .unwrap();
-    assert_eq!(original_attempt.outcome, AttemptOutcome::Acked);
+        .filter(|attempt| attempt.relay == relay)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        original_attempts
+            .iter()
+            .map(|attempt| (attempt.ordinal, &attempt.outcome))
+            .collect::<Vec<_>>(),
+        vec![(1, &AttemptOutcome::Started), (2, &AttemptOutcome::Acked)],
+        "restart preserves the interrupted ordinal and ACKs a new retry ordinal"
+    );
     let original_lane = store
         .recover_outbox_lanes(intent)
         .unwrap()
@@ -196,7 +231,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     assert_eq!(
         original_lane.state,
         nmp_store::LaneState::Terminal {
-            ordinal: 1,
+            ordinal: 2,
             outcome: AttemptOutcome::Acked,
         }
     );
@@ -216,6 +251,13 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
             Box::new(directory(keys.public_key(), relay.clone())),
             10,
         );
+        core.handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            relay.clone(),
+        ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event),
@@ -348,6 +390,20 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
             ),
             10,
         );
+        core.handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            r1.clone(),
+        ));
+        core.handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 1,
+                generation: 1,
+            },
+            r2.clone(),
+        ));
         let publish = |core: &mut EngineCore<RedbStore>| {
             core.handle(EngineMsg::Publish(
                 WriteIntent {
@@ -374,15 +430,43 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         10,
     );
     let effects = core.recover_on_boot();
-    let replays = effects
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::PublishEvent(..)))
+            .count(),
+        0,
+        "recovery queues connection work without allocating offline attempts"
+    );
+    let mut replays = core
+        .handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            r1.clone(),
+        ))
+        .iter()
+        .filter(
+            |effect| matches!(effect, Effect::PublishEvent(_, replayed, _) if replayed == &event),
+        )
+        .count();
+    replays += core
+        .handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 1,
+                generation: 1,
+            },
+            r2.clone(),
+        ))
         .iter()
         .filter(
             |effect| matches!(effect, Effect::PublishEvent(_, replayed, _) if replayed == &event),
         )
         .count();
     assert_eq!(
-        replays, 4,
-        "two coowners retain both append-only relay lanes"
+        replays, 2,
+        "both relays make progress while the one-per-relay cap retains the other two lanes"
     );
     assert!(core
         .reattach_receipt(a, Box::new(Sink::default()))
@@ -494,6 +578,13 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             Box::new(directory(keys.public_key(), relay.clone())),
             10,
         );
+        core.handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            relay.clone(),
+        ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event),
@@ -684,6 +775,13 @@ fn pinned_host_routing_round_trips_across_a_restart() {
         // route to fall back on and this test would never see
         // `Effect::PublishEvent` at all.
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+        core.handle(EngineMsg::RelayConnected(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            host.clone(),
+        ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event.clone()),
@@ -702,6 +800,16 @@ fn pinned_host_routing_round_trips_across_a_restart() {
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
     let recovery = core.recover_on_boot();
+    assert!(recovery
+        .iter()
+        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &host)));
+    let recovery = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        host.clone(),
+    ));
     assert!(
         recovery.iter().any(|effect| matches!(effect,
             Effect::PublishEvent(r, e, _) if r == &host && e == &event
