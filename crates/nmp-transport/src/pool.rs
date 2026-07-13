@@ -274,6 +274,9 @@ impl PoolEventSink for std::sync::mpsc::SyncSender<PoolEvent> {
 /// harvested constants).
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
+    /// Maximum distinct live relay workers. This is the transport half of
+    /// the engine's one whole-demand relay ceiling; zero is normalized to
+    /// [`DEFAULT_MAX_RELAYS`] and never disables admission.
     pub max_relays: usize,
     /// Maximum worker events waiting for the translator. A full queue blocks
     /// the socket worker, propagating pressure back to TCP reads.
@@ -479,8 +482,7 @@ impl Pool {
 
     /// Monotonic count of [`Self::ensure_open`] calls this pool refused
     /// because opening the relay would have exceeded [`PoolConfig::max_relays`]
-    /// live workers (issue #121). Always `0` unless an operator configured a
-    /// non-zero cap. The engine folds this into its diagnostics rejection
+    /// live workers. The engine folds this into its diagnostics rejection
     /// counter — see `nmp-engine`'s relay admission. A poisoned lock reports
     /// `0` (nothing to report through a broken pool), matching every other
     /// read on this facade.
@@ -492,8 +494,8 @@ impl Pool {
             .unwrap_or(0)
     }
 
-    /// Tear down every worker. Subsequent [`Self::ensure_open`] calls
-    /// return a sentinel dead handle; subsequent `send` calls are
+    /// Tear down every worker. Subsequent [`Self::ensure_open`] calls return
+    /// [`RelayOpenError::ShuttingDown`]; subsequent `send` calls are
     /// structural no-ops. Joins the translator thread before returning.
     pub fn shutdown(&self) {
         let handle = match self.inner.lock() {

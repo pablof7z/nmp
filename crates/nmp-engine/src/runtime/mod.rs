@@ -1017,7 +1017,11 @@ fn dispatch_effect(
             }
         }
         Effect::EnsureRelay(url) => {
-            pool.ensure_open(&url);
+            // The durable lane is already persisted as WaitingConnection.
+            // A typed cap refusal remains observable in pool diagnostics and
+            // must not be converted back into an invalid handle or a busy
+            // retry loop here.
+            let _refusal = pool.ensure_open(&url).err();
         }
         // The signer frozen into this exact accepted template is looked up
         // by pubkey on every request. A later active-account switch cannot
