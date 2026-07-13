@@ -37,7 +37,7 @@ uniffi = { workspace = true, features = ["cli"] }
 # as `nmp-grammar` itself gets here.
 nmp-nip51.workspace = true
 nmp-nip02.workspace = true
-nmp-nip29.workspace = true
+nmp-nip29 = { workspace = true, features = ["engine"] }
 nmp-content.workspace = true
 
 # #99: the corrupt-retained-receipt reattach falsifier needs to write a

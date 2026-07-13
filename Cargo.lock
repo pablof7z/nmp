@@ -1484,6 +1484,7 @@ dependencies = [
 name = "nmp-nip29"
 version = "0.1.0"
 dependencies = [
+ "nmp",
  "nmp-grammar",
  "nmp-nip51",
  "nmp-ownership",

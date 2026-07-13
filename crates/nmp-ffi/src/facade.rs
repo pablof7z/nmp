@@ -310,6 +310,32 @@ impl NmpEngine {
         Ok(receipt_id)
     }
 
+    /// Compose an ordinary kind:9 NIP-29 message from semantic inputs
+    /// (#156). The caller supplies no author, timestamp, kind, bech32
+    /// encoding, or raw tags: NMP reads the active account, owns event time,
+    /// materializes ordered/deduplicated `nostr:npub…` content references,
+    /// and composes `p`/reply-`e`/`h`/`previous` plus pinned-host routing.
+    /// `previous` comes from an engine-owned strict-cache snapshot for this
+    /// exact host/group; no caller row or provenance claim enters the path.
+    /// Publish the returned take-once value through [`Self::publish_composed`].
+    pub fn group_message_intent(
+        &self,
+        host: String,
+        group_id: String,
+        content: String,
+        recipient_pubkeys: Vec<String>,
+        reply_to: Option<crate::nip29::FfiGroupReplyParent>,
+    ) -> Result<Arc<crate::nip29::FfiComposedWriteIntent>, FfiError> {
+        crate::nip29::group_message_intent(
+            &self.engine,
+            host,
+            group_id,
+            content,
+            recipient_pubkeys,
+            reply_to,
+        )
+    }
+
     /// Publish a `nmp_nip29::compose_group_send`-composed intent (#115).
     /// Take-once: `intent` is consumed by this call (`FfiComposedWriteIntent
     /// ::take`) -- a second call on the SAME handle fails closed with
@@ -543,6 +569,118 @@ mod tests {
         );
 
         engine.shutdown();
+    }
+
+    /// #156 account-switch falsifier through the public native boundary.
+    /// Composition snapshots A, but switching to B is serialized ahead of
+    /// publish on the sole engine command path. Acceptance must reject the
+    /// stale A draft before `Accepted`, canonical storage, or the durable
+    /// outbox journal can observe it. The lower engine test uses counting
+    /// signers to prove neither account capability is invoked.
+    #[test]
+    fn ffi_group_message_composed_as_a_cannot_publish_after_switching_to_b() {
+        use redb::{ReadableDatabase, ReadableTableMetadata};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("stale-account.redb");
+        let engine = NmpEngine::new(NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let a = engine
+            .add_account(format!("{:064x}", 1u8))
+            .expect("A must register through the public FFI surface");
+        let b = engine
+            .add_account(format!("{:064x}", 2u8))
+            .expect("B must register through the public FFI surface");
+
+        engine.set_active_account(Some(a)).expect("A must activate");
+        let intent = engine
+            .group_message_intent(
+                "wss://group-host.example.com".to_string(),
+                "group-a".to_string(),
+                "stale A message".to_string(),
+                vec![],
+                None,
+            )
+            .expect("composition as active A must succeed");
+        engine
+            .set_active_account(Some(b))
+            .expect("B must activate before publish");
+
+        let (tx, rx) = mpsc::channel();
+        let receipt_id = engine
+            .publish_composed(
+                intent,
+                Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) }),
+            )
+            .expect("pre-acceptance failure still has a stream-local correlation id");
+        match rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stale author must fail deterministically")
+        {
+            FfiWriteStatus::Failed { reason } => assert_eq!(
+                reason,
+                "unsigned draft author does not match current active account"
+            ),
+            other => panic!("Failed must be first, before Accepted; got {other:?}"),
+        }
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected),
+            "Failed must be the sole receipt fact"
+        );
+        // Reuse the protocol selection but ask the empty configured Public
+        // lane, so this is a canonical-cache assertion with no relay dial.
+        let mut cache_probe = nmp_nip29::group_content_demand(
+            nostr::RelayUrl::parse("wss://group-host.example.com").unwrap(),
+            "group-a",
+        );
+        cache_probe.source = nmp::SourceAuthority::Public;
+        let subscription = engine
+            .engine
+            .observe(nmp::LiveQuery(cache_probe))
+            .expect("canonical query must open");
+        let (deltas, _evidence) = subscription
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canonical query must deliver its current empty snapshot");
+        assert!(
+            !deltas
+                .iter()
+                .any(|delta| matches!(delta, nmp::RowDelta::Added(_))),
+            "a pre-acceptance rejection must create no canonical row"
+        );
+        drop(subscription);
+
+        let (reattach_tx, reattach_rx) = mpsc::channel();
+        let outcome = engine
+            .reattach_receipt(
+                receipt_id,
+                Box::new(ChannelReceiptObserver {
+                    tx: Mutex::new(reattach_tx),
+                }),
+            )
+            .expect("reattach lookup must succeed");
+        assert_eq!(outcome, FfiReceiptReattachment::NotFound);
+        assert_eq!(
+            reattach_rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+        engine.shutdown();
+
+        let db = redb::Database::open(&path).expect("reopen store for residue audit");
+        let read = db.begin_read().expect("begin residue audit");
+        for table_name in ["outbox_intents", "outbox_receipts", "outbox_meta"] {
+            let definition: redb::TableDefinition<&str, &str> =
+                redb::TableDefinition::new(table_name);
+            let table = read.open_table(definition).expect("open outbox table");
+            assert_eq!(
+                table.len().expect("count outbox rows"),
+                0,
+                "pre-acceptance rejection left journal residue in {table_name}"
+            );
+        }
     }
 
     /// #99: PR #97's FFI reattach coverage stopped at `reattachment_to_ffi`,
@@ -884,7 +1022,7 @@ mod tests {
         engine.shutdown();
     }
 
-    /// #115 falsifier 10: `publish_composed` takes its `FfiComposedWriteIntent`
+    /// #156: `publish_composed` takes its `FfiComposedWriteIntent`
     /// exactly once. No signer is ever attached (`set_active_account` without
     /// `add_account`), so the first call settles into the SAME retained
     /// `Accepted`+`AwaitingCapability` steady state
@@ -901,17 +1039,15 @@ mod tests {
             .set_active_account(Some(keys.public_key().to_hex()))
             .expect("account must activate");
 
-        let intent = crate::nip29::group_send_intent(
-            "wss://group-host.example.com".to_string(),
-            "group-a".to_string(),
-            keys.public_key().to_hex(),
-            nostr::Timestamp::now().as_secs(),
-            9,
-            "hi".to_string(),
-            vec![],
-            vec![],
-        )
-        .expect("a well-formed group send must compose");
+        let intent = engine
+            .group_message_intent(
+                "wss://group-host.example.com".to_string(),
+                "group-a".to_string(),
+                "hi".to_string(),
+                vec![],
+                None,
+            )
+            .expect("a well-formed group message must compose");
 
         let (tx_a, rx_a) = mpsc::channel();
         let observer_a = Box::new(ChannelReceiptObserver {

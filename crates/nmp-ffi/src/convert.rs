@@ -116,17 +116,13 @@ pub enum FfiError {
     /// (`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,
     /// #107 Contract: "the pinned relay set must be nonempty").
     EmptyPinnedRelaySet,
-    /// #115: `group_send_intent`'s `extra_tags` named a tag
-    /// `nmp_nip29::compose_group_send` owns itself (`"h"`/`"previous"`) --
-    /// mirrors `nmp_nip29::GroupSendError::ReservedTag`, surfaced rather
-    /// than silently rewritten.
-    ReservedGroupTag {
-        got: String,
-    },
+    /// #156: `NmpEngine::group_message_intent` requires an active account
+    /// because NMP, not the native caller, owns the unsigned event author.
+    NoActiveAccount,
     /// #115: `NmpEngine::publish_composed` was called a second time on the
     /// same `FfiComposedWriteIntent` handle -- it is take-once by design
-    /// (recompose via `group_send_intent` again is the correct retry path,
-    /// since `created_at`/`previous` should refresh anyway).
+    /// (recompose via `group_message_intent` again is the correct retry path,
+    /// since NMP-owned time and couriered `previous` evidence should refresh).
     IntentAlreadyConsumed,
 }
 
@@ -174,9 +170,7 @@ impl std::fmt::Display for FfiError {
             Self::EmptyPinnedRelaySet => {
                 write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
             }
-            Self::ReservedGroupTag { got } => {
-                write!(f, "extra_tags named a reserved tag: {got:?}")
-            }
+            Self::NoActiveAccount => write!(f, "group messages require an active account"),
             Self::IntentAlreadyConsumed => {
                 write!(f, "this composed write intent was already published once")
             }
@@ -197,14 +191,11 @@ impl From<GDemandError> for FfiError {
     }
 }
 
-/// #115: `nmp_nip29::compose_group_send`'s failure modes -> the shared FFI
-/// error type. `MalformedTag` reuses `InvalidTag` (same meaning: a raw tag
-/// row didn't parse) rather than adding a redundant variant.
-impl From<nmp_nip29::GroupSendError> for FfiError {
-    fn from(err: nmp_nip29::GroupSendError) -> Self {
+impl From<nmp_nip29::GroupMessageError> for FfiError {
+    fn from(err: nmp_nip29::GroupMessageError) -> Self {
         match err {
-            nmp_nip29::GroupSendError::ReservedTag(got) => Self::ReservedGroupTag { got },
-            nmp_nip29::GroupSendError::MalformedTag(got) => Self::InvalidTag { got },
+            nmp_nip29::GroupMessageError::Engine(error) => error.into(),
+            nmp_nip29::GroupMessageError::SignedOut => Self::NoActiveAccount,
         }
     }
 }
@@ -922,7 +913,7 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
     // gets the identical treatment -- `FfiWriteRouting` has no matching
     // variant at all, so this `match` staying exhaustive over exactly
     // `{AuthorOutbox, ToInboxes}` IS the enforcement; an app can only reach
-    // a pinned-host write transitively through `nip29::group_send_intent`'s
+    // a pinned-host write transitively through `NmpEngine::group_message_intent`'s
     // opaque `FfiComposedWriteIntent`, never through this conversion path.
     let routing = match intent.routing {
         FfiWriteRouting::AuthorOutbox => GWriteRouting::AuthorOutbox,

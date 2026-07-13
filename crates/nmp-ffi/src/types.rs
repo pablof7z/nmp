@@ -331,7 +331,7 @@ pub enum FfiDurability {
 /// IDENTICAL reason -- this enum deliberately gains NO variant for it, and
 /// no `HostAuthority` constructor is exported anywhere in this crate. An
 /// app can only ever obtain a pinned-host write transitively, through a
-/// protocol module's already-composed intent (`nip29::group_send_intent`
+/// protocol module's already-composed intent (`NmpEngine::group_message_intent`
 /// -> the opaque `FfiComposedWriteIntent`) -- never by naming a host
 /// itself. This exhaustive two-variant match IS the enforcement: a new
 /// `WriteRouting` variant landing in `nmp-grammar` without a corresponding

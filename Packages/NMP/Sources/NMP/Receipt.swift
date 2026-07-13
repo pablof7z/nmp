@@ -71,11 +71,11 @@ extension NMPEngine {
         return Receipt(id: id, status: stream)
     }
 
-    /// Publish a `GroupSendIntent` from `groupSendIntent` (#115). Take-once:
+    /// Publish a `GroupSendIntent` from `groupMessageIntent` (#156). Take-once:
     /// `intent` is consumed by this call -- a second `publishComposed` on
     /// the SAME `GroupSendIntent` throws `NMPError.intentAlreadyConsumed`
     /// rather than silently re-publishing a stale template (recompose via
-    /// `groupSendIntent` again for a retry). Otherwise identical to
+    /// `groupMessageIntent` again for a retry). Otherwise identical to
     /// `publish(_:)`'s receipt-stream bridge.
     public func publishComposed(_ intent: GroupSendIntent) async throws -> Receipt {
         var continuation: AsyncStream<WriteStatus>.Continuation!
