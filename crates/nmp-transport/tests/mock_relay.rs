@@ -10,11 +10,11 @@
 //! `Pool` under test imposes no runtime on its own caller (D8); the tokio
 //! runtime here drives the test relay, not `nmp-transport`.
 
-use std::net::TcpListener;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use nmp_test_support::ConnectionOwner;
 use nmp_transport::{AttemptCorrelation, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 use nostr::{JsonUtil, RelayMessage};
 // Deliberately NOT a glob import: `nostr_relay_builder::prelude::*` re-exports
@@ -62,65 +62,16 @@ fn frame_contains(event: &PoolEvent, needle: &str) -> bool {
     matches!(event, PoolEvent::Frame { frame, .. } if frame.clone().into_message().as_json().contains(needle))
 }
 
-/// Reserve an ephemeral TCP port by binding then immediately dropping the
-/// listener, so the *second* relay instance in the reconnect half of this
-/// test can rebind the exact same port the first one used.
-static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(0);
-
+/// Ask the OS for an available ephemeral backend port. Relay A and relay B
+/// use distinct allocations while sequential [`ConnectionOwner`] values
+/// supply the stable client-facing address.
 fn free_port() -> u16 {
-    let base = 20_000 + (std::process::id() % 20_000) as u16;
-    let _ = NEXT_TEST_PORT.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed);
-    loop {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
-        if port < 20_000 {
-            NEXT_TEST_PORT.store(base, Ordering::Relaxed);
-            continue;
-        }
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+    listener.local_addr().expect("ephemeral address").port()
 }
 
-/// `LocalRelay::run` starts its listener task asynchronously. Prove the TCP
-/// accept loop is live before asking the pool to dial, so a loaded CI host
-/// cannot turn startup scheduling into a reconnect-test timeout.
-async fn wait_for_listener(port: u16) {
-    tokio::time::timeout(Duration::from_secs(5), async move {
-        loop {
-            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                Ok(stream) => {
-                    drop(stream);
-                    return;
-                }
-                Err(_) => tokio::task::yield_now().await,
-            }
-        }
-    })
-    .await
-    .expect("test relay listener did not become ready");
-}
-
-/// `LocalRelay::shutdown()` is fire-and-forget: it calls `tokio::sync::
-/// Notify::notify_waiters` on the listener task and returns immediately --
-/// it never awaits that task actually waking up, ceasing to accept, or
-/// releasing the OS-level TCP socket. A fixed `sleep` after it is a guess
-/// at how long that async teardown takes, not a fact about it (the #60
-/// anti-pattern this rewrite removes: condition on what is actually true,
-/// never on how long something usually takes). This is `wait_for_listener`'s
-/// mirror image: poll for the OBSERVABLE condition that actually matters --
-/// the port is bindable again -- rather than assuming a delay was enough.
-async fn wait_for_port_released(port: u16) {
-    tokio::time::timeout(Duration::from_secs(5), async move {
-        loop {
-            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("port was not released by the previous relay instance");
+fn loopback(port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
 /// Rust's test harness runs the test fns in this file concurrently by
@@ -164,74 +115,35 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
-    let port = free_port();
+    let port_a = free_port();
     let keys = Keys::generate();
     let event: Event = EventBuilder::text_note("hello from nmp-transport's test 7")
         .finalize(&keys)
         .expect("sign test event");
 
     let relay_a = LocalRelay::builder()
-        .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .port(port)
+        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .port(port_a)
         .build();
     relay_a.run().await.expect("run relay_a");
-    wait_for_listener(port).await;
-    eprintln!("[test] relay_a running on port {port}");
     relay_a
         .add_event(event.clone())
         .await
         .expect("seed event into relay_a");
-    eprintln!("[test] seeded event into relay_a");
-    let relay_url_str = relay_a.url().await.to_string();
-    eprintln!("[test] relay_a url = {relay_url_str}");
-
+    let connection_owner = ConnectionOwner::bind(loopback(0), loopback(port_a))
+        .await
+        .expect("bind client-facing relay connection owner");
+    let public_addr = connection_owner.local_addr();
+    let relay_url_str = format!("ws://{public_addr}");
     let url = nostr::RelayUrl::parse(&relay_url_str).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(
         PoolConfig {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
-            // `backoff::jittered`'s per-URL offset is a FIXED value (up to
-            // ~5s in production), re-paid on EVERY retry against this URL
-            // until one connects -- not re-rolled per attempt. relay_a and
-            // relay_b share the exact same URL (same host:port), and the
-            // pool's own worker thread starts redialing within milliseconds
-            // of `relay_a.shutdown()` -- well before this test's own
-            // `wait_for_port_released`/`wait_for_listener` dance can
-            // possibly finish bringing relay_b up, so at least one doomed
-            // connect attempt against this URL is effectively guaranteed
-            // every run. Whether that URL's hash happens to land near the
-            // ~5s ceiling is pure per-port luck (`free_port` picks a fresh
-            // ephemeral port each run) -- on an unlucky port, two such
-            // taxed retries alone can eat ~10s, which is what was blowing
-            // this test's `Connected` wait under CI load. Disabling jitter
-            // here removes the lottery rather than padding the timeout to
-            // out-wait it.
+            // The test controls the exact disconnect instant, so production
+            // reconnect jitter would add no semantic coverage here.
             reconnect_jitter_max: Some(Duration::ZERO),
-            // The load-bearing fix for the RESIDUAL flake (recurred on
-            // #109/#112/#120 even after the jitter fix above):
-            // `LocalRelay::shutdown()` (read directly from
-            // `nostr-relay-builder`'s `local/inner.rs`) only notifies the
-            // ACCEPT loop to stop taking new connections -- it never
-            // touches an already-established per-connection session task.
-            // So `relay_a.shutdown()` below does NOT reliably sever our
-            // ALREADY-OPEN connection to relay_a; that usually happens
-            // quickly anyway (the socket gets a read error/EOF from the OS
-            // teardown), but confirmed-by-instrumentation on a rare run
-            // (~1 in 25-30, reproduced with ZERO added load) it does not,
-            // and the worker's ONLY remaining way to notice relay_a is gone
-            // is the keepalive idle-ping/pong-timeout fallback -- whose
-            // PRODUCTION defaults (`KEEPALIVE_IDLE_THRESHOLD` /
-            // `KEEPALIVE_PONG_TIMEOUT`, 30s each) sum to a ~60s worst case,
-            // dwarfing any timeout this test could reasonably afford and
-            // producing a hang that looks identical to "never reconnects"
-            // from the test's side (zero further `PoolEvent`s of any kind
-            // until the fallback finally fires). Overriding both to a small
-            // value makes that fallback path fast and bounded instead of
-            // production-scale slow, exactly mirroring why
-            // `reconnect_delay_initial` above is overridden the same way.
-            keepalive_idle: Some(Duration::from_millis(200)),
-            keepalive_pong_timeout: Some(Duration::from_millis(200)),
             ..PoolConfig::default()
         },
         tx,
@@ -295,33 +207,34 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     // automatically.
     assert!(pool.set_reconnect_preamble(h1, vec![req.clone()]));
 
-    // Force a disconnect: tear down relay_a, then rebind a fresh relay_b on
-    // the SAME port, seeded with the same event (a fresh instance has its
-    // own database). The pool's worker must detect the drop, back off
-    // briefly, and redial — no NMP code drives this, only the harvested
-    // reconnect loop.
-    relay_a.shutdown();
-    wait_for_port_released(port).await;
+    // Bring up a fresh backend with its own database, then synchronously sever
+    // the exact established TCP connection and rebind its public address to
+    // that backend. `LocalRelay::shutdown()` is deliberately not the
+    // disconnect mechanism: its notification stops only the accept loop;
+    // established sessions remain live and can keep answering pings.
+    let port_b = free_port();
     let relay_b = LocalRelay::builder()
-        .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .port(port)
+        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .port(port_b)
         .build();
     relay_b.run().await.expect("run relay_b");
-    wait_for_listener(port).await;
     relay_b
         .add_event(event.clone())
         .await
         .expect("seed event into relay_b");
+    connection_owner
+        .shutdown()
+        .await
+        .expect("sever the exact established relay connection");
+    let connection_owner_b = ConnectionOwner::bind(public_addr, loopback(port_b))
+        .await
+        .expect("rebind the public relay address to relay_b");
+    relay_a.shutdown();
 
     // Assert: a NEW Connected with a bumped generation (test 6/7's core
     // falsifier), then — with NO further `pool.send` from this test — the
-    // replayed REQ yields a fresh EVENT+EOSE from relay_b. 30s, not 15s:
-    // with `reconnect_jitter_max` zeroed above, the remaining exposure is
-    // `CONNECT_TIMEOUT` (10s) per stalled dial attempt, and a reconnect can
-    // plausibly need more than one attempt under heavy CI contention before
-    // relay_b's accept task actually gets scheduled -- 30s comfortably
-    // covers two full stalled attempts plus margin, not a guess.
-    let connected2 = recv_matching(&rx, Duration::from_secs(30), is_connected);
+    // replayed REQ yields a fresh EVENT+EOSE from relay_b.
+    let connected2 = recv_matching(&rx, Duration::from_secs(10), is_connected);
     let PoolEvent::Connected { handle: h2, .. } = connected2 else {
         unreachable!("is_connected guard")
     };
@@ -347,11 +260,12 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
         "the current handle must still work"
     );
 
-    eprintln!("[test] calling pool.shutdown()");
     pool.shutdown();
-    eprintln!("[test] pool.shutdown() returned");
+    connection_owner_b
+        .shutdown()
+        .await
+        .expect("shut down relay_b connection owner");
     relay_b.shutdown();
-    eprintln!("[test] relay_b.shutdown() returned, test complete");
 }
 
 /// Issue #93's core falsifier, over REAL sockets: a durable `EVENT`
@@ -374,63 +288,26 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
-    let port = free_port();
+    let port_a = free_port();
     let keys = Keys::generate();
 
     let relay_a = LocalRelay::builder()
-        .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .port(port)
+        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .port(port_a)
         .build();
     relay_a.run().await.expect("run relay_a");
-    wait_for_listener(port).await;
-    let relay_url_str = relay_a.url().await.to_string();
+    let connection_owner = ConnectionOwner::bind(loopback(0), loopback(port_a))
+        .await
+        .expect("bind client-facing relay connection owner");
+    let public_addr = connection_owner.local_addr();
+    let relay_url_str = format!("ws://{public_addr}");
     let url = nostr::RelayUrl::parse(&relay_url_str).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(
         PoolConfig {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
-            // `backoff::jittered`'s per-URL offset is a FIXED value (up to
-            // ~5s in production), re-paid on EVERY retry against this URL
-            // until one connects -- not re-rolled per attempt. relay_a and
-            // relay_b share the exact same URL (same host:port), and the
-            // pool's own worker thread starts redialing within milliseconds
-            // of `relay_a.shutdown()` -- well before this test's own
-            // `wait_for_port_released`/`wait_for_listener` dance can
-            // possibly finish bringing relay_b up, so at least one doomed
-            // connect attempt against this URL is effectively guaranteed
-            // every run. Whether that URL's hash happens to land near the
-            // ~5s ceiling is pure per-port luck (`free_port` picks a fresh
-            // ephemeral port each run) -- on an unlucky port, two such
-            // taxed retries alone can eat ~10s, which is what was blowing
-            // this test's `Connected` wait under CI load. Disabling jitter
-            // here removes the lottery rather than padding the timeout to
-            // out-wait it.
             reconnect_jitter_max: Some(Duration::ZERO),
-            // The load-bearing fix for the RESIDUAL flake (recurred on
-            // #109/#112/#120 even after the jitter fix above):
-            // `LocalRelay::shutdown()` (read directly from
-            // `nostr-relay-builder`'s `local/inner.rs`) only notifies the
-            // ACCEPT loop to stop taking new connections -- it never
-            // touches an already-established per-connection session task.
-            // So `relay_a.shutdown()` below does NOT reliably sever our
-            // ALREADY-OPEN connection to relay_a; that usually happens
-            // quickly anyway (the socket gets a read error/EOF from the OS
-            // teardown), but confirmed-by-instrumentation on a rare run
-            // (~1 in 25-30, reproduced with ZERO added load) it does not,
-            // and the worker's ONLY remaining way to notice relay_a is gone
-            // is the keepalive idle-ping/pong-timeout fallback -- whose
-            // PRODUCTION defaults (`KEEPALIVE_IDLE_THRESHOLD` /
-            // `KEEPALIVE_PONG_TIMEOUT`, 30s each) sum to a ~60s worst case,
-            // dwarfing any timeout this test could reasonably afford and
-            // producing a hang that looks identical to "never reconnects"
-            // from the test's side (zero further `PoolEvent`s of any kind
-            // until the fallback finally fires). Overriding both to a small
-            // value makes that fallback path fast and bounded instead of
-            // production-scale slow, exactly mirroring why
-            // `reconnect_delay_initial` above is overridden the same way.
-            keepalive_idle: Some(Duration::from_millis(200)),
-            keepalive_pong_timeout: Some(Duration::from_millis(200)),
             ..PoolConfig::default()
         },
         tx,
@@ -467,14 +344,22 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
     let stranded_json = format!(r#"["EVENT",{}]"#, stranded.as_json());
     let correlation = AttemptCorrelation(1);
 
-    // Tear relay_a down and wait for the pool to actually OBSERVE the
-    // drop (`Disconnected`) before submitting the durable EVENT -- racing
-    // it against a socket that is merely in the process of closing (as
-    // `relay_a.shutdown()` alone would) is not reliable: a local write can
-    // still land in the OS send buffer before the TCP teardown completes,
-    // legitimately resolving `Written` and defeating the point of this
-    // test. Waiting for the worker's OWN detected disconnect guarantees
-    // there is no live connection left for the command to reach at all.
+    // Prepare the next backend, then sever the exact owned connection. Waiting
+    // for the worker's own `Disconnected` fact guarantees no live generation
+    // remains before the durable EVENT is submitted.
+    let port_b = free_port();
+    let relay_b = LocalRelay::builder()
+        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .port(port_b)
+        .build();
+    relay_b.run().await.expect("run relay_b");
+    connection_owner
+        .shutdown()
+        .await
+        .expect("sever the exact established relay connection");
+    let connection_owner_b = ConnectionOwner::bind(public_addr, loopback(port_b))
+        .await
+        .expect("rebind the public relay address to relay_b");
     relay_a.shutdown();
     let disconnected = recv_matching(&rx, Duration::from_secs(5), |e| {
         matches!(e, PoolEvent::Disconnected { .. })
@@ -503,18 +388,7 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
         other => panic!("expected EventHandoff, got {other:?}"),
     }
 
-    // Bring relay_b up on the SAME port and let the pool reconnect.
-    wait_for_port_released(port).await;
-    let relay_b = LocalRelay::builder()
-        .addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .port(port)
-        .build();
-    relay_b.run().await.expect("run relay_b");
-    wait_for_listener(port).await;
-
-    // 30s -- see test 7's identical `connected2` wait above for why (two
-    // CONNECT_TIMEOUT-bounded stalled attempts, not a guess).
-    let connected2 = recv_matching(&rx, Duration::from_secs(30), is_connected);
+    let connected2 = recv_matching(&rx, Duration::from_secs(10), is_connected);
     let PoolEvent::Connected { handle: h2, .. } = connected2 else {
         unreachable!("is_connected guard")
     };
@@ -559,6 +433,10 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
     }
 
     pool.shutdown();
+    connection_owner_b
+        .shutdown()
+        .await
+        .expect("shut down relay_b connection owner");
     relay_b.shutdown();
 }
 
@@ -584,7 +462,6 @@ async fn durable_event_resolves_written_exactly_once() {
         .port(port)
         .build();
     relay.run().await.expect("run relay");
-    wait_for_listener(port).await;
     let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
