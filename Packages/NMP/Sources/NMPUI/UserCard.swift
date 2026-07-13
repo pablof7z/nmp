@@ -11,6 +11,7 @@ public enum NMPUserCardVariant: Sendable, Hashable {
 /// list, and dense contexts. Follow state remains controlled by the app.
 public struct NMPUserCard: View {
     @Environment(\.nmpUITheme) private var theme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     public let pubkey: String
     public let profile: NostrProfileMetadata?
@@ -43,8 +44,7 @@ public struct NMPUserCard: View {
             case .compact: compact
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { action?() }
+        .modifier(NMPCardInteraction(accessibilityName: "Open profile", action: action))
         .accessibilityElement(children: .contain)
     }
 
@@ -65,7 +65,7 @@ public struct NMPUserCard: View {
                         NMPName(pubkey: pubkey, profile: profile)
                             .font(.title3.weight(.bold))
                         if let nip05 = profile?.nip05, !nip05.isEmpty {
-                            Text(nip05).font(.caption).foregroundStyle(theme.secondary)
+                            NMPNIP05(nip05)
                         }
                     }
                     Spacer(minLength: 10)
@@ -75,7 +75,7 @@ public struct NMPUserCard: View {
                     Text(about)
                         .font(.subheadline)
                         .foregroundStyle(theme.secondary)
-                        .lineLimit(3)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 3)
                 }
             }
             .padding(.top, 42)
@@ -96,7 +96,7 @@ public struct NMPUserCard: View {
                     Text(about)
                         .font(.subheadline)
                         .foregroundStyle(theme.secondary)
-                        .lineLimit(2)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                 }
             }
             Spacer(minLength: 8)

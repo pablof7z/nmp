@@ -31,7 +31,10 @@ public struct Row: Sendable, Identifiable, Hashable {
         sources = ffi.sources
     }
 
-    private init(
+    /// Construct a raw row value for previews, fixtures, import adapters, and
+    /// app-owned renderers. This does not insert the event into NMP or make any
+    /// claim about signature validity, provenance, or canonical-store status.
+    public init(
         id: String, pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]],
         content: String, sig: String, sources: [String]
     ) {

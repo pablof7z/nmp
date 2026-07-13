@@ -112,7 +112,6 @@ public struct NostrContent: View {
                             role: piece == "\n" ? .breakLine : .inline,
                             view: AnyView(
                                 NMPStyledText(text: piece == "\n" ? "" : piece, styles: styles)
-                                    .fixedSize()
                             )
                         )
                     )
@@ -290,13 +289,20 @@ private struct NMPStyledText: View {
     let styles: [NostrContentInlineStyle]
 
     var body: some View {
-        Text(text)
-            .font(styles.contains(.code) ? .system(.body, design: .monospaced) : .body)
-            .fontWeight(styles.contains(.strong) ? .semibold : .regular)
-            .italic(styles.contains(.emphasis))
-            .strikethrough(styles.contains(.strikethrough))
+        styledText
             .padding(.horizontal, styles.contains(.code) ? 3 : 0)
             .background(styles.contains(.code) ? Color.secondary.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 3))
+    }
+
+    private var styledText: Text {
+        var value = Text(text)
+        if styles.contains(.code) {
+            value = value.font(.system(.body, design: .monospaced))
+        }
+        if styles.contains(.strong) { value = value.bold() }
+        if styles.contains(.emphasis) { value = value.italic() }
+        if styles.contains(.strikethrough) { value = value.strikethrough() }
+        return value
     }
 }
 
@@ -347,15 +353,35 @@ private struct NMPReferenceClaimModifier: ViewModifier {
     let referenceID: UInt64
     @State private var claim: NostrContentClaim?
 
+    @ViewBuilder
     func body(content: Content) -> some View {
+#if compiler(>=6.0)
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content
+                .onAppear { setClaimed(true) }
+                .onScrollVisibilityChange(threshold: 0.01) { isVisible in
+                    setClaimed(isVisible)
+                }
+                .onDisappear { setClaimed(false) }
+        } else {
+            content
+                .onAppear { setClaimed(true) }
+                .onDisappear { setClaimed(false) }
+        }
+#else
         content
-            .onAppear {
-                if claim == nil { claim = session.claim(referenceID: referenceID) }
-            }
-            .onDisappear {
-                claim?.cancel()
-                claim = nil
-            }
+            .onAppear { setClaimed(true) }
+            .onDisappear { setClaimed(false) }
+#endif
+    }
+
+    private func setClaimed(_ isClaimed: Bool) {
+        if isClaimed {
+            if claim == nil { claim = session.claim(referenceID: referenceID) }
+        } else {
+            claim?.cancel()
+            claim = nil
+        }
     }
 }
 

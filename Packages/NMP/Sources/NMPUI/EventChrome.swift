@@ -183,8 +183,12 @@ struct NMPResolvedEventCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
-            .contentShape(Rectangle())
-            .onTapGesture { input.actions.openEvent(input.event) }
+            .modifier(
+                NMPCardInteraction(
+                    accessibilityName: "Open event",
+                    action: { input.actions.openEvent(input.event) }
+                )
+            )
         }
     }
 }
@@ -196,10 +200,9 @@ struct NMPNestedEventContent: View {
     init(input: NMPEventRenderInput) {
         self.input = input
         _nestedSession = StateObject(
-            wrappedValue: input.session.client.session(
+            wrappedValue: input.session.nestedSession(
                 content: input.event.content,
                 syntax: input.event.kind == 30_023 ? .markdown : .plainText,
-                policy: input.session.policy,
                 context: input.context
             )
         )
