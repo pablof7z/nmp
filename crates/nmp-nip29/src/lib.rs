@@ -21,9 +21,7 @@ mod send;
 pub use demand::{group_content_demand, group_discovery_demand};
 pub use group_ref::{remembered_groups, GroupRef, RememberedGroups};
 #[cfg(feature = "engine")]
-pub use message::{
-    compose_group_message, GroupMessageContext, GroupMessageError, GroupReplyParent,
-};
+pub use message::{compose_group_message, GroupMessageError, GroupReplyParent};
 pub use send::{compose_group_send, GroupSendError, GroupTimelineEvidence, PREVIOUS_MAX};
 
 #[cfg(test)]

@@ -5,47 +5,10 @@
 
 use nostr::{EventId, PublicKey, RelayUrl, Tag, Timestamp, ToBech32};
 
-use nmp::{Engine, EngineError, WriteIntent};
+use nmp::{CacheMode, Engine, EngineError, LiveQuery, RowDelta, WriteIntent};
 
 use crate::send::compose_group_send_with_tags;
-use crate::GroupTimelineEvidence;
-
-/// Host-bound context for composing an ordinary kind:9 group message.
-///
-/// NIP-29 group identifiers are scoped by their host. A row may therefore
-/// contribute `previous` evidence only when it both belongs to this group
-/// and was actually delivered by this exact host. Keeping the host, group id,
-/// and filtered evidence in one value prevents a caller from accidentally
-/// pairing evidence from host X with a write pinned to host Y.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupMessageContext {
-    host: RelayUrl,
-    group_id: String,
-    previous: GroupTimelineEvidence,
-}
-
-impl GroupMessageContext {
-    /// Build context from delivered rows. Every row carries the relay sources
-    /// from which NMP observed that exact event id; rows without the selected
-    /// host in that set are excluded before `previous` is derived.
-    pub fn from_delivered_rows(
-        host: RelayUrl,
-        group_id: impl Into<String>,
-        items: impl IntoIterator<Item = (EventId, u64, Vec<Vec<String>>, Vec<RelayUrl>)>,
-    ) -> Self {
-        let group_id = group_id.into();
-        let rows = items
-            .into_iter()
-            .filter(|(_, _, _, sources)| sources.contains(&host))
-            .map(|(id, created_at, tags, _sources)| (id, created_at, tags));
-        let previous = GroupTimelineEvidence::from_events(&group_id, rows);
-        Self {
-            host,
-            group_id,
-            previous,
-        }
-    }
-}
+use crate::{group_content_demand, GroupTimelineEvidence};
 
 /// The exact event and author a kind:9 group message replies to. The author
 /// is carried both in the marked `e` row (the NIP-10-style outbox hint) and
@@ -81,6 +44,8 @@ impl From<EngineError> for GroupMessageError {
 ///   `nostr:npub…` tokens before `content`, and emitted as `p` tags;
 /// - a reply parent contributes a marked `e` row and its author contributes a
 ///   deduplicated `p` row;
+/// - `previous` is derived from an ordinary strict-cache NMP query pinned to
+///   `host`, never from caller-supplied row/provenance values;
 /// - the lower-level composer adds `h`/`previous`, durable pinned-host routing,
 ///   and the ordinary signing/receipt path consumes the result.
 ///
@@ -91,7 +56,8 @@ impl From<EngineError> for GroupMessageError {
 /// omits that redundant selection.
 pub fn compose_group_message(
     engine: &Engine,
-    context: &GroupMessageContext,
+    host: RelayUrl,
+    group_id: &str,
     content: String,
     recipients: Vec<PublicKey>,
     reply_to: Option<GroupReplyParent>,
@@ -99,6 +65,7 @@ pub fn compose_group_message(
     let author = engine
         .active_account()?
         .ok_or(GroupMessageError::SignedOut)?;
+    let previous = trusted_previous(engine, host.clone(), group_id)?;
 
     let mut ordered_recipients = Vec::with_capacity(recipients.len());
     for recipient in recipients {
@@ -134,15 +101,53 @@ pub fn compose_group_message(
     }
 
     Ok(compose_group_send_with_tags(
-        context.host.clone(),
-        &context.group_id,
+        host,
+        group_id,
         author,
         Timestamp::now(),
         9,
         content,
         tags,
-        &context.previous,
+        &previous,
     ))
+}
+
+/// Build the exact ordinary demand whose initial cache snapshot is allowed
+/// to contribute `previous`. `Strict` is the critical provenance boundary:
+/// the engine projects only rows it has actually observed from this pinned
+/// host. Callers cannot provide or mutate the resulting rows.
+fn trusted_timeline_demand(host: RelayUrl, group_id: &str) -> nmp::Demand {
+    let mut demand = group_content_demand(host, group_id);
+    demand.cache = CacheMode::Strict;
+    demand
+}
+
+/// Read one engine-minted current snapshot, then immediately withdraw the
+/// ordinary demand. `EngineCore::on_subscribe` always emits that first frame
+/// from local canonical state before any network result is required; if a
+/// screen already observes the same group, normal demand coalescing applies.
+fn trusted_previous(
+    engine: &Engine,
+    host: RelayUrl,
+    group_id: &str,
+) -> Result<GroupTimelineEvidence, GroupMessageError> {
+    let subscription = engine.observe(LiveQuery(trusted_timeline_demand(host, group_id)))?;
+    let (deltas, _evidence) = subscription
+        .recv()
+        .map_err(|_| GroupMessageError::Engine(EngineError::EngineClosed))?;
+    let rows = deltas.into_iter().filter_map(|delta| match delta {
+        RowDelta::Added(row) => Some((
+            row.event.id,
+            row.event.created_at.as_secs(),
+            row.event
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect(),
+        )),
+        RowDelta::SourcesGrew { .. } | RowDelta::Removed(_) => None,
+    });
+    Ok(GroupTimelineEvidence::from_events(group_id, rows))
 }
 
 fn materialize_content(content: String, recipients: &[PublicKey]) -> String {
@@ -179,10 +184,6 @@ mod tests {
         RelayUrl::parse("wss://group-host.example.com").unwrap()
     }
 
-    fn context() -> GroupMessageContext {
-        GroupMessageContext::from_delivered_rows(host(), "group-a", [])
-    }
-
     fn unsigned(intent: &WriteIntent) -> &nostr::UnsignedEvent {
         let WritePayload::Unsigned(unsigned) = &intent.payload else {
             panic!("group messages must be unsigned")
@@ -193,7 +194,14 @@ mod tests {
     #[test]
     fn signed_out_cannot_compose_a_group_message() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let result = compose_group_message(&engine, &context(), "hello".to_string(), vec![], None);
+        let result = compose_group_message(
+            &engine,
+            host(),
+            "group-a",
+            "hello".to_string(),
+            vec![],
+            None,
+        );
         let error = match result {
             Err(error) => error,
             Ok(_) => panic!("a signed-out engine must not compose an intent"),
@@ -214,7 +222,8 @@ mod tests {
         let before = Timestamp::now().as_secs();
         let intent = compose_group_message(
             &engine,
-            &context(),
+            host(),
+            "group-a",
             "hello".to_string(),
             vec![first, first, second],
             Some(GroupReplyParent {
@@ -272,7 +281,8 @@ mod tests {
 
         let intent = compose_group_message(
             &engine,
-            &context(),
+            host(),
+            "group-a",
             "plain body".to_string(),
             vec![],
             Some(GroupReplyParent {
@@ -290,5 +300,22 @@ mod tests {
             &["p".to_string(), reply_author.to_hex()]
         );
         engine.shutdown();
+    }
+
+    #[test]
+    fn previous_snapshot_demand_is_exact_host_pinned_and_strict() {
+        let demand = trusted_timeline_demand(host(), "group-a");
+        assert_eq!(demand.cache, CacheMode::Strict);
+        assert_eq!(
+            demand.source,
+            nmp::SourceAuthority::Pinned(std::collections::BTreeSet::from([host()]))
+        );
+        let h = nmp::IndexedTagName::new('h').unwrap();
+        assert_eq!(
+            demand.selection.tags.get(&h),
+            Some(&nmp::Binding::Literal(std::collections::BTreeSet::from([
+                "group-a".to_string()
+            ])))
+        );
     }
 }

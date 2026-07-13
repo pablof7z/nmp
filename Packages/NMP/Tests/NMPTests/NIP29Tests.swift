@@ -88,27 +88,15 @@ final class NIP29Tests: XCTestCase {
         let first = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
         let second = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
         let parentID = String(repeating: "1", count: 64)
-        let previousID = String(repeating: "2", count: 64)
         let query = try engine.observe(NMP.groupContentDemand(host: host, groupId: groupID))
         let rowTask = Task { await Self.firstRow(from: query, timeoutSeconds: 5) }
-        let recent = Row(
-            id: previousID,
-            pubkey: author,
-            createdAt: 100,
-            kind: 9,
-            tags: [["h", groupID]],
-            content: "earlier",
-            sig: "sig",
-            sources: [host]
-        )
 
         let intent = try engine.groupMessageIntent(
             host: host,
             groupID: groupID,
             content: "hello",
             recipients: [first, first, second],
-            reply: GroupReplyParent(eventID: parentID, authorPubkey: first),
-            recentRows: [recent]
+            reply: GroupReplyParent(eventID: parentID, authorPubkey: first)
         )
         let receipt = try await engine.publishComposed(intent)
         let status = await Self.firstStatus(from: receipt, timeoutSeconds: 5)
@@ -130,7 +118,6 @@ final class NIP29Tests: XCTestCase {
                 ["p", second],
                 ["e", parentID, "", "reply", first],
                 ["h", groupID],
-                ["previous", "22222222"],
             ]
         )
     }

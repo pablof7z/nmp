@@ -21,6 +21,8 @@ import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.Collections
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -32,50 +34,71 @@ import kotlin.concurrent.thread
  * by NMP's production transport, and returns a real Nostr OK frame. */
 private class LocalAckRelay : AutoCloseable {
     private val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
-    private val accepted = AtomicReference<Socket?>()
+    private val accepted = Collections.synchronizedList(mutableListOf<Socket>())
+    private val connectionWorkers = Collections.synchronizedList(mutableListOf<Thread>())
     private val closed = AtomicBoolean(false)
     private val failure = AtomicReference<Throwable?>()
     private val events = LinkedBlockingQueue<String>()
+    private val storedEvents = CopyOnWriteArrayList<String>()
     val url: String = "ws://127.0.0.1:${server.localPort}"
 
     private val worker =
         thread(name = "nmp-kotlin-local-ack-relay", isDaemon = true) {
             try {
-                val socket = server.accept()
-                accepted.set(socket)
-                socket.tcpNoDelay = true
-                val input = socket.getInputStream()
-                val output = socket.getOutputStream()
-                completeHandshake(input, output)
-                while (!socket.isClosed) {
-                    val frame = readFrame(input) ?: break
-                    when (frame.opcode) {
-                        0x1 -> {
-                            val text = frame.payload.toString(StandardCharsets.UTF_8)
-                            if (text.startsWith("[\"EVENT\",")) {
-                                val id =
-                                    Regex("\\\"id\\\"\\s*:\\s*\\\"([0-9a-f]{64})\\\"")
-                                        .find(text)
-                                        ?.groupValues
-                                        ?.get(1)
-                                        ?: error("EVENT frame had no canonical id: $text")
-                                events.put(text)
-                                writeFrame(
-                                    output,
-                                    0x1,
-                                    "[\"OK\",\"$id\",true,\"saved\"]"
-                                        .toByteArray(StandardCharsets.UTF_8),
-                                )
-                            }
+                while (!closed.get()) {
+                    val socket = server.accept()
+                    accepted.add(socket)
+                    val connection =
+                        thread(name = "nmp-kotlin-local-relay-connection", isDaemon = true) {
+                            serve(socket)
                         }
-                        0x8 -> break
-                        0x9 -> writeFrame(output, 0xA, frame.payload)
-                    }
+                    connectionWorkers.add(connection)
                 }
             } catch (error: Throwable) {
                 if (!closed.get()) failure.set(error)
             }
         }
+
+    private fun serve(socket: Socket) {
+        try {
+            socket.tcpNoDelay = true
+            val input = socket.getInputStream()
+            val output = socket.getOutputStream()
+            completeHandshake(input, output)
+            while (!socket.isClosed) {
+                val frame = readFrame(input) ?: break
+                when (frame.opcode) {
+                    0x1 -> {
+                        val text = frame.payload.toString(StandardCharsets.UTF_8)
+                        when {
+                            text.startsWith("[\"EVENT\",") -> {
+                                val id = eventId(text)
+                                storedEvents.add(text.substringAfter(',').dropLast(1))
+                                events.put(text)
+                                writeText(output, "[\"OK\",\"$id\",true,\"saved\"]")
+                            }
+                            text.startsWith("[\"REQ\",") -> {
+                                val subscriptionId =
+                                    Regex("^\\[\\s*\"REQ\"\\s*,\\s*\"([^\"]+)\"")
+                                        .find(text)
+                                        ?.groupValues
+                                        ?.get(1)
+                                        ?: error("REQ frame had no subscription id: $text")
+                                for (event in storedEvents) {
+                                    writeText(output, "[\"EVENT\",\"$subscriptionId\",$event]")
+                                }
+                                writeText(output, "[\"EOSE\",\"$subscriptionId\"]")
+                            }
+                        }
+                    }
+                    0x8 -> break
+                    0x9 -> writeFrame(output, 0xA, frame.payload)
+                }
+            }
+        } catch (error: Throwable) {
+            if (!closed.get()) failure.compareAndSet(null, error)
+        }
+    }
 
     fun awaitEvent(): String {
         val event = events.poll(10, TimeUnit.SECONDS)
@@ -85,10 +108,25 @@ private class LocalAckRelay : AutoCloseable {
 
     override fun close() {
         closed.set(true)
-        accepted.get()?.close()
         server.close()
+        synchronized(accepted) { accepted.forEach(Socket::close) }
         worker.join(2_000)
+        synchronized(connectionWorkers) { connectionWorkers.forEach { it.join(2_000) } }
         failure.get()?.let { throw AssertionError("local relay failed", it) }
+    }
+
+    private fun eventId(frame: String): String =
+        Regex("\\\"id\\\"\\s*:\\s*\\\"([0-9a-f]{64})\\\"")
+            .find(frame)
+            ?.groupValues
+            ?.get(1)
+            ?: error("EVENT frame had no canonical id: $frame")
+
+    private fun writeText(
+        output: OutputStream,
+        text: String,
+    ) {
+        writeFrame(output, 0x1, text.toByteArray(StandardCharsets.UTF_8))
     }
 
     private fun completeHandshake(
@@ -280,7 +318,6 @@ class NIP29Test {
                 val first = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
                 val second = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
                 val parentId = "1".repeat(64)
-                val previousId = "2".repeat(64)
                 val rowDeferred =
                     async {
                         withTimeoutOrNull(5_000) {
@@ -290,18 +327,6 @@ class NIP29Test {
                                 .first()
                         }
                     }
-                val recent =
-                    Row(
-                        id = previousId,
-                        pubkey = author,
-                        createdAt = 100uL,
-                        kind = 9u,
-                        tags = listOf(listOf("h", groupId)),
-                        content = "earlier",
-                        sig = "sig",
-                        sources = listOf(host),
-                    )
-
                 val intent =
                     engine.groupMessageIntent(
                         host = host,
@@ -309,7 +334,6 @@ class NIP29Test {
                         content = "hello",
                         recipients = listOf(first, first, second),
                         reply = GroupReplyParent(parentId, first),
-                        recentRows = listOf(recent),
                     )
                 val receipt = engine.publishComposed(intent)
                 assertEquals(WriteStatus.Accepted, withTimeoutOrNull(5_000) { receipt.status.first() })
@@ -330,7 +354,6 @@ class NIP29Test {
                         listOf("p", second),
                         listOf("e", parentId, "", "reply", first),
                         listOf("h", groupId),
-                        listOf("previous", "22222222"),
                     ),
                     row?.tags,
                 )
@@ -378,6 +401,81 @@ class NIP29Test {
                     assertEquals(author, row?.pubkey)
                     assertEquals(9u.toUShort(), row?.kind)
                     assertTrue(row?.tags?.contains(listOf("h", groupId)) == true)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun engineOwnedPreviousAdmitsOnlyTheSelectedHostsDeliveredRows() {
+        LocalAckRelay().use { relayX ->
+            LocalAckRelay().use { relayY ->
+                runBlocking {
+                    NMPEngine(NMPConfig()).use { engine ->
+                        val author = engine.addAccount("0".repeat(63) + "1")
+                        engine.setActiveAccount(author)
+                        val groupId = "same-id-on-two-hosts"
+
+                        suspend fun seed(relay: LocalAckRelay, content: String): String {
+                            val receipt =
+                                engine.publishComposed(
+                                    engine.groupMessageIntent(
+                                        host = relay.url,
+                                        groupId = groupId,
+                                        content = content,
+                                    ),
+                                )
+                            val acked =
+                                withTimeoutOrNull(10_000) {
+                                    receipt.status.first { it is WriteStatus.Acked }
+                                }
+                            assertTrue(acked is WriteStatus.Acked)
+                            val wire = relay.awaitEvent()
+                            val id =
+                                Regex("\\\"id\\\"\\s*:\\s*\\\"([0-9a-f]{64})\\\"")
+                                    .find(wire)!!
+                                    .groupValues[1]
+                            val delivered =
+                                withTimeoutOrNull(10_000) {
+                                    engine.observe(groupContentDemand(relay.url, groupId))
+                                        .first { batch ->
+                                            batch.rows.any { row ->
+                                                row.id == id &&
+                                                    row.sources.any { it.startsWith(relay.url) }
+                                            }
+                                        }
+                                }
+                            assertNotNull(delivered, "$content must re-enter NMP from its relay")
+                            return id
+                        }
+
+                        val xId = seed(relayX, "seen only on X")
+                        val yId = seed(relayY, "seen only on Y")
+                        assertFalse(xId.startsWith(yId.take(8)))
+
+                        val receipt =
+                            engine.publishComposed(
+                                engine.groupMessageIntent(
+                                    host = relayY.url,
+                                    groupId = groupId,
+                                    content = "compose on Y",
+                                ),
+                            )
+                        val acked =
+                            withTimeoutOrNull(10_000) {
+                                receipt.status.first { it is WriteStatus.Acked }
+                            }
+                        assertTrue(acked is WriteStatus.Acked)
+                        val wire = relayY.awaitEvent()
+                        assertTrue(
+                            wire.contains("[\"previous\",\"${yId.take(8)}\"]"),
+                            "Y-delivered evidence must contribute previous: $wire",
+                        )
+                        assertFalse(
+                            wire.contains(xId.take(8)),
+                            "X-only evidence must not influence a Y-pinned write: $wire",
+                        )
+                    }
                 }
             }
         }

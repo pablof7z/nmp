@@ -315,6 +315,8 @@ impl NmpEngine {
     /// encoding, or raw tags: NMP reads the active account, owns event time,
     /// materializes ordered/deduplicated `nostr:npub…` content references,
     /// and composes `p`/reply-`e`/`h`/`previous` plus pinned-host routing.
+    /// `previous` comes from an engine-owned strict-cache snapshot for this
+    /// exact host/group; no caller row or provenance claim enters the path.
     /// Publish the returned take-once value through [`Self::publish_composed`].
     pub fn group_message_intent(
         &self,
@@ -323,7 +325,6 @@ impl NmpEngine {
         content: String,
         recipient_pubkeys: Vec<String>,
         reply_to: Option<crate::nip29::FfiGroupReplyParent>,
-        recent_rows: Vec<crate::types::FfiRow>,
     ) -> Result<Arc<crate::nip29::FfiComposedWriteIntent>, FfiError> {
         crate::nip29::group_message_intent(
             &self.engine,
@@ -332,7 +333,6 @@ impl NmpEngine {
             content,
             recipient_pubkeys,
             reply_to,
-            recent_rows,
         )
     }
 
@@ -481,28 +481,9 @@ impl Drop for NmpDiagnosticsHandle {
 mod tests {
     use super::*;
     use crate::types::{FfiDurability, FfiWritePayload, FfiWriteRouting, FfiWriteStatus};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::Duration;
-
-    struct CountingSigner {
-        pubkey: nostr::PublicKey,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl nmp_signer::SigningCapability for CountingSigner {
-        fn public_key(&self) -> Option<nostr::PublicKey> {
-            Some(self.pubkey)
-        }
-
-        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            nmp_signer::SignerOp::err(nmp_signer::SignerError::Rejected(
-                "counting signer must not be reached".to_string(),
-            ))
-        }
-    }
 
     #[test]
     fn reattachment_mapping_is_exhaustive_and_distinct() {
@@ -593,8 +574,9 @@ mod tests {
     /// #156 account-switch falsifier through the public native boundary.
     /// Composition snapshots A, but switching to B is serialized ahead of
     /// publish on the sole engine command path. Acceptance must reject the
-    /// stale A draft before either registered signer, canonical storage, or
-    /// the durable outbox journal can observe it.
+    /// stale A draft before `Accepted`, canonical storage, or the durable
+    /// outbox journal can observe it. The lower engine test uses counting
+    /// signers to prove neither account capability is invoked.
     #[test]
     fn ffi_group_message_composed_as_a_cannot_publish_after_switching_to_b() {
         use redb::{ReadableDatabase, ReadableTableMetadata};
@@ -606,28 +588,14 @@ mod tests {
             ..NmpEngineConfig::default()
         })
         .expect("engine must build");
-        let a = nostr::Keys::generate().public_key();
-        let b = nostr::Keys::generate().public_key();
-        let a_calls = Arc::new(AtomicUsize::new(0));
-        let b_calls = Arc::new(AtomicUsize::new(0));
-        engine
-            .engine
-            .add_signer(CountingSigner {
-                pubkey: a,
-                calls: Arc::clone(&a_calls),
-            })
-            .expect("engine must remain open");
-        engine
-            .engine
-            .add_signer(CountingSigner {
-                pubkey: b,
-                calls: Arc::clone(&b_calls),
-            })
-            .expect("engine must remain open");
+        let a = engine
+            .add_account(format!("{:064x}", 1u8))
+            .expect("A must register through the public FFI surface");
+        let b = engine
+            .add_account(format!("{:064x}", 2u8))
+            .expect("B must register through the public FFI surface");
 
-        engine
-            .set_active_account(Some(a.to_hex()))
-            .expect("A must activate");
+        engine.set_active_account(Some(a)).expect("A must activate");
         let intent = engine
             .group_message_intent(
                 "wss://group-host.example.com".to_string(),
@@ -635,11 +603,10 @@ mod tests {
                 "stale A message".to_string(),
                 vec![],
                 None,
-                vec![],
             )
             .expect("composition as active A must succeed");
         engine
-            .set_active_account(Some(b.to_hex()))
+            .set_active_account(Some(b))
             .expect("B must activate before publish");
 
         let (tx, rx) = mpsc::channel();
@@ -664,9 +631,6 @@ mod tests {
             Err(mpsc::RecvTimeoutError::Disconnected),
             "Failed must be the sole receipt fact"
         );
-        assert_eq!(a_calls.load(Ordering::SeqCst), 0, "A signer was invoked");
-        assert_eq!(b_calls.load(Ordering::SeqCst), 0, "B signer was invoked");
-
         // Reuse the protocol selection but ask the empty configured Public
         // lane, so this is a canonical-cache assertion with no relay dial.
         let mut cache_probe = nmp_nip29::group_content_demand(
@@ -1082,7 +1046,6 @@ mod tests {
                 "hi".to_string(),
                 vec![],
                 None,
-                vec![],
             )
             .expect("a well-formed group message must compose");
 

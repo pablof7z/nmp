@@ -103,8 +103,9 @@ extension NMPEngine {
     /// composer actually owns. `recipients` retain selection order; NMP
     /// deduplicates them, prefixes their `nostr:npub…` references to
     /// `content`, and emits matching `p` rows. `reply` contributes the marked
-    /// direct-parent `e` row and its author recipient. `recentRows` are
-    /// couriered only so NMP can derive NIP-29 `previous` evidence.
+    /// direct-parent `e` row and its author recipient. NMP derives NIP-29
+    /// `previous` from its own strict-cache snapshot for `host`/`groupID`;
+    /// native code cannot supply or forge relay provenance.
     ///
     /// The active account supplies the author and NMP supplies event time.
     /// The caller cannot choose a kind or inject raw tags. Publish the opaque
@@ -114,15 +115,8 @@ extension NMPEngine {
         groupID: String,
         content: String,
         recipients: [String] = [],
-        reply: GroupReplyParent? = nil,
-        recentRows: [Row] = []
+        reply: GroupReplyParent? = nil
     ) throws -> GroupSendIntent {
-        let ffiRows = recentRows.map {
-            FfiRow(
-                id: $0.id, pubkey: $0.pubkey, createdAt: $0.createdAt, kind: $0.kind,
-                tags: $0.tags, content: $0.content, sig: $0.sig, sources: $0.sources
-            )
-        }
         return try GroupSendIntent(
             ffi: nmpRethrowing {
                 try ffi.groupMessageIntent(
@@ -130,8 +124,7 @@ extension NMPEngine {
                     groupId: groupID,
                     content: content,
                     recipientPubkeys: recipients,
-                    replyTo: reply?.toFfi(),
-                    recentRows: ffiRows
+                    replyTo: reply?.toFfi()
                 )
             }
         )

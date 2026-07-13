@@ -113,21 +113,7 @@ internal fun composeGroupMessageIntent(
     content: String,
     recipients: List<String>,
     reply: GroupReplyParent?,
-    recentRows: List<Row>,
 ): GroupSendIntent {
-    val ffiRows =
-        recentRows.map {
-            FfiRow(
-                id = it.id,
-                pubkey = it.pubkey,
-                createdAt = it.createdAt,
-                kind = it.kind,
-                tags = it.tags,
-                content = it.content,
-                sig = it.sig,
-                sources = it.sources,
-            )
-        }
     return GroupSendIntent(
         nmpRethrowing {
             engine.groupMessageIntent(
@@ -136,7 +122,6 @@ internal fun composeGroupMessageIntent(
                 content,
                 recipients,
                 reply?.toFfi(),
-                ffiRows,
             )
         },
     )

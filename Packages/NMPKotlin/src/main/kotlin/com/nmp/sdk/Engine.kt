@@ -88,16 +88,15 @@ class NMPEngine(config: NMPConfig) : AutoCloseable {
 
     /** Compose an ordinary kind:9 NIP-29 group message from semantic native
      * state. NMP derives the active author/time, mention content, protocol
-     * tags, and pinned-host routing. */
+     * tags, engine-owned host provenance, and pinned-host routing. */
     fun groupMessageIntent(
         host: String,
         groupId: String,
         content: String,
         recipients: List<String> = emptyList(),
         reply: GroupReplyParent? = null,
-        recentRows: List<Row> = emptyList(),
     ): GroupSendIntent =
-        composeGroupMessageIntent(ffi, host, groupId, content, recipients, reply, recentRows)
+        composeGroupMessageIntent(ffi, host, groupId, content, recipients, reply)
 
     /** Publish a [GroupSendIntent] from `groupMessageIntent` (#156). Take-once
      * -- see [publishComposedReceipt]'s own doc. */
