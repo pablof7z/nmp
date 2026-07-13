@@ -12,7 +12,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, Tag, Tags, Timestamp};
+use nostr::{
+    Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Tag, Tags, Timestamp,
+};
 
 use crate::{IntentId, LocalOrigin, Provenance, SigState, StoredEvent};
 
@@ -452,6 +454,18 @@ pub(crate) struct StoredEventView<'a> {
     content_len: usize,
 }
 
+/// Predicate(s) already proven by the ordered index that yielded a row.
+/// nostrdb uses the same matched-field mask so cheap post-filtering does not
+/// rescan the selected tag or recompare selected fixed fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexedMatch {
+    None,
+    Author,
+    Kind,
+    AuthorKind,
+    Tag(SingleLetterTag),
+}
+
 impl<'a> StoredEventView<'a> {
     /// Fully validate an immutable event envelope before exposing borrowed
     /// fields and iterators.
@@ -565,22 +579,34 @@ impl<'a> StoredEventView<'a> {
     }
 
     pub(crate) fn matches_filter(&self, filter: &Filter) -> bool {
+        self.matches_filter_after_index(filter, IndexedMatch::None)
+    }
+
+    pub(crate) fn matches_filter_after_index(
+        &self,
+        filter: &Filter,
+        indexed: IndexedMatch,
+    ) -> bool {
         if filter.ids.as_ref().is_some_and(|ids| {
             !ids.is_empty() && !ids.iter().any(|id| id.as_bytes() == self.id_bytes())
         }) {
             return false;
         }
-        if filter.authors.as_ref().is_some_and(|authors| {
-            !authors.is_empty()
-                && !authors
-                    .iter()
-                    .any(|author| author.as_bytes() == self.pubkey_bytes())
-        }) {
+        if !matches!(indexed, IndexedMatch::Author | IndexedMatch::AuthorKind)
+            && filter.authors.as_ref().is_some_and(|authors| {
+                !authors.is_empty()
+                    && !authors
+                        .iter()
+                        .any(|author| author.as_bytes() == self.pubkey_bytes())
+            })
+        {
             return false;
         }
-        if filter.kinds.as_ref().is_some_and(|kinds| {
-            !kinds.is_empty() && !kinds.iter().any(|kind| kind.as_u16() == self.kind_u16())
-        }) {
+        if !matches!(indexed, IndexedMatch::Kind | IndexedMatch::AuthorKind)
+            && filter.kinds.as_ref().is_some_and(|kinds| {
+                !kinds.is_empty() && !kinds.iter().any(|kind| kind.as_u16() == self.kind_u16())
+            })
+        {
             return false;
         }
         let created_at = self.created_at_secs();
@@ -594,6 +620,9 @@ impl<'a> StoredEventView<'a> {
             return false;
         }
         for (name, wanted) in &filter.generic_tags {
+            if matches!(indexed, IndexedMatch::Tag(indexed_name) if indexed_name == *name) {
+                continue;
+            }
             if !self.tags().any(|tag| {
                 let mut elements = tag.elements();
                 let Some(tag_name) = elements.next() else {
