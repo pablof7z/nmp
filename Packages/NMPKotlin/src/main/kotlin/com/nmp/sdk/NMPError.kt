@@ -56,15 +56,13 @@ sealed class NMPError(message: String) : Exception(message) {
     object EmptyPinnedRelaySet :
         NMPError("SourceAuthority.Pinned requires a nonempty relay set")
 
-    /** #115: `groupSendIntent`'s `extraTags` named a tag `groupSendIntent`
-     * owns itself (`"h"`/`"previous"`) -- surfaced, never silently
-     * rewritten. */
-    data class ReservedGroupTag(val got: String) :
-        NMPError("extraTags named a reserved tag: $got")
+    /** #156: `groupMessageIntent` has no active account from which NMP can
+     * derive the unsigned event author. */
+    object NoActiveAccount : NMPError("group messages require an active account")
 
     /** #115: `publishComposed` was called a second time on the same
      * `GroupSendIntent` -- it is take-once by design (call
-     * `groupSendIntent` again for a retry). */
+     * `groupMessageIntent` again for a retry). */
     object IntentAlreadyConsumed :
         NMPError("this composed write intent was already published once")
 
@@ -86,7 +84,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.NostrEntitySecretKeyRejected -> NostrEntitySecretKeyRejected
                 is FfiException.AuthorOutboxesRequiresBoundAuthors -> AuthorOutboxesRequiresBoundAuthors
                 is FfiException.EmptyPinnedRelaySet -> EmptyPinnedRelaySet
-                is FfiException.ReservedGroupTag -> ReservedGroupTag(ffi.got)
+                is FfiException.NoActiveAccount -> NoActiveAccount
                 is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
             }
     }

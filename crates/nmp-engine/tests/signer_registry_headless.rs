@@ -14,7 +14,9 @@
 //! whether the SIGN step itself used the correct account's key.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::RelayAdmissionPolicy;
@@ -27,7 +29,25 @@ use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::{LocalKeySigner, SignerError, SignerOp, SigningCapability};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
-use nostr::{EventId, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
+use nostr::{Event, EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
+
+struct CountingSigner {
+    pubkey: PublicKey,
+    calls: Arc<AtomicUsize>,
+}
+
+impl SigningCapability for CountingSigner {
+    fn public_key(&self) -> Option<PublicKey> {
+        Some(self.pubkey)
+    }
+
+    fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<Event> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        SignerOp::err(SignerError::Rejected(
+            "counting signer must not be reached".to_string(),
+        ))
+    }
+}
 
 struct PubkeylessSigner;
 
@@ -350,6 +370,74 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
         Duration::from_secs(5),
         |status| { matches!(status, WriteStatus::Failed(_)) }
     ));
+
+    handle.shutdown();
+    engine_thread.join();
+}
+
+/// #156's sole-path account-switch falsifier at the capability seam. A
+/// group-message template composed while A is active cannot reach either
+/// registered signer after the active account switches to B.
+#[test]
+fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let a_calls = Arc::new(AtomicUsize::new(0));
+    let b_calls = Arc::new(AtomicUsize::new(0));
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    );
+    handle
+        .add_signer(CountingSigner {
+            pubkey: a.public_key(),
+            calls: Arc::clone(&a_calls),
+        })
+        .expect("A signer must register");
+    handle
+        .add_signer(CountingSigner {
+            pubkey: b.public_key(),
+            calls: Arc::clone(&b_calls),
+        })
+        .expect("B signer must register");
+
+    handle.set_active_account(Some(a.public_key()));
+    let composed_as_a = UnsignedEvent::new(
+        a.public_key(),
+        Timestamp::now(),
+        Kind::Custom(9),
+        vec![],
+        "composed while A is active",
+    );
+    handle.set_active_account(Some(b.public_key()));
+
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(composed_as_a),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("pre-acceptance failure still returns a local status stream");
+    match receipt
+        .recv_timeout(Duration::from_secs(5))
+        .expect("stale author must fail deterministically")
+    {
+        WriteStatus::Failed(reason) => assert_eq!(
+            reason,
+            "unsigned draft author does not match current active account"
+        ),
+        other => panic!("Failed must be first, before Accepted; got {other:?}"),
+    }
+    assert_eq!(
+        receipt.recv_timeout(Duration::from_secs(1)),
+        Err(RecvTimeoutError::Disconnected),
+        "Failed must be the sole receipt fact"
+    );
+    assert_eq!(a_calls.load(Ordering::SeqCst), 0, "A signer was invoked");
+    assert_eq!(b_calls.load(Ordering::SeqCst), 0, "B signer was invoked");
 
     handle.shutdown();
     engine_thread.join();

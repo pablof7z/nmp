@@ -3,24 +3,23 @@
 // needed to call any of these. Pass the returned `NMPDemand` straight to
 // `NMPEngine.observe(NMPDemand)`. Mirrors NIP29.swift.
 //
-// `groupSendIntent`/`GroupSendIntent` (#115) are this file's write-side
-// counterpart: an app couriers `Row`s it already has from a live
-// `groupContentDemand` read, and `nmp-nip29::compose_group_send` owns 100%
-// of the `h`/`previous` tag composition -- the app never sees either tag,
-// routing, or host authority directly, only the opaque, take-once
-// `GroupSendIntent` `NMPEngine.publishComposed(GroupSendIntent)` consumes.
+// `NMPEngine.groupMessageIntent`/`GroupSendIntent` (#156) are this file's
+// write-side counterpart. The app supplies semantic composer state; NMP owns
+// author/time/kind, NIP-27 mention materialization, `p`/reply-`e` tags, and
+// the existing `h`/`previous`/pinned-host composition.
 
 package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiComposedWriteIntent
 import uniffi.nmp_ffi.FfiGroupRef
+import uniffi.nmp_ffi.FfiGroupReplyParent
 import uniffi.nmp_ffi.FfiRememberedGroups
 import uniffi.nmp_ffi.FfiRow
+import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.activeAccountDemand as ffiActiveAccountDemand
 import uniffi.nmp_ffi.decodeRememberedGroups as ffiDecodeRememberedGroups
 import uniffi.nmp_ffi.groupContentDemand as ffiGroupContentDemand
 import uniffi.nmp_ffi.groupDiscoveryDemand as ffiGroupDiscoveryDemand
-import uniffi.nmp_ffi.groupSendIntent as ffiGroupSendIntent
 
 /** A remembered NIP-29 group reference (#108, `FfiGroupRef` mirror) --
  * group id, host relay, and optional display name. */
@@ -89,48 +88,41 @@ fun decodeRememberedGroups(row: Row): RememberedGroups {
     return RememberedGroups.from(ffiDecodeRememberedGroups(ffiRow))
 }
 
-/** A composed NIP-29 group send (#115), returned by [groupSendIntent].
+/** A direct reply parent for a kind:9 group message. NMP turns this into the
+ * marked reply `e` row plus the author's deduplicated recipient `p` row. */
+data class GroupReplyParent(
+    val eventId: String,
+    val authorPubkey: String,
+) {
+    internal fun toFfi(): FfiGroupReplyParent = FfiGroupReplyParent(eventId, authorPubkey)
+}
+
+/** A composed NIP-29 group message (#156), returned by
+ * [NMPEngine.groupMessageIntent].
  * Opaque and take-once -- pass it to `NMPEngine.publishComposed` exactly
  * once; a second attempt throws `NMPError.IntentAlreadyConsumed`. Never
- * exposes `h`, `previous`, routing, or host authority: this crate composed
- * all of that internally from the couriered `recentRows`. */
+ * exposes the materialized tags, routing, author, or timestamp. */
 class GroupSendIntent internal constructor(internal val ffi: FfiComposedWriteIntent)
 
-/** Compose a NIP-29 group send (#115): [recentRows] are delivered kind:9/
- * 30315 [Row]s the app is already rendering from its own live
- * `groupContentDemand` read (#108) -- couriered, not hand-rolled (see
- * `nmp_nip29::compose_group_send`'s own doc for that distinction). This
- * function owns 100% of the `h`/`previous` tag
- * selection/verification/truncation/encoding; the app supplies only the
- * primitives it already has. `kind` is entirely the caller's choice --
- * this call (and everything it reaches) is kind-blind. Publish the result
- * via `NMPEngine.publishComposed`. */
-fun groupSendIntent(
+/** Internal bridge used by [NMPEngine.groupMessageIntent]. Native callers
+ * supply no author, time, kind, or raw tags. */
+internal fun composeGroupMessageIntent(
+    engine: NmpEngineInterface,
     host: String,
     groupId: String,
-    authorPubkey: String,
-    createdAt: ULong,
-    kind: UShort,
     content: String,
-    extraTags: List<List<String>> = emptyList(),
-    recentRows: List<Row> = emptyList(),
+    recipients: List<String>,
+    reply: GroupReplyParent?,
 ): GroupSendIntent {
-    val ffiRows =
-        recentRows.map {
-            FfiRow(
-                id = it.id,
-                pubkey = it.pubkey,
-                createdAt = it.createdAt,
-                kind = it.kind,
-                tags = it.tags,
-                content = it.content,
-                sig = it.sig,
-                sources = it.sources,
-            )
-        }
     return GroupSendIntent(
         nmpRethrowing {
-            ffiGroupSendIntent(host, groupId, authorPubkey, createdAt, kind, content, extraTags, ffiRows)
+            engine.groupMessageIntent(
+                host,
+                groupId,
+                content,
+                recipients,
+                reply?.toFfi(),
+            )
         },
     )
 }
