@@ -71,6 +71,9 @@ pub enum FfiError {
     /// `add_account`'s secret key did not parse as a valid nostr key (hex or
     /// bech32 `nsec`).
     InvalidSecretKey,
+    InvalidSigner {
+        reason: String,
+    },
     /// No upper-half correlation id remains for a publish rejected before
     /// durable acceptance. No receipt or status stream was created.
     ReceiptCorrelationIdExhausted,
@@ -133,6 +136,9 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
+            nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
+                reason: "signer has no public key".to_string(),
+            },
             nmp::EngineError::ReceiptCorrelationIdExhausted => Self::ReceiptCorrelationIdExhausted,
             nmp::EngineError::EngineClosed => Self::EngineClosed,
         }
@@ -150,6 +156,7 @@ impl std::fmt::Display for FfiError {
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
+            Self::InvalidSigner { reason } => write!(f, "invalid signer: {reason}"),
             Self::ReceiptCorrelationIdExhausted => {
                 write!(f, "receipt correlation id namespace exhausted")
             }

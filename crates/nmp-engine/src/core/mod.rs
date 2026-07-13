@@ -303,6 +303,11 @@ pub enum Effect {
     /// so no `EmitReceipt` can truthfully accompany this failure.
     PublishFailed(PublishError),
     RequestSign(ReceiptId, u64, UnsignedEvent),
+    /// A remote signer became available again before its previous retryable
+    /// completion reached the engine. The runtime checks the currently
+    /// registered capability's live availability before sending the ordinary
+    /// `SignerAttached` event, closing that cross-thread ordering race.
+    RearmSignerIfAvailable(PublicKey),
     RequestDecrypt(EventId, PublicKey, String),
     /// Outbox: publish `event` to `relay` (plan §3.4's "`Effect::Wire`
     /// publish REQ/EVENT per relay", re-cut as its OWN effect rather than a
@@ -1465,8 +1470,10 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// `SignerCompleted` (plan §3.4 step 2 continuation): the runtime's
-    /// signer capability resolved. `Err` is a whole-intent terminal
-    /// (`WriteStatus::Failed`) — no relay was ever contacted.
+    /// signer capability resolved. Explicit rejection and invalid signer
+    /// output are whole-intent terminals (`WriteStatus::Failed`). Transport
+    /// absence, timeout, and disconnect return the retained obligation to
+    /// `AwaitingCapability` so the exact frozen identity can be reattached.
     fn on_signer_completed(
         &mut self,
         id: ReceiptId,
@@ -1484,7 +1491,14 @@ impl<S: EventStore> EngineCore<S> {
         match result {
             Ok(event) => self.on_signed(id, event, &mut effects),
             Err(err) => {
-                self.fail_and_compensate(id, err.to_string(), &mut effects);
+                if err.is_terminal() {
+                    self.fail_and_compensate(id, err.to_string(), &mut effects);
+                } else if let Some(pending) = self.pending.get_mut(&id) {
+                    let signing_pubkey = pending.signing_pubkey;
+                    Self::notify(pending, WriteStatus::AwaitingCapability);
+                    effects.push(Effect::EmitReceipt(id, WriteStatus::AwaitingCapability));
+                    effects.push(Effect::RearmSignerIfAvailable(signing_pubkey));
+                }
             }
         }
         effects

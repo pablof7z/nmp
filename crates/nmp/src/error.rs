@@ -27,6 +27,8 @@ pub enum EngineError {
     /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
     /// not parse as a valid nostr key (hex or bech32 `nsec`).
     InvalidSecretKey,
+    /// A custom capability did not expose a stable registry identity.
+    SignerMissingPublicKey,
     /// The upper-half namespace reserved for failures rejected before
     /// durable acceptance has been completely consumed.
     ReceiptCorrelationIdExhausted,
@@ -43,6 +45,7 @@ impl std::fmt::Display for EngineError {
             Self::InvalidRelayUrl { url } => write!(f, "invalid relay url: {url:?}"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
+            Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
             Self::ReceiptCorrelationIdExhausted => {
                 write!(f, "receipt correlation id namespace exhausted")
             }

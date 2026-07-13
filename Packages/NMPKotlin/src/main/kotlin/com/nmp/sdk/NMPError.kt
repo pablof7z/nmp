@@ -23,11 +23,7 @@ import uniffi.nmp_ffi.FfiException
  * Receipt-correlation exhaustion is synchronous because no truthful
  * `Receipt` or status flow can be created without an identity.
  *
- * Also no `SignerHasNoPublicKey` case: `addAccount` goes through
- * `nmp::Engine::add_account`, whose built-in `LocalKeySigner` path always
- * reports a public key -- there is no reachable "signer has no public key"
- * state through this entry point, so an impossible error case is not kept
- * on the public surface just in case. */
+ */
 sealed class NMPError(message: String) : Exception(message) {
     data class NonIndexableFilterTag(val got: String) :
         NMPError("not indexable as a filter key: $got")
@@ -36,6 +32,7 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
+    data class InvalidSigner(val reason: String) : NMPError("invalid signer: $reason")
     object ReceiptCorrelationIdExhausted :
         NMPError("receipt correlation id namespace exhausted")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
@@ -80,6 +77,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
                 is FfiException.InvalidSecretKey -> InvalidSecretKey
+                is FfiException.InvalidSigner -> InvalidSigner(ffi.reason)
                 is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)

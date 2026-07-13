@@ -13,6 +13,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1421,11 +1432,13 @@ dependencies = [
  "nostr 0.44.4",
  "nostr-relay-builder",
  "redb",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing-subscriber",
  "tungstenite 0.29.0",
+ "url",
 ]
 
 [[package]]
@@ -1438,10 +1451,13 @@ dependencies = [
  "nmp-nip02",
  "nmp-nip29",
  "nmp-nip51",
+ "nmp-signer",
  "nostr 0.44.4",
  "redb",
  "tempfile",
+ "tungstenite 0.29.0",
  "uniffi",
+ "url",
 ]
 
 [[package]]
@@ -1524,7 +1540,13 @@ dependencies = [
 name = "nmp-signer"
 version = "0.1.0"
 dependencies = [
+ "nmp-transport",
  "nostr 0.44.4",
+ "serde",
+ "serde_json",
+ "tungstenite 0.29.0",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -1581,6 +1603,7 @@ version = "0.44.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70"
 dependencies = [
+ "aes",
  "base64",
  "bech32",
  "bip39",

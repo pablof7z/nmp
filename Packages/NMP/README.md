@@ -26,6 +26,31 @@ only renders that state and forwards taps. The ordinary action refuses a
 missing contact-list base; first-list creation is intentionally a separate,
 not-yet-shipped policy rather than a hidden one-contact replacement.
 
+NIP-46 remote signers are also projected directly:
+
+```swift
+// Host Info.plist: LSApplicationQueriesSchemes = ["primalconnect"]
+guard let primal = NMPLocalSignerDiscovery.installed().first(where: { $0.id == "primal" })
+else { throw NMPError.invalidSigner("Primal is not installed") }
+let connection = try await nmp.oneClickConnectNip46(
+    signer: primal,
+    relays: ["wss://relay.example"],
+    metadata: .init(name: "My App")
+)
+defer { connection.close() }
+for await state in connection.states {
+    if case .ready(let pubkey) = state { /* now attached to this engine */ break }
+}
+```
+
+The library starts the relay listener before opening Primal. OS handoff success
+does not mean connected; `.ready` follows only after the NIP-46 handshake and
+engine attachment. Generic `nostrconnect://` invitations and pasted
+`bunker://` tokens use `nip46Invitation` / `connectNip46` directly. Amber is
+Android/NIP-55-only and is not falsely offered as an iOS NIP-46 signer.
+`close()` is idempotent; it detaches only that exact session and finishes the
+state stream. Dropping the last connection reference has the same effect.
+
 See `Sources/NMP/Engine.swift` and
 [`docs/builder/34-content.md`](../../docs/builder/34-content.md).
 For the SwiftUI product and live Gallery, see

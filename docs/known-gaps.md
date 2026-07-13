@@ -33,10 +33,20 @@ about current code:
   that the exact URL survived a crash. Retry eligibility, backoff, caps,
   terminal lane cleanup and the single deadline fold remain issue #79; there
   is no polling/busy-spin placeholder.
-- **Signer selection is frozen for accepted writes, but standard platform
-  providers are unbuilt.** Missing Rust capabilities survive restart and resume
-  only for the exact persisted pubkey. Per-write identity override and secure
-  Swift/Kotlin provider/vault reattachment remain #47/#6.
+- **The NIP-46 reconnect path is built; standard platform vault providers are not.**
+  A current NIP-46 client now owns its independent signer-relay connection,
+  NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
+  communication/user keys, NIP-44 crypto, and frozen-event validation. Missing
+  capabilities remain durable `AwaitingCapability`; a real redb close/reopen
+  proof reconnects a bunker, promotes the exact frozen event, publishes, and
+  receives a relay ACK. Swift projects Primal discovery and one-click launch;
+  Kotlin/JVM projects package-filtered Android discovery and an exact
+  URI/package handoff contract. Connections own scoped registrations, so a
+  stale session cannot detach its replacement, and close/drop deterministically
+  finishes only that session. Still open under #47/#51: explicit per-write
+  identity override, standard Keychain/Keystore providers and automatic vault
+  restore, NIP-55 execution/Android AAR integration, and permanent signer
+  connection/correlation counters in engine diagnostics.
 - **Protocol-module composition is unbuilt.** The existing ownership design
   incorrectly makes kind ownership gate all route authority. Modules must claim
   only exact NIP-defined schemas while typed contextual operations may add their
@@ -144,7 +154,7 @@ about current code:
 
 ## Security hardening deferred
 
-- **Secret zeroization and platform signer-provider boundary are not complete.** `nmp-signer` currently holds `nostr::Keys` without the old repo's zeroize/raw-bytes hardening. The promoted contract also requires the durable Rust event/outbox store to persist obligations rather than secrets and the Swift/Kotlin SDKs to offer standard secure-storage-backed signer providers. Both need falsification before v2 ships. Owner: security/signing workstream.
+- **Secret zeroization and platform signer-provider boundary are not complete.** NIP-46 URI/session secrets use redacted debug output and zeroizing memory, and the durable event/outbox store persists only the expected pubkey plus an opaque identity reference. `LocalKeySigner` still holds `nostr::Keys` without the old repo's raw-bytes/zeroize hardening, and Swift/Kotlin do not yet ship standard secure-storage-backed providers that restore sessions automatically. Owner: security/signing workstream (#47).
 
 ## Process / tooling
 

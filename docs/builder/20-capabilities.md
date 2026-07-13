@@ -99,6 +99,36 @@ the shared cache, or grants protocol-host authority to an arbitrary relay.
 No layer starts a polling timer or secretly buffers another layer's durable
 obligation.
 
+## Current NIP-46 surface
+
+The Rust facade ships `Nip46Invitation` and `Nip46Signer`. It supports both
+`nostrconnect://` and `bunker://`, keeps the signer communication key distinct
+from the user's signing key, responds to relay AUTH, preserves one correlated
+request through `auth_url`, asks the signer to `switch_relays`, and validates
+the returned event before the engine validates it again at promotion. Pending
+RPCs are cancellation-owned: direct-Rust timeout/drop releases the bounded
+correlation slot, and an unanswered `switch_relays` request holds only a weak,
+bounded reference to the session.
+
+Swift exposes `NMPLocalSignerDiscovery`, `nip46Invitation`, `connectNip46`, and
+`oneClickConnectNip46`. Primal is detected with its app-specific
+`primalconnect` scheme; a successful OS open is only handoff evidence. Apps
+wait for `.ready`, which is emitted only after the relay handshake and engine
+attachment complete. Each connection owns an opaque signer registration;
+closing or dropping it is idempotent and cannot detach a newer replacement for
+the same pubkey.
+
+Kotlin/JVM exposes the same connection flow plus package-filtered Android
+discovery. `androidHandoff` returns the generated URI and exact package name;
+both are resolved again from the Rust catalog by signer id, so a copied native
+value cannot redirect the secret-bearing URI to another package. Lifecycle
+facts use one bounded multicast `Flow`; `Closed` is terminal and completes every
+collector. An Android host launches the
+handoff pair with an explicit package. The current
+package is a JVM falsifier, not an Android AAR, so it deliberately does not
+import `Intent` or `PackageManager` itself. Amber is catalogued as Android
+NIP-55-only and is not offered as a NIP-46 connection.
+
 ---
 
 <sub>[Index](README.md) · Related: [Identity and signers](16-identity.md) · [Writing and receipts](14-writing.md) · [Provenance and private authority](21-provenance.md)</sub>

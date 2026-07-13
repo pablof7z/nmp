@@ -156,7 +156,9 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
         },
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
 
     // Bootstrap: a's own (empty) kind:1 feed -- this is what actually opens
     // the connection to `url` and kicks off the capability probe.
