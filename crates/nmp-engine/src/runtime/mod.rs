@@ -68,7 +68,7 @@ use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
-use nmp_signer::{SignerOp, SigningCapability};
+use nmp_signer::{SignerError, SignerOp, SigningCapability};
 use nmp_store::EventStore;
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp};
 
@@ -226,13 +226,15 @@ enum Cmd {
         reply: Sender<ReattachOutcome>,
     },
     /// Register a new signing capability (M4 §5: `SignerRegistry`). The
-    /// reply carries the pubkey the engine thread's registry keyed it under
-    /// (`None` if `signer.public_key()` itself returned `None` — there is no
-    /// key to register it against, so it is dropped rather than stored
-    /// unreachably).
+    /// reply carries the pubkey the engine thread's registry keyed it under,
+    /// or a typed error if the capability has no stable identity.
     AddSigner {
         signer: Box<dyn SigningCapability + Send>,
-        reply: Sender<Option<PublicKey>>,
+        reply: Sender<Result<PublicKey, AddSignerError>>,
+    },
+    RemoveSigner {
+        pubkey: PublicKey,
+        reply: Sender<bool>,
     },
     /// Register a new diagnostics observer (M5 plan §1.2 step 4). The reply
     /// carries the id (used only by `Cmd::UnobserveDiagnostics` to withdraw
@@ -262,14 +264,20 @@ struct SignerRegistry {
 
 impl SignerRegistry {
     /// Register `signer` under its own `public_key()`, replacing any prior
-    /// capability already registered for that key. Returns the key it was
-    /// registered under (`None` if the capability reports no key at all).
-    fn add(&mut self, signer: Box<dyn SigningCapability + Send>) -> Option<PublicKey> {
-        let pk = signer.public_key();
-        if let Some(pk) = pk {
-            self.signers.insert(pk, signer);
-        }
-        pk
+    /// capability already registered for that key.
+    fn add(
+        &mut self,
+        signer: Box<dyn SigningCapability + Send>,
+    ) -> Result<PublicKey, AddSignerError> {
+        let pk = signer
+            .public_key()
+            .ok_or(AddSignerError::MissingPublicKey)?;
+        self.signers.insert(pk, signer);
+        Ok(pk)
+    }
+
+    fn remove(&mut self, pubkey: PublicKey) -> bool {
+        self.signers.remove(&pubkey).is_some()
     }
 
     /// Resolve the signer frozen into this exact accepted template. An
@@ -749,9 +757,9 @@ fn engine_loop<S, D>(
                 let _ = applied.send(());
             }
             Cmd::AddSigner { signer, reply } => {
-                let pk = registry.add(signer);
-                let _ = reply.send(pk);
-                if let Some(pk) = pk {
+                let result = registry.add(signer);
+                let _ = reply.send(result.clone());
+                if let Ok(pk) = result {
                     let effects = core.handle(EngineMsg::SignerAttached(pk));
                     dispatch_effects(
                         effects,
@@ -763,6 +771,9 @@ fn engine_loop<S, D>(
                         self_inbox,
                     );
                 }
+            }
+            Cmd::RemoveSigner { pubkey, reply } => {
+                let _ = reply.send(registry.remove(pubkey));
             }
             Cmd::ObserveDiagnostics { reply } => {
                 let id = next_diag_id;
@@ -978,11 +989,10 @@ fn dispatch_effect(
                     // on a remote signer round-trip.
                     let inbox = self_inbox.clone();
                     thread::spawn(move || {
-                        if let Ok(result) = rx.recv() {
-                            let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
-                                id, generation, result,
-                            )));
-                        }
+                        let result = rx.recv().unwrap_or(Err(SignerError::Disconnected));
+                        let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
+                            id, generation, result,
+                        )));
                     });
                 }
             },
@@ -1203,7 +1213,8 @@ impl DiagnosticsHandle {
 ///
 /// - `subscribe(LiveQuery) -> (QueryHandle, Receiver<RowsMsg>)`
 /// - `unsubscribe(QueryHandle)`
-/// - `add_signer(impl SigningCapability) -> Option<PublicKey>`
+/// - `add_signer(impl SigningCapability) -> Result<PublicKey, AddSignerError>`
+/// - `remove_signer(PublicKey) -> bool`
 /// - `set_active_account(Option<PublicKey>)`
 /// - `publish(WriteIntent) -> Receiver<WriteStatus>`
 /// - `observe_diagnostics() -> (DiagnosticsHandle, LatestReceiver<DiagnosticsSnapshot>)`
@@ -1215,6 +1226,21 @@ impl DiagnosticsHandle {
 pub struct Handle {
     inbox: Sender<Cmd>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddSignerError {
+    MissingPublicKey,
+}
+
+impl std::fmt::Display for AddSignerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingPublicKey => f.write_str("signing capability has no public key"),
+        }
+    }
+}
+
+impl std::error::Error for AddSignerError {}
 
 impl Handle {
     /// Open a live subscription. Blocks (briefly — one engine-thread round
@@ -1254,11 +1280,11 @@ impl Handle {
     /// active — call [`Self::set_active_account`] to actually switch reads
     /// and writes onto it. Blocks briefly (one engine-thread round trip,
     /// same discipline as [`Self::subscribe`]) and returns the key it was
-    /// registered under, or `None` if the capability reported no key at all.
+    /// registered under, or a typed error if the capability reported no key.
     ///
     /// # Panics
     /// If the engine thread has already shut down.
-    pub fn add_signer<Sig>(&self, signer: Sig) -> Option<PublicKey>
+    pub fn add_signer<Sig>(&self, signer: Sig) -> Result<PublicKey, AddSignerError>
     where
         Sig: SigningCapability + Send + 'static,
     {
@@ -1272,6 +1298,21 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine thread dropped the add_signer reply")
+    }
+
+    /// Detach the capability for `pubkey`. Accepted writes keep their frozen
+    /// identity and remain waiting; they are never retargeted.
+    pub fn remove_signer(&self, pubkey: PublicKey) -> bool {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::RemoveSigner {
+                pubkey,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: remove_signer() called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine thread dropped the remove_signer reply")
     }
 
     /// Re-root every reactive query and default unsigned-publish authority

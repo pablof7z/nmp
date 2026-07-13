@@ -1447,8 +1447,10 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// `SignerCompleted` (plan §3.4 step 2 continuation): the runtime's
-    /// signer capability resolved. `Err` is a whole-intent terminal
-    /// (`WriteStatus::Failed`) — no relay was ever contacted.
+    /// signer capability resolved. Explicit rejection and invalid signer
+    /// output are whole-intent terminals (`WriteStatus::Failed`). Transport
+    /// absence, timeout, and disconnect return the retained obligation to
+    /// `AwaitingCapability` so the exact frozen identity can be reattached.
     fn on_signer_completed(
         &mut self,
         id: ReceiptId,
@@ -1466,7 +1468,12 @@ impl<S: EventStore> EngineCore<S> {
         match result {
             Ok(event) => self.on_signed(id, event, &mut effects),
             Err(err) => {
-                self.fail_and_compensate(id, err.to_string(), &mut effects);
+                if err.is_terminal() {
+                    self.fail_and_compensate(id, err.to_string(), &mut effects);
+                } else if let Some(pending) = self.pending.get_mut(&id) {
+                    Self::notify(pending, WriteStatus::AwaitingCapability);
+                    effects.push(Effect::EmitReceipt(id, WriteStatus::AwaitingCapability));
+                }
             }
         }
         effects

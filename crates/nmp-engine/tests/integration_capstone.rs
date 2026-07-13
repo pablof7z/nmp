@@ -377,7 +377,9 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
         },
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
     let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
@@ -476,7 +478,9 @@ async fn write_ack_per_relay_over_real_relays() {
         },
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
     let unsigned = UnsignedEvent::new(
@@ -629,7 +633,9 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
         },
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
 
     handle.set_active_account(Some(a.public_key()));
     let (_qh, rows_rx) = handle.subscribe(LiveQuery::from_filter(follows_minus_mutes_filter()));

@@ -38,6 +38,7 @@ pub mod facade;
 pub mod nip02;
 pub mod nip29;
 pub mod observer;
+pub mod signer;
 pub mod types;
 
 uniffi::setup_scaffolding!();

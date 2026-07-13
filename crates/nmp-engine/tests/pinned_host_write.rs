@@ -143,7 +143,9 @@ async fn pinned_host_send_reaches_only_the_host_and_round_trips_unchanged() {
         },
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(author.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(author.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(author.public_key()));
 
     let intent = nmp_nip29::compose_group_send(
@@ -258,7 +260,9 @@ async fn pinned_host_rejection_surfaces_as_a_typed_status_never_silence() {
         },
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(author.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(author.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(author.public_key()));
 
     let intent = nmp_nip29::compose_group_send(

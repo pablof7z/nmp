@@ -544,7 +544,9 @@ impl NmpWorld {
 
         if let Some(active) = self.active_person.clone() {
             let keys = self.person(&active);
-            handle.add_signer(LocalKeySigner::new(keys.clone()));
+            handle
+                .add_signer(LocalKeySigner::new(keys.clone()))
+                .expect("local signer has a public key");
             handle.set_active_account(Some(keys.public_key()));
         }
 

@@ -1,0 +1,253 @@
+use std::net::TcpListener;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use nmp_signer::{
+    CryptoCapability, Nip46ConnectionEvent, Nip46Signer, SignerOp, SigningCapability,
+};
+use nostr::nips::nip44;
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tungstenite::Message;
+
+#[derive(Deserialize)]
+struct SignBody {
+    kind: u16,
+    created_at: u64,
+    tags: Vec<Vec<String>>,
+    content: String,
+}
+
+fn response_event(
+    signer: &Keys,
+    client: PublicKey,
+    id: &str,
+    result: Option<String>,
+    error: Option<&str>,
+) -> Event {
+    let plaintext = json!({ "id": id, "result": result, "error": error }).to_string();
+    let ciphertext = nip44::encrypt(
+        signer.secret_key(),
+        &client,
+        plaintext,
+        nip44::Version::default(),
+    )
+    .unwrap();
+    EventBuilder::new(Kind::NostrConnect, ciphertext)
+        .tag(Tag::public_key(client))
+        .sign_with_keys(signer)
+        .unwrap()
+}
+
+fn event_frame(subscription_id: &str, event: Event) -> String {
+    json!(["EVENT", subscription_id, event]).to_string()
+}
+
+fn spawn_mock_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let relay_url = format!("ws://{address}");
+    let remote_signer = Keys::generate();
+    let user = Keys::generate();
+    let remote_for_thread = remote_signer.clone();
+    let user_for_thread = user.clone();
+    let (seen_tx, seen_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = tungstenite::accept(stream).unwrap();
+        socket
+            .send(Message::Text(
+                json!(["AUTH", "mock-auth-challenge"]).to_string().into(),
+            ))
+            .unwrap();
+
+        let mut subscription_id = None;
+        let mut seen_methods = Vec::new();
+        let mut saw_auth = false;
+        while let Ok(message) = socket.read() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let Ok(frame) = serde_json::from_str::<Value>(text.as_ref()) else {
+                continue;
+            };
+            let Some(parts) = frame.as_array() else {
+                continue;
+            };
+            match parts.first().and_then(Value::as_str) {
+                Some("AUTH") => {
+                    let event = Event::from_json(parts[1].to_string()).unwrap();
+                    assert_eq!(event.kind, Kind::Authentication);
+                    assert_eq!(event.tags.challenge(), Some("mock-auth-challenge"));
+                    event.verify().unwrap();
+                    saw_auth = true;
+                }
+                Some("REQ") => {
+                    subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                }
+                Some("EVENT") => {
+                    let event = Event::from_json(parts[1].to_string()).unwrap();
+                    assert_eq!(event.kind, Kind::NostrConnect);
+                    assert!(event
+                        .tags
+                        .public_keys()
+                        .any(|pk| *pk == remote_for_thread.public_key()));
+                    let plaintext = nip44::decrypt(
+                        remote_for_thread.secret_key(),
+                        &event.pubkey,
+                        event.content.as_bytes(),
+                    )
+                    .unwrap();
+                    let request: Value = serde_json::from_str(&plaintext).unwrap();
+                    let id = request["id"].as_str().unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    let params = request["params"].as_array().unwrap();
+                    seen_methods.push(method.to_string());
+
+                    let result = match method {
+                        "connect" => {
+                            assert_eq!(params[0], remote_for_thread.public_key().to_hex());
+                            Some("ack".to_string())
+                        }
+                        "get_public_key" => Some(user_for_thread.public_key().to_hex()),
+                        "switch_relays" => Some("null".to_string()),
+                        "sign_event" => {
+                            let body: SignBody =
+                                serde_json::from_str(params[0].as_str().unwrap()).unwrap();
+                            let tags = body
+                                .tags
+                                .iter()
+                                .map(Tag::parse)
+                                .collect::<Result<Vec<_>, _>>()
+                                .unwrap();
+                            let unsigned = UnsignedEvent::new(
+                                user_for_thread.public_key(),
+                                Timestamp::from(body.created_at),
+                                Kind::from_u16(body.kind),
+                                tags,
+                                body.content,
+                            );
+                            let auth = response_event(
+                                &remote_for_thread,
+                                event.pubkey,
+                                id,
+                                Some("auth_url".to_string()),
+                                Some("https://signer.example/approve"),
+                            );
+                            socket
+                                .send(Message::Text(
+                                    event_frame(subscription_id.as_deref().unwrap(), auth).into(),
+                                ))
+                                .unwrap();
+                            Some(unsigned.sign_with_keys(&user_for_thread).unwrap().as_json())
+                        }
+                        "nip44_encrypt" => Some(
+                            nip44::encrypt(
+                                user_for_thread.secret_key(),
+                                &PublicKey::from_hex(params[0].as_str().unwrap()).unwrap(),
+                                params[1].as_str().unwrap(),
+                                nip44::Version::default(),
+                            )
+                            .unwrap(),
+                        ),
+                        "nip44_decrypt" => Some(
+                            nip44::decrypt(
+                                user_for_thread.secret_key(),
+                                &PublicKey::from_hex(params[0].as_str().unwrap()).unwrap(),
+                                params[1].as_str().unwrap().as_bytes(),
+                            )
+                            .unwrap(),
+                        ),
+                        other => panic!("unexpected method {other}"),
+                    };
+                    let response =
+                        response_event(&remote_for_thread, event.pubkey, id, result, None);
+                    socket
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                        ))
+                        .unwrap();
+                    if method == "nip44_decrypt" {
+                        assert!(saw_auth);
+                        let _ = seen_tx.send(seen_methods);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    (relay_url, remote_signer, user, seen_rx)
+}
+
+#[test]
+fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
+    let (relay, remote, user, seen) = spawn_mock_remote_signer();
+    let uri = format!(
+        "bunker://{}?relay={}&secret=one-use-secret",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+    );
+    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    assert_eq!(signer.remote_signer_public_key(), remote.public_key());
+    assert_eq!(signer.user_public_key(), user.public_key());
+    assert_ne!(signer.remote_signer_public_key(), signer.user_public_key());
+
+    let events = signer.subscribe_connection_events();
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_000),
+        Kind::TextNote,
+        vec![Tag::hashtag("nip46")],
+        "signed remotely",
+    );
+    let signed = signer
+        .sign(unsigned.clone())
+        .wait(Duration::from_secs(5))
+        .unwrap();
+    signed.verify().unwrap();
+    assert_eq!(signed.pubkey, user.public_key());
+    assert_eq!(signed.content, unsigned.content);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Nip46ConnectionEvent::AuthorizationRequired(url)
+            if url == "https://signer.example/approve"
+    ));
+
+    let peer = Keys::generate();
+    let ciphertext = signer
+        .nip44_encrypt(peer.public_key(), "secret payload")
+        .wait(Duration::from_secs(5))
+        .unwrap();
+    let plaintext = signer
+        .nip44_decrypt(peer.public_key(), &ciphertext)
+        .wait(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(plaintext, "secret payload");
+
+    let methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(methods.starts_with(&[
+        "connect".to_string(),
+        "get_public_key".to_string(),
+        "switch_relays".to_string(),
+    ]));
+    assert!(methods.ends_with(&[
+        "sign_event".to_string(),
+        "nip44_encrypt".to_string(),
+        "nip44_decrypt".to_string(),
+    ]));
+}
+
+#[test]
+fn unavailable_signer_operation_is_retryable() {
+    let (tx, rx) = mpsc::channel::<Result<String, nmp_signer::SignerError>>();
+    drop(tx);
+    assert_eq!(
+        SignerOp::Pending(rx).wait(Duration::from_millis(10)),
+        Err(nmp_signer::SignerError::Disconnected)
+    );
+}

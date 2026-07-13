@@ -204,7 +204,9 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         RelayAdmissionPolicy::default(),
     );
 
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
     // $myFollows shape: kind:1 authored by whoever `a`'s kind:3 contact
@@ -995,7 +997,9 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         second.recv_timeout(Duration::from_secs(1)).unwrap(),
         WriteStatus::AwaitingCapability
     );
-    handle.add_signer(LocalKeySigner::new(keys.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(keys.clone()))
+        .expect("local signer has a public key");
     assert!(wait_for_status(
         &first,
         Duration::from_secs(2),
@@ -1075,7 +1079,9 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
         WriteStatus::AwaitingCapability
     );
-    handle.add_signer(LocalKeySigner::new(keys));
+    handle
+        .add_signer(LocalKeySigner::new(keys))
+        .expect("local signer has a public key");
     assert!(wait_for_status(
         &statuses,
         Duration::from_secs(2),

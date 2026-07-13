@@ -14,12 +14,14 @@
 //! - [`Engine::publish`] -- a [`WriteIntent`] in, a `Receiver<`[`WriteStatus`]`>`
 //!   out.
 //!
-//! Plus identity ([`Engine::add_account`]/[`Engine::set_active_account`]),
-//! [`Engine::observe_diagnostics`], and [`Engine::shutdown`]. Every verb
-//! fails closed with `EngineError::EngineClosed` once `shutdown` has run --
-//! see [`Engine`]'s own doc for the serialized lifecycle gate that makes
-//! this true even under concurrent use, and its `Drop` impl for the case
-//! where a caller never calls `shutdown` at all.
+//! Plus identity and signer lifecycle ([`Engine::add_account`],
+//! [`Engine::add_signer`], [`Engine::remove_signer`], and
+//! [`Engine::set_active_account`]), [`Engine::observe_diagnostics`], and
+//! [`Engine::shutdown`]. Every verb fails closed with
+//! `EngineError::EngineClosed` once `shutdown` has run -- see [`Engine`]'s
+//! own doc for the serialized lifecycle gate that makes this true even under
+//! concurrent use, and its `Drop` impl for the case where a caller never
+//! calls `shutdown` at all.
 //!
 //! Everything below `Engine` -- `EngineThread`, `Handle`, `LiveDirectory`,
 //! `RedbStore`/`MemoryStore`, `PoolConfig`, `LocalKeySigner` -- is no longer
@@ -31,12 +33,9 @@
 //! - `Engine::from_parts`, an in-workspace/test hatch for `nmp-bdd`'s
 //!   scripted-relay harness (may freely need mechanism-crate types; it is
 //!   not expected to be usable from an `nmp`-only dependency).
-//! - `Engine::add_signer`/`SigningCapability` -- a THIRD-PARTY signing
-//!   capability's output is not yet validated against the frozen unsigned
-//!   template before it reaches the wire (`nmp-engine`'s #2/#3 Unit U3),
-//!   so the facade must not present a custom-signer path as supported
-//!   until that lands. `Engine::add_account`'s built-in `LocalKeySigner`
-//!   path is unaffected -- it signs the frozen template itself.
+//! External [`SigningCapability`] implementations are supported: the engine's
+//! promotion boundary independently verifies every returned event against the
+//! frozen accepted template before it can reach the wire.
 //!
 //! This crate re-exports every value type an app needs to drive the two
 //! nouns, and to name every `DiagnosticsSnapshot` field, without reaching
@@ -130,12 +129,34 @@ pub use nmp_store::CoverageInterval;
 // already re-exported below).
 pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
-// A lower-level signing capability an app can implement itself (e.g. a
-// NIP-46/bunker remote signer) and hand to `Engine::add_signer` -- gated
-// behind `unstable-mechanism` until #2/#3's Unit U3 validates a signer's
-// output; see this module's doc and `Engine::add_signer`'s own doc.
-#[cfg(feature = "unstable-mechanism")]
-pub use nmp_signer::SigningCapability;
+#[cfg(test)]
+mod relay_hint_tests {
+    use super::*;
+
+    #[test]
+    fn network_hint_gate_rejects_local_and_onion_but_keeps_public_hosts() {
+        assert!(admits_network_relay_hint(
+            &RelayUrl::parse("wss://relay.example.com").unwrap()
+        ));
+        assert!(!admits_network_relay_hint(
+            &RelayUrl::parse("ws://127.0.0.1:7777").unwrap()
+        ));
+        assert!(!admits_network_relay_hint(
+            &RelayUrl::parse("ws://10.0.0.9").unwrap()
+        ));
+        assert!(!admits_network_relay_hint(
+            &RelayUrl::parse("wss://hiddenservice.onion").unwrap()
+        ));
+    }
+}
+
+// Supported signer/provider surface. The engine's promotion boundary now
+// validates every external signer result against the frozen accepted event.
+pub use nmp_signer::{
+    known_local_signers, LocalSignerApp, LocalSignerProtocol, Nip46ClientMetadata,
+    Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer, SignerError, SignerOp,
+    SigningCapability,
+};
 
 // The concrete mechanism types are internal by default (#52's "internal or
 // explicitly unstable"). `Engine::from_parts` needs `EventStore`/

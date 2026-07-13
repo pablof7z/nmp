@@ -205,7 +205,7 @@ impl Engine {
         self.with_handle(|handle| {
             handle
                 .add_signer(nmp_signer::LocalKeySigner::new(keys))
-                .expect("LocalKeySigner::public_key() always returns Some")
+                .expect("LocalKeySigner::public_key() always returns a key")
         })
     }
 
@@ -214,24 +214,25 @@ impl Engine {
     /// top of for the common local-key case. Same "does not activate it"
     /// caveat as `add_account`.
     ///
-    /// Gated behind `unstable-mechanism` until #2/#3's Unit U3 lands: the
-    /// runtime does not yet validate a signer's OUTPUT against the frozen
-    /// unsigned template (matching body/pubkey/id) before routing it to the
-    /// wire -- `EngineCore::on_signer_completed` forwards whatever
-    /// `Ok(event)` a registered `SigningCapability` returns straight into
-    /// `on_signed`, so a misbehaving/compromised custom signer can get a
-    /// tampered event published verbatim today. `add_account`'s
-    /// `LocalKeySigner` is exempt from this gate -- it signs the exact
-    /// frozen template itself rather than accepting an external signer's
-    /// output -- so this only concerns a THIRD-PARTY `SigningCapability`
-    /// impl, and the facade must not present that path as supported before
-    /// U3 closes the gap.
-    #[cfg(feature = "unstable-mechanism")]
-    pub fn add_signer<Sig>(&self, signer: Sig) -> Result<Option<PublicKey>, EngineError>
+    /// The promotion boundary verifies signature, id, author, timestamp,
+    /// kind, tags, and content against the frozen accepted template before
+    /// any relay publication. Capabilities without a stable public key are
+    /// rejected rather than stored unreachably.
+    pub fn add_signer<Sig>(&self, signer: Sig) -> Result<PublicKey, EngineError>
     where
         Sig: nmp_signer::SigningCapability + Send + 'static,
     {
-        self.with_handle(|handle| handle.add_signer(signer))
+        self.with_handle(|handle| {
+            handle
+                .add_signer(signer)
+                .map_err(|_| EngineError::SignerMissingPublicKey)
+        })?
+    }
+
+    /// Detach a signer capability without changing active identity or any
+    /// accepted write's frozen author.
+    pub fn remove_signer(&self, pubkey: PublicKey) -> Result<bool, EngineError> {
+        self.with_handle(|handle| handle.remove_signer(pubkey))
     }
 
     /// Re-root every reactive query AND the active signing capability

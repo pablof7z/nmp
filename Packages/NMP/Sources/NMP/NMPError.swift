@@ -19,11 +19,6 @@ import NMPFFI
 /// Receipt-correlation exhaustion is synchronous because no truthful
 /// `Receipt` or status stream can be created without an identity.
 ///
-/// Also no `.signerHasNoPublicKey` case: `addAccount` goes through
-/// `nmp::Engine::add_account`, whose built-in `LocalKeySigner` path always
-/// reports a public key -- there is no reachable "signer has no public key"
-/// state through this entry point, so an impossible error case is not kept
-/// on the public surface just in case.
 public enum NMPError: Error, Sendable, Equatable {
     case nonIndexableFilterTag(String)
     case invalidPublicKey(String)
@@ -31,6 +26,7 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidRelayUrl(String)
     case invalidTag([String])
     case invalidSecretKey
+    case invalidSigner(String)
     case receiptCorrelationIdExhausted
     case storeOpenFailed(String)
     case invalidSignature(String)
@@ -66,6 +62,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
         case .InvalidTag(let got): self = .invalidTag(got)
         case .InvalidSecretKey: self = .invalidSecretKey
+        case .InvalidSigner(let reason): self = .invalidSigner(reason)
         case .ReceiptCorrelationIdExhausted: self = .receiptCorrelationIdExhausted
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .InvalidSignature(let got): self = .invalidSignature(got)

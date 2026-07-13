@@ -6,5 +6,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# `nip44` for `CryptoCapability`'s NIP-44 encrypt/decrypt surface (§3.3).
-nostr = { workspace = true, features = ["nip44"] }
+# NIP-46 supplies the typed message/event helpers; the adapter still parses
+# the current URI/handshake additions itself because rust-nostr 0.44 models
+# the older connect shape.
+nostr = { workspace = true, features = ["nip46"] }
+nmp-transport.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+zeroize = "1"
+
+[dev-dependencies]
+tungstenite = "0.29"
