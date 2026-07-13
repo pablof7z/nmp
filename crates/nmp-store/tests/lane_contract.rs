@@ -258,6 +258,55 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
 }
 
 #[test]
+fn suspended_attempt_is_atomic_deadline_free_and_resumes_with_the_next_ordinal() {
+    for_each_backend(|store| {
+        let relay = RelayUrl::parse("wss://waiting-auth.example").unwrap();
+        let (intent, _, signed, key, _) = seed(store, "waiting auth", 150, relay);
+        store
+            .set_lane_eligible(&key, 1, Timestamp::from(151))
+            .unwrap();
+        store
+            .start_lane_attempt(&key, 2, signed.clone(), Timestamp::from(152))
+            .unwrap();
+
+        let waiting = store
+            .suspend_lane_attempt(
+                &key,
+                3,
+                1,
+                Timestamp::from(153),
+                TransientCause::AuthRequired,
+                Some("auth-required: authenticate".into()),
+                true,
+            )
+            .unwrap();
+        assert_eq!(waiting.revision, 4);
+        assert_eq!(waiting.state, LaneState::WaitingAuth);
+        assert_eq!(store.next_outbox_deadline().unwrap(), None);
+        assert!(store
+            .due_outbox_deadlines(Timestamp::from(u64::MAX), 10)
+            .unwrap()
+            .is_empty());
+        let details = store.recover_attempt_details(intent).unwrap();
+        let transient = details[0].transient.as_ref().unwrap();
+        assert_eq!(transient.eligible_at, Timestamp::from(153));
+        assert_eq!(transient.cause, TransientCause::AuthRequired);
+        assert_eq!(
+            transient.raw_reason.as_deref(),
+            Some("auth-required: authenticate")
+        );
+
+        store
+            .set_lane_eligible(&key, 4, Timestamp::from(200))
+            .unwrap();
+        let (second, _) = store
+            .start_lane_attempt(&key, 5, signed, Timestamp::from(200))
+            .unwrap();
+        assert_eq!(second.ordinal, 2);
+    });
+}
+
+#[test]
 fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
     for_each_backend(|store| {
         let empty_keys = Keys::generate();
