@@ -338,6 +338,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verifier_outage_is_health_not_false_relay_misbehavior() {
+        let mut health = RelayHealth::default();
+        record_unavailable(&mut health);
+
+        assert_eq!(health.invalid_signature_count, 0);
+        assert_eq!(
+            health.last_error.as_deref(),
+            Some("signature verification worker unavailable")
+        );
+    }
+
     /// Reproducible real-corpus proof for #168.
     ///
     /// `NMP_CORPUS` is JSONL with one canonical event object per line. The
