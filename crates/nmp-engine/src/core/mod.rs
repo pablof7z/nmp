@@ -33,6 +33,9 @@ mod evidence;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use nostr::{
     Event as SignedEvent, EventId, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
@@ -516,6 +519,12 @@ pub struct EngineCore<S: EventStore> {
     /// the richer policy explicitly deferred here.
     store_degraded: Option<String>,
     transport_degraded: Option<String>,
+    /// Test-only work counters for the affected-handle invalidation
+    /// falsifier. Production pays no field or increment cost.
+    #[cfg(test)]
+    projection_store_queries: Cell<u64>,
+    #[cfg(test)]
+    router_compiles: Cell<u64>,
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
@@ -567,6 +576,10 @@ impl<S: EventStore> EngineCore<S> {
             discovered_private_relays_rejected: 0,
             store_degraded: None,
             transport_degraded: None,
+            #[cfg(test)]
+            projection_store_queries: Cell::new(0),
+            #[cfg(test)]
+            router_compiles: Cell::new(0),
         }
     }
 
@@ -2243,7 +2256,9 @@ impl<S: EventStore> EngineCore<S> {
         match self.resolver.ingest_observed_detailed(events) {
             Err(error) => self.degrade_store(error, effects),
             Ok(ingest) => {
-                let _delta = ingest.delta;
+                let demand_changed = !ingest.delta.is_empty();
+                let affected_handles = ingest.affected_handles;
+                let satisfied_pending = !ingest.satisfied_intents.is_empty();
                 for (intent_id, canonical) in ingest.satisfied_intents {
                     if let Some((receipt_id, pending)) = self
                         .pending
@@ -2256,11 +2271,34 @@ impl<S: EventStore> EngineCore<S> {
                         self.on_signed(receipt_id, canonical, effects);
                     }
                 }
+                let mut directory_changed = false;
                 for author in relay_list_authors {
-                    self.ingest_relay_list_winner(author, effects);
+                    directory_changed |= self.ingest_relay_list_winner(author, effects);
                 }
-                self.recompile(effects);
-                self.refresh_all_handles(effects);
+
+                // Ordinary committed rows do not change the active demand or
+                // router plan. Avoid rebuilding it on every EVENT batch; a
+                // resolver atom delta or an actual NIP-65 directory change is
+                // the evidence that routing may differ.
+                if demand_changed || directory_changed {
+                    self.recompile(effects);
+                } else {
+                    // Event counters are diagnostics facts even when the
+                    // demand/router plan is unchanged. Preserve the prior
+                    // observable update without paying a full router compile.
+                    effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+                }
+
+                // A demand/directory change may alter the capped source plan
+                // and therefore evidence for otherwise-unrelated handles;
+                // keep that path broad. The dominant ordinary-ingest path is
+                // exact: refresh only subscriptions whose root filter matches
+                // a changed row (or whose shared projection shape changed).
+                if demand_changed || directory_changed || satisfied_pending {
+                    self.refresh_all_handles(effects);
+                } else {
+                    self.refresh_handles(affected_handles, effects);
+                }
             }
         }
     }
@@ -2412,6 +2450,9 @@ impl<S: EventStore> EngineCore<S> {
     /// has no token to pass, so its `Req` arm always falls through to the
     /// plain-REQ branch below, every time.
     fn recompile(&mut self, effects: &mut Vec<Effect>) {
+        #[cfg(test)]
+        self.router_compiles
+            .set(self.router_compiles.get().saturating_add(1));
         self.sync_discovery(effects);
         let demand = self.resolver.active_demand();
         self.attribution.observe_demand(demand.iter());
@@ -2591,7 +2632,11 @@ impl<S: EventStore> EngineCore<S> {
     /// older copy that already lost the replaceable race at `insert` time
     /// can never overwrite the directory with worse data than what the
     /// store itself considers authoritative.
-    fn ingest_relay_list_winner(&mut self, author: nostr::PublicKey, effects: &mut Vec<Effect>) {
+    fn ingest_relay_list_winner(
+        &mut self,
+        author: nostr::PublicKey,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
             authors: Some(BTreeSet::from([author.to_hex()])),
@@ -2604,11 +2649,11 @@ impl<S: EventStore> EngineCore<S> {
             Ok(rows) => rows.into_iter().next(),
             Err(e) => {
                 self.degrade_store(e, effects);
-                return;
+                return false;
             }
         };
         let Some(winner) = winner else {
-            return;
+            return false;
         };
         // Relay admission (issue #121): these relays are DISCOVERED — parsed
         // straight off a network-sourced (validly-signed, but untrusted-
@@ -2637,10 +2682,17 @@ impl<S: EventStore> EngineCore<S> {
         self.discovered_private_relays_rejected = self
             .discovered_private_relays_rejected
             .saturating_add(write_rejected + read_rejected);
+        let author = author.to_hex();
+        let before_known = self.directory.knows_write_relays(&author);
+        let before_write = self.directory.write_relays(&author);
+        let before_read = self.directory.read_relays(&author);
         self.directory
-            .ingest_write_relays(author.to_hex(), write_relays);
+            .ingest_write_relays(author.clone(), write_relays);
         self.directory
-            .ingest_read_relays(author.to_hex(), read_relays);
+            .ingest_read_relays(author.clone(), read_relays);
+        before_known != self.directory.knows_write_relays(&author)
+            || before_write != self.directory.write_relays(&author)
+            || before_read != self.directory.read_relays(&author)
     }
 
     /// Open a real negentropy reconciliation for `filter` against `probed`
@@ -2878,8 +2930,22 @@ impl<S: EventStore> EngineCore<S> {
 
     fn refresh_all_handles(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<HandleId> = self.handles.keys().copied().collect();
+        self.refresh_handles(ids, effects);
+    }
+
+    fn refresh_handles(
+        &mut self,
+        ids: impl IntoIterator<Item = HandleId>,
+        effects: &mut Vec<Effect>,
+    ) {
         for id in ids {
-            self.refresh_handle(id, effects);
+            // The resolver also owns internal handles (notably the
+            // self-bootstrap discovery query). They participate in graph
+            // invalidation but have no app projection state here. Reject
+            // them before `refresh_handle` opens any store read.
+            if self.handles.contains_key(&id) {
+                self.refresh_handle(id, effects);
+            }
         }
     }
 
@@ -3021,6 +3087,9 @@ impl<S: EventStore> EngineCore<S> {
         let row_limit = effective_row_limit(&root_atoms);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
+            #[cfg(test)]
+            self.projection_store_queries
+                .set(self.projection_store_queries.get().saturating_add(1));
             let filter = atom.to_nostr();
             let rows = match row_limit {
                 Some(limit) => self.resolver.store().query_newest(&filter, limit)?,
@@ -3666,5 +3735,349 @@ mod relay_health_tests {
             core.diagnostics_snapshot().transport_degraded.as_deref(),
             Some("signature verification worker unavailable")
         );
+    }
+}
+
+#[cfg(test)]
+mod affected_handle_invalidation_tests {
+    use std::sync::{Arc, Mutex};
+
+    use nmp_grammar::IndexedTagName;
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    use super::*;
+
+    const HANDLE_COUNT: usize = 64;
+    const ROWS_PER_HANDLE: usize = 4;
+
+    #[derive(Clone, Default)]
+    struct CapturingSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
+
+    impl RowSink for CapturingSink {
+        fn on_rows(&self, rows: Vec<RowDelta>) {
+            self.0.lock().unwrap().push(rows);
+        }
+    }
+
+    fn room_event(keys: &Keys, room: usize, ordinal: usize, created_at: u64) -> SignedEvent {
+        EventBuilder::new(Kind::from(9u16), format!("room-{room}-event-{ordinal}"))
+            .tag(Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap())
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn room_query_for_kind(room: usize, kind: u16, limit: usize) -> LiveQuery {
+        LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([kind])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('h').unwrap(),
+                Binding::Literal(BTreeSet::from([format!("room-{room}")])),
+            )]),
+            limit: Some(limit),
+            ..Filter::default()
+        })
+    }
+
+    fn room_query(room: usize) -> LiveQuery {
+        room_query_for_kind(room, 9, 200)
+    }
+
+    #[test]
+    fn ordinary_room_batch_queries_only_the_matching_handle_and_skips_router_compile() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://affected-room.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+
+        let mut seed = Vec::new();
+        for room in 0..HANDLE_COUNT {
+            for ordinal in 0..ROWS_PER_HANDLE {
+                let event = room_event(
+                    &keys,
+                    room,
+                    ordinal,
+                    (room * ROWS_PER_HANDLE + ordinal + 1) as u64,
+                );
+                seed.push((
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(1u64)),
+                ));
+            }
+        }
+        core.resolver.store_mut().insert_batch(seed).unwrap();
+
+        let sinks: Vec<_> = (0..HANDLE_COUNT)
+            .map(|room| {
+                let sink = CapturingSink::default();
+                core.handle(EngineMsg::Subscribe(
+                    room_query(room),
+                    Box::new(sink.clone()),
+                ));
+                sink
+            })
+            .collect();
+
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        for sink in &sinks {
+            sink.0.lock().unwrap().clear();
+        }
+
+        let arriving = room_event(&keys, 17, 99, 50_000);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                arriving.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(50_001u64)),
+            )],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert_eq!(core.router_compiles.get(), 0);
+        for (room, sink) in sinks.iter().enumerate() {
+            let batches = sink.0.lock().unwrap();
+            if room == 17 {
+                assert_eq!(batches.len(), 1);
+                assert!(matches!(
+                    batches[0].as_slice(),
+                    [RowDelta::Added(row)] if row.event.id == arriving.id
+                ));
+            } else {
+                assert!(batches.is_empty(), "unrelated room {room} was refreshed");
+            }
+        }
+
+        // A byte-for-byte duplicate observation is a true no-op: no handle
+        // query and no router compile merely to rediscover that fact.
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        let mut duplicate_effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                arriving.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(50_001u64)),
+            )],
+            &mut duplicate_effects,
+        );
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.router_compiles.get(), 0);
+        assert!(duplicate_effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::EmitRows(..))));
+
+        // The same id from a genuinely new relay changes only provenance.
+        // It must re-query the one matching handle, emit SourcesGrew there,
+        // and still avoid both unrelated handles and router compilation.
+        for sink in &sinks {
+            sink.0.lock().unwrap().clear();
+        }
+        core.projection_store_queries.set(0);
+        core.router_compiles.set(0);
+        let second_relay = RelayUrl::parse("wss://second-room-source.example").unwrap();
+        let mut provenance_effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                arriving.clone(),
+                RelayObserved::new(second_relay.clone(), Timestamp::from(50_002u64)),
+            )],
+            &mut provenance_effects,
+        );
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert_eq!(core.router_compiles.get(), 0);
+        for (room, sink) in sinks.iter().enumerate() {
+            let batches = sink.0.lock().unwrap();
+            if room == 17 {
+                assert_eq!(batches.len(), 1);
+                assert!(matches!(
+                    batches[0].as_slice(),
+                    [RowDelta::SourcesGrew { id, sources }]
+                        if *id == arriving.id
+                            && *sources == BTreeSet::from([relay.clone(), second_relay.clone()])
+                ));
+            } else {
+                assert!(batches.is_empty(), "unrelated room {room} was refreshed");
+            }
+        }
+    }
+
+    #[test]
+    fn top_n_insert_queries_only_its_handle_and_emits_eviction_delta() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://top-n-affected.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let oldest = room_event(&keys, 7, 0, 10);
+        let retained = room_event(&keys, 7, 1, 20);
+        let unrelated = room_event(&keys, 8, 0, 10);
+        core.resolver
+            .store_mut()
+            .insert_batch(
+                [oldest.clone(), retained, unrelated]
+                    .into_iter()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(30u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+
+        let affected = CapturingSink::default();
+        let other = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(
+            room_query_for_kind(7, 9, 2),
+            Box::new(affected.clone()),
+        ));
+        core.handle(EngineMsg::Subscribe(
+            room_query_for_kind(8, 9, 2),
+            Box::new(other.clone()),
+        ));
+        affected.0.lock().unwrap().clear();
+        other.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+
+        let newest = room_event(&keys, 7, 2, 40);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                newest.clone(),
+                RelayObserved::new(relay, Timestamp::from(41u64)),
+            )],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 1);
+        let batches = affected.0.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == newest.id)));
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == oldest.id)));
+        assert!(other.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replaceable_supersession_invalidates_old_and_new_matches_only() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://replaceable-affected.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let replaceable = |room: usize, created_at: u64| {
+            EventBuilder::new(Kind::from(10_000u16), format!("winner-{room}"))
+                .tag(Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap())
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let old = replaceable(3, 10);
+        core.resolver
+            .store_mut()
+            .insert_batch(vec![(
+                old.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )])
+            .unwrap();
+
+        let old_sink = CapturingSink::default();
+        let new_sink = CapturingSink::default();
+        let unrelated_sink = CapturingSink::default();
+        for (room, sink) in [
+            (3, old_sink.clone()),
+            (4, new_sink.clone()),
+            (5, unrelated_sink.clone()),
+        ] {
+            core.handle(EngineMsg::Subscribe(
+                room_query_for_kind(room, 10_000, 10),
+                Box::new(sink.clone()),
+            ));
+            sink.0.lock().unwrap().clear();
+        }
+        core.projection_store_queries.set(0);
+
+        let new = replaceable(4, 20);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                new.clone(),
+                RelayObserved::new(relay, Timestamp::from(21u64)),
+            )],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 2);
+        assert!(matches!(
+            old_sink.0.lock().unwrap().as_slice(),
+            [batch] if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == old.id)
+        ));
+        assert!(matches!(
+            new_sink.0.lock().unwrap().as_slice(),
+            [batch] if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == new.id)
+        ));
+        assert!(unrelated_sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn kind_five_removed_row_invalidates_matching_handle_without_shape_luck() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://deletion-affected.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let target = room_event(&keys, 12, 0, 10);
+        core.resolver
+            .store_mut()
+            .insert_batch(vec![(
+                target.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )])
+            .unwrap();
+
+        let affected = CapturingSink::default();
+        let unrelated = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(
+            room_query(12),
+            Box::new(affected.clone()),
+        ));
+        core.handle(EngineMsg::Subscribe(
+            room_query(13),
+            Box::new(unrelated.clone()),
+        ));
+        affected.0.lock().unwrap().clear();
+        unrelated.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(target.id))
+            .custom_created_at(Timestamp::from(20u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(deletion, RelayObserved::new(relay, Timestamp::from(21u64)))],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert!(matches!(
+            affected.0.lock().unwrap().as_slice(),
+            [batch] if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == target.id)
+        ));
+        assert!(unrelated.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolver_internal_handle_is_filtered_before_any_projection_read() {
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let (internal, _delta) = core.resolver.subscribe(room_query(1)).unwrap();
+        core.projection_store_queries.set(0);
+
+        let mut effects = Vec::new();
+        core.refresh_handles([internal.id()], &mut effects);
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert!(effects.is_empty());
     }
 }
