@@ -23,13 +23,37 @@ final class NMPUIGalleryUITests: XCTestCase {
         keepScreenshot("live-proof")
     }
 
-    func testConformanceStatesExposeDeterministicFallbacks() {
+    func testPrimaryCatalogPassesVoiceOverAccessibilityAudit() throws {
+        try app.performAccessibilityAudit(
+            for: [
+                .elementDetection,
+                .hitRegion,
+                .sufficientElementDescription,
+                .textClipped,
+                .trait,
+            ]
+        )
+    }
+
+    func testConformanceStatesExposeDeterministicFallbacks() throws {
         app.tabBars.buttons["States"].tap()
         XCTAssertTrue(element("gallery.states.scripted").waitForExistence(timeout: 5))
 
         let scroll = app.scrollViews.firstMatch
         scroll.swipeUp()
         XCTAssertTrue(element("gallery.states.unknown-kind").waitForExistence(timeout: 5))
+
+        let dynamicTypeTitle = app.staticTexts["Accessibility Dynamic Type"]
+        var foundDynamicType = false
+        for _ in 0..<5 {
+            if dynamicTypeTitle.waitForExistence(timeout: 1) {
+                foundDynamicType = true
+                break
+            }
+            scroll.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(foundDynamicType)
+        try app.performAccessibilityAudit(for: [.textClipped])
 
         for _ in 0..<5 { scroll.swipeUp() }
         XCTAssertTrue(element("gallery.states.long-content").waitForExistence(timeout: 5))
@@ -73,7 +97,7 @@ final class NMPUIGalleryUITests: XCTestCase {
     }
 
     private func element(_ identifier: String) -> XCUIElement {
-        app.descendants(matching: .any)[identifier]
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
     private func keepScreenshot(_ name: String) {
