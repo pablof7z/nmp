@@ -355,6 +355,7 @@ private struct NMPReferenceClaimModifier: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
+#if compiler(>=6.0)
         if #available(iOS 18.0, macOS 15.0, *) {
             content
                 .onAppear { setClaimed(true) }
@@ -367,6 +368,11 @@ private struct NMPReferenceClaimModifier: ViewModifier {
                 .onAppear { setClaimed(true) }
                 .onDisappear { setClaimed(false) }
         }
+#else
+        content
+            .onAppear { setClaimed(true) }
+            .onDisappear { setClaimed(false) }
+#endif
     }
 
     private func setClaimed(_ isClaimed: Bool) {
