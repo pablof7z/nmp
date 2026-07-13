@@ -3021,10 +3021,11 @@ impl<S: EventStore> EngineCore<S> {
     /// `id` ASC (bytewise), the NIP-01 canonical newest-first order -- NOT
     /// every cached match. The authoritative cap lives HERE, at the handle
     /// projection, deliberately NOT in `EventStore::query` (which must keep
-    /// returning every current match: the resolver's `wide_concrete` KEEPS
-    /// `limit`, so Derived-node recompute / negentropy / ingest all push
-    /// limit-bearing filters into `query()` and rely on getting the FULL
-    /// match set -- truncating there would corrupt reactive recompute).
+    /// returning every current match: unlimited Derived-node recompute,
+    /// negentropy, and ingest callers rely on its FULL match set. Explicitly
+    /// limited Derived nodes use `query_newest` at their own projection seam;
+    /// that is a separate NIP-01 event-selection operation, not a mutation of
+    /// `query()`'s complete-set contract.
     /// For this projection alone, each root atom may be pre-bounded through
     /// `EventStore::query_newest`; taking N newest from each atom is exact
     /// because a row outside one atom's top N already has N newer witnesses

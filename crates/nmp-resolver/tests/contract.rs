@@ -202,12 +202,89 @@ fn bookmarks_filter() -> Filter {
     }
 }
 
+/// `kinds:[7], authors := Derived(inner=(kinds:[1], limit:N),
+/// project=Authors)` — a generic bounded interior projection. The limit
+/// selects events before their authors are projected.
+fn bounded_recent_authors_filter(limit: usize) -> Filter {
+    Filter {
+        kinds: Some(BTreeSet::from([7u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                limit: Some(limit),
+                ..Filter::default()
+            }),
+            project: Selector::Authors,
+        }))),
+        ..Filter::default()
+    }
+}
+
 fn dummy_event_id(seed: &str) -> nostr::EventId {
     let keys = Keys::generate();
     EventBuilder::new(Kind::TextNote, seed)
         .sign_with_keys(&keys)
         .unwrap()
         .id
+}
+
+#[test]
+fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
+    use nmp_resolver::testkit::{deletion, kind1};
+
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+    let d = Keys::generate();
+    let (_handle, _open_delta) =
+        h.subscribe(LiveQuery::from_filter(bounded_recent_authors_filter(2)));
+
+    let event_a = kind1(&a, "oldest", 100);
+    let event_b = kind1(&b, "middle", 200);
+    let event_c = kind1(&c, "newest", 300);
+    h.deliver(vec![event_a, event_b, event_c]);
+
+    let inner = ConcreteFilter {
+        kinds: Some(BTreeSet::from([1u16])),
+        limit: Some(2),
+        ..ConcreteFilter::default()
+    };
+    let outer_b = cf_kinds_authors(&[7], &[&b.public_key().to_hex()]);
+    let outer_c = cf_kinds_authors(&[7], &[&c.public_key().to_hex()]);
+    assert_eq!(
+        h.demand(),
+        BTreeSet::from([inner.clone(), outer_b.clone(), outer_c.clone()]),
+        "the older third event must not influence a limit:2 Derived set"
+    );
+
+    let event_d = kind1(&d, "new top", 400);
+    let event_d_id = event_d.id;
+    let delta = h.deliver(vec![event_d]);
+    let outer_d = cf_kinds_authors(&[7], &[&d.public_key().to_hex()]);
+    assert_eq!(
+        delta.ops,
+        vec![
+            DemandOp::Close(outbox_atom(outer_b.clone())),
+            DemandOp::Open(outbox_atom(outer_d.clone()))
+        ],
+        "a newer event evicts exactly the previous top-N floor"
+    );
+    assert_eq!(
+        h.demand(),
+        BTreeSet::from([inner.clone(), outer_c.clone(), outer_d.clone()])
+    );
+
+    let delta = h.deliver(vec![deletion(&d, &[event_d_id], 500)]);
+    assert_eq!(
+        delta.ops,
+        vec![
+            DemandOp::Close(outbox_atom(outer_d)),
+            DemandOp::Open(outbox_atom(outer_b.clone()))
+        ],
+        "retracting a top-N row pulls the next-newest event back in"
+    );
+    assert_eq!(h.demand(), BTreeSet::from([inner, outer_b, outer_c]));
 }
 
 // ---- 1. depth1_myfollows_surgical_delta ---------------------------------

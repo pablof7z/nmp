@@ -834,6 +834,23 @@ impl<S: EventStore> Engine<S> {
         Ok(acc.into_delta())
     }
 
+    /// Read the event set an interior projection is actually defined over.
+    /// An explicit NIP-01 limit selects the newest `N` events before the
+    /// closed [`nmp_grammar::Selector`] is applied; an unlimited filter still
+    /// needs the complete set. Keeping this distinction here prevents a bounded
+    /// `Derived` node from silently turning into an unbounded local scan.
+    fn projection_input_events(
+        &self,
+        filter: &ConcreteFilter,
+    ) -> Result<Vec<nostr::Event>, PersistenceError> {
+        let nostr_filter = filter.to_nostr();
+        let rows = match filter.limit {
+            Some(limit) => self.store.query_newest(&nostr_filter, limit)?,
+            None => self.store.query(&nostr_filter)?,
+        };
+        Ok(rows.into_iter().map(|stored| stored.event).collect())
+    }
+
     /// Recompute node `id`'s value from its (already-current) children.
     /// Returns whether the value changed. For a FilterNode, also diffs +
     /// applies its atom-set change into the global demand table via `acc`.
@@ -850,15 +867,7 @@ impl<S: EventStore> Engine<S> {
             }
             Node::Derived(n) => {
                 let new = match self.graph.wide_concrete(n.inner) {
-                    Some(cf) => {
-                        let events: Vec<nostr::Event> = self
-                            .store
-                            .query(&cf.to_nostr())?
-                            .into_iter()
-                            .map(|se| se.event)
-                            .collect();
-                        project_events(&events, &n.project)
-                    }
+                    Some(cf) => project_events(&self.projection_input_events(&cf)?, &n.project),
                     None => ResolvedSet::new(),
                 };
                 self.graph.set_derived_cached(id, new)
@@ -1033,15 +1042,7 @@ impl<S: EventStore> Engine<S> {
                     depth + 1,
                 )?;
                 let cached = match self.graph.wide_concrete(inner) {
-                    Some(cf) => {
-                        let events: Vec<nostr::Event> = self
-                            .store
-                            .query(&cf.to_nostr())?
-                            .into_iter()
-                            .map(|se| se.event)
-                            .collect();
-                        project_events(&events, &d.project)
-                    }
+                    Some(cf) => project_events(&self.projection_input_events(&cf)?, &d.project),
                     None => ResolvedSet::new(),
                 };
                 self.graph.insert(
