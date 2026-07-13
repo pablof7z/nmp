@@ -182,6 +182,13 @@ impl NmpEngine {
         Ok(())
     }
 
+    /// Return the account currently rooting reactive identity and unsigned
+    /// writes. The secret and signer capability remain engine-owned; native
+    /// callers receive only the public key needed for presentation.
+    pub fn active_account(&self) -> Result<Option<String>, FfiError> {
+        Ok(self.engine.active_account()?.map(|pubkey| pubkey.to_hex()))
+    }
+
     /// Observe the active account's relationship to `target` through the
     /// NMP-owned NIP-02 resource. The returned handle only owns demand
     /// cancellation; contact-list semantics and acquisition state stay in
@@ -681,6 +688,31 @@ mod tests {
                 "pre-acceptance rejection left journal residue in {table_name}"
             );
         }
+    }
+
+    #[test]
+    fn active_account_projects_the_rust_authority_and_closed_state() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+
+        assert_eq!(
+            engine.active_account().expect("engine is open"),
+            None,
+            "a new engine must remain read-only"
+        );
+        engine
+            .set_active_account(Some(pubkey.clone()))
+            .expect("account must activate");
+        assert_eq!(
+            engine.active_account().expect("engine is open"),
+            Some(pubkey)
+        );
+
+        engine.shutdown();
+        assert!(matches!(
+            engine.active_account(),
+            Err(FfiError::EngineClosed)
+        ));
     }
 
     /// #99: PR #97's FFI reattach coverage stopped at `reattachment_to_ffi`,
