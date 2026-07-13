@@ -59,7 +59,7 @@ fn is_connected(event: &PoolEvent) -> bool {
 }
 
 fn frame_contains(event: &PoolEvent, needle: &str) -> bool {
-    matches!(event, PoolEvent::Frame { frame, .. } if frame.as_message().as_json().contains(needle))
+    matches!(event, PoolEvent::Frame { frame, .. } if frame.clone().into_message().as_json().contains(needle))
 }
 
 /// Reserve an ephemeral TCP port by binding then immediately dropping the
@@ -599,7 +599,10 @@ async fn durable_event_resolves_written_exactly_once() {
         .expect("sign test event");
     let json = format!(r#"["EVENT",{}]"#, event.as_json());
     let correlation = AttemptCorrelation(1);
-    assert!(pool.send_durable(h, correlation, WireFrame::Text(json)));
+    assert_eq!(
+        pool.send_durable(h, correlation, WireFrame::Text(json)),
+        nmp_transport::DurableSendOutcome::Queued
+    );
 
     let first = recv_matching(
         &rx,

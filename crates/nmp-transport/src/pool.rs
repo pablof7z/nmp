@@ -16,7 +16,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nostr::{RelayMessage, RelayUrl};
+use nostr::{Event, RelayMessage, RelayUrl, SubscriptionId};
 
 use crate::handle::RelayHandle;
 use crate::health::RelayHealth;
@@ -74,17 +74,28 @@ pub enum HandoffResult {
     Ambiguous,
 }
 
+/// Immediate result of submitting one durable EVENT to a relay worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableSendOutcome {
+    Queued,
+    Resolved(HandoffResult),
+}
+
 /// One parsed, owned relay message off the wire.
 ///
-/// Text is parsed exactly once at the transport boundary. The signature gate
-/// inspects an `EVENT` through [`Self::as_message`] and the engine consumes the
-/// same owned value through [`Self::into_message`]; neither layer reparses or
-/// reserializes its JSON. Keepalive `Ping`/`Pong`, binary messages, and the
+/// Text is parsed exactly once at the transport boundary. EVENT payloads move
+/// immediately into an [`Arc`], so signature workers and the engine share the
+/// same parsed allocation instead of deep-cloning content and tags. Keepalive
+/// `Ping`/`Pong`, binary messages, and the
 /// WebSocket `Close` frame never reach this type — they are consumed by the
 /// worker's keepalive FSM / surfaced instead as [`PoolEvent::Disconnected`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelayFrame {
-    message: Box<RelayMessage<'static>>,
+pub enum RelayFrame {
+    Event {
+        subscription_id: SubscriptionId,
+        event: Arc<Event>,
+    },
+    Message(Box<RelayMessage<'static>>),
 }
 
 impl RelayFrame {
@@ -95,21 +106,55 @@ impl RelayFrame {
     /// single JSON parse.
     #[must_use]
     pub fn from_message(message: RelayMessage<'static>) -> Self {
-        Self {
-            message: Box::new(message),
+        match message {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } => Self::Event {
+                subscription_id: subscription_id.into_owned(),
+                event: Arc::new(event.into_owned()),
+            },
+            message => Self::Message(Box::new(message)),
         }
     }
 
-    /// Borrow the parsed message without cloning its event payload.
+    /// Borrow an EVENT payload through its shared parsed allocation.
     #[must_use]
-    pub fn as_message(&self) -> &RelayMessage<'static> {
-        self.message.as_ref()
+    pub fn event(&self) -> Option<&Arc<Event>> {
+        match self {
+            Self::Event { event, .. } => Some(event),
+            Self::Message(_) => None,
+        }
     }
 
-    /// Move the parsed message into the engine without another parse or clone.
+    /// Move an EVENT into the engine, normally without cloning.
+    ///
+    /// The translator drops every temporary verifier reference before sink
+    /// delivery, making `Arc::try_unwrap` the production path. The clone is a
+    /// defensive fallback for public callers that retained a frame clone.
+    pub fn into_event(self) -> Result<Event, Self> {
+        match self {
+            Self::Event { event, .. } => {
+                Ok(Arc::try_unwrap(event).unwrap_or_else(|event| event.as_ref().clone()))
+            }
+            other => Err(other),
+        }
+    }
+
+    /// Reconstitute the typed relay message. Engine EVENT ingest should prefer
+    /// [`Self::into_event`] so its hot path can unwrap the shared allocation.
     #[must_use]
     pub fn into_message(self) -> RelayMessage<'static> {
-        *self.message
+        match self {
+            Self::Event {
+                subscription_id,
+                event,
+            } => RelayMessage::event(
+                subscription_id,
+                Arc::try_unwrap(event).unwrap_or_else(|event| event.as_ref().clone()),
+            ),
+            Self::Message(message) => *message,
+        }
     }
 }
 
@@ -211,6 +256,10 @@ pub struct PoolConfig {
     pub verified_cache_capacity: usize,
     /// Maximum worker events drained into one ordered verification batch.
     pub max_verify_batch: usize,
+    /// Maximum typed relay frames handed to the engine/store in one batch.
+    /// This separately caps transaction size even if producers continuously
+    /// refill the bounded event queue while the bridge is draining it.
+    pub max_engine_batch: usize,
     /// Override for the keepalive idle threshold; `None` uses the
     /// production default ([`crate::keepalive::KEEPALIVE_IDLE_THRESHOLD`]).
     /// Tests on millisecond budgets pass a small value.
@@ -245,6 +294,7 @@ impl Default for PoolConfig {
             verifier_queue_capacity: 64,
             verified_cache_capacity: 65_536,
             max_verify_batch: 128,
+            max_engine_batch: 128,
             keepalive_idle: None,
             keepalive_pong_timeout: None,
             reconnect_delay_initial: None,
@@ -316,25 +366,21 @@ impl Pool {
     /// (`NotHandedOff` if still queued, `Ambiguous` if a write was accepted
     /// but never confirmed flushed) rather than silently requeuing it.
     ///
-    /// The returned `bool` mirrors [`Self::send`]'s (`true` iff handed to a
-    /// live worker's outbound queue) but is NOT the authoritative answer —
-    /// the caller must watch for `PoolEvent::EventHandoff{correlation, ..}`
-    /// either way. A stale handle or a worker whose command channel has
-    /// already disconnected resolves the correlation synchronously, right
-    /// here, as `NotHandedOff` (provably true: it never reached any live
-    /// worker at all) — the caller never needs a separate "did `false` mean
-    /// I should treat this as resolved" branch.
+    /// [`DurableSendOutcome::Queued`] means the worker now owns the attempt
+    /// and will later emit exactly one [`PoolEvent::EventHandoff`]. A stale
+    /// handle, reserved binary frame, or disconnected command channel returns
+    /// [`DurableSendOutcome::Resolved`] immediately, so the engine resolves
+    /// it locally rather than sending back into its own bounded pool queue.
     pub fn send_durable(
         &self,
         h: RelayHandle,
         correlation: AttemptCorrelation,
         frame: WireFrame,
-    ) -> bool {
+    ) -> DurableSendOutcome {
         let WireFrame::Text(text) = frame else {
-            self.resolve_not_handed_off(correlation);
-            return false; // Binary is reserved; no wire-emittable path yet.
+            return DurableSendOutcome::Resolved(HandoffResult::NotHandedOff);
         };
-        let outcome = match self.inner.lock() {
+        match self.inner.lock() {
             Ok(guard) => match guard.command_tx_for(h) {
                 Some(worker) => {
                     let handed_off = worker.push(worker::WorkerCommand::SendDurable {
@@ -343,50 +389,25 @@ impl Pool {
                         frame: text,
                     });
                     if handed_off {
-                        None
+                        DurableSendOutcome::Queued
                     } else {
-                        Some(guard.sink())
+                        DurableSendOutcome::Resolved(HandoffResult::NotHandedOff)
                     }
                 }
-                None => Some(guard.sink()),
+                None => DurableSendOutcome::Resolved(HandoffResult::NotHandedOff),
             },
-            Err(poisoned) => Some(poisoned.into_inner().sink()),
-        };
-        match outcome {
-            Some(sink) => {
-                sink.on_event(PoolEvent::EventHandoff {
-                    correlation,
-                    result: HandoffResult::NotHandedOff,
-                });
-                false
-            }
-            None => true,
+            Err(_) => DurableSendOutcome::Resolved(HandoffResult::NotHandedOff),
         }
     }
 
-    /// Synchronously resolve `correlation` as `NotHandedOff` when the frame
-    /// could not even be considered for handoff (e.g. a non-text `WireFrame`
-    /// — reserved, never wire-emittable today). Mirrors the stale-handle
-    /// path in [`Self::send_durable`] so every call resolves exactly once
-    /// regardless of which early-return fires.
-    fn resolve_not_handed_off(&self, correlation: AttemptCorrelation) {
-        let sink = match self.inner.lock() {
-            Ok(guard) => guard.sink(),
-            Err(poisoned) => poisoned.into_inner().sink(),
-        };
-        sink.on_event(PoolEvent::EventHandoff {
-            correlation,
-            result: HandoffResult::NotHandedOff,
-        });
-    }
-
-    /// Close the slot for `h`. No-op if the handle is stale or the slot was
-    /// already closed. A subsequent [`Self::ensure_open`] for the same URL
-    /// reopens with a bumped generation.
-    pub fn close(&self, h: RelayHandle) -> bool {
+    /// Close the slot for `h` and return its synchronous disconnect fact.
+    /// A stale/already-closed handle returns `None`. The fact is returned,
+    /// never delivered through the blocking pool sink while `PoolInner` is
+    /// locked. A subsequent [`Self::ensure_open`] reopens a fresh generation.
+    pub fn close(&self, h: RelayHandle) -> Option<PoolEvent> {
         match self.inner.lock() {
             Ok(mut guard) => guard.close(h),
-            Err(_) => false,
+            Err(_) => None,
         }
     }
 

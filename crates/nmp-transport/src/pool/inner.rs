@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event, EventId, RelayMessage, RelayUrl};
+use nostr::{Event, EventId, RelayUrl};
 
 use crate::handle::RelayHandle;
 use crate::health::{ConnState, RelayHealth};
@@ -245,18 +245,6 @@ impl PoolInner {
         state.worker.as_ref()
     }
 
-    /// Clone the sink handle. Used by [`super::Pool::send_durable`] to
-    /// resolve an [`super::AttemptCorrelation`] synchronously as
-    /// `NotHandedOff` when the frame never even reaches a live worker's
-    /// command channel — the sink itself outlives every slot (dropped only
-    /// by [`Self::shutdown`], by which point no caller can still be racing
-    /// a `send_durable`, since `Pool::shutdown` joins the translator and the
-    /// pool is `Arc`-shared, so any in-flight `send_durable` call already
-    /// holds its own clone of this `Arc` before the lock is ever released).
-    pub(super) fn sink(&self) -> Arc<dyn PoolEventSink> {
-        Arc::clone(&self.sink)
-    }
-
     pub(super) fn set_reconnect_preamble_for(&self, h: RelayHandle, frames: Vec<String>) -> bool {
         match self.command_tx_for(h) {
             Some(worker) => worker.push(WorkerCommand::SetReconnectPreamble(frames)),
@@ -272,25 +260,21 @@ impl PoolInner {
         Some(state.health.clone())
     }
 
-    /// Close the slot for `h`. Pushes `PoolEvent::Disconnected` synchronously
-    /// — the pool already knows the outcome, no need to wait on the worker.
-    pub(super) fn close(&mut self, h: RelayHandle) -> bool {
-        let Some(state) = self.slots.get_mut(h.slot as usize) else {
-            return false;
-        };
+    /// Close the slot for `h` and return its synchronous disconnect fact.
+    /// Sink delivery is intentionally the caller's responsibility so no
+    /// blocking bounded send can occur while `PoolInner` is locked.
+    pub(super) fn close(&mut self, h: RelayHandle) -> Option<PoolEvent> {
+        let state = self.slots.get_mut(h.slot as usize)?;
         if state.generation != h.generation {
-            return false;
+            return None;
         }
-        let Some(worker) = state.worker.take() else {
-            return false;
-        };
+        let worker = state.worker.take()?;
         worker.push(WorkerCommand::Shutdown);
         state.health.state = ConnState::Disconnected;
-        self.sink.on_event(PoolEvent::Disconnected {
+        Some(PoolEvent::Disconnected {
             slot: h.slot,
             reason: DisconnectReason::Closed,
-        });
-        true
+        })
     }
 
     /// Tear down every open worker, hand back the translator's `JoinHandle`
@@ -298,16 +282,12 @@ impl PoolInner {
     /// `PoolInner` per event; joining while holding the lock deadlocks).
     pub(super) fn shutdown(&mut self) -> Option<JoinHandle<()>> {
         self.shutdown = true;
-        for (slot_id, state) in self.slots.iter_mut().enumerate() {
+        for state in &mut self.slots {
             let Some(worker) = state.worker.take() else {
                 continue;
             };
             worker.push(WorkerCommand::Shutdown);
             state.health.state = ConnState::Disconnected;
-            self.sink.on_event(PoolEvent::Disconnected {
-                slot: slot_id as u32,
-                reason: DisconnectReason::ShuttingDown,
-            });
         }
         // Drop the pool's own long-lived `Sender<WorkerEvent>` clone. Every
         // worker thread also holds a clone but each exits promptly after
@@ -339,7 +319,7 @@ fn translator_loop(
     worker_event_rx: &std::sync::mpsc::Receiver<WorkerEvent>,
     config: &PoolConfig,
 ) {
-    let verifier = VerifierPool::new(
+    let mut verifier = VerifierPool::new(
         configured_verifier_workers(config.verifier_workers),
         config.verifier_queue_capacity,
     );
@@ -349,10 +329,10 @@ fn translator_loop(
         let mut events = vec![event];
         events.extend(worker_event_rx.try_iter().take(max_batch - 1));
         let Ok(guard) = inner.lock() else { break };
-        let current: Vec<_> = events
-            .iter()
-            .map(|event| frame_is_current(&guard, event))
-            .collect();
+        // Project generation changes in FIFO order without mutating the real
+        // slots. A reconnect worker emits Connected before its first Frame;
+        // planning both in one batch must therefore see the frame as current.
+        let current = planned_currentness(&guard, &events);
         drop(guard);
 
         // Build the finite crypto plan without holding PoolInner. Known ids
@@ -371,16 +351,16 @@ fn translator_loop(
                 let WorkerEventKind::Frame(frame) = &event.kind else {
                     return VerificationPlan::Pass;
                 };
-                let RelayMessage::Event { event, .. } = frame.as_message() else {
+                let Some(event) = frame.event() else {
                     return VerificationPlan::Pass;
                 };
-                if let Some(known) = verified.get(&event.id) {
-                    return VerificationPlan::Known(known);
+                if let Some(plan) = cached_frame_plan(&verified, frame) {
+                    return plan;
                 }
                 let pair = (event.id, event.sig);
                 let candidate = *candidate_by_pair.entry(pair).or_insert_with(|| {
                     let index = candidates.len();
-                    candidates.push(Arc::new(event.as_ref().clone()));
+                    candidates.push(Arc::clone(event));
                     index
                 });
                 VerificationPlan::Candidate(candidate)
@@ -409,6 +389,9 @@ fn translator_loop(
                             candidate_results[candidate],
                         ))
                     }
+                    (WorkerEventKind::Frame(_), VerificationPlan::InvalidId) => {
+                        Some(FrameVerdict::RejectMisbehavior)
+                    }
                     (WorkerEventKind::Frame(_), VerificationPlan::Pass) => {
                         Some(FrameVerdict::Accept)
                     }
@@ -429,6 +412,9 @@ fn translator_loop(
         // off-lock delivery discipline).
         let sink = Arc::clone(&guard.sink);
         drop(guard);
+        // Release verifier references before sink delivery so the engine can
+        // unwrap each frame's Arc<Event> without cloning content or tags.
+        drop(candidates);
         for pool_event in pool_events {
             sink.on_event(pool_event);
         }
@@ -449,12 +435,24 @@ fn configured_verifier_workers(_configured: usize) -> usize {
     1
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerificationPlan {
     Stale,
     Pass,
+    InvalidId,
     Known(Signature),
     Candidate(usize),
+}
+
+fn cached_frame_plan(
+    verified: &VerifiedEventCache,
+    frame: &super::RelayFrame,
+) -> Option<VerificationPlan> {
+    let event = frame.event()?;
+    if !event.verify_id() {
+        return Some(VerificationPlan::InvalidId);
+    }
+    verified.get(&event.id).map(VerificationPlan::Known)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,10 +498,7 @@ impl VerifiedEventCache {
 }
 
 fn event_signature(frame: &super::RelayFrame) -> Option<Signature> {
-    match frame.as_message() {
-        RelayMessage::Event { event, .. } => Some(event.sig),
-        _ => None,
-    }
+    frame.event().map(|event| event.sig)
 }
 
 fn resolve_candidate_verdict(
@@ -511,20 +506,21 @@ fn resolve_candidate_verdict(
     frame: &super::RelayFrame,
     cryptographically_valid: VerificationOutcome,
 ) -> FrameVerdict {
-    let RelayMessage::Event { event, .. } = frame.as_message() else {
+    let Some(event) = frame.event() else {
         unreachable!("only EVENT frames receive candidate plans")
     };
-    match verified.get(&event.id) {
-        Some(known) if known == event.sig => FrameVerdict::Accept,
-        Some(_) => FrameVerdict::RejectMisbehavior,
-        None if cryptographically_valid == VerificationOutcome::Valid => {
+    match (verified.get(&event.id), cryptographically_valid) {
+        (Some(known), VerificationOutcome::Valid) if known == event.sig => FrameVerdict::Accept,
+        (Some(_), VerificationOutcome::Valid | VerificationOutcome::Invalid) => {
+            FrameVerdict::RejectMisbehavior
+        }
+        (Some(_), VerificationOutcome::Unavailable) => FrameVerdict::RejectUnavailable,
+        (None, VerificationOutcome::Valid) => {
             verified.insert(event.id, event.sig);
             FrameVerdict::Accept
         }
-        None if cryptographically_valid == VerificationOutcome::Invalid => {
-            FrameVerdict::RejectMisbehavior
-        }
-        None => FrameVerdict::RejectUnavailable,
+        (None, VerificationOutcome::Invalid) => FrameVerdict::RejectMisbehavior,
+        (None, VerificationOutcome::Unavailable) => FrameVerdict::RejectUnavailable,
     }
 }
 
@@ -538,6 +534,39 @@ fn frame_is_current(inner: &PoolInner, event: &WorkerEvent) -> bool {
     state.worker.is_some()
         && worker_id_of(event.generation) == worker_id_of(state.generation)
         && event.generation == state.generation
+}
+
+fn planned_currentness(inner: &PoolInner, events: &[WorkerEvent]) -> Vec<bool> {
+    let mut planned_generations: HashMap<u32, u64> = inner
+        .slots
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, state)| {
+            state
+                .worker
+                .as_ref()
+                .map(|_| (slot as u32, state.generation))
+        })
+        .collect();
+    events
+        .iter()
+        .map(|event| {
+            let baseline = planned_generations.get(&event.slot).copied();
+            match &event.kind {
+                WorkerEventKind::Connected
+                    if baseline.is_some_and(|generation| {
+                        worker_id_of(generation) == worker_id_of(event.generation)
+                            && event.generation >= generation
+                    }) =>
+                {
+                    planned_generations.insert(event.slot, event.generation);
+                    true
+                }
+                WorkerEventKind::Frame(_) => baseline == Some(event.generation),
+                _ => true,
+            }
+        })
+        .collect()
 }
 
 /// Apply one [`WorkerEvent`] to its slot and build the outbound
@@ -562,10 +591,8 @@ fn frame_is_current(inner: &PoolInner, event: &WorkerEvent) -> bool {
 #[cfg(test)]
 fn apply_worker_event(inner: &mut PoolInner, event: WorkerEvent) -> Option<PoolEvent> {
     let verdict = match &event.kind {
-        WorkerEventKind::Frame(frame) => Some(match frame.as_message() {
-            RelayMessage::Event { event, .. } if event.verify().is_err() => {
-                FrameVerdict::RejectMisbehavior
-            }
+        WorkerEventKind::Frame(frame) => Some(match frame.event() {
+            Some(event) if event.verify().is_err() => FrameVerdict::RejectMisbehavior,
             _ => FrameVerdict::Accept,
         }),
         _ => None,
@@ -734,7 +761,7 @@ mod tests {
         assert!(matches!(connected, Some(PoolEvent::Connected { .. })));
 
         // Close, then reopen — a new worker instance, new generation.
-        assert!(guard.close(h1));
+        assert!(guard.close(h1).is_some());
         let h2 = guard.ensure_open(&url);
         assert_ne!(
             h1.generation, h2.generation,
@@ -834,7 +861,7 @@ mod tests {
 
         // Closing one relay frees a slot in the live budget; the next new
         // relay is admitted again.
-        assert!(guard.close(hb));
+        assert!(guard.close(hb).is_some());
         let hc2 = guard.ensure_open(&c);
         assert_ne!(hc2.slot, u32::MAX, "a freed slot lets a new relay in again");
         assert_eq!(
@@ -1020,6 +1047,86 @@ mod tests {
     }
 
     #[test]
+    fn cached_id_signature_cannot_admit_mutated_event_payload() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::TextNote, "canonical")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut cache = VerifiedEventCache::new(4);
+        cache.insert(event.id, event.sig);
+
+        let valid = crate::pool::RelayFrame::from(nostr::RelayMessage::event(
+            nostr::SubscriptionId::new("s"),
+            event.clone(),
+        ));
+        assert_eq!(
+            cached_frame_plan(&cache, &valid),
+            Some(VerificationPlan::Known(event.sig))
+        );
+
+        let mut mutated = event;
+        mutated.content.push_str("-forged");
+        let mutated = crate::pool::RelayFrame::from(nostr::RelayMessage::event(
+            nostr::SubscriptionId::new("s"),
+            mutated,
+        ));
+        assert_eq!(
+            cached_frame_plan(&cache, &mutated),
+            Some(VerificationPlan::InvalidId)
+        );
+
+        let mut valid_first = VerifiedEventCache::new(4);
+        assert_eq!(
+            resolve_candidate_verdict(&mut valid_first, &valid, VerificationOutcome::Valid),
+            FrameVerdict::Accept
+        );
+        assert_eq!(
+            resolve_candidate_verdict(&mut valid_first, &mutated, VerificationOutcome::Invalid),
+            FrameVerdict::RejectMisbehavior,
+            "a prior valid cache insert cannot override this payload's failed proof"
+        );
+
+        let mut invalid_first = VerifiedEventCache::new(4);
+        assert_eq!(
+            resolve_candidate_verdict(&mut invalid_first, &mutated, VerificationOutcome::Invalid),
+            FrameVerdict::RejectMisbehavior
+        );
+        assert_eq!(
+            resolve_candidate_verdict(&mut invalid_first, &valid, VerificationOutcome::Valid),
+            FrameVerdict::Accept,
+            "an invalid sibling cannot poison the later valid payload"
+        );
+    }
+
+    #[test]
+    fn same_batch_connected_transition_makes_following_frame_current() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+        let handle = guard.ensure_open(&url);
+        let connected_generation = pack_generation(worker_id_of(handle.generation), 1);
+        let events = vec![
+            WorkerEvent {
+                slot: handle.slot,
+                generation: connected_generation,
+                kind: WorkerEventKind::Connected,
+            },
+            WorkerEvent {
+                slot: handle.slot,
+                generation: connected_generation,
+                kind: WorkerEventKind::Frame(crate::pool::RelayFrame::from(
+                    nostr::RelayMessage::notice("after reconnect"),
+                )),
+            },
+        ];
+
+        assert_eq!(planned_currentness(&guard, &events), vec![true, true]);
+        guard.shutdown();
+    }
+
+    #[test]
     fn verification_cache_is_strictly_bounded_and_eviction_only_forgets() {
         use nostr::{EventBuilder, Keys, Kind};
 
@@ -1061,7 +1168,7 @@ mod tests {
         let url = RelayUrl::parse("wss://relay.example").unwrap();
 
         let h1 = guard.ensure_open(&url);
-        assert!(guard.close(h1));
+        assert!(guard.close(h1).is_some());
         let _h2 = guard.ensure_open(&url);
 
         let delivered = apply_worker_event(
@@ -1131,27 +1238,15 @@ mod tests {
         let pool = Pool::new(PoolConfig::default(), tx);
         let url = RelayUrl::parse("wss://relay.example").unwrap();
         let h1 = pool.ensure_open(&url);
-        pool.close(h1);
+        assert!(pool.close(h1).is_some());
 
         let correlation = AttemptCorrelation(42);
-        let handed_off = pool.send_durable(h1, correlation, WireFrame::Text("[]".into()));
-        assert!(!handed_off);
-
-        // Drain events until the handoff resolution shows up -- `close`
-        // also emits a synchronous `Disconnected` first.
-        let mut found = None;
-        for event in rx.iter().take(4) {
-            if let PoolEvent::EventHandoff {
-                correlation: c,
-                result,
-            } = event
-            {
-                assert_eq!(c, correlation);
-                found = Some(result);
-                break;
-            }
-        }
-        assert!(matches!(found, Some(HandoffResult::NotHandedOff)));
+        let outcome = pool.send_durable(h1, correlation, WireFrame::Text("[]".into()));
+        assert_eq!(
+            outcome,
+            crate::pool::DurableSendOutcome::Resolved(HandoffResult::NotHandedOff)
+        );
+        assert!(rx.try_recv().is_err(), "immediate resolution stays local");
         pool.shutdown();
     }
 
@@ -1170,21 +1265,18 @@ mod tests {
         .join();
 
         let correlation = crate::pool::AttemptCorrelation(99);
-        assert!(!pool.send_durable(
-            RelayHandle {
-                slot: u32::MAX,
-                generation: 0,
-            },
-            correlation,
-            WireFrame::Text("[]".into()),
-        ));
-        assert!(matches!(
-            rx.recv_timeout(std::time::Duration::from_secs(1)),
-            Ok(PoolEvent::EventHandoff {
-                correlation: found,
-                result: crate::pool::HandoffResult::NotHandedOff,
-            }) if found == correlation
-        ));
+        assert_eq!(
+            pool.send_durable(
+                RelayHandle {
+                    slot: u32::MAX,
+                    generation: 0,
+                },
+                correlation,
+                WireFrame::Text("[]".into()),
+            ),
+            crate::pool::DurableSendOutcome::Resolved(crate::pool::HandoffResult::NotHandedOff)
+        );
+        assert!(rx.try_recv().is_err());
 
         inner.clear_poison();
         pool.shutdown();

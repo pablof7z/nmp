@@ -92,11 +92,13 @@ public struct DiagnosticsSnapshot: Sendable {
     public let relays: [RelayDiagnostics]
     public let uncoveredAuthorCount: UInt32
     public let droppedMergeRules: [String]
+    public let transportDegraded: String?
 
     init(_ ffi: FfiDiagnosticsSnapshot) {
         relays = ffi.relays.map(RelayDiagnostics.init)
         uncoveredAuthorCount = ffi.uncoveredAuthorCount
         droppedMergeRules = ffi.droppedMergeRules
+        transportDegraded = ffi.transportDegraded
     }
 
     /// A default empty snapshot -- used as the initial value of
@@ -105,10 +107,12 @@ public struct DiagnosticsSnapshot: Sendable {
     public init(
         relays: [RelayDiagnostics] = [],
         uncoveredAuthorCount: UInt32 = 0,
-        droppedMergeRules: [String] = []
+        droppedMergeRules: [String] = [],
+        transportDegraded: String? = nil
     ) {
         self.relays = relays
         self.uncoveredAuthorCount = uncoveredAuthorCount
         self.droppedMergeRules = droppedMergeRules
+        self.transportDegraded = transportDegraded
     }
 }

@@ -60,10 +60,11 @@
 mod diagnostics_channel;
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
@@ -71,7 +72,7 @@ use nmp_signer::{SignerOp, SigningCapability};
 use nmp_store::EventStore;
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp};
 
-use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
+use nmp_transport::{DurableSendOutcome, Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
@@ -82,6 +83,26 @@ use nmp_grammar::WriteIntent;
 
 pub use diagnostics_channel::LatestReceiver;
 use diagnostics_channel::{latest_channel, LatestSender};
+
+#[derive(Clone)]
+struct EnginePoolSink {
+    events: cb::Sender<PoolEvent>,
+    stopping: cb::Receiver<()>,
+}
+
+struct EnginePoolRuntime {
+    pool: Pool,
+    stop: cb::Sender<()>,
+}
+
+impl nmp_transport::PoolEventSink for EnginePoolSink {
+    fn on_event(&self, event: PoolEvent) {
+        cb::select_biased! {
+            recv(self.stopping) -> _ => {}
+            send(self.events, event) -> _ => {}
+        }
+    }
+}
 
 /// One delivered batch for a live subscription: raw rows + the query's
 /// per-source acquisition evidence (see the module doc's "two delivery
@@ -188,7 +209,7 @@ enum Cmd {
     /// propagating store/engine pressure back into the bounded pool queues.
     RelayBatch {
         frames: Vec<(nmp_transport::RelayHandle, nmp_transport::RelayFrame)>,
-        applied: SyncSender<()>,
+        applied: cb::Sender<()>,
     },
     Subscribe {
         query: LiveQuery,
@@ -290,24 +311,45 @@ impl EngineThread {
         D: RelayDirectory + Send + 'static,
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let max_engine_batch = pool_config.max_engine_batch.max(1);
         let (pool_evt_tx, pool_evt_rx) =
-            mpsc::sync_channel::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
+            cb::bounded::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
+        let (pool_stop_tx, pool_stop_rx) = cb::bounded::<()>(0);
         // The pool's OWN mio worker threads + translator thread are interior
         // to `Pool` (harvested, HARVEST-justified in nmp-transport's own
         // docs) — this crate never touches mio/tungstenite directly.
-        let pool = Pool::new(pool_config, pool_evt_tx);
+        let pool = Pool::new(
+            pool_config,
+            EnginePoolSink {
+                events: pool_evt_tx,
+                stopping: pool_stop_rx.clone(),
+            },
+        );
 
         let bridge_inbox = cmd_tx.clone();
         let bridge_join = thread::Builder::new()
             .name("nmp-engine-pool-bridge".to_string())
-            .spawn(move || pool_bridge_loop(&pool_evt_rx, &bridge_inbox))
+            .spawn(move || {
+                pool_bridge_loop(&pool_evt_rx, &pool_stop_rx, &bridge_inbox, max_engine_batch)
+            })
             .expect("nmp-engine: pool-bridge thread spawn must succeed");
 
         let self_inbox = cmd_tx.clone();
         let engine_join = thread::Builder::new()
             .name("nmp-engine".to_string())
             .spawn(move || {
-                engine_loop(store, directory, cap, admission, pool, &cmd_rx, &self_inbox)
+                engine_loop(
+                    store,
+                    directory,
+                    cap,
+                    admission,
+                    EnginePoolRuntime {
+                        pool,
+                        stop: pool_stop_tx,
+                    },
+                    &cmd_rx,
+                    &self_inbox,
+                )
             })
             .expect("nmp-engine: engine thread spawn must succeed");
 
@@ -357,19 +399,33 @@ fn duration_until(deadline: Timestamp, now: Timestamp) -> Duration {
 /// thread's inbox. Exits as soon as `pool_evt_rx` disconnects, which only
 /// happens once every clone of the pool's sink is gone (see `EngineThread::
 /// join`'s doc).
-fn pool_bridge_loop(pool_evt_rx: &Receiver<PoolEvent>, engine_inbox: &Sender<Cmd>) {
-    while let Ok(event) = pool_evt_rx.recv() {
+fn pool_bridge_loop(
+    pool_evt_rx: &cb::Receiver<PoolEvent>,
+    stopping: &cb::Receiver<()>,
+    engine_inbox: &Sender<Cmd>,
+    max_engine_batch: usize,
+) {
+    loop {
+        let event = cb::select_biased! {
+            recv(stopping) -> _ => break,
+            recv(pool_evt_rx) -> event => match event {
+                Ok(event) => event,
+                Err(_) => break,
+            },
+        };
         if let PoolEvent::Frame { handle, frame } = event {
             let mut frames = vec![(handle, frame)];
             let trailing = loop {
+                if frames.len() == max_engine_batch {
+                    break None;
+                }
                 match pool_evt_rx.try_recv() {
                     Ok(PoolEvent::Frame { handle, frame }) => frames.push((handle, frame)),
                     Ok(other) => break Some(other),
-                    Err(TryRecvError::Empty) => break None,
-                    Err(TryRecvError::Disconnected) => break None,
+                    Err(cb::TryRecvError::Empty | cb::TryRecvError::Disconnected) => break None,
                 }
             };
-            let (applied_tx, applied_rx) = mpsc::sync_channel(1);
+            let (applied_tx, applied_rx) = cb::bounded(1);
             if engine_inbox
                 .send(Cmd::RelayBatch {
                     frames,
@@ -379,7 +435,11 @@ fn pool_bridge_loop(pool_evt_rx: &Receiver<PoolEvent>, engine_inbox: &Sender<Cmd
             {
                 break;
             }
-            if applied_rx.recv().is_err() {
+            let applied = cb::select_biased! {
+                recv(stopping) -> _ => false,
+                recv(applied_rx) -> result => result.is_ok(),
+            };
+            if !applied {
                 break;
             }
             if let Some(trailing) = trailing.and_then(translate_pool_event) {
@@ -400,7 +460,7 @@ fn pool_bridge_loop(pool_evt_rx: &Receiver<PoolEvent>, engine_inbox: &Sender<Cmd
 #[cfg(test)]
 mod pool_bridge_tests {
     use super::*;
-    use nmp_transport::{RelayFrame, RelayHandle};
+    use nmp_transport::{PoolEventSink, RelayFrame, RelayHandle};
     use nostr::RelayMessage;
 
     fn notice_frame(text: &str) -> RelayFrame {
@@ -409,9 +469,10 @@ mod pool_bridge_tests {
 
     #[test]
     fn bridge_waits_for_applied_ack_before_enqueuing_another_relay_batch() {
-        let (pool_tx, pool_rx) = mpsc::channel();
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &cmd_tx));
+        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128));
         let handle = RelayHandle {
             slot: 1,
             generation: 2,
@@ -438,7 +499,7 @@ mod pool_bridge_tests {
             })
             .unwrap();
         assert!(
-            matches!(cmd_rx.try_recv(), Err(TryRecvError::Empty)),
+            matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "a second relay batch cannot enter the engine inbox before ack"
         );
 
@@ -452,7 +513,106 @@ mod pool_bridge_tests {
         };
         second_ack.send(()).unwrap();
         drop(pool_tx);
+        drop(stop_tx);
         bridge.join().unwrap();
+    }
+
+    #[test]
+    fn bridge_caps_each_engine_transaction_without_losing_order() {
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        for text in ["one", "two", "three"] {
+            pool_tx
+                .send(PoolEvent::Frame {
+                    handle,
+                    frame: notice_frame(text),
+                })
+                .unwrap();
+        }
+        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 2));
+
+        let first_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 2);
+                assert_eq!(
+                    frames[0].1.clone().into_message(),
+                    RelayMessage::notice("one")
+                );
+                assert_eq!(
+                    frames[1].1.clone().into_message(),
+                    RelayMessage::notice("two")
+                );
+                applied
+            }
+            _ => panic!("first command must be a capped relay batch"),
+        };
+        first_ack.send(()).unwrap();
+        let second_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(
+                    frames[0].1.clone().into_message(),
+                    RelayMessage::notice("three")
+                );
+                applied
+            }
+            _ => panic!("second command must retain the next ordered frame"),
+        };
+        second_ack.send(()).unwrap();
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
+    fn stop_disconnect_releases_bridge_waiting_for_engine_ack() {
+        let (pool_tx, pool_rx) = cb::bounded(1);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 1));
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle: RelayHandle {
+                    slot: 1,
+                    generation: 2,
+                },
+                frame: notice_frame("pending"),
+            })
+            .unwrap();
+        let _unacked = cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        drop(stop_tx);
+        bridge.join().unwrap();
+        drop(pool_tx);
+    }
+
+    #[test]
+    fn bounded_pool_sink_is_cancelled_without_polling_during_shutdown() {
+        let (events_tx, events_rx) = cb::bounded(1);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let sink = EnginePoolSink {
+            events: events_tx,
+            stopping: stop_rx,
+        };
+        sink.on_event(PoolEvent::Disconnected {
+            slot: 1,
+            reason: nmp_transport::DisconnectReason::Error,
+        });
+        let blocked = thread::spawn(move || {
+            sink.on_event(PoolEvent::Disconnected {
+                slot: 2,
+                reason: nmp_transport::DisconnectReason::Error,
+            });
+        });
+
+        drop(stop_tx);
+        blocked.join().unwrap();
+        assert_eq!(events_rx.len(), 1, "shutdown does not enqueue a tail");
     }
 }
 
@@ -466,14 +626,12 @@ mod pool_bridge_tests {
 /// "tag frames with the handle's generation" step; there is no further
 /// staleness check for this module to perform.
 ///
-/// `PoolEvent::Health` has no `EngineMsg` counterpart in M3 (diagnostics
-/// only, no reducer vocabulary consumes it yet) and is dropped.
 fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     match event {
         PoolEvent::Connected { handle, url } => Some(EngineMsg::RelayConnected(handle, url)),
         PoolEvent::Disconnected { slot, .. } => Some(EngineMsg::RelayDisconnected(slot)),
         PoolEvent::Frame { handle, frame } => Some(EngineMsg::RelayFrame(handle, frame)),
-        PoolEvent::Health { .. } => None,
+        PoolEvent::Health { slot, health } => Some(EngineMsg::RelayHealth(slot, health)),
         PoolEvent::EventHandoff {
             correlation,
             result,
@@ -514,13 +672,17 @@ fn engine_loop<S, D>(
     directory: D,
     cap: usize,
     admission: RelayAdmissionPolicy,
-    pool: Pool,
+    pool_runtime: EnginePoolRuntime,
     cmd_rx: &Receiver<Cmd>,
     self_inbox: &Sender<Cmd>,
 ) where
     S: EventStore,
     D: RelayDirectory + 'static,
 {
+    let EnginePoolRuntime {
+        pool,
+        stop: pool_stop_tx,
+    } = pool_runtime;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
@@ -744,6 +906,10 @@ fn engine_loop<S, D>(
     // the last `Arc<PoolInner>` reference after `shutdown` runs, which in
     // turn drops the pool's sink -- the very thing `EngineThread::join`'s
     // doc explains lets the bridge thread's `recv` finally disconnect.
+    // Disconnecting the stop channel wakes the bridge if it is blocked on a
+    // relay batch acknowledgement and wakes any bounded sink producer before
+    // pool shutdown joins the translator.
+    drop(pool_stop_tx);
     pool.shutdown();
 }
 
@@ -785,7 +951,11 @@ fn dispatch_effect(
         Effect::PublishEvent(url, event, correlation) => {
             let handle = pool.ensure_open(&url);
             let json = ClientMessage::event(event).as_json();
-            let _ = pool.send_durable(handle, correlation, WireFrame::Text(json));
+            if let DurableSendOutcome::Resolved(result) =
+                pool.send_durable(handle, correlation, WireFrame::Text(json))
+            {
+                let _ = self_inbox.send(Cmd::Engine(EngineMsg::EventHandoff(correlation, result)));
+            }
         }
         // The signer frozen into this exact accepted template is looked up
         // by pubkey on every request. A later active-account switch cannot
