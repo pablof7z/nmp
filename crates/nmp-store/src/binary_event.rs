@@ -1,9 +1,10 @@
 //! Portable binary codecs for canonical persisted event state.
 //!
-//! Immutable, signed NIP-01 event bytes and mutable provenance/local metadata
-//! deliberately have different envelopes. Duplicate relay observations can
-//! therefore rewrite only the compact metadata sidecar, while queries borrow
-//! fixed fields, tags, and content directly from the immutable event value.
+//! Immutable signed NIP-01 event bytes, optional canonical local state, and
+//! self-contained displaced-row provenance deliberately have distinct
+//! envelopes. Canonical relay observations are fixed-width redb rows outside
+//! this codec, while queries borrow fixed fields, tags, and content directly
+//! from the immutable event value.
 //! All integers are big-endian and every parser uses checked slices; unlike
 //! nostrdb's packed native struct, this is alignment-safe and endian-stable on
 //! every Rust target, including wasm.
@@ -16,6 +17,7 @@ use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, Tag, Tags, Timest
 use crate::{IntentId, LocalOrigin, Provenance, SigState, StoredEvent};
 
 const EVENT_MAGIC: &[u8; 4] = b"NMPE";
+const LOCAL_MAGIC: &[u8; 4] = b"NMPL";
 const PROVENANCE_MAGIC: &[u8; 4] = b"NMPP";
 const COMPOSITE_MAGIC: &[u8; 4] = b"NMPC";
 const VERSION: u8 = 3;
@@ -32,6 +34,10 @@ const KIND_OFFSET: usize = CREATED_AT_OFFSET + 8;
 const TAG_COUNT_OFFSET: usize = KIND_OFFSET + 2;
 const TAG_BYTES_LEN_OFFSET: usize = TAG_COUNT_OFFSET + 4;
 const CONTENT_LEN_OFFSET: usize = TAG_BYTES_LEN_OFFSET + 4;
+
+// magic + version + sig_state + reserved + owner_count
+const LOCAL_HEADER_LEN: usize = 12;
+const LOCAL_OWNER_COUNT_OFFSET: usize = 8;
 
 // magic + version + flags + reserved + seen_count + owner_count
 const PROVENANCE_HEADER_LEN: usize = 16;
@@ -56,6 +62,7 @@ pub(crate) enum DecodeError {
     InvalidRelay,
     DuplicateRelay,
     DuplicateOwner,
+    InvalidOwnerOrder,
     InvalidSignature,
     InvalidLocalState(u8),
     TrailingBytes,
@@ -188,6 +195,16 @@ fn encoded_provenance_body_len(provenance: &Provenance) -> Result<usize, DecodeE
     Ok(total)
 }
 
+fn checked_local_len(owner_count: usize) -> Result<usize, DecodeError> {
+    u32::try_from(owner_count).map_err(|_| DecodeError::LengthOverflow)?;
+    let owners_len = owner_count
+        .checked_mul(8)
+        .ok_or(DecodeError::LengthOverflow)?;
+    LOCAL_HEADER_LEN
+        .checked_add(owners_len)
+        .ok_or(DecodeError::LengthOverflow)
+}
+
 /// Encode only immutable, signed NIP-01 event data.
 pub(crate) fn encode_event(event: &Event) -> Result<Vec<u8>, DecodeError> {
     let tags = event.tags.as_slice();
@@ -217,6 +234,73 @@ pub(crate) fn encode_event(event: &Event) -> Result<Vec<u8>, DecodeError> {
     }
     out.extend_from_slice(event.content.as_bytes());
     Ok(out)
+}
+
+/// Encode the canonical local-intent ownership/signature state independently
+/// from relay observations. Table absence represents `Provenance::local ==
+/// None`; this envelope therefore always represents `Some(LocalOrigin)`, even
+/// when its owner set is empty.
+pub(crate) fn encode_local(local: &LocalOrigin) -> Result<Vec<u8>, DecodeError> {
+    let mut out = Vec::with_capacity(checked_local_len(local.owners.len())?);
+    out.extend_from_slice(LOCAL_MAGIC);
+    out.push(VERSION);
+    out.push(match local.sig_state {
+        SigState::Pending => 0,
+        SigState::Signed => 1,
+    });
+    out.extend_from_slice(&[0; 2]);
+    push_u32(&mut out, local.owners.len())?;
+    debug_assert_eq!(out.len(), LOCAL_HEADER_LEN);
+    for owner in &local.owners {
+        push_u64(&mut out, owner.0);
+    }
+    Ok(out)
+}
+
+/// Decode one canonical local-state envelope. Owner ids must already be in
+/// canonical set form: repeated ids are rejected rather than silently folded.
+pub(crate) fn decode_local(bytes: &[u8]) -> Result<LocalOrigin, DecodeError> {
+    if bytes.len() < LOCAL_HEADER_LEN {
+        return Err(DecodeError::Truncated);
+    }
+    check_magic_and_version(bytes, LOCAL_MAGIC)?;
+    let sig_state = match bytes[5] {
+        0 => SigState::Pending,
+        1 => SigState::Signed,
+        other => return Err(DecodeError::InvalidLocalState(other)),
+    };
+    if bytes[6..8] != [0, 0] {
+        return Err(DecodeError::InvalidReserved);
+    }
+    let owner_count = read_u32(bytes, LOCAL_OWNER_COUNT_OFFSET)? as usize;
+    let expected_len = checked_local_len(owner_count)?;
+    if expected_len > bytes.len() {
+        return Err(DecodeError::Truncated);
+    }
+    if expected_len < bytes.len() {
+        return Err(DecodeError::TrailingBytes);
+    }
+
+    let mut cursor = LOCAL_HEADER_LEN;
+    let mut owners = BTreeSet::new();
+    let mut previous_owner = None;
+    for _ in 0..owner_count {
+        let owner = IntentId(take_u64(bytes, &mut cursor)?);
+        if let Some(previous) = previous_owner {
+            if owner.0 == previous {
+                return Err(DecodeError::DuplicateOwner);
+            }
+            if owner.0 < previous {
+                return Err(DecodeError::InvalidOwnerOrder);
+            }
+        }
+        if !owners.insert(owner) {
+            return Err(DecodeError::DuplicateOwner);
+        }
+        previous_owner = Some(owner.0);
+    }
+    debug_assert_eq!(cursor, expected_len);
+    Ok(LocalOrigin { owners, sig_state })
 }
 
 /// Encode only mutable relay provenance and local-intent ownership state.
@@ -711,6 +795,124 @@ mod tests {
             decode_provenance(&empty_pending_local_bytes).unwrap(),
             empty_pending_local
         );
+    }
+
+    #[test]
+    fn local_codec_round_trips_both_states_with_sorted_unique_owners() {
+        for sig_state in [SigState::Pending, SigState::Signed] {
+            let expected = LocalOrigin {
+                owners: BTreeSet::from([IntentId(8), IntentId(1), IntentId(3)]),
+                sig_state,
+            };
+            let encoded = encode_local(&expected).unwrap();
+
+            assert_eq!(&encoded[..4], LOCAL_MAGIC);
+            assert_eq!(encoded[4], VERSION);
+            assert_eq!(encoded[6..8], [0, 0]);
+            assert_eq!(read_u32(&encoded, LOCAL_OWNER_COUNT_OFFSET).unwrap(), 3);
+            let encoded_owners: Vec<u64> = encoded[LOCAL_HEADER_LEN..]
+                .chunks(8)
+                .map(|bytes| u64::from_be_bytes(bytes.try_into().unwrap()))
+                .collect();
+            assert_eq!(encoded_owners, [1, 3, 8]);
+            assert_eq!(decode_local(&encoded).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn local_codec_preserves_some_with_an_empty_owner_set() {
+        let expected = LocalOrigin {
+            owners: BTreeSet::new(),
+            sig_state: SigState::Pending,
+        };
+        let encoded = encode_local(&expected).unwrap();
+        assert_eq!(encoded.len(), LOCAL_HEADER_LEN);
+        assert_eq!(read_u32(&encoded, LOCAL_OWNER_COUNT_OFFSET).unwrap(), 0);
+        assert_eq!(decode_local(&encoded).unwrap(), expected);
+    }
+
+    #[test]
+    fn local_codec_rejects_malformed_and_noncanonical_values() {
+        let expected = LocalOrigin {
+            owners: BTreeSet::from([IntentId(3), IntentId(8)]),
+            sig_state: SigState::Signed,
+        };
+
+        let mut invalid_magic = encode_local(&expected).unwrap();
+        invalid_magic[0] = b'X';
+        assert_eq!(
+            decode_local(&invalid_magic).unwrap_err(),
+            DecodeError::BadMagic
+        );
+
+        let mut invalid_version = encode_local(&expected).unwrap();
+        invalid_version[4] = VERSION.wrapping_add(1);
+        assert_eq!(
+            decode_local(&invalid_version).unwrap_err(),
+            DecodeError::UnsupportedVersion(VERSION.wrapping_add(1))
+        );
+
+        let mut invalid_state = encode_local(&expected).unwrap();
+        invalid_state[5] = 2;
+        assert_eq!(
+            decode_local(&invalid_state).unwrap_err(),
+            DecodeError::InvalidLocalState(2)
+        );
+
+        let mut invalid_reserved = encode_local(&expected).unwrap();
+        invalid_reserved[6] = 1;
+        assert_eq!(
+            decode_local(&invalid_reserved).unwrap_err(),
+            DecodeError::InvalidReserved
+        );
+
+        let mut duplicate = encode_local(&expected).unwrap();
+        duplicate[LOCAL_HEADER_LEN + 8..LOCAL_HEADER_LEN + 16].copy_from_slice(&3u64.to_be_bytes());
+        assert_eq!(
+            decode_local(&duplicate).unwrap_err(),
+            DecodeError::DuplicateOwner
+        );
+
+        let mut descending = encode_local(&expected).unwrap();
+        descending[LOCAL_HEADER_LEN..LOCAL_HEADER_LEN + 8].copy_from_slice(&8u64.to_be_bytes());
+        descending[LOCAL_HEADER_LEN + 8..LOCAL_HEADER_LEN + 16]
+            .copy_from_slice(&3u64.to_be_bytes());
+        assert_eq!(
+            decode_local(&descending).unwrap_err(),
+            DecodeError::InvalidOwnerOrder
+        );
+
+        let mut trailing = encode_local(&expected).unwrap();
+        trailing.push(0);
+        assert_eq!(
+            decode_local(&trailing).unwrap_err(),
+            DecodeError::TrailingBytes
+        );
+
+        let mut oversized_count = encode_local(&expected).unwrap();
+        oversized_count[LOCAL_OWNER_COUNT_OFFSET..LOCAL_OWNER_COUNT_OFFSET + 4]
+            .copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(decode_local(&oversized_count).is_err());
+        assert_eq!(
+            checked_local_len(usize::MAX).unwrap_err(),
+            DecodeError::LengthOverflow
+        );
+    }
+
+    #[test]
+    fn every_local_codec_prefix_is_rejected_as_truncated() {
+        let local = LocalOrigin {
+            owners: BTreeSet::from([IntentId(1), IntentId(2), IntentId(3)]),
+            sig_state: SigState::Signed,
+        };
+        let encoded = encode_local(&local).unwrap();
+        for len in 0..encoded.len() {
+            assert_eq!(
+                decode_local(&encoded[..len]).unwrap_err(),
+                DecodeError::Truncated,
+                "local-state prefix {len} unexpectedly parsed"
+            );
+        }
     }
 
     #[test]
