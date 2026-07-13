@@ -39,7 +39,7 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec
 }
 
 fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
-    RelayFrame::Text(RelayMessage::event(nostr::SubscriptionId::new(sub), event).as_json())
+    RelayFrame::from(RelayMessage::event(nostr::SubscriptionId::new(sub), event))
 }
 
 fn kind3(author: &Keys, follows: &[nostr::PublicKey], created_at: u64) -> nostr::Event {

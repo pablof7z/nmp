@@ -17,7 +17,7 @@ use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::{RelayFrame, RelayHandle};
-use nostr::{JsonUtil, Keys, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
+use nostr::{Keys, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
 
 #[derive(Clone, Default)]
 struct CapturingSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
@@ -74,7 +74,7 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) {
 }
 
 fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
-    RelayFrame::Text(RelayMessage::event(SubscriptionId::new(sub), event).as_json())
+    RelayFrame::from(RelayMessage::event(SubscriptionId::new(sub), event))
 }
 
 fn deliver(core: &mut EngineCore<MemoryStore>, slot: u32, event: &nostr::Event) -> Vec<Effect> {
