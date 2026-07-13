@@ -87,7 +87,7 @@ fn main() {
     let path = scratch
         .as_ref()
         .map_or_else(|| input_path.clone(), |dir| dir.path().join("store.redb"));
-    if scratch.is_some() {
+    let import_batch_ms = if scratch.is_some() {
         let source = std::fs::read_to_string(&input_path).expect("read event JSONL");
         let events: Vec<Event> = source
             .lines()
@@ -96,6 +96,7 @@ fn main() {
             .collect();
         let relay = RelayUrl::parse("wss://query-benchmark.invalid").unwrap();
         let mut imported = RedbStore::open(&path).expect("open benchmark store");
+        let started = Instant::now();
         imported
             .insert_batch(
                 events
@@ -107,7 +108,10 @@ fn main() {
                     .collect(),
             )
             .expect("import benchmark JSONL");
-    }
+        Some(started.elapsed().as_secs_f64() * 1_000.0)
+    } else {
+        None
+    };
 
     let store = RedbStore::open(&path).expect("open redb store");
     let kind = Kind::from(9u16);
@@ -345,6 +349,9 @@ fn main() {
     println!("authors_43={}", authors_43.len());
     println!("authors_43_populated_rows={authors_43_rows}");
     println!("iterations={iterations}");
+    if let Some(import_batch_ms) = import_batch_ms {
+        println!("import_batch_ms={import_batch_ms:.3}");
+    }
     println!("bounded_room_mean_ms={bounded_room_ms:.3}");
     println!("bounded_room_member_mean_ms={bounded_room_member_ms:.3}");
     println!("complete_room_mean_ms={complete_room_ms:.3}");
