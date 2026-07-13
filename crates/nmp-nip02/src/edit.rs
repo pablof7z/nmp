@@ -12,7 +12,7 @@ pub enum FollowChange {
 /// relationship or returns one closed, compare-and-swap write intent.
 pub enum ComposeFollowResult {
     NoChange,
-    Publish(WriteIntent),
+    Publish(Box<WriteIntent>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,34 +42,30 @@ pub fn follows(event: &Event, target: PublicKey) -> bool {
 /// `p` tag (NIP-02's chronological convention), while unfollow removes all
 /// matching `p` tags. The returned payload carries `base.id` as an atomic
 /// acceptance precondition; a concurrent winner produces a typed conflict
-/// before any write is journaled. `base == None` is legal only as the
-/// caller's explicit, source-evidenced local observation; it is never
-/// interpreted here as globally authoritative emptiness.
+/// before any write is journaled. This ordinary edit requires an established
+/// base. Creating a first contact list needs a separately named policy and
+/// cannot masquerade as `follow`.
 pub fn compose_follow_change(
     author: PublicKey,
-    base: Option<&Event>,
+    base: &Event,
     target: PublicKey,
     change: FollowChange,
     now: Timestamp,
 ) -> Result<ComposeFollowResult, ComposeFollowError> {
-    if let Some(base) = base {
-        if base.pubkey != author {
-            return Err(ComposeFollowError::BaseHasWrongAuthor);
-        }
-        if base.kind != Kind::ContactList {
-            return Err(ComposeFollowError::BaseHasWrongKind);
-        }
+    if base.pubkey != author {
+        return Err(ComposeFollowError::BaseHasWrongAuthor);
+    }
+    if base.kind != Kind::ContactList {
+        return Err(ComposeFollowError::BaseHasWrongKind);
     }
 
-    let currently_follows = base.is_some_and(|event| follows(event, target));
+    let currently_follows = follows(base, target);
     let wants_follow = change == FollowChange::Follow;
     if currently_follows == wants_follow {
         return Ok(ComposeFollowResult::NoChange);
     }
 
-    let mut tags: Vec<Tag> = base
-        .map(|event| event.tags.iter().cloned().collect())
-        .unwrap_or_default();
+    let mut tags: Vec<Tag> = base.tags.iter().cloned().collect();
     if wants_follow {
         let tag = Tag::parse(vec!["p".to_string(), target.to_hex()])
             .map_err(|_| ComposeFollowError::InvalidGeneratedTag)?;
@@ -83,30 +79,31 @@ pub fn compose_follow_change(
         });
     }
 
-    let created_at = match base {
-        Some(base) if now <= base.created_at => Timestamp::from_secs(
+    let created_at = if now <= base.created_at {
+        Timestamp::from_secs(
             base.created_at
                 .as_secs()
                 .checked_add(1)
                 .ok_or(ComposeFollowError::TimestampExhausted)?,
-        ),
-        _ => now,
+        )
+    } else {
+        now
     };
     let unsigned = UnsignedEvent::new(
         author,
         created_at,
         Kind::ContactList,
         tags,
-        base.map(|event| event.content.clone()).unwrap_or_default(),
+        base.content.clone(),
     );
-    Ok(ComposeFollowResult::Publish(WriteIntent {
+    Ok(ComposeFollowResult::Publish(Box::new(WriteIntent {
         payload: WritePayload::UnsignedReplaceableEdit {
             unsigned,
-            expected_base: base.map(|event| event.id),
+            expected_base: Some(base.id),
         },
         durability: Durability::Durable,
         routing: WriteRouting::AuthorOutbox,
-    }))
+    })))
 }
 
 /// Extract the precondition for tests and adapters without opening up any
@@ -171,7 +168,7 @@ mod tests {
 
         let ComposeFollowResult::Publish(intent) = compose_follow_change(
             author.public_key(),
-            Some(&base),
+            &base,
             target.public_key(),
             FollowChange::Follow,
             Timestamp::from_secs(9),
@@ -211,7 +208,7 @@ mod tests {
         );
         let ComposeFollowResult::Publish(intent) = compose_follow_change(
             author.public_key(),
-            Some(&base),
+            &base,
             target.public_key(),
             FollowChange::Unfollow,
             Timestamp::from_secs(30),
@@ -242,17 +239,18 @@ mod tests {
         assert!(matches!(
             compose_follow_change(
                 author.public_key(),
-                Some(&base),
+                &base,
                 target.public_key(),
                 FollowChange::Follow,
                 Timestamp::from_secs(2)
             ),
             Ok(ComposeFollowResult::NoChange)
         ));
+        let empty = event(&author, 1, vec![], "");
         assert!(matches!(
             compose_follow_change(
                 author.public_key(),
-                None,
+                &empty,
                 target.public_key(),
                 FollowChange::Unfollow,
                 Timestamp::from_secs(2)
@@ -270,7 +268,7 @@ mod tests {
         assert_eq!(
             compose_follow_change(
                 author.public_key(),
-                Some(&wrong_author),
+                &wrong_author,
                 target.public_key(),
                 FollowChange::Follow,
                 Timestamp::from_secs(2)
@@ -284,7 +282,7 @@ mod tests {
         assert_eq!(
             compose_follow_change(
                 author.public_key(),
-                Some(&wrong_kind),
+                &wrong_kind,
                 target.public_key(),
                 FollowChange::Follow,
                 Timestamp::from_secs(2)

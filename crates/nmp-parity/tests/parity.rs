@@ -874,6 +874,7 @@ fn normalize_direct_follow_snapshot(snapshot: FollowSnapshot) -> NormFollowSnaps
             FollowAvailability::SignedOut => "signed_out",
             FollowAvailability::Acquiring => "acquiring",
             FollowAvailability::Ready => "ready",
+            FollowAvailability::NoContactList => "no_contact_list",
             FollowAvailability::CachedOnly => "cached_only",
             FollowAvailability::SourceUnavailable => "source_unavailable",
         },
@@ -894,6 +895,7 @@ fn normalize_ffi_follow_snapshot(snapshot: FfiFollowSnapshot) -> NormFollowSnaps
             FfiFollowAvailability::SignedOut => "signed_out",
             FfiFollowAvailability::Acquiring => "acquiring",
             FfiFollowAvailability::Ready => "ready",
+            FfiFollowAvailability::NoContactList => "no_contact_list",
             FfiFollowAvailability::CachedOnly => "cached_only",
             FfiFollowAvailability::SourceUnavailable => "source_unavailable",
         },
@@ -1034,6 +1036,35 @@ fn wait_for_ffi_follow_snapshot(
         if snapshot.relationship == relationship
             && snapshot.availability == FfiFollowAvailability::Ready
         {
+            return normalize_ffi_follow_snapshot(snapshot);
+        }
+    }
+}
+
+fn wait_for_direct_follow_availability(
+    observation: &FollowObservation,
+    availability: FollowAvailability,
+) -> NormFollowSnapshot {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let snapshot = observation
+            .recv_timeout(remaining)
+            .expect("direct following availability must settle before the total deadline");
+        if snapshot.availability == availability {
+            return normalize_direct_follow_snapshot(snapshot);
+        }
+    }
+}
+
+fn wait_for_ffi_follow_availability(
+    rx: &mpsc::Receiver<FfiFollowSnapshot>,
+    availability: FfiFollowAvailability,
+) -> NormFollowSnapshot {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let snapshot = recv_before(rx, deadline, "FFI following availability");
+        if snapshot.availability == availability {
             return normalize_ffi_follow_snapshot(snapshot);
         }
     }
@@ -1206,6 +1237,95 @@ async fn run_ffi_follow_scenario(
         after_unfollow,
         preserved_existing_follow,
     }
+}
+
+async fn run_direct_missing_contact_list(
+    author: &Keys,
+    target: &Keys,
+) -> (NormFollowSnapshot, Vec<NormFollowActionStatus>) {
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    relay
+        .seed_own_relay_list(author, QUERY_CREATED_AT - 1)
+        .await;
+    let engine = Arc::new(
+        Engine::new(EngineConfig {
+            indexer_relays: vec![relay.url.to_string()],
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+            ..EngineConfig::default()
+        })
+        .expect("direct missing-list engine must construct"),
+    );
+    let active = engine
+        .add_account(&author.secret_key().to_secret_hex())
+        .expect("direct missing-list account must register");
+    engine
+        .set_active_account(Some(active))
+        .expect("direct missing-list account must activate");
+
+    let observation = observe_following(engine.clone(), target.public_key())
+        .expect("direct missing-list observation must open");
+    let snapshot =
+        wait_for_direct_follow_availability(&observation, FollowAvailability::NoContactList);
+    let action = collect_direct_follow_action(set_following(
+        engine.clone(),
+        target.public_key(),
+        FollowChange::Follow,
+    ));
+
+    drop(observation);
+    engine.shutdown();
+    relay.shutdown();
+    (snapshot, action)
+}
+
+async fn run_ffi_missing_contact_list(
+    author: &Keys,
+    target: &Keys,
+) -> (NormFollowSnapshot, Vec<NormFollowActionStatus>) {
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    relay
+        .seed_own_relay_list(author, QUERY_CREATED_AT - 1)
+        .await;
+    let engine = NmpEngine::new(NmpEngineConfig {
+        store_path: None,
+        indexer_relays: vec![relay.url.to_string()],
+        app_relays: vec![],
+        fallback_relays: vec![],
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..NmpEngineConfig::default()
+    })
+    .expect("FFI missing-list engine must construct");
+    let active = engine
+        .add_account(author.secret_key().to_secret_hex())
+        .expect("FFI missing-list account must register");
+    engine
+        .set_active_account(Some(active))
+        .expect("FFI missing-list account must activate");
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let observation = engine
+        .observe_following(
+            target.public_key().to_hex(),
+            Box::new(FfiFollowSnapshots {
+                tx: Mutex::new(snapshot_tx),
+            }),
+        )
+        .expect("FFI missing-list observation must open");
+    let snapshot =
+        wait_for_ffi_follow_availability(&snapshot_rx, FfiFollowAvailability::NoContactList);
+    let (action_tx, action_rx) = mpsc::channel();
+    engine.follow(
+        target.public_key().to_hex(),
+        Box::new(FfiFollowActions {
+            tx: Mutex::new(action_tx),
+        }),
+    );
+    let action = collect_ffi_follow_action(&action_rx);
+
+    observation.cancel();
+    engine.shutdown();
+    relay.shutdown();
+    (snapshot, action)
 }
 
 async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOutcome {
@@ -2014,4 +2134,28 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
             NormFollowActionStatus::Receipt("acked")
         ]
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_and_ffi_follow_refuse_a_reconciled_missing_contact_list() {
+    let author = fixed_keys();
+    let target = Keys::generate();
+
+    let direct = run_direct_missing_contact_list(&author, &target).await;
+    let ffi = run_ffi_missing_contact_list(&author, &target).await;
+    assert_eq!(
+        direct, ffi,
+        "direct Rust and the iOS FFI path must expose the same non-destructive missing-list state"
+    );
+    assert_eq!(direct.0.relationship, "not_following");
+    assert_eq!(direct.0.availability, "no_contact_list");
+    assert!(!direct.0.has_base);
+    assert_eq!(
+        direct.1,
+        vec![
+            NormFollowActionStatus::Acquiring,
+            NormFollowActionStatus::Failed("NoContactList".to_string())
+        ],
+        "ordinary follow must publish nothing when there is no established kind:3 base"
+    );
 }

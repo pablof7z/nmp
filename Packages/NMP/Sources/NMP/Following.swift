@@ -23,6 +23,7 @@ public enum NMPFollowAvailability: Sendable, Hashable {
     case signedOut
     case acquiring
     case ready
+    case noContactList
     case cachedOnly
     case sourceUnavailable
 
@@ -31,6 +32,7 @@ public enum NMPFollowAvailability: Sendable, Hashable {
         case .signedOut: self = .signedOut
         case .acquiring: self = .acquiring
         case .ready: self = .ready
+        case .noContactList: self = .noContactList
         case .cachedOnly: self = .cachedOnly
         case .sourceUnavailable: self = .sourceUnavailable
         }
@@ -84,6 +86,7 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
     case signedOut
     case accountChanged
     case acquisitionTimedOut
+    case noContactList
     case cachedOnly
     case sourceUnavailable
     case baseHasWrongAuthor
@@ -99,6 +102,7 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
         case .signedOut: self = .signedOut
         case .accountChanged: self = .accountChanged
         case .acquisitionTimedOut: self = .acquisitionTimedOut
+        case .noContactList: self = .noContactList
         case .cachedOnly: self = .cachedOnly
         case .sourceUnavailable: self = .sourceUnavailable
         case .baseHasWrongAuthor: self = .baseHasWrongAuthor
@@ -280,6 +284,21 @@ public final class NMPFollowing: ObservableObject {
             && !isActing
     }
 
+    /// Presentation state derived from NMP's typed action stream. This is
+    /// intent pending an explicit second tap, never optimistic follow truth.
+    public var offersAnotherAttempt: Bool {
+        guard desiredFollowing != nil, let actionStatus else { return false }
+        switch actionStatus {
+        case .failed(.acquisitionTimedOut),
+             .failed(.cachedOnly),
+             .failed(.sourceUnavailable),
+             .receipt(_, .replaceableConflict):
+            return true
+        default:
+            return false
+        }
+    }
+
     public func follow() {
         start(desiredFollowing: true)
     }
@@ -294,6 +313,17 @@ public final class NMPFollowing: ObservableObject {
         case .following: unfollow()
         case .notFollowing: follow()
         case .unknown: break
+        }
+    }
+
+    /// The single action a connected control forwards. Retry policy remains
+    /// beside the NMP action/resource rather than inside a SwiftUI view.
+    public func performPrimaryAction() {
+        guard canToggle else { return }
+        if offersAnotherAttempt, let desiredFollowing {
+            start(desiredFollowing: desiredFollowing)
+        } else {
+            toggle()
         }
     }
 
@@ -318,13 +348,16 @@ public final class NMPFollowing: ObservableObject {
         case .noChange:
             isActing = false
             desiredFollowing = nil
+        case .failed(.acquisitionTimedOut),
+             .failed(.cachedOnly),
+             .failed(.sourceUnavailable):
+            isActing = false
         case .failed:
             isActing = false
             desiredFollowing = nil
         case .receipt(_, let status):
             if case .replaceableConflict = status {
                 isActing = false
-                desiredFollowing = nil
             } else if case .failed = status {
                 isActing = false
                 desiredFollowing = nil

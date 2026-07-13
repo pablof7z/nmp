@@ -28,7 +28,9 @@ pending row becomes visible. `Accepted` never means merely queued in memory.
 A protocol module composing a destructive replaceable/addressable edit may
 attach the exact canonical base event id it observed. `None` means the module
 established no local winner under its explicit source-evidence policy; it does
-not assert global Nostr absence.
+not assert global Nostr absence. NIP-02's ordinary `follow` / `unfollow`
+operation deliberately requires `Some(base)`; the generic `None` form does not
+silently grant it first-list creation policy.
 
 The store compares that expected base with the current winner inside the same
 acceptance transaction, before allocating an intent or receipt id and before

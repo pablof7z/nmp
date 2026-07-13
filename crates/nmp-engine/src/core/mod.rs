@@ -3348,7 +3348,10 @@ mod receipt_allocator_tests {
             expected: Some(base.id),
             actual: Some(concurrent.id),
         };
-        assert_eq!(sink.0.lock().unwrap().as_slice(), [expected.clone()]);
+        assert_eq!(
+            sink.0.lock().unwrap().as_slice(),
+            std::slice::from_ref(&expected)
+        );
         assert!(effects
             .iter()
             .any(|effect| matches!(effect, Effect::EmitReceipt(_, status) if *status == expected)));

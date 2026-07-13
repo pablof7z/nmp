@@ -24,6 +24,7 @@ pub enum FfiFollowAvailability {
     SignedOut,
     Acquiring,
     Ready,
+    NoContactList,
     CachedOnly,
     SourceUnavailable,
 }
@@ -43,6 +44,7 @@ pub enum FfiFollowActionFailure {
     SignedOut,
     AccountChanged,
     AcquisitionTimedOut,
+    NoContactList,
     CachedOnly,
     SourceUnavailable,
     BaseHasWrongAuthor,
@@ -112,6 +114,7 @@ pub(crate) fn snapshot_to_ffi(snapshot: FollowSnapshot) -> FfiFollowSnapshot {
             FollowAvailability::SignedOut => FfiFollowAvailability::SignedOut,
             FollowAvailability::Acquiring => FfiFollowAvailability::Acquiring,
             FollowAvailability::Ready => FfiFollowAvailability::Ready,
+            FollowAvailability::NoContactList => FfiFollowAvailability::NoContactList,
             FollowAvailability::CachedOnly => FfiFollowAvailability::CachedOnly,
             FollowAvailability::SourceUnavailable => FfiFollowAvailability::SourceUnavailable,
         },
@@ -124,6 +127,7 @@ fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
         FollowActionFailure::SignedOut => FfiFollowActionFailure::SignedOut,
         FollowActionFailure::AccountChanged => FfiFollowActionFailure::AccountChanged,
         FollowActionFailure::AcquisitionTimedOut => FfiFollowActionFailure::AcquisitionTimedOut,
+        FollowActionFailure::NoContactList => FfiFollowActionFailure::NoContactList,
         FollowActionFailure::CachedOnly => FfiFollowActionFailure::CachedOnly,
         FollowActionFailure::SourceUnavailable => FfiFollowActionFailure::SourceUnavailable,
         FollowActionFailure::Compose(error) => match error {

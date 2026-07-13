@@ -34,11 +34,11 @@ shortfall. Cached rows render while acquisition continues, but cached-only,
 AUTH-denied, source-error, local-limit, and no-planned-source states do not
 authorize an edit.
 
-If every current planned source reconciles and returns no kind:3, `None` is an
-established **source-scoped** base. It permits first-list creation with an
-`expected_base: None` guard. It still does not mean that no unknown relay has a
-contact list. A bare cache miss, before that evidence exists, is never treated
-as an empty list.
+If every current planned source reconciles and returns no kind:3, the resource
+reports `NoContactList`. The ordinary `follow` and `unfollow` actions still
+refuse to publish. First-list creation needs a separately named operation with
+an explicit product policy; it cannot masquerade as editing an established
+list. A bare cache miss is never treated as an empty list.
 
 ### 2. Compose from the exact value
 
@@ -55,8 +55,9 @@ follow Boolean.
 ### 3. Compare-and-swap at acceptance
 
 The composed unsigned replacement carries the exact local base event id as an
-acceptance precondition. `None` means “the coordinate still has no local
-winner,” not global absence.
+acceptance precondition. The generic guard can express `None` for a future
+protocol operation whose explicitly designed first-value policy permits it,
+but NIP-02's ordinary follow action never emits that form.
 
 Memory and redb stores check that precondition inside the same atomic
 transaction that would allocate the intent/receipt and insert the pending
@@ -145,9 +146,11 @@ The shipped falsifiers cover:
 
 - tag order, content, relay hint, petname, duplicate-target, and unrelated-tag
   preservation;
-- exact-base success, `None`-means-`None`, regular-event misuse rejection, and
-  a concurrent winner producing a typed conflict with no journal residue;
-- signed-out and no-source failure without a write;
+- exact-base success, generic `None`-means-`None`, regular-event misuse
+  rejection, and a concurrent winner producing a typed conflict with no
+  journal residue;
+- signed-out, no-source, and reconciled-no-contact-list failure without a
+  write;
 - a real loopback indexer/outbox relay through both direct Rust and the iOS FFI
   surface: initial state, follow/ACK, reactive following state, duplicate
   follow no-op, preservation of an existing contact, unfollow/ACK, and reactive

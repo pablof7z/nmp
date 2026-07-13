@@ -73,6 +73,22 @@ final class NMPUIGalleryUITests: XCTestCase {
         XCTAssertTrue(foundDynamicType)
         try app.performAccessibilityAudit(for: [.textClipped])
 
+        let followStates = element("gallery.states.follow")
+        for _ in 0..<4 where !followStates.isHittable {
+            scroll.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(followStates.waitForExistence(timeout: 5))
+        let missingList = app.buttons.matching(
+            NSPredicate(format: "value == 'No contact list'")
+        ).firstMatch
+        XCTAssertTrue(missingList.exists)
+        XCTAssertFalse(missingList.isEnabled)
+        let retry = app.buttons.matching(
+            NSPredicate(format: "label == 'Retry follow'")
+        ).firstMatch
+        XCTAssertEqual(retry.value as? String, "Ready to retry")
+        XCTAssertTrue(retry.isEnabled)
+
         for _ in 0..<5 { scroll.swipeUp() }
         XCTAssertTrue(element("gallery.states.long-content").waitForExistence(timeout: 5))
         keepScreenshot("conformance-long-content")

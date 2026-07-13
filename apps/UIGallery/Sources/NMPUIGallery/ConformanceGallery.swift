@@ -69,6 +69,12 @@ struct ConformanceGallery: View {
                             variant: .prominent,
                             action: {}
                         )
+                        NMPFollowButtonBody(
+                            snapshot: followSnapshot(.notFollowing, .ready),
+                            offersAnotherAttempt: true,
+                            variant: .prominent,
+                            action: {}
+                        )
                         HStack(spacing: 10) {
                             NMPFollowButtonBody(
                                 snapshot: followSnapshot(.unknown, .acquiring),
@@ -76,6 +82,10 @@ struct ConformanceGallery: View {
                             )
                             NMPFollowButtonBody(
                                 snapshot: followSnapshot(.following, .cachedOnly),
+                                action: {}
+                            )
+                            NMPFollowButtonBody(
+                                snapshot: followSnapshot(.notFollowing, .noContactList),
                                 action: {}
                             )
                             NMPFollowButtonBody(
@@ -178,7 +188,9 @@ struct ConformanceGallery: View {
             target: Self.placeholderPubkey,
             relationship: relationship,
             availability: availability,
-            baseEventID: relationship == .unknown ? nil : String(repeating: "01", count: 32)
+            baseEventID: relationship == .unknown || availability == .noContactList
+                ? nil
+                : String(repeating: "01", count: 32)
         )
     }
 

@@ -17,17 +17,20 @@ public struct NMPFollowButtonBody: View {
 
     public let snapshot: NMPFollowingSnapshot
     public let isActing: Bool
+    public let offersAnotherAttempt: Bool
     public let variant: NMPFollowButtonVariant
     public let action: () -> Void
 
     public init(
         snapshot: NMPFollowingSnapshot,
         isActing: Bool = false,
+        offersAnotherAttempt: Bool = false,
         variant: NMPFollowButtonVariant = .compact,
         action: @escaping () -> Void
     ) {
         self.snapshot = snapshot
         self.isActing = isActing
+        self.offersAnotherAttempt = offersAnotherAttempt
         self.variant = variant
         self.action = action
     }
@@ -105,21 +108,24 @@ public struct NMPFollowButtonBody: View {
     }
 
     private var title: String {
+        if offersAnotherAttempt { return "Retry" }
         switch snapshot.relationship {
-        case .following: "Following"
-        case .notFollowing, .unknown: "Follow"
+        case .following: return "Following"
+        case .notFollowing, .unknown: return "Follow"
         }
     }
 
     private var symbol: String {
+        if offersAnotherAttempt { return "arrow.clockwise" }
         switch snapshot.availability {
-        case .cachedOnly, .sourceUnavailable: "wifi.exclamationmark"
-        case .signedOut: "person.crop.circle.badge.exclamationmark"
-        case .acquiring: "plus"
+        case .cachedOnly, .sourceUnavailable: return "wifi.exclamationmark"
+        case .noContactList: return "person.crop.circle.badge.exclamationmark"
+        case .signedOut: return "person.crop.circle.badge.exclamationmark"
+        case .acquiring: return "plus"
         case .ready:
             switch snapshot.relationship {
-            case .following: "checkmark"
-            case .notFollowing, .unknown: "plus"
+            case .following: return "checkmark"
+            case .notFollowing, .unknown: return "plus"
             }
         }
     }
@@ -135,6 +141,9 @@ public struct NMPFollowButtonBody: View {
     }
 
     private var foreground: Color {
+        if offersAnotherAttempt && !isUnavailable {
+            return .white
+        }
         if snapshot.relationship == .following || isUnavailable {
             return theme.foreground
         }
@@ -145,34 +154,47 @@ public struct NMPFollowButtonBody: View {
         if isUnavailable {
             return theme.elevatedSurface
         }
+        if offersAnotherAttempt {
+            return theme.accent
+        }
         return snapshot.relationship == .following ? theme.elevatedSurface : theme.accent
     }
 
     private var border: Color {
-        snapshot.relationship == .following || isUnavailable ? theme.border : .clear
+        if offersAnotherAttempt && !isUnavailable { return .clear }
+        return snapshot.relationship == .following || isUnavailable ? theme.border : .clear
     }
 
     private var accessibilityLabel: String {
-        snapshot.relationship == .following ? "Unfollow" : "Follow"
+        if offersAnotherAttempt {
+            return snapshot.relationship == .following ? "Retry unfollow" : "Retry follow"
+        }
+        return snapshot.relationship == .following ? "Unfollow" : "Follow"
     }
 
     private var accessibilityValue: String {
+        if offersAnotherAttempt && canAct { return "Ready to retry" }
         switch snapshot.availability {
-        case .signedOut: "Signed out"
-        case .acquiring: "Loading current follow state"
-        case .ready: snapshot.relationship == .following ? "Following" : "Not following"
-        case .cachedOnly: "Cached state only"
-        case .sourceUnavailable: "Follow sources unavailable"
+        case .signedOut: return "Signed out"
+        case .acquiring: return "Loading current follow state"
+        case .ready: return snapshot.relationship == .following ? "Following" : "Not following"
+        case .noContactList: return "No contact list"
+        case .cachedOnly: return "Cached state only"
+        case .sourceUnavailable: return "Follow sources unavailable"
         }
     }
 
     private var accessibilityHint: String {
+        if offersAnotherAttempt && canAct {
+            return "Retries the NMP follow action from the latest canonical state"
+        }
         switch snapshot.availability {
-        case .signedOut: "Sign in to change this relationship"
-        case .acquiring: "Wait for NMP to resolve the current contact list"
-        case .ready: snapshot.relationship == .following ? "Stops following this user" : "Follows this user"
-        case .cachedOnly: "Reconnect before changing the contact list"
-        case .sourceUnavailable: "NMP has no safe source plan for this edit"
+        case .signedOut: return "Sign in to change this relationship"
+        case .acquiring: return "Wait for NMP to resolve the current contact list"
+        case .ready: return snapshot.relationship == .following ? "Stops following this user" : "Follows this user"
+        case .noContactList: return "Create a contact list before using the ordinary follow action"
+        case .cachedOnly: return "Reconnect before changing the contact list"
+        case .sourceUnavailable: return "NMP has no safe source plan for this edit"
         }
     }
 }
@@ -196,8 +218,9 @@ public struct NMPFollowButton: View {
         NMPFollowButtonBody(
             snapshot: following.snapshot,
             isActing: following.isActing,
+            offersAnotherAttempt: following.offersAnotherAttempt,
             variant: variant,
-            action: following.toggle
+            action: following.performPrimaryAction
         )
     }
 }

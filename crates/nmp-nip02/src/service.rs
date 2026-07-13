@@ -15,6 +15,7 @@ use crate::edit::{
 };
 
 const ACQUISITION_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_ACQUISITION_SNAPSHOTS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowRelationship {
@@ -32,6 +33,7 @@ pub enum FollowAvailability {
     SignedOut,
     Acquiring,
     Ready,
+    NoContactList,
     CachedOnly,
     SourceUnavailable,
 }
@@ -50,6 +52,7 @@ pub enum FollowActionFailure {
     SignedOut,
     AccountChanged,
     AcquisitionTimedOut,
+    NoContactList,
     CachedOnly,
     SourceUnavailable,
     Compose(ComposeFollowError),
@@ -151,12 +154,21 @@ fn project(
     accumulator: &Accumulator,
     evidence: &AcquisitionEvidence,
 ) -> FollowSnapshot {
-    let availability = availability(active, evidence);
+    let evidence_availability = availability(active, evidence);
     let base = active.and_then(|pubkey| accumulator.base_for(pubkey));
+    let availability =
+        if active.is_some() && base.is_none() && evidence_availability == FollowAvailability::Ready
+        {
+            FollowAvailability::NoContactList
+        } else {
+            evidence_availability
+        };
     let relationship = match base {
         Some(base) if follows(base, target) => FollowRelationship::Following,
         Some(_) => FollowRelationship::NotFollowing,
-        None if availability == FollowAvailability::Ready => FollowRelationship::NotFollowing,
+        None if availability == FollowAvailability::NoContactList => {
+            FollowRelationship::NotFollowing
+        }
         None => FollowRelationship::Unknown,
     };
     FollowSnapshot {
@@ -309,7 +321,9 @@ impl FollowAction {
 /// Start NMP's simple NIP-02 action. The acquisition/readiness policy,
 /// exact-base edit, atomic conflict guard, signer, durable outbox routing,
 /// and receipt stream all remain in Rust. A UI merely observes these states
-/// and asks for `Follow` or `Unfollow`.
+/// and asks for `Follow` or `Unfollow`. Initial acquisition is bounded by
+/// both an idle timeout and a closed snapshot budget, so relay churn cannot
+/// keep a pre-write action alive forever.
 pub fn set_following(engine: Arc<Engine>, target: PublicKey, change: FollowChange) -> FollowAction {
     set_following_with_timeout(engine, target, change, ACQUISITION_TIMEOUT)
 }
@@ -348,8 +362,16 @@ fn set_following_with_timeout(
         };
         let mut accumulator = Accumulator::default();
         let mut last_availability = FollowAvailability::Acquiring;
+        let mut remaining_snapshots = MAX_ACQUISITION_SNAPSHOTS;
 
         let base = loop {
+            if remaining_snapshots == 0 {
+                let _ = tx.send(FollowActionStatus::Failed(
+                    FollowActionFailure::AcquisitionTimedOut,
+                ));
+                return;
+            }
+            remaining_snapshots -= 1;
             match subscription.recv_timeout(timeout) {
                 Ok((deltas, evidence)) => {
                     accumulator.apply(deltas);
@@ -369,8 +391,20 @@ fn set_following_with_timeout(
                         return;
                     }
                     last_availability = availability(active, &evidence);
+                    if last_availability == FollowAvailability::SourceUnavailable {
+                        let _ = tx.send(FollowActionStatus::Failed(
+                            FollowActionFailure::SourceUnavailable,
+                        ));
+                        return;
+                    }
                     if last_availability == FollowAvailability::Ready {
-                        break accumulator.base_for(author).cloned();
+                        let Some(base) = accumulator.base_for(author).cloned() else {
+                            let _ = tx.send(FollowActionStatus::Failed(
+                                FollowActionFailure::NoContactList,
+                            ));
+                            return;
+                        };
+                        break base;
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
@@ -393,16 +427,16 @@ fn set_following_with_timeout(
             }
         };
 
-        let composed =
-            match compose_follow_change(author, base.as_ref(), target, change, Timestamp::now()) {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = tx.send(FollowActionStatus::Failed(FollowActionFailure::Compose(
-                        error,
-                    )));
-                    return;
-                }
-            };
+        let composed = match compose_follow_change(author, &base, target, change, Timestamp::now())
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = tx.send(FollowActionStatus::Failed(FollowActionFailure::Compose(
+                    error,
+                )));
+                return;
+            }
+        };
         let intent = match composed {
             ComposeFollowResult::NoChange => {
                 let _ = tx.send(FollowActionStatus::NoChange {
@@ -410,7 +444,7 @@ fn set_following_with_timeout(
                 });
                 return;
             }
-            ComposeFollowResult::Publish(intent) => intent,
+            ComposeFollowResult::Publish(intent) => *intent,
         };
 
         let receipt = match engine.publish_tracked(intent) {
@@ -444,7 +478,7 @@ fn set_following_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp::EngineConfig;
+    use nmp::{EngineConfig, RelayUrl, SourceEvidence};
     use nostr::Keys;
 
     #[test]
@@ -480,11 +514,28 @@ mod tests {
             Duration::from_millis(20),
         );
         assert_eq!(action.recv().unwrap(), FollowActionStatus::Acquiring);
-        assert!(matches!(
+        assert_eq!(
             action.recv().unwrap(),
-            FollowActionStatus::Failed(
-                FollowActionFailure::SourceUnavailable | FollowActionFailure::AcquisitionTimedOut
-            )
-        ));
+            FollowActionStatus::Failed(FollowActionFailure::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn reconciled_absence_is_visible_but_not_an_editable_empty_list() {
+        let author = Keys::generate().public_key();
+        let target = Keys::generate().public_key();
+        let evidence = AcquisitionEvidence {
+            sources: vec![SourceEvidence {
+                relay: RelayUrl::parse("wss://relay.example").unwrap(),
+                reconciled_through: Some(Timestamp::from_secs(10)),
+                status: SourceStatus::Requesting,
+            }],
+            shortfall: vec![],
+        };
+
+        let snapshot = project(Some(author), target, &Accumulator::default(), &evidence);
+        assert_eq!(snapshot.relationship, FollowRelationship::NotFollowing);
+        assert_eq!(snapshot.availability, FollowAvailability::NoContactList);
+        assert_eq!(snapshot.base_event_id, None);
     }
 }

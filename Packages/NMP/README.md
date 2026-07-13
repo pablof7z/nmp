@@ -22,7 +22,9 @@ NMPFollowButton(following: following)
 
 The resource derives truth from NMP's canonical kind:3 query and the action
 preserves the exact list under an atomic base precondition. The SwiftUI view
-only renders that state and forwards taps.
+only renders that state and forwards taps. The ordinary action refuses a
+missing contact-list base; first-list creation is intentionally a separate,
+not-yet-shipped policy rather than a hidden one-contact replacement.
 
 See `Sources/NMP/Engine.swift` and
 [`docs/builder/34-content.md`](../../docs/builder/34-content.md).

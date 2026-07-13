@@ -68,7 +68,9 @@ about current code:
   the iOS FFI surface. Still unbuilt at this checkpoint: Compose UI parity and Gallery,
   the conflict-honest `nmp-ui` open-code registry/CLI, NIP-25 live reaction
   resources/write intents (#155), and broader product/photo/highlight/media
-  component families. See `docs/design/ui-components-strategy.md` and issue
+  component families. The ordinary follow action also deliberately refuses
+  first-contact-list creation; that requires a separately named policy/action
+  before it can ship. See `docs/design/ui-components-strategy.md` and issue
   #75.
 - **Boundedness is only partial.** Swift newest-frame buffering, indexed queries,
   and router caps exist, but graph, derived-set, wire, relay, result, receipt,
