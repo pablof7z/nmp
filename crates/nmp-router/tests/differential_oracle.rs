@@ -22,9 +22,7 @@ use nmp_resolver::LiveQuery;
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Keys};
 
-use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, RelayUrl, Router, RuleRegistry,
-};
+use nmp_router::{test_relay, DiscoveryKinds, FixtureDirectory, RelayUrl, Router, RuleRegistry};
 
 fn my_follows_filter() -> Filter {
     Filter {

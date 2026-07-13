@@ -16,9 +16,7 @@ use nmp_resolver::testkit::Harness;
 use nmp_resolver::LiveQuery;
 use nostr::Keys;
 
-use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, Router, RuleRegistry, WireOp,
-};
+use nmp_router::{test_relay, DiscoveryKinds, FixtureDirectory, Router, RuleRegistry, WireOp};
 
 fn literal_author_filter(author_hex: &str) -> Filter {
     Filter {
