@@ -35,6 +35,24 @@ final class NMPUIGalleryUITests: XCTestCase {
         )
     }
 
+    func testConnectedFollowButtonsExposeNMPsSignedOutState() {
+        let scroll = app.scrollViews.firstMatch
+        let featuredUsers = app.staticTexts["Featured users"]
+        for _ in 0..<5 where !featuredUsers.isHittable {
+            scroll.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(featuredUsers.waitForExistence(timeout: 5))
+
+        let followButtons = app.buttons.matching(NSPredicate(format: "label == 'Follow'"))
+        XCTAssertGreaterThanOrEqual(followButtons.count, 3)
+        for index in 0..<3 {
+            let button = followButtons.element(boundBy: index)
+            XCTAssertEqual(button.value as? String, "Signed out")
+            XCTAssertFalse(button.isEnabled)
+        }
+        keepScreenshot("connected-follow-signed-out")
+    }
+
     func testConformanceStatesExposeDeterministicFallbacks() throws {
         app.tabBars.buttons["States"].tap()
         XCTAssertTrue(element("gallery.states.scripted").waitForExistence(timeout: 5))
@@ -54,6 +72,22 @@ final class NMPUIGalleryUITests: XCTestCase {
         }
         XCTAssertTrue(foundDynamicType)
         try app.performAccessibilityAudit(for: [.textClipped])
+
+        let followStates = element("gallery.states.follow")
+        for _ in 0..<4 where !followStates.isHittable {
+            scroll.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(followStates.waitForExistence(timeout: 5))
+        let missingList = app.buttons.matching(
+            NSPredicate(format: "value == 'No contact list'")
+        ).firstMatch
+        XCTAssertTrue(missingList.exists)
+        XCTAssertFalse(missingList.isEnabled)
+        let retry = app.buttons.matching(
+            NSPredicate(format: "label == 'Retry follow'")
+        ).firstMatch
+        XCTAssertEqual(retry.value as? String, "Ready to retry")
+        XCTAssertTrue(retry.isEnabled)
 
         for _ in 0..<5 { scroll.swipeUp() }
         XCTAssertTrue(element("gallery.states.long-content").waitForExistence(timeout: 5))

@@ -93,27 +93,26 @@ private struct ComponentsGallery: View {
                     .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
                 }
 
-                GallerySection("Featured users", note: "Three layouts, one Avatar/Name fallback contract, app-controlled follow state.") {
+                GallerySection("Featured users", note: "Three layouts, one Avatar/Name fallback contract, and one live NMP-owned NIP-02 relationship. Signed-out, acquisition, conflict, and receipt state are never guessed by the card.") {
                     NMPResolvedProfile(session: model.profileSession, pubkey: GalleryModel.profilePubkey) { profile in
                         VStack(spacing: 14) {
                             NMPUserCard(
                                 pubkey: GalleryModel.profilePubkey,
                                 profile: profile,
                                 variant: .featured,
-                                followAction: {}
+                                following: model.following
                             )
                             NMPUserCard(
                                 pubkey: GalleryModel.profilePubkey,
                                 profile: profile,
                                 variant: .landscape,
-                                isFollowing: true,
-                                followAction: {}
+                                following: model.following
                             )
                             NMPUserCard(
                                 pubkey: GalleryModel.profilePubkey,
                                 profile: profile,
                                 variant: .compact,
-                                followAction: {}
+                                following: model.following
                             )
                         }
                     }

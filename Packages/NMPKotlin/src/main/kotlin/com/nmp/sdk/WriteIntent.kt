@@ -116,6 +116,8 @@ sealed class WriteStatus {
 
     data class OutcomeUnknown(val relay: String) : WriteStatus()
 
+    data class ReplaceableConflict(val expected: String?, val actual: String?) : WriteStatus()
+
     data class Failed(val reason: String) : WriteStatus()
 
     companion object {
@@ -132,6 +134,8 @@ sealed class WriteStatus {
                 is FfiWriteStatus.PersistenceBlocked -> PersistenceBlocked(ffi.relay)
                 is FfiWriteStatus.RoutePersistenceBlocked -> RoutePersistenceBlocked(ffi.relay)
                 is FfiWriteStatus.OutcomeUnknown -> OutcomeUnknown(ffi.relay)
+                is FfiWriteStatus.ReplaceableConflict ->
+                    ReplaceableConflict(ffi.expected, ffi.actual)
                 is FfiWriteStatus.Failed -> Failed(ffi.reason)
             }
     }

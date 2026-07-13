@@ -8,8 +8,9 @@
 //! [`DiagnosticsSubscription::cancel`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvError;
+use std::sync::mpsc::{RecvError, RecvTimeoutError};
 use std::sync::Arc;
+use std::time::Duration;
 
 use nmp_engine::core::DiagnosticsSnapshot;
 use nmp_engine::runtime::{DiagnosticsHandle, Handle, LatestReceiver, QueryHandle, RowsMsg};
@@ -101,6 +102,14 @@ impl Subscription {
     /// channel disconnects.
     pub fn recv(&self) -> Result<RowsMsg, RecvError> {
         self.rows.recv()
+    }
+
+    /// Wait at most `timeout` for the next live-query frame. This is the
+    /// same stream as [`Self::recv`], with no polling or second cache; it is
+    /// useful to protocol actions whose acquisition phase has an explicit,
+    /// bounded deadline.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<RowsMsg, RecvTimeoutError> {
+        self.rows.recv_timeout(timeout)
     }
 
     /// Withdraw the subscription now, rather than waiting for `Drop`.

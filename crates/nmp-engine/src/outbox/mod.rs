@@ -52,6 +52,13 @@ pub enum WriteStatus {
     /// An at-most-once attempt crossed a process-loss boundary after its
     /// Started fact committed. Terminal ambiguity, never retry permission.
     OutcomeUnknown(RelayUrl),
+    /// The write was a compare-and-swap whole-value replacement and the
+    /// canonical local winner changed before atomic acceptance. No intent,
+    /// receipt journal row, signer request, or relay write was created.
+    ReplaceableConflict {
+        expected: Option<EventId>,
+        actual: Option<EventId>,
+    },
     /// Whole-intent terminal reached BEFORE any relay was ever contacted —
     /// a signer rejection, or (ledger #6) an unroutable `PrivateNarrow`
     /// route. Distinct from the per-relay `Rejected`: no `RelayUrl` exists

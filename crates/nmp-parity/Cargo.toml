@@ -14,6 +14,7 @@ nostr.workspace = true
 nmp.workspace = true
 nmp-ffi.workspace = true
 nmp-bdd.workspace = true
+nmp-nip02.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

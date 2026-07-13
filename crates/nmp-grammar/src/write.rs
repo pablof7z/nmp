@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use nostr::{Event as SignedEvent, PublicKey, RelayUrl, UnsignedEvent};
+use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, UnsignedEvent};
 
 /// A typed property of a write (M0 amendment) — not a routing choice.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -34,6 +34,21 @@ pub enum Durability {
 /// and the reducer requests the signer capability.
 pub enum WritePayload {
     Unsigned(UnsignedEvent),
+    /// An unsigned whole-value replacement whose acceptance is conditional
+    /// on the store still holding exactly `expected_base` at the draft's
+    /// replaceable/addressable coordinate. `None` means "there is still no
+    /// local winner"; it never means that Nostr is globally empty.
+    ///
+    /// The precondition travels with the draft so a protocol module can
+    /// compose one closed, race-free write value. It is checked inside the
+    /// store's atomic acceptance transaction, before an intent/receipt id is
+    /// allocated or any canonical row is changed. This variant is unsigned
+    /// for the same reason as [`Self::Unsigned`]: NMP freezes and signs the
+    /// exact body after acceptance.
+    UnsignedReplaceableEdit {
+        unsigned: UnsignedEvent,
+        expected_base: Option<EventId>,
+    },
     Signed(SignedEvent),
 }
 

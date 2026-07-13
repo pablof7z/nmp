@@ -412,6 +412,7 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
         let outcome = store
             .accept_write(AcceptWrite {
                 frozen,
+                replaceable_base: None,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,

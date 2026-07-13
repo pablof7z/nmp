@@ -30,6 +30,10 @@ use crate::convert::{
     demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey,
     row_delta_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
 };
+use crate::nip02::{
+    action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
+    FollowObserver, NmpFollowHandle,
+};
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
 use crate::types::{FfiDemand, FfiFilter, FfiReceiptReattachment, FfiWriteIntent};
 use nmp::ReceiptReattachment;
@@ -40,6 +44,31 @@ fn reattachment_to_ffi(value: &ReceiptReattachment) -> FfiReceiptReattachment {
         ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
         ReceiptReattachment::RetainedButUnreadable => FfiReceiptReattachment::RetainedButUnreadable,
     }
+}
+
+fn start_following_action(
+    engine: Arc<nmp::Engine>,
+    target: String,
+    change: nmp_nip02::FollowChange,
+    observer: Box<dyn FollowActionObserver>,
+) {
+    let target = match parse_pubkey(&target) {
+        Ok(target) => target,
+        Err(_) => {
+            observer.on_status(crate::nip02::FfiFollowActionStatus::Failed {
+                failure: crate::nip02::FfiFollowActionFailure::InvalidTarget { got: target },
+            });
+            observer.on_closed();
+            return;
+        }
+    };
+    let action = nmp_nip02::set_following(engine, target, change);
+    thread::spawn(move || {
+        while let Ok(status) = action.recv() {
+            observer.on_status(action_status_to_ffi(status));
+        }
+        observer.on_closed();
+    });
 }
 
 /// Construction config for [`NmpEngine::new`]. See the module doc: the only
@@ -119,14 +148,14 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
 /// `nmp-transport`/`nmp-resolver` mechanism types (#52).
 #[derive(uniffi::Object)]
 pub struct NmpEngine {
-    engine: nmp::Engine,
+    engine: Arc<nmp::Engine>,
 }
 
 #[uniffi::export]
 impl NmpEngine {
     #[uniffi::constructor]
     pub fn new(config: NmpEngineConfig) -> Result<Arc<Self>, FfiError> {
-        let engine = nmp::Engine::new(config.into())?;
+        let engine = Arc::new(nmp::Engine::new(config.into())?);
         Ok(Arc::new(Self { engine }))
     }
 
@@ -151,6 +180,51 @@ impl NmpEngine {
         let pk = pubkey.as_deref().map(parse_pubkey).transpose()?;
         self.engine.set_active_account(pk)?;
         Ok(())
+    }
+
+    /// Observe the active account's relationship to `target` through the
+    /// NMP-owned NIP-02 resource. The returned handle only owns demand
+    /// cancellation; contact-list semantics and acquisition state stay in
+    /// Rust and arrive as closed snapshots.
+    pub fn observe_following(
+        &self,
+        target: String,
+        observer: Box<dyn FollowObserver>,
+    ) -> Result<Arc<NmpFollowHandle>, FfiError> {
+        let target = parse_pubkey(&target)?;
+        let observation = nmp_nip02::observe_following(self.engine.clone(), target)?;
+        let cancel = observation.cancel_handle();
+        thread::spawn(move || {
+            while let Some(snapshot) = observation.recv() {
+                observer.on_snapshot(snapshot_to_ffi(snapshot));
+            }
+            observer.on_closed();
+        });
+        Ok(follow_handle(cancel))
+    }
+
+    /// Ask NMP to follow `target`. This is the complete NIP-02 action: it
+    /// waits for the module's source-evidence policy, preserves the exact
+    /// kind:3 base, atomically guards that base, signs, routes, and streams
+    /// the durable receipt. The native button owns none of those steps.
+    pub fn follow(&self, target: String, observer: Box<dyn FollowActionObserver>) {
+        start_following_action(
+            self.engine.clone(),
+            target,
+            nmp_nip02::FollowChange::Follow,
+            observer,
+        )
+    }
+
+    /// The inverse of [`Self::follow`], with the same acquisition,
+    /// compare-and-swap, signer, routing, and receipt guarantees.
+    pub fn unfollow(&self, target: String, observer: Box<dyn FollowActionObserver>) {
+        start_following_action(
+            self.engine.clone(),
+            target,
+            nmp_nip02::FollowChange::Unfollow,
+            observer,
+        )
     }
 
     /// Open a live subscription. `observer` is driven from a dedicated drain

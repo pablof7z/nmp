@@ -1047,6 +1047,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
                     unsigned.content,
                     sentinel_signature(),
                 ),
+                replaceable_base: None,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,

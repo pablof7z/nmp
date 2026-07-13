@@ -102,6 +102,7 @@ public enum WriteStatus: Sendable, Hashable {
     case persistenceBlocked(relay: String)
     case routePersistenceBlocked(relay: String)
     case outcomeUnknown(relay: String)
+    case replaceableConflict(expected: String?, actual: String?)
     case failed(reason: String)
 
     init(_ ffi: FfiWriteStatus) {
@@ -117,6 +118,8 @@ public enum WriteStatus: Sendable, Hashable {
         case .persistenceBlocked(let relay): self = .persistenceBlocked(relay: relay)
         case .routePersistenceBlocked(let relay): self = .routePersistenceBlocked(relay: relay)
         case .outcomeUnknown(let relay): self = .outcomeUnknown(relay: relay)
+        case .replaceableConflict(let expected, let actual):
+            self = .replaceableConflict(expected: expected, actual: actual)
         case .failed(let reason): self = .failed(reason: reason)
         }
     }

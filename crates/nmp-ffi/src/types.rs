@@ -480,16 +480,41 @@ pub struct FfiDiagnosticsSnapshot {
 pub enum FfiWriteStatus {
     Accepted,
     AwaitingCapability,
-    Signed { event_id: String },
-    Routed { relays: Vec<String> },
-    Sent { relay: String },
-    Acked { relay: String },
-    Rejected { relay: String, reason: String },
-    GaveUp { relay: String },
-    PersistenceBlocked { relay: String },
-    RoutePersistenceBlocked { relay: String },
-    OutcomeUnknown { relay: String },
-    Failed { reason: String },
+    Signed {
+        event_id: String,
+    },
+    Routed {
+        relays: Vec<String>,
+    },
+    Sent {
+        relay: String,
+    },
+    Acked {
+        relay: String,
+    },
+    Rejected {
+        relay: String,
+        reason: String,
+    },
+    GaveUp {
+        relay: String,
+    },
+    PersistenceBlocked {
+        relay: String,
+    },
+    RoutePersistenceBlocked {
+        relay: String,
+    },
+    OutcomeUnknown {
+        relay: String,
+    },
+    ReplaceableConflict {
+        expected: Option<String>,
+        actual: Option<String>,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 /// Result of looking up a stable retained receipt id.

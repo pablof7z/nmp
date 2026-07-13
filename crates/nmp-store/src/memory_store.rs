@@ -1132,6 +1132,7 @@ impl EventStore for MemoryStore {
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         let AcceptWrite {
             frozen,
+            replaceable_base,
             expected_pubkey,
             signing_identity_ref,
             durability,
@@ -1149,6 +1150,20 @@ impl EventStore for MemoryStore {
         }
         if self.tombstone_refuses(&frozen) {
             return Ok(AcceptOutcome::Refused(RefuseReason::Tombstoned));
+        }
+
+        if let Some(expected) = replaceable_base {
+            let Some(key) = address_key_for(&frozen) else {
+                return Ok(AcceptOutcome::Refused(
+                    RefuseReason::ReplaceableBaseOnRegularEvent,
+                ));
+            };
+            let actual = self.addr_index.get(&key).copied();
+            if actual != expected {
+                return Ok(AcceptOutcome::Refused(
+                    RefuseReason::ReplaceableBaseChanged { expected, actual },
+                ));
+            }
         }
 
         let intent_id = self.alloc_intent_id()?;
@@ -2528,6 +2543,7 @@ mod lane_atomicity_tests {
         let accepted = store
             .accept_write(AcceptWrite {
                 frozen,
+                replaceable_base: None,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "atomic".into(),
                 durability: WriteDurability::Durable,

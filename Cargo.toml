@@ -16,6 +16,7 @@ members = [
     "crates/nmp-bdd",
     "crates/nmp-parity",
     "crates/nmp-nip51",
+    "crates/nmp-nip02",
     "crates/nmp-nip29",
     "crates/nmp-content",
 ]
@@ -47,6 +48,7 @@ nmp = { path = "crates/nmp" }
 nmp-ffi = { path = "crates/nmp-ffi" }
 nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip51 = { path = "crates/nmp-nip51" }
+nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
 nmp-content = { path = "crates/nmp-content" }
 proptest = "1"

@@ -1274,8 +1274,21 @@ impl<S: EventStore> EngineCore<S> {
             routing,
         } = intent;
 
+        let replaceable_base = match &payload {
+            WritePayload::UnsignedReplaceableEdit { expected_base, .. } => Some(*expected_base),
+            WritePayload::Unsigned(_) | WritePayload::Signed(_) => None,
+        };
+
+        if replaceable_base.is_some() && durability == Durability::Ephemeral {
+            return self.fail_unaccepted(
+                sink,
+                "replaceable edits require durable or at-most-once acceptance".to_string(),
+            );
+        }
+
         let signing_pubkey = match &payload {
-            WritePayload::Unsigned(unsigned) => match self.active_pubkey {
+            WritePayload::Unsigned(unsigned)
+            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => match self.active_pubkey {
                 Some(active) if active == unsigned.pubkey => active,
                 Some(_) => {
                     return self.fail_unaccepted(
@@ -1325,6 +1338,7 @@ impl<S: EventStore> EngineCore<S> {
             };
             let accept = AcceptWrite {
                 frozen: frozen.clone(),
+                replaceable_base,
                 expected_pubkey: signing_pubkey,
                 signing_identity_ref: signing_pubkey.to_hex(),
                 durability: store_durability,
@@ -1333,7 +1347,9 @@ impl<S: EventStore> EngineCore<S> {
                 // If a signer is already present the immediate request below
                 // promotes it; if not, restart safely re-requests it.
                 sig_state: match payload {
-                    WritePayload::Unsigned(_) => IntentSigState::AwaitingSigner,
+                    WritePayload::Unsigned(_) | WritePayload::UnsignedReplaceableEdit { .. } => {
+                        IntentSigState::AwaitingSigner
+                    }
                     WritePayload::Signed(_) => IntentSigState::Pending,
                 },
                 accepted_at: self.clock,
@@ -1346,7 +1362,14 @@ impl<S: EventStore> EngineCore<S> {
                 let AcceptOutcome::Refused(reason) = outcome else {
                     unreachable!("only Refused omits journal ids")
                 };
-                return self.fail_unaccepted(sink, format!("write refused: {reason:?}"));
+                return match reason {
+                    nmp_store::RefuseReason::ReplaceableBaseChanged { expected, actual } => self
+                        .fail_unaccepted_with_status(
+                            sink,
+                            WriteStatus::ReplaceableConflict { expected, actual },
+                        ),
+                    other => self.fail_unaccepted(sink, format!("write refused: {other:?}")),
+                };
             };
             let receipt_id = outcome
                 .journaled_receipt_id()
@@ -1398,7 +1421,8 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         match payload {
-            WritePayload::Unsigned(unsigned) => {
+            WritePayload::Unsigned(unsigned)
+            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => {
                 if already_signed {
                     self.on_signed(
                         id,
@@ -1717,7 +1741,8 @@ impl<S: EventStore> EngineCore<S> {
 
     fn freeze_payload(payload: &WritePayload) -> Result<SignedEvent, String> {
         match payload {
-            WritePayload::Unsigned(unsigned) => {
+            WritePayload::Unsigned(unsigned)
+            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => {
                 let computed = EventId::new(
                     &unsigned.pubkey,
                     &unsigned.created_at,
@@ -1841,6 +1866,14 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn fail_unaccepted(&mut self, sink: Box<dyn ReceiptSink>, reason: String) -> Vec<Effect> {
+        self.fail_unaccepted_with_status(sink, WriteStatus::Failed(reason))
+    }
+
+    fn fail_unaccepted_with_status(
+        &mut self,
+        sink: Box<dyn ReceiptSink>,
+        status: WriteStatus,
+    ) -> Vec<Effect> {
         // No store id exists on refusal/persistence failure by contract.
         // This correlation id is stream-local only and never enters the
         // durable receipt namespace.
@@ -1848,7 +1881,6 @@ impl<S: EventStore> EngineCore<S> {
             Ok(id) => id,
             Err(err) => return vec![Effect::PublishFailed(err)],
         };
-        let status = WriteStatus::Failed(reason);
         sink.on_status(status.clone());
         vec![Effect::EmitReceipt(id, status)]
     }
@@ -3260,6 +3292,71 @@ mod receipt_allocator_tests {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
         }
+    }
+
+    #[test]
+    fn stale_replaceable_edit_surfaces_a_typed_conflict_before_acceptance() {
+        use nmp_store::RelayObserved;
+        use nostr::EventBuilder;
+
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://source.example").unwrap();
+        let base = EventBuilder::new(Kind::ContactList, "base")
+            .custom_created_at(Timestamp::from(10u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let concurrent = EventBuilder::new(Kind::ContactList, "concurrent")
+            .custom_created_at(Timestamp::from(20u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                base.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(10u64)),
+            )
+            .unwrap();
+        store
+            .insert(
+                concurrent.clone(),
+                RelayObserved::new(relay, Timestamp::from(20u64)),
+            )
+            .unwrap();
+
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let sink = Sink::default();
+        let effects = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::UnsignedReplaceableEdit {
+                    unsigned: UnsignedEvent::new(
+                        keys.public_key(),
+                        Timestamp::from(30u64),
+                        Kind::ContactList,
+                        vec![],
+                        "my edit",
+                    ),
+                    expected_base: Some(base.id),
+                },
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(sink.clone()),
+        ));
+
+        let expected = WriteStatus::ReplaceableConflict {
+            expected: Some(base.id),
+            actual: Some(concurrent.id),
+        };
+        assert_eq!(
+            sink.0.lock().unwrap().as_slice(),
+            std::slice::from_ref(&expected)
+        );
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitReceipt(_, status) if *status == expected)));
+        assert!(core.pending.is_empty());
+        assert!(core.resolver.store().recover_outbox().is_empty());
     }
 
     #[test]

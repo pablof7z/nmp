@@ -69,9 +69,10 @@ The optional [content and UI building-block architecture](docs/design/ui-compone
 places reusable parsing, reference sessions, native primitives, and styled
 open-code components above the public NMP facade. Apps may adopt, edit, replace,
 or omit those layers; NMP Core remains blind to them. This architecture is
-now implemented for the shared content engine and first native SwiftUI family;
-Compose parity, the `nmp-ui` source installer, and broader protocol components
-remain tracked work.
+now implemented for the shared content engine and first native SwiftUI family,
+including an NMP-owned live NIP-02 following resource/action and a view-only
+Follow button; Compose parity, the `nmp-ui` source installer, and broader
+protocol components remain tracked work.
 
 ## What this unlocks
 
@@ -79,6 +80,8 @@ remain tracked work.
 - Account-dependent data can re-root while unrelated multi-account observations stay live.
 - Cached rows can render immediately while relay work continues behind them.
 - A pending publication can appear through the same local data path as relay-received events, without an optimistic mirror in app state.
+- A follow button can display canonical NIP-02 state and request an atomic,
+  tag-preserving whole-list edit without app-owned kind:3 logic.
 - Protocol-specific behavior can compose with the engine without turning core into a catalog of preferred content types.
 - When data is absent or a write stalls, diagnostics can show the scoped evidence instead of inventing a global sync judgment.
 
