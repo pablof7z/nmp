@@ -37,7 +37,8 @@ use std::rc::Rc;
 use std::cell::Cell;
 
 use nostr::{
-    Event as SignedEvent, EventId, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
+    filter::MatchEventOptions, Event as SignedEvent, EventId, PublicKey, RelayMessage, RelayUrl,
+    Timestamp, UnsignedEvent,
 };
 
 use nmp_grammar::{
@@ -45,7 +46,9 @@ use nmp_grammar::{
     HostAuthority, NarrowOnly, PrivateRoute, SourceAuthority, WriteIntent, WritePayload,
     WriteRouting,
 };
-use nmp_resolver::{Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle};
+use nmp_resolver::{
+    CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery, QueryHandle,
+};
 use nmp_router::{
     DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, Router, RuleRegistry, SubId,
     WireDelta, WireOp, WireReq,
@@ -329,8 +332,22 @@ pub enum Effect {
 struct HandleState {
     _handle: QueryHandle,
     sink: Box<dyn RowSink>,
-    last_rows: BTreeMap<EventId, BTreeSet<RelayUrl>>,
+    last_rows: BTreeMap<EventId, RememberedRow>,
     last_evidence: Option<AcquisitionEvidence>,
+    /// False after any failed full refresh. Direct deltas cannot repair a
+    /// possibly missed historical snapshot, so the next affected batch must
+    /// retry the full oracle before incremental application resumes.
+    projection_complete: bool,
+}
+
+/// The minimal retained projection state needed to apply a committed writer
+/// delta without re-materializing the handle's entire history. Event bodies
+/// still live only in the store/app delta; the engine remembers selection and
+/// provenance keys, not a second payload cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RememberedRow {
+    created_at: u64,
+    sources: BTreeSet<RelayUrl>,
 }
 
 /// Per-receipt bookkeeping the reducer retains from `Publish` through to the
@@ -1210,6 +1227,7 @@ impl<S: EventStore> EngineCore<S> {
                 sink,
                 last_rows: BTreeMap::new(),
                 last_evidence: None,
+                projection_complete: false,
             },
         );
         self.refresh_handle(id, &mut effects);
@@ -2289,6 +2307,7 @@ impl<S: EventStore> EngineCore<S> {
             Ok(ingest) => {
                 let demand_changed = !ingest.delta.is_empty();
                 let affected_handles = ingest.affected_handles;
+                let row_changes = ingest.row_changes;
                 let satisfied_pending = !ingest.satisfied_intents.is_empty();
                 for (intent_id, canonical) in ingest.satisfied_intents {
                     if let Some((receipt_id, pending)) = self
@@ -2328,7 +2347,7 @@ impl<S: EventStore> EngineCore<S> {
                 if demand_changed || directory_changed || satisfied_pending {
                     self.refresh_all_handles(effects);
                 } else {
-                    self.refresh_handles(affected_handles, effects);
+                    self.apply_committed_row_changes(affected_handles, &row_changes, effects);
                 }
             }
         }
@@ -2980,6 +2999,251 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Apply a committed writer batch directly to ordinary one-root handle
+    /// projections. This is the other half of #177's targeted invalidation:
+    /// once the resolver has already proven which handles are affected, a
+    /// simple handle should not re-query 60k or 1M prior rows to emit one
+    /// exact delta. Complex/multi-root and strict-cache projections keep the
+    /// existing full-refresh oracle until their incremental algebra is proven.
+    fn apply_committed_row_changes(
+        &mut self,
+        ids: impl IntoIterator<Item = HandleId>,
+        changes: &CommittedRowChanges,
+        effects: &mut Vec<Effect>,
+    ) {
+        for id in ids {
+            if !self.handles.contains_key(&id) {
+                continue;
+            }
+            if !self.try_apply_committed_row_changes(id, changes, effects) {
+                self.refresh_handle(id, effects);
+            }
+        }
+    }
+
+    /// Returns `true` when the handle was fully and exactly handled without a
+    /// store read (including the no-visible-change case), `false` when the
+    /// caller must fall back to `refresh_handle`.
+    fn try_apply_committed_row_changes(
+        &mut self,
+        id: HandleId,
+        changes: &CommittedRowChanges,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let root_atoms = self.resolver.root_atoms(id);
+        // One currently-resolved root atom is not enough to prove this is
+        // an ordinary projection: a Derived/SetOp query can momentarily
+        // resolve to one root while still owning interior dependency atoms.
+        // Keep those shapes on the full-refresh oracle until their
+        // incremental algebra is proven independently.
+        if root_atoms.len() != 1 || self.resolver.subtree_atoms(id).len() != 1 {
+            return false;
+        }
+        let atom = root_atoms
+            .first()
+            .expect("one-root projection has one concrete atom");
+        let Some(state) = self.handles.get(&id) else {
+            return true;
+        };
+        if state._handle.cache() == CacheMode::Strict
+            || state.last_evidence.is_none()
+            || !state.projection_complete
+        {
+            return false;
+        }
+
+        let filter = atom.to_nostr();
+        let matches = |event: &nostr::Event| filter.match_event(event, MatchEventOptions::new());
+        let row_limit = effective_row_limit(&root_atoms);
+        let visible_removal = changes
+            .removed
+            .iter()
+            .any(|event| matches(event) && state.last_rows.contains_key(&event.id));
+        // A full top-N window may have older candidates outside remembered
+        // state. Removing a visible member therefore needs exactly one
+        // bounded oracle read to backfill correctly. Insert-only top-N
+        // changes are exact from `old top-N ∪ inserted` and stay read-free.
+        if row_limit.is_some_and(|limit| state.last_rows.len() == limit && visible_removal) {
+            return false;
+        }
+
+        // Unlimited handles are the scale-critical case: mutate remembered
+        // selection/provenance state in place and allocate only for the
+        // committed delta. Cloning the full BTreeMap here would merely trade
+        // a full store replay for O(history) memory/time inside the engine.
+        if row_limit.is_none() {
+            let state = self
+                .handles
+                .get_mut(&id)
+                .expect("handle remained live during synchronous projection");
+            let evidence = state
+                .last_evidence
+                .clone()
+                .expect("direct projection requires prior evidence");
+            let mut added = BTreeMap::<EventId, Row>::new();
+            let mut sources_grew = BTreeSet::<EventId>::new();
+            let mut removed = BTreeSet::<EventId>::new();
+
+            for event in &changes.removed {
+                if matches(event) && state.last_rows.remove(&event.id).is_some() {
+                    removed.insert(event.id);
+                }
+            }
+            for row in &changes.inserted {
+                if !matches(&row.event) {
+                    continue;
+                }
+                let sources = row.observed_relays.clone();
+                state.last_rows.insert(
+                    row.event.id,
+                    RememberedRow {
+                        created_at: row.event.created_at.as_secs(),
+                        sources: sources.clone(),
+                    },
+                );
+                added.insert(
+                    row.event.id,
+                    Row {
+                        event: row.event.clone(),
+                        sources,
+                    },
+                );
+            }
+            for row in &changes.provenance_grew {
+                if !matches(&row.event) {
+                    continue;
+                }
+                if let Some(remembered) = state.last_rows.get_mut(&row.event.id) {
+                    let prior_len = remembered.sources.len();
+                    remembered
+                        .sources
+                        .extend(row.observed_relays.iter().cloned());
+                    if remembered.sources.len() != prior_len {
+                        sources_grew.insert(row.event.id);
+                    }
+                }
+            }
+
+            let changed_current: BTreeSet<_> =
+                added.keys().chain(sources_grew.iter()).copied().collect();
+            let mut delta = Vec::with_capacity(changed_current.len() + removed.len());
+            for event_id in changed_current {
+                if let Some(row) = added.remove(&event_id) {
+                    delta.push(RowDelta::Added(row));
+                } else {
+                    delta.push(RowDelta::SourcesGrew {
+                        id: event_id,
+                        sources: state.last_rows[&event_id].sources.clone(),
+                    });
+                }
+            }
+            delta.extend(removed.into_iter().map(RowDelta::Removed));
+            if delta.is_empty() {
+                return true;
+            }
+            state.sink.on_rows(delta.clone());
+            effects.push(Effect::EmitRows(id, delta, evidence));
+            return true;
+        }
+
+        // Bounded handles remember at most N rows, so cloning their small
+        // window is bounded by the caller's explicit limit. This makes
+        // insertion/eviction and exact delta ordering straightforward.
+        let previous = state.last_rows.clone();
+        let mut current = previous.clone();
+        let mut added = BTreeMap::<EventId, Row>::new();
+
+        for event in &changes.removed {
+            if matches(event) {
+                current.remove(&event.id);
+            }
+        }
+        for row in &changes.inserted {
+            if !matches(&row.event) {
+                continue;
+            }
+            let sources = row.observed_relays.clone();
+            current.insert(
+                row.event.id,
+                RememberedRow {
+                    created_at: row.event.created_at.as_secs(),
+                    sources: sources.clone(),
+                },
+            );
+            added.insert(
+                row.event.id,
+                Row {
+                    event: row.event.clone(),
+                    sources,
+                },
+            );
+        }
+        for row in &changes.provenance_grew {
+            if !matches(&row.event) {
+                continue;
+            }
+            if let Some(remembered) = current.get_mut(&row.event.id) {
+                remembered
+                    .sources
+                    .extend(row.observed_relays.iter().cloned());
+            }
+        }
+
+        let limit = row_limit.expect("unlimited projection returned above");
+        if current.len() > limit {
+            let mut ordered: Vec<_> = current
+                .iter()
+                .map(|(event_id, row)| (row.created_at, *event_id))
+                .collect();
+            ordered.sort_by(|a, b| nip01_newest_first((a.0, &a.1), (b.0, &b.1)));
+            let keep: BTreeSet<_> = ordered
+                .into_iter()
+                .take(limit)
+                .map(|(_, event_id)| event_id)
+                .collect();
+            current.retain(|event_id, _| keep.contains(event_id));
+        }
+
+        if current == previous {
+            return true;
+        }
+        let evidence = state
+            .last_evidence
+            .clone()
+            .expect("direct projection requires prior evidence");
+        let mut delta = Vec::new();
+        for (event_id, remembered) in &current {
+            match previous.get(event_id) {
+                None => delta.push(RowDelta::Added(
+                    added
+                        .remove(event_id)
+                        .expect("new direct row came from committed insertion"),
+                )),
+                Some(last) if last.sources != remembered.sources => {
+                    delta.push(RowDelta::SourcesGrew {
+                        id: *event_id,
+                        sources: remembered.sources.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        for event_id in previous.keys() {
+            if !current.contains_key(event_id) {
+                delta.push(RowDelta::Removed(*event_id));
+            }
+        }
+
+        let state = self
+            .handles
+            .get_mut(&id)
+            .expect("handle remained live during synchronous projection");
+        state.last_rows = current;
+        state.sink.on_rows(delta.clone());
+        effects.push(Effect::EmitRows(id, delta, evidence));
+        true
+    }
+
     /// Recompute `id`'s current row set + acquisition evidence; emit (and
     /// synchronously deliver to its sink) `Effect::EmitRows` only if either
     /// changed since the last refresh -- and, when something DID change, the
@@ -3004,6 +3268,9 @@ impl<S: EventStore> EngineCore<S> {
         let (current, evidence) = match self.rows_and_evidence_for(id) {
             Ok(v) => v,
             Err(e) => {
+                if let Some(state) = self.handles.get_mut(&id) {
+                    state.projection_complete = false;
+                }
                 self.degrade_store(e, effects);
                 return;
             }
@@ -3011,18 +3278,27 @@ impl<S: EventStore> EngineCore<S> {
         let Some(state) = self.handles.get_mut(&id) else {
             return;
         };
-        let current_sources: BTreeMap<EventId, BTreeSet<RelayUrl>> = current
+        let current_rows: BTreeMap<EventId, RememberedRow> = current
             .iter()
-            .map(|(id, row)| (*id, row.sources.clone()))
+            .map(|(id, row)| {
+                (
+                    *id,
+                    RememberedRow {
+                        created_at: row.event.created_at.as_secs(),
+                        sources: row.sources.clone(),
+                    },
+                )
+            })
             .collect();
-        if current_sources == state.last_rows && state.last_evidence.as_ref() == Some(&evidence) {
+        state.projection_complete = true;
+        if current_rows == state.last_rows && state.last_evidence.as_ref() == Some(&evidence) {
             return;
         }
         let mut delta: Vec<RowDelta> = Vec::new();
         for (event_id, row) in current {
             match state.last_rows.get(&event_id) {
                 None => delta.push(RowDelta::Added(row)),
-                Some(last_sources) if *last_sources != row.sources => {
+                Some(last) if last.sources != row.sources => {
                     delta.push(RowDelta::SourcesGrew {
                         id: event_id,
                         sources: row.sources,
@@ -3032,11 +3308,11 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         for old_id in state.last_rows.keys() {
-            if !current_sources.contains_key(old_id) {
+            if !current_rows.contains_key(old_id) {
                 delta.push(RowDelta::Removed(*old_id));
             }
         }
-        state.last_rows = current_sources;
+        state.last_rows = current_rows;
         state.last_evidence = Some(evidence.clone());
         state.sink.on_rows(delta.clone());
         effects.push(Effect::EmitRows(id, delta, evidence));
@@ -3170,6 +3446,65 @@ impl<S: EventStore> EngineCore<S> {
             &self.ever_connected_relays,
         );
         Ok((by_id, evidence))
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl EngineCore<nmp_store::RedbStore> {
+    /// Benchmark-only access to the store work counters used by the
+    /// million-row scale proofs. Not an application/store API.
+    #[doc(hidden)]
+    pub fn bench_reset_query_work(&self) {
+        self.resolver.store().reset_query_work();
+    }
+
+    #[doc(hidden)]
+    pub fn bench_query_work(&self) -> (u64, u64, u64) {
+        self.resolver.store().query_work()
+    }
+
+    /// Drive the production committed-delta path without constructing a
+    /// transport frame; the benchmark already owns verified signed events
+    /// and explicit relay observations.
+    #[doc(hidden)]
+    pub fn bench_ingest_observed(
+        &mut self,
+        events: Vec<(SignedEvent, RelayObserved)>,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.ingest_relay_events(events, &mut effects);
+        effects
+    }
+
+    /// Exact pre-#195 comparison lane: commit through the same resolver/store
+    /// door, then force the old affected-handle full refresh. Restricted to
+    /// ordinary benchmark events whose demand/directory shape cannot change.
+    #[doc(hidden)]
+    pub fn bench_ingest_observed_with_forced_refresh(
+        &mut self,
+        events: Vec<(SignedEvent, RelayObserved)>,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for (event, observed) in &events {
+            *self
+                .events_by_relay_kind
+                .entry(observed.relay.clone())
+                .or_default()
+                .entry(event.kind.as_u16())
+                .or_insert(0) += 1;
+        }
+        let ingest = self
+            .resolver
+            .ingest_observed_detailed(events)
+            .expect("benchmark fixture store commit");
+        assert!(ingest.delta.is_empty(), "benchmark shape changed demand");
+        assert!(
+            ingest.satisfied_intents.is_empty(),
+            "benchmark event unexpectedly satisfied a local intent"
+        );
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        self.refresh_handles(ingest.affected_handles, &mut effects);
+        effects
     }
 }
 
@@ -3882,6 +4217,43 @@ mod affected_handle_invalidation_tests {
         room_query_for_kind(room, 9, 200)
     }
 
+    fn unlimited_room_query(room: usize) -> LiveQuery {
+        LiveQuery::from_filter(Filter {
+            tags: BTreeMap::from([(
+                IndexedTagName::new('h').unwrap(),
+                Binding::Literal(BTreeSet::from([format!("room-{room}")])),
+            )]),
+            ..Filter::default()
+        })
+    }
+
+    fn subscribed_handle(effects: &[Effect]) -> HandleId {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, _, _) => Some(*id),
+                _ => None,
+            })
+            .expect("subscribe emits the initial row/evidence snapshot")
+    }
+
+    fn assert_remembered_rows_match_oracle(core: &EngineCore<MemoryStore>, id: HandleId) {
+        let (oracle, _) = core.rows_and_evidence_for(id).unwrap();
+        let oracle: BTreeMap<_, _> = oracle
+            .into_iter()
+            .map(|(event_id, row)| {
+                (
+                    event_id,
+                    RememberedRow {
+                        created_at: row.event.created_at.as_secs(),
+                        sources: row.sources,
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(core.handles[&id].last_rows, oracle);
+    }
+
     #[test]
     fn ordinary_room_batch_queries_only_the_matching_handle_and_skips_router_compile() {
         let keys = Keys::generate();
@@ -3932,7 +4304,7 @@ mod affected_handle_invalidation_tests {
             &mut effects,
         );
 
-        assert_eq!(core.projection_store_queries.get(), 1);
+        assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
         for (room, sink) in sinks.iter().enumerate() {
             let batches = sink.0.lock().unwrap();
@@ -3966,8 +4338,9 @@ mod affected_handle_invalidation_tests {
             .all(|effect| !matches!(effect, Effect::EmitRows(..))));
 
         // The same id from a genuinely new relay changes only provenance.
-        // It must re-query the one matching handle, emit SourcesGrew there,
-        // and still avoid both unrelated handles and router compilation.
+        // The committed provenance fact is already exact: emit SourcesGrew
+        // without re-querying prior room history, unrelated handles, or the
+        // router.
         for sink in &sinks {
             sink.0.lock().unwrap().clear();
         }
@@ -3982,7 +4355,7 @@ mod affected_handle_invalidation_tests {
             )],
             &mut provenance_effects,
         );
-        assert_eq!(core.projection_store_queries.get(), 1);
+        assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
         for (room, sink) in sinks.iter().enumerate() {
             let batches = sink.0.lock().unwrap();
@@ -4047,7 +4420,7 @@ mod affected_handle_invalidation_tests {
             &mut effects,
         );
 
-        assert_eq!(core.projection_store_queries.get(), 1);
+        assert_eq!(core.projection_store_queries.get(), 0);
         let batches = affected.0.lock().unwrap();
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
@@ -4057,6 +4430,185 @@ mod affected_handle_invalidation_tests {
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == oldest.id)));
         assert!(other.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn top_n_visible_removal_uses_one_bounded_backfill_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://top-n-backfill.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let oldest = room_event(&keys, 21, 0, 10);
+        let middle = room_event(&keys, 21, 1, 20);
+        let newest = room_event(&keys, 21, 2, 30);
+        core.resolver
+            .store_mut()
+            .insert_batch(
+                [oldest.clone(), middle, newest.clone()]
+                    .into_iter()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(31u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+
+        let sink = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(
+            room_query_for_kind(21, 9, 2),
+            Box::new(sink.clone()),
+        ));
+        sink.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(newest.id))
+            .custom_created_at(Timestamp::from(40u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(deletion, RelayObserved::new(relay, Timestamp::from(41u64)))],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 1);
+        let batches = sink.0.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == oldest.id)));
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newest.id)));
+    }
+
+    #[test]
+    fn top_n_equal_timestamp_id_tie_is_applied_without_store_read() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://top-n-tie.example").unwrap();
+        let tied = |content: &str| {
+            EventBuilder::new(Kind::from(9u16), content)
+                .tag(Tag::parse(["h".to_owned(), "room-22".to_owned()]).unwrap())
+                .custom_created_at(Timestamp::from(50u64))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let mut pair = [tied("a"), tied("b")];
+        pair.sort_by_key(|event| event.id);
+        let arriving = pair[0].clone();
+        let seeded = pair[1].clone();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        core.resolver
+            .store_mut()
+            .insert(
+                seeded.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(51u64)),
+            )
+            .unwrap();
+
+        let sink = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(
+            room_query_for_kind(22, 9, 1),
+            Box::new(sink.clone()),
+        ));
+        sink.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                arriving.clone(),
+                RelayObserved::new(relay, Timestamp::from(52u64)),
+            )],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        let batches = sink.0.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == arriving.id)));
+        assert!(batches[0]
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == seeded.id)));
+    }
+
+    #[test]
+    fn same_batch_insert_and_delete_is_a_zero_query_zero_delta_net_noop() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://same-batch-delete.example").unwrap();
+        let target = room_event(&keys, 23, 0, 10);
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(target.id))
+            .custom_created_at(Timestamp::from(20u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let sink = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(room_query(23), Box::new(sink.clone())));
+        sink.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![
+                (
+                    target,
+                    RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+                ),
+                (deletion, RelayObserved::new(relay, Timestamp::from(21u64))),
+            ],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert!(sink.0.lock().unwrap().is_empty());
+        assert!(effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::EmitRows(..))));
+    }
+
+    #[test]
+    fn same_batch_multi_relay_insert_emits_complete_initial_sources_without_read() {
+        let keys = Keys::generate();
+        let first = RelayUrl::parse("wss://batch-source-a.example").unwrap();
+        let second = RelayUrl::parse("wss://batch-source-b.example").unwrap();
+        let event = room_event(&keys, 24, 0, 10);
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let sink = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(room_query(24), Box::new(sink.clone())));
+        sink.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![
+                (
+                    event.clone(),
+                    RelayObserved::new(first.clone(), Timestamp::from(11u64)),
+                ),
+                (
+                    event.clone(),
+                    RelayObserved::new(second.clone(), Timestamp::from(12u64)),
+                ),
+            ],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert!(matches!(
+            sink.0.lock().unwrap().as_slice(),
+            [batch] if matches!(
+                batch.as_slice(),
+                [RowDelta::Added(row)]
+                    if row.event.id == event.id
+                        && row.sources == BTreeSet::from([first, second])
+            )
+        ));
     }
 
     #[test]
@@ -4106,7 +4658,9 @@ mod affected_handle_invalidation_tests {
             &mut effects,
         );
 
-        assert_eq!(core.projection_store_queries.get(), 2);
+        // Both windows were known incomplete (one row under limit 10), so
+        // neither removal nor insertion can expose an unknown backfill.
+        assert_eq!(core.projection_store_queries.get(), 0);
         assert!(matches!(
             old_sink.0.lock().unwrap().as_slice(),
             [batch] if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == old.id)
@@ -4157,12 +4711,259 @@ mod affected_handle_invalidation_tests {
             &mut effects,
         );
 
-        assert_eq!(core.projection_store_queries.get(), 1);
+        // The prior window held one row under limit 200, proving no hidden
+        // backfill candidate existed; the committed removal is exact.
+        assert_eq!(core.projection_store_queries.get(), 0);
         assert!(matches!(
             affected.0.lock().unwrap().as_slice(),
             [batch] if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == target.id)
         ));
         assert!(unrelated.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn strict_pinned_projection_keeps_provenance_filtering_on_the_refresh_oracle() {
+        let keys = Keys::generate();
+        let pinned = RelayUrl::parse("wss://strict-pinned.example").unwrap();
+        let other = RelayUrl::parse("wss://strict-other.example").unwrap();
+        let LiveQuery(mut demand) = room_query(25);
+        demand.source = SourceAuthority::Pinned(BTreeSet::from([pinned.clone()]));
+        demand.cache = CacheMode::Strict;
+
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let sink = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(
+            LiveQuery(demand),
+            Box::new(sink.clone()),
+        ));
+        sink.0.lock().unwrap().clear();
+
+        let event = room_event(&keys, 25, 0, 10);
+        core.projection_store_queries.set(0);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                event.clone(),
+                RelayObserved::new(other.clone(), Timestamp::from(11u64)),
+            )],
+            &mut effects,
+        );
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert!(sink.0.lock().unwrap().is_empty());
+
+        core.projection_store_queries.set(0);
+        core.ingest_relay_events(
+            vec![(
+                event.clone(),
+                RelayObserved::new(pinned.clone(), Timestamp::from(12u64)),
+            )],
+            &mut effects,
+        );
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert!(matches!(
+            sink.0.lock().unwrap().as_slice(),
+            [batch] if matches!(
+                batch.as_slice(),
+                [RowDelta::Added(row)]
+                    if row.event.id == event.id
+                        && row.sources == BTreeSet::from([other, pinned])
+            )
+        ));
+    }
+
+    #[test]
+    fn one_resolved_root_with_a_derived_subtree_uses_the_refresh_oracle() {
+        let me = Keys::generate();
+        let followed = Keys::generate();
+        let relay = RelayUrl::parse("wss://derived-fallback.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let contact_list = EventBuilder::new(Kind::ContactList, "")
+            .tag(Tag::public_key(followed.public_key()))
+            .custom_created_at(Timestamp::from(10u64))
+            .sign_with_keys(&me)
+            .unwrap();
+        core.resolver
+            .store_mut()
+            .insert(
+                contact_list,
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )
+            .unwrap();
+        core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
+
+        let query = LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([9u16])),
+            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                inner: nmp_grammar::Demand::from_filter(Filter {
+                    kinds: Some(BTreeSet::from([3u16])),
+                    authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                    ..Filter::default()
+                }),
+                project: nmp_grammar::Selector::Tag("p".to_owned()),
+            }))),
+            ..Filter::default()
+        });
+        let sink = CapturingSink::default();
+        core.handle(EngineMsg::Subscribe(query, Box::new(sink.clone())));
+        sink.0.lock().unwrap().clear();
+
+        let post = EventBuilder::new(Kind::from(9u16), "followed post")
+            .custom_created_at(Timestamp::from(20u64))
+            .sign_with_keys(&followed)
+            .unwrap();
+        core.projection_store_queries.set(0);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                post.clone(),
+                RelayObserved::new(relay, Timestamp::from(21u64)),
+            )],
+            &mut effects,
+        );
+
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert!(matches!(
+            sink.0.lock().unwrap().as_slice(),
+            [batch] if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == post.id)
+        ));
+    }
+
+    #[test]
+    fn incomplete_projection_forces_one_recovery_read_before_direct_deltas_resume() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://projection-recovery.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let sink = CapturingSink::default();
+        let subscribed = core.handle(EngineMsg::Subscribe(
+            unlimited_room_query(28),
+            Box::new(sink.clone()),
+        ));
+        let handle = subscribed_handle(&subscribed);
+        sink.0.lock().unwrap().clear();
+        core.handles.get_mut(&handle).unwrap().projection_complete = false;
+
+        let first = room_event(&keys, 28, 0, 10);
+        core.projection_store_queries.set(0);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                first.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+            )],
+            &mut effects,
+        );
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert!(core.handles[&handle].projection_complete);
+
+        sink.0.lock().unwrap().clear();
+        let second = room_event(&keys, 28, 1, 20);
+        core.projection_store_queries.set(0);
+        core.ingest_relay_events(
+            vec![(
+                second.clone(),
+                RelayObserved::new(relay, Timestamp::from(21u64)),
+            )],
+            &mut effects,
+        );
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert!(matches!(
+            sink.0.lock().unwrap().as_slice(),
+            [batch] if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == second.id)
+        ));
+    }
+
+    #[test]
+    fn fixed_seed_mixed_batches_match_a_forced_full_refresh_after_every_commit() {
+        let keys = Keys::generate();
+        let first = RelayUrl::parse("wss://differential-a.example").unwrap();
+        let second = RelayUrl::parse("wss://differential-b.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let sink = CapturingSink::default();
+        let subscribe = core.handle(EngineMsg::Subscribe(
+            unlimited_room_query(26),
+            Box::new(sink.clone()),
+        ));
+        let handle = subscribed_handle(&subscribe);
+        sink.0.lock().unwrap().clear();
+        let mut app_rows = BTreeMap::<EventId, Row>::new();
+        let mut candidates = Vec::<SignedEvent>::new();
+        let mut seed = 0x4d59_5df4_d0f3_3173u64;
+
+        for step in 0..256u64 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let created_at = 1_000 + step / 3;
+            let observed_at = Timestamp::from(50_000 + step);
+            let batch = match seed % 5 {
+                0 => {
+                    let event = room_event(&keys, 26, step as usize, created_at);
+                    candidates.push(event.clone());
+                    vec![(event, RelayObserved::new(first.clone(), observed_at))]
+                }
+                1 if !candidates.is_empty() => {
+                    let event = candidates[(seed as usize) % candidates.len()].clone();
+                    vec![(event, RelayObserved::new(second.clone(), observed_at))]
+                }
+                2 if !candidates.is_empty() => {
+                    let target = &candidates[(seed as usize) % candidates.len()];
+                    let deletion = EventBuilder::new(Kind::EventDeletion, "")
+                        .tag(Tag::event(target.id))
+                        .custom_created_at(Timestamp::from(100_000 + step))
+                        .sign_with_keys(&keys)
+                        .unwrap();
+                    vec![(deletion, RelayObserved::new(first.clone(), observed_at))]
+                }
+                3 => {
+                    let event =
+                        EventBuilder::new(Kind::from(10_000u16), format!("revision-{step}"))
+                            .tag(Tag::parse(["h".to_owned(), "room-26".to_owned()]).unwrap())
+                            .custom_created_at(Timestamp::from(200_000 + step))
+                            .sign_with_keys(&keys)
+                            .unwrap();
+                    candidates.push(event.clone());
+                    vec![(event, RelayObserved::new(first.clone(), observed_at))]
+                }
+                _ => {
+                    let event = room_event(&keys, 27, step as usize, created_at);
+                    vec![(event, RelayObserved::new(first.clone(), observed_at))]
+                }
+            };
+
+            core.projection_store_queries.set(0);
+            let mut effects = Vec::new();
+            core.ingest_relay_events(batch, &mut effects);
+            assert_eq!(
+                core.projection_store_queries.get(),
+                0,
+                "unlimited ordinary handle re-read history at step {step}"
+            );
+
+            let emitted = std::mem::take(&mut *sink.0.lock().unwrap());
+            for delta in emitted.into_iter().flatten() {
+                match delta {
+                    RowDelta::Added(row) => {
+                        app_rows.insert(row.event.id, row);
+                    }
+                    RowDelta::SourcesGrew { id, sources } => {
+                        app_rows
+                            .get_mut(&id)
+                            .expect("source growth follows add")
+                            .sources = sources;
+                    }
+                    RowDelta::Removed(id) => {
+                        app_rows.remove(&id);
+                    }
+                }
+            }
+
+            assert_remembered_rows_match_oracle(&core, handle);
+            let remembered = &core.handles[&handle].last_rows;
+            assert_eq!(app_rows.len(), remembered.len());
+            for (event_id, row) in &app_rows {
+                assert_eq!(row.sources, remembered[event_id].sources);
+            }
+        }
     }
 
     #[test]

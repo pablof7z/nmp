@@ -28,6 +28,31 @@ pub struct RelayIngestResult {
     /// subscription-notification set: callers need not re-query unrelated
     /// handles merely to prove they stayed unchanged.
     pub affected_handles: BTreeSet<HandleId>,
+    /// Exact canonical row facts produced by the committed writer batch.
+    /// Simple app projections can apply these facts directly instead of
+    /// re-reading and re-materializing their entire prior result set merely
+    /// to discover one `Added`, `SourcesGrew`, or `Removed` delta.
+    pub row_changes: CommittedRowChanges,
+}
+
+/// One canonical current row together with every relay in this writer batch
+/// that observed it. For a new row this is its complete initial source set;
+/// for provenance growth callers union these sources into remembered state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedCurrentRow {
+    pub event: nostr::Event,
+    pub observed_relays: BTreeSet<RelayUrl>,
+}
+
+/// Net canonical event changes after consolidating transient rows inside one
+/// governed batch. An event inserted and then superseded/deleted in the same
+/// transaction appears in neither `inserted` nor `removed`, because it was
+/// never visible before or after the commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommittedRowChanges {
+    pub inserted: Vec<CommittedCurrentRow>,
+    pub removed: Vec<nostr::Event>,
+    pub provenance_grew: Vec<CommittedCurrentRow>,
 }
 
 use crate::eval::{project_events, resolve_reactive, resolve_setop};
@@ -547,6 +572,14 @@ impl<S: EventStore> Engine<S> {
         let mut removed: Vec<nostr::Event> = Vec::new();
         let mut provenance_grew: Vec<nostr::Event> = Vec::new();
         let mut satisfied_intents = Vec::new();
+        let mut observed_by_id =
+            BTreeMap::<nostr::EventId, (nostr::Event, BTreeSet<RelayUrl>)>::new();
+        for (event, observed) in &events {
+            let entry = observed_by_id
+                .entry(event.id)
+                .or_insert_with(|| (event.clone(), BTreeSet::new()));
+            entry.1.insert(observed.relay.clone());
+        }
         let input_events: Vec<_> = events.iter().map(|(event, _from)| event.clone()).collect();
         let outcomes = self.store.insert_batch(events)?;
         for (event, outcome) in input_events.into_iter().zip(outcomes) {
@@ -580,6 +613,45 @@ impl<S: EventStore> Engine<S> {
                 InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
             }
         }
+        let inserted_ids: BTreeSet<_> = inserted.iter().map(|event| event.id).collect();
+        let removed_ids: BTreeSet<_> = removed.iter().map(|event| event.id).collect();
+        let provenance_grew_ids: BTreeSet<_> =
+            provenance_grew.iter().map(|event| event.id).collect();
+        let row_changes = CommittedRowChanges {
+            inserted: inserted
+                .iter()
+                .filter(|event| !removed_ids.contains(&event.id))
+                .map(|event| {
+                    let (_, observed_relays) = observed_by_id
+                        .get(&event.id)
+                        .expect("inserted input event has observed relays");
+                    CommittedCurrentRow {
+                        event: event.clone(),
+                        observed_relays: observed_relays.clone(),
+                    }
+                })
+                .collect(),
+            removed: removed
+                .iter()
+                .filter(|event| !inserted_ids.contains(&event.id))
+                .cloned()
+                .collect(),
+            provenance_grew: provenance_grew_ids
+                .into_iter()
+                .filter(|event_id| {
+                    !inserted_ids.contains(event_id) && !removed_ids.contains(event_id)
+                })
+                .map(|event_id| {
+                    let (event, observed_relays) = observed_by_id
+                        .get(&event_id)
+                        .expect("duplicate input event has observed relays");
+                    CommittedCurrentRow {
+                        event: event.clone(),
+                        observed_relays: observed_relays.clone(),
+                    }
+                })
+                .collect(),
+        };
         let changed_events: Vec<_> = inserted
             .iter()
             .chain(removed.iter())
@@ -592,6 +664,7 @@ impl<S: EventStore> Engine<S> {
             delta,
             satisfied_intents,
             affected_handles,
+            row_changes,
         })
     }
 
