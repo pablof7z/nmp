@@ -450,12 +450,12 @@ struct GalleryIntro: View {
             Text(eyebrow)
                 .font(.caption2.weight(.bold))
                 .tracking(1.2)
-                .foregroundStyle(.purple)
+                .foregroundStyle(Color(red: 0.36, green: 0.08, blue: 0.68))
             Text(title)
                 .font(.largeTitle.weight(.bold))
             Text(description)
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.primary.opacity(0.64))
         }
     }
 }
@@ -475,7 +475,7 @@ struct GallerySection<Content: View>: View {
         VStack(alignment: .leading, spacing: 13) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.title3.weight(.bold))
-                Text(note).font(.caption).foregroundStyle(.secondary)
+                Text(note).font(.caption).foregroundStyle(Color.primary.opacity(0.64))
             }
             content
         }
