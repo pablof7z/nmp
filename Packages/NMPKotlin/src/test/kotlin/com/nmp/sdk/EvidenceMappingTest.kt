@@ -97,6 +97,21 @@ class EvidenceMappingTest {
     }
 
     @Test
+    fun replaceableConflictPreservesBothWinnerIds() {
+        val conflict =
+            WriteStatus.from(
+                FfiWriteStatus.ReplaceableConflict(
+                    expected = "expected-event",
+                    actual = "actual-event",
+                ),
+            )
+        assertEquals(
+            WriteStatus.ReplaceableConflict("expected-event", "actual-event"),
+            conflict,
+        )
+    }
+
+    @Test
     fun everyAcquisitionEvidenceVariantMapsWithoutARollup() {
         val raw =
             FfiAcquisitionEvidence(

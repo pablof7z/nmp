@@ -1327,6 +1327,7 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         let accepted = store
             .accept_write(AcceptWrite {
                 frozen: frozen_pending,
+                replaceable_base: None,
                 expected_pubkey: k.public_key(),
                 signing_identity_ref: "coverage-proof".into(),
                 durability: WriteDurability::Durable,

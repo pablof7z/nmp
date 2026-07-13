@@ -91,6 +91,7 @@ impl !core::panic::unwind_safe::RefUnwindSafe for nmp::DiagnosticsSubscription
 impl !core::panic::unwind_safe::UnwindSafe for nmp::DiagnosticsSubscription
 pub struct nmp::Engine
 impl nmp::Engine
+pub fn nmp::Engine::active_account(&self) -> core::result::Result<core::option::Option<nostr::key::public_key::PublicKey>, nmp::EngineError>
 pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nostr::key::public_key::PublicKey, nmp::EngineError>
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery) -> core::result::Result<nmp::Subscription, nmp::EngineError>
@@ -146,6 +147,7 @@ impl nmp::Subscription
 pub fn nmp::Subscription::cancel(self)
 pub fn nmp::Subscription::cancel_handle(&self) -> nmp::ObservationCancel
 pub fn nmp::Subscription::recv(&self) -> core::result::Result<nmp_engine::runtime::RowsMsg, std::sync::mpsc::RecvError>
+pub fn nmp::Subscription::recv_timeout(&self, core::time::Duration) -> core::result::Result<nmp_engine::runtime::RowsMsg, std::sync::mpsc::RecvTimeoutError>
 impl core::ops::drop::Drop for nmp::Subscription
 pub fn nmp::Subscription::drop(&mut self)
 impl core::marker::Freeze for nmp::Subscription
@@ -20556,6 +20558,95 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                                                     "variant": {
                                                       "discriminant": null,
                                                       "kind": {
+                                                        "struct": {
+                                                          "fields": [
+                                                            {
+                                                              "attrs": [],
+                                                              "inner": {
+                                                                "struct_field": {
+                                                                  "resolved_path": {
+                                                                    "args": {
+                                                                      "angle_bracketed": {
+                                                                        "args": [
+                                                                          {
+                                                                            "type": {
+                                                                              "resolved_path": {
+                                                                                "args": null,
+                                                                                "path": "nostr::EventId",
+                                                                                "resolved_item": {
+                                                                                  "definition": {
+                                                                                    "previously_defined": "nostr::event::id::EventId"
+                                                                                  },
+                                                                                  "path": "nostr::event::id::EventId"
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        ],
+                                                                        "constraints": []
+                                                                      }
+                                                                    },
+                                                                    "path": "Option",
+                                                                    "resolved_item": {
+                                                                      "path": "core::option::Option"
+                                                                    }
+                                                                  }
+                                                                }
+                                                              },
+                                                              "name": "expected",
+                                                              "visibility": "default"
+                                                            },
+                                                            {
+                                                              "attrs": [],
+                                                              "inner": {
+                                                                "struct_field": {
+                                                                  "resolved_path": {
+                                                                    "args": {
+                                                                      "angle_bracketed": {
+                                                                        "args": [
+                                                                          {
+                                                                            "type": {
+                                                                              "resolved_path": {
+                                                                                "args": null,
+                                                                                "path": "nostr::EventId",
+                                                                                "resolved_item": {
+                                                                                  "definition": {
+                                                                                    "previously_defined": "nostr::event::id::EventId"
+                                                                                  },
+                                                                                  "path": "nostr::event::id::EventId"
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        ],
+                                                                        "constraints": []
+                                                                      }
+                                                                    },
+                                                                    "path": "Option",
+                                                                    "resolved_item": {
+                                                                      "path": "core::option::Option"
+                                                                    }
+                                                                  }
+                                                                }
+                                                              },
+                                                              "name": "actual",
+                                                              "visibility": "default"
+                                                            }
+                                                          ],
+                                                          "has_stripped_fields": false
+                                                        }
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "ReplaceableConflict",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": {
                                                         "tuple": [
                                                           {
                                                             "attrs": [],
@@ -23684,6 +23775,78 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                   }
                                 },
                                 "name": "Unsigned",
+                                "visibility": "default"
+                              },
+                              {
+                                "attrs": [],
+                                "inner": {
+                                  "variant": {
+                                    "discriminant": null,
+                                    "kind": {
+                                      "struct": {
+                                        "fields": [
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "struct_field": {
+                                                "resolved_path": {
+                                                  "args": null,
+                                                  "path": "nostr::UnsignedEvent",
+                                                  "resolved_item": {
+                                                    "definition": {
+                                                      "previously_defined": "nostr::event::unsigned::UnsignedEvent"
+                                                    },
+                                                    "path": "nostr::event::unsigned::UnsignedEvent"
+                                                  }
+                                                }
+                                              }
+                                            },
+                                            "name": "unsigned",
+                                            "visibility": "default"
+                                          },
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "struct_field": {
+                                                "resolved_path": {
+                                                  "args": {
+                                                    "angle_bracketed": {
+                                                      "args": [
+                                                        {
+                                                          "type": {
+                                                            "resolved_path": {
+                                                              "args": null,
+                                                              "path": "nostr::EventId",
+                                                              "resolved_item": {
+                                                                "definition": {
+                                                                  "previously_defined": "nostr::event::id::EventId"
+                                                                },
+                                                                "path": "nostr::event::id::EventId"
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      ],
+                                                      "constraints": []
+                                                    }
+                                                  },
+                                                  "path": "Option",
+                                                  "resolved_item": {
+                                                    "path": "core::option::Option"
+                                                  }
+                                                }
+                                              }
+                                            },
+                                            "name": "expected_base",
+                                            "visibility": "default"
+                                          }
+                                        ],
+                                        "has_stripped_fields": false
+                                      }
+                                    }
+                                  }
+                                },
+                                "name": "UnsignedReplaceableEdit",
                                 "visibility": "default"
                               },
                               {

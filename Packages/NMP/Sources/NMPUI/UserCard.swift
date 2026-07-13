@@ -1,3 +1,4 @@
+import NMP
 import NMPContent
 import SwiftUI
 
@@ -8,7 +9,8 @@ public enum NMPUserCardVariant: Sendable, Hashable {
 }
 
 /// Ready-made profile card with genuinely different compositions for feature,
-/// list, and dense contexts. Follow state remains controlled by the app.
+/// list, and dense contexts. When supplied, follow state/action come from
+/// `NMPFollowing`; this card never parses or edits kind:3 itself.
 public struct NMPUserCard: View {
     @Environment(\.nmpUITheme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -16,24 +18,21 @@ public struct NMPUserCard: View {
     public let pubkey: String
     public let profile: NostrProfileMetadata?
     public let variant: NMPUserCardVariant
-    public let isFollowing: Bool
+    public let following: NMPFollowing?
     public let action: (() -> Void)?
-    public let followAction: (() -> Void)?
 
     public init(
         pubkey: String,
         profile: NostrProfileMetadata? = nil,
         variant: NMPUserCardVariant = .featured,
-        isFollowing: Bool = false,
-        action: (() -> Void)? = nil,
-        followAction: (() -> Void)? = nil
+        following: NMPFollowing? = nil,
+        action: (() -> Void)? = nil
     ) {
         self.pubkey = pubkey
         self.profile = profile
         self.variant = variant
-        self.isFollowing = isFollowing
+        self.following = following
         self.action = action
-        self.followAction = followAction
     }
 
     public var body: some View {
@@ -138,16 +137,10 @@ public struct NMPUserCard: View {
         }
     }
 
+    @ViewBuilder
     private var followButton: some View {
-        Button(action: { followAction?() }) {
-            Text(isFollowing ? "Following" : "Follow")
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .foregroundStyle(isFollowing ? theme.foreground : Color.white)
-                .background(isFollowing ? theme.elevatedSurface : theme.accent, in: Capsule())
+        if let following {
+            NMPFollowButton(following: following, variant: .compact)
         }
-        .buttonStyle(.plain)
-        .disabled(followAction == nil)
     }
 }

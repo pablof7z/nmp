@@ -1,3 +1,4 @@
+import NMP
 import NMPContent
 import NMPUI
 import SwiftUI
@@ -61,5 +62,22 @@ final class NMPUITests: XCTestCase {
     func testCompactCountsMatchReactionComponents() {
         XCTAssertEqual(NMPCompactCount.string(for: 999), "999")
         XCTAssertEqual(NMPCompactCount.string(for: 1_250), "1.2k")
+    }
+
+    func testFollowButtonBodyAcceptsOnlyProjectedStateAndATap() {
+        let snapshot = NMPFollowingSnapshot(
+            activePubkey: String(repeating: "01", count: 32),
+            target: String(repeating: "02", count: 32),
+            relationship: .following,
+            availability: .ready,
+            baseEventID: String(repeating: "03", count: 32)
+        )
+
+        _ = NMPFollowButtonBody(
+            snapshot: snapshot,
+            isActing: false,
+            variant: .prominent,
+            action: {}
+        )
     }
 }

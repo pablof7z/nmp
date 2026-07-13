@@ -1435,6 +1435,7 @@ dependencies = [
  "nmp",
  "nmp-content",
  "nmp-grammar",
+ "nmp-nip02",
  "nmp-nip29",
  "nmp-nip51",
  "nostr 0.44.4",
@@ -1450,6 +1451,17 @@ dependencies = [
  "blake3",
  "nostr 0.44.4",
  "serde_json",
+]
+
+[[package]]
+name = "nmp-nip02"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+ "nmp-grammar",
+ "nmp-ownership",
+ "nostr 0.44.4",
+ "tempfile",
 ]
 
 [[package]]
@@ -1482,6 +1494,7 @@ dependencies = [
  "nmp",
  "nmp-bdd",
  "nmp-ffi",
+ "nmp-nip02",
  "nostr 0.44.4",
  "tempfile",
  "tokio",

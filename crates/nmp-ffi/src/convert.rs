@@ -622,6 +622,12 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::OutcomeUnknown(relay) => FfiWriteStatus::OutcomeUnknown {
             relay: relay.to_string(),
         },
+        GWriteStatus::ReplaceableConflict { expected, actual } => {
+            FfiWriteStatus::ReplaceableConflict {
+                expected: expected.map(|id| id.to_hex()),
+                actual: actual.map(|id| id.to_hex()),
+            }
+        }
         GWriteStatus::Failed(reason) => FfiWriteStatus::Failed {
             reason: reason.clone(),
         },
@@ -770,6 +776,16 @@ mod write_status_tests {
                 GWriteStatus::OutcomeUnknown(relay.clone()),
                 FfiWriteStatus::OutcomeUnknown {
                     relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::ReplaceableConflict {
+                    expected: Some(EventId::all_zeros()),
+                    actual: None,
+                },
+                FfiWriteStatus::ReplaceableConflict {
+                    expected: Some(EventId::all_zeros().to_hex()),
+                    actual: None,
                 },
             ),
             (
@@ -1315,6 +1331,9 @@ mod tests {
         let parsed = write_intent_from_ffi(intent).expect("well-formed intent must parse");
         match parsed.payload {
             GWritePayload::Unsigned(u) => assert_eq!(u.tags.len(), 1),
+            GWritePayload::UnsignedReplaceableEdit { .. } => {
+                panic!("the raw FFI write surface must not mint guarded replaceable edits")
+            }
             GWritePayload::Signed(_) => {
                 panic!("an Unsigned FfiWritePayload must build an Unsigned GWritePayload")
             }
@@ -1415,6 +1434,9 @@ mod tests {
             }
             GWritePayload::Unsigned(_) => {
                 panic!("a Signed FfiWritePayload must build a Signed GWritePayload")
+            }
+            GWritePayload::UnsignedReplaceableEdit { .. } => {
+                panic!("the raw FFI write surface must not mint guarded replaceable edits")
             }
         }
     }

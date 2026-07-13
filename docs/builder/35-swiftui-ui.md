@@ -73,6 +73,62 @@ NMPArticleByline(article: article, authorProfile: profile)
 NMPArticleReadingTime(article: article)
 ```
 
+## Following resource and button
+
+Following is intentionally different from the controlled reaction primitives.
+NIP-02 kind:3 is a whole-list replacement, so an app-supplied `isFollowing`
+Boolean plus callback would export destructive protocol logic into every app.
+
+Construct one bindable NMP resource and pass it wherever the relationship is
+rendered:
+
+```swift
+@StateObject private var following: NMPFollowing
+
+init(engine: NMPEngine, pubkey: String) throws {
+    _following = StateObject(
+        wrappedValue: try NMPFollowing(engine: engine, target: pubkey)
+    )
+}
+
+var body: some View {
+    NMPFollowButton(following: following, variant: .compact)
+
+    NMPUserCard(
+        pubkey: following.target,
+        profile: profile,
+        following: following
+    )
+}
+```
+
+`NMPFollowing` observes the active account's canonical NIP-02 relationship and
+copies NMP's closed availability/action state onto the main actor. The button
+owns only styling, accessibility, and its reduced-motion-aware confirmation
+animation. Its tap invokes `following.toggle()`; all acquisition, kind:3
+preservation, exact-base conflict detection, signing, author-outbox routing,
+and receipt handling remain in NMP.
+
+The production state vocabulary distinguishes signed out, acquiring, ready,
+cached-only, and source-unavailable from following/not-following/unknown. The
+button is enabled only for an established ready relationship and never
+optimistically flips a local Boolean.
+
+Apps with their own component can skip `NMPFollowing` and consume the simple
+engine action directly:
+
+```swift
+let action = engine.follow(pubkey) // or engine.unfollow(pubkey)
+for await status in action.status {
+    // acquiring, noChange, receipt facts, or typed failure
+}
+```
+
+Malformed target, signed-out state, acquisition failure, conflict, and relay
+outcomes all arrive as action state; `follow` itself does not throw. See
+[Editing replaceable state safely](15-editing-replaceable.md) for the
+source-scoped base contract.
+
 ## Replace one renderer
 
 Renderer sets are immutable ordinary values. The last explicit builder call on
@@ -158,13 +214,17 @@ The first SwiftUI family includes:
 - `NMPArticleImage`, `NMPArticleTitle`, `NMPArticleSummary`,
   `NMPArticleByline`, and `NMPArticleReadingTime` as reusable card leaves;
 - `NMPUserCard` in featured, landscape, and compact compositions;
+- `NMPFollowButton` in compact, prominent, and icon variants, backed by the
+  NMP-owned `NMPFollowing` relationship/action resource;
 - `NMPReactionButton` in heart, spark, and minimal variants;
 - `NMPAvatarReactionButton` and `NMPEmojiReactionBar`.
 
 Article reading time is presentation-derived through `NMPReadingTime`; it is
-not inserted into the NIP-23 protocol value. Reaction views are controlled
-components: the host supplies selected/count/people state and actions. Typed
-NIP-25 live resources and write intents are tracked separately in issue #155.
+not inserted into the NIP-23 protocol value. Reaction views remain controlled
+components: the host supplies selected/count/people state and actions until the
+typed NIP-25 work tracked in issue #155 lands. The follow button does not use
+that controlled-state pattern because NMP now ships the NIP-02 resource and
+semantic action itself.
 
 ## Theme and actions
 

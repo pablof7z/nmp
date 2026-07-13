@@ -89,6 +89,7 @@ fn frozen_from_signed(signed: &Event) -> Event {
 fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         frozen,
+        replaceable_base: None,
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
         durability: WriteDurability::Durable,
@@ -121,6 +122,100 @@ fn for_each_backend(mut body: impl FnMut(&mut dyn EventStore)) {
 }
 
 // ---------------------------------------------------------------------
+
+#[test]
+fn replaceable_base_precondition_rejects_a_concurrent_winner_atomically() {
+    for_each_backend(|store| {
+        let k = keys();
+        let relay = RelayUrl::parse("wss://source.example").unwrap();
+        let (_base_frozen, base) = compose(&k, Kind::ContactList, "base", 10);
+        assert!(matches!(
+            store
+                .insert(
+                    base.clone(),
+                    RelayObserved::new(relay.clone(), Timestamp::from(10u64))
+                )
+                .unwrap(),
+            InsertOutcome::Inserted
+        ));
+
+        let (_concurrent_frozen, concurrent) = compose(&k, Kind::ContactList, "concurrent", 20);
+        assert!(matches!(
+            store
+                .insert(
+                    concurrent.clone(),
+                    RelayObserved::new(relay, Timestamp::from(20u64))
+                )
+                .unwrap(),
+            InsertOutcome::Superseded { .. }
+        ));
+
+        let (draft, _) = compose(&k, Kind::ContactList, "my edit", 30);
+        let mut guarded = accept(draft, k.public_key(), 30);
+        guarded.replaceable_base = Some(Some(base.id));
+        assert_eq!(
+            do_accept(store, guarded),
+            AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged {
+                expected: Some(base.id),
+                actual: Some(concurrent.id),
+            })
+        );
+        assert!(store.recover_outbox().is_empty());
+        let rows = store
+            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.id, concurrent.id);
+    });
+}
+
+#[test]
+fn replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (first, _) = compose(&k, Kind::ContactList, "first", 10);
+        let mut create = accept(first.clone(), k.public_key(), 10);
+        create.replaceable_base = Some(None);
+        assert!(matches!(
+            do_accept(store, create),
+            AcceptOutcome::Inserted { .. }
+        ));
+
+        let (second, _) = compose(&k, Kind::ContactList, "second", 20);
+        let mut exact = accept(second, k.public_key(), 20);
+        exact.replaceable_base = Some(Some(first.id));
+        assert!(matches!(
+            do_accept(store, exact),
+            AcceptOutcome::Superseded { .. }
+        ));
+
+        let (third, _) = compose(&k, Kind::ContactList, "third", 30);
+        let mut falsely_empty = accept(third, k.public_key(), 30);
+        falsely_empty.replaceable_base = Some(None);
+        assert!(matches!(
+            do_accept(store, falsely_empty),
+            AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged {
+                expected: None,
+                actual: Some(_),
+            })
+        ));
+    });
+}
+
+#[test]
+fn replaceable_base_precondition_on_regular_event_fails_closed() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (note, _) = compose(&k, Kind::TextNote, "not replaceable", 10);
+        let mut guarded = accept(note, k.public_key(), 10);
+        guarded.replaceable_base = Some(None);
+        assert_eq!(
+            do_accept(store, guarded),
+            AcceptOutcome::Refused(RefuseReason::ReplaceableBaseOnRegularEvent)
+        );
+        assert!(store.recover_outbox().is_empty());
+    });
+}
 
 #[test]
 fn accept_write_inserts_pending_row_and_journal_in_one_txn() {

@@ -50,6 +50,7 @@ const ROUTER_CAP: usize = 10;
 struct Inner {
     handle: Handle,
     engine_thread: EngineThread,
+    active_pubkey: Option<PublicKey>,
 }
 
 /// The one supported Rust product surface (canonical-facade-52-plan.md §1).
@@ -92,6 +93,7 @@ impl Engine {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
+                active_pubkey: None,
             })),
         })
     }
@@ -127,6 +129,7 @@ impl Engine {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
+                active_pubkey: None,
             })),
         }
     }
@@ -238,7 +241,34 @@ impl Engine {
     /// publish attempted while active in that state terminates
     /// `WriteStatus::Failed`, never a panic.
     pub fn set_active_account(&self, pubkey: Option<PublicKey>) -> Result<(), EngineError> {
-        self.with_handle(|handle| handle.set_active_account(pubkey))
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match &mut *guard {
+            Some(inner) => {
+                inner.handle.set_active_account(pubkey);
+                inner.active_pubkey = pubkey;
+                Ok(())
+            }
+            None => Err(EngineError::EngineClosed),
+        }
+    }
+
+    /// The account currently rooting reactive identity and unsigned writes.
+    /// This is facade-owned identity state, not a cache projection. It is
+    /// updated under the same lifecycle mutex as [`Self::set_active_account`]
+    /// so protocol actions can pin the author they are editing and detect an
+    /// account switch before acceptance.
+    pub fn active_account(&self) -> Result<Option<PublicKey>, EngineError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match &*guard {
+            Some(inner) => Ok(inner.active_pubkey),
+            None => Err(EngineError::EngineClosed),
+        }
     }
 
     /// Open a live diagnostics stream. Same `Drop` discipline as
@@ -264,6 +294,7 @@ impl Engine {
         if let Some(Inner {
             handle,
             engine_thread,
+            active_pubkey: _,
         }) = inner
         {
             handle.shutdown();

@@ -1,0 +1,15 @@
+[package]
+name = "nmp-nip02"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nostr.workspace = true
+nmp.workspace = true
+nmp-grammar.workspace = true
+nmp-ownership.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

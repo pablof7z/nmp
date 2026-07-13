@@ -7,8 +7,24 @@ for source-ranged mixed-content parsing, typed kind:0/NIP-23 resources, and
 bounded live reference sessions over that same engine. Importing or linking
 `NMPContent` is never required to use `NMP`. `NMPUI` is the optional SwiftUI
 product: `Avatar`, `Name`, mentions, event chrome, portrait and Medium-style
-article cards, user cards, reactions, and `NostrContent` with locally scoped
-renderer overrides.
+article cards, user cards, reactions, a live NMP-owned NIP-02 follow button,
+and `NostrContent` with locally scoped renderer overrides.
+
+Following is an NMP action rather than button-owned protocol logic:
+
+```swift
+let action = nmp.follow(pubkey)
+for await status in action.status { /* acquisition + receipt state */ }
+
+let following = try NMPFollowing(engine: nmp, target: pubkey)
+NMPFollowButton(following: following)
+```
+
+The resource derives truth from NMP's canonical kind:3 query and the action
+preserves the exact list under an atomic base precondition. The SwiftUI view
+only renders that state and forwards taps. The ordinary action refuses a
+missing contact-list base; first-list creation is intentionally a separate,
+not-yet-shipped policy rather than a hidden one-contact replacement.
 
 See `Sources/NMP/Engine.swift` and
 [`docs/builder/34-content.md`](../../docs/builder/34-content.md).
