@@ -1022,18 +1022,22 @@ pub trait EventStore {
     /// rows survive — not a display ordering: the app receives an unordered,
     /// `EventId`-keyed `RowDelta` stream and sorts it itself, so #9's
     /// display-sort fork stays open and the two compose. This store door
-    /// deliberately stays uncapped so reactive recompute and negentropy still
-    /// see every match.
+    /// deliberately stays uncapped so unlimited reactive recompute and
+    /// negentropy still see every match. A `Derived` node carrying an explicit
+    /// limit uses [`EventStore::query_newest`] instead: its projection is
+    /// defined over the selected newest `N`, not over the complete history.
     fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError>;
 
     /// Return at most `limit` current matches in NIP-01 newest-first
     /// selection order: `created_at` descending, then event id ascending.
     ///
     /// This is a distinct door from [`EventStore::query`], whose deliberately
-    /// complete result is required by reactive recompute and negentropy. The
-    /// default implementation preserves backend correctness by sorting the
-    /// complete answer; persistent backends may override it with an ordered
-    /// index scan that stops as soon as `limit` accepted rows have been found.
+    /// complete result is required by unlimited reactive recompute and
+    /// negentropy. Handle root projections and explicitly limited `Derived`
+    /// nodes use this bounded door. The default implementation preserves
+    /// backend correctness by sorting the complete answer; persistent backends
+    /// may override it with an ordered index scan that stops as soon as
+    /// `limit` accepted rows have been found.
     fn query_newest(
         &self,
         filter: &Filter,
