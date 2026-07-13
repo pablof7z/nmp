@@ -2728,6 +2728,13 @@ impl<S: EventStore> EngineCore<S> {
 
     fn on_relay_connected(&mut self, handle: TransportRelayHandle, url: RelayUrl) -> Vec<Effect> {
         self.slot_to_url.insert(handle.slot, url.clone());
+        // A connection can also exist solely for a compiled/persisted write
+        // route. Keep its slot attribution for write ACKs, but it must never
+        // become a read source, receive a replay, or trigger capability
+        // discovery unless the CURRENT read plan admits that exact URL.
+        let Some(reqs) = self.router.plan().reqs.get(&url).cloned() else {
+            return Vec::new();
+        };
         // Feeds `AcquisitionEvidence.sources[_].status` (`evidence.rs`):
         // this relay is now `Requesting`, never again `Connecting` for the
         // lifetime of this `EngineCore` (`ever_connected_relays` is
@@ -2740,18 +2747,12 @@ impl<S: EventStore> EngineCore<S> {
         // §2: "a replayed sub on the new generation gets fresh snapshots").
         self.attribution.clear_relay(&url);
         let mut effects = Vec::new();
-        if let Some(reqs) = self.router.plan().reqs.get(&url).cloned() {
-            if !reqs.is_empty() {
-                for req in &reqs {
-                    self.attribution.record_send(
-                        &url,
-                        &req.sub_id,
-                        &req.filter,
-                        req.absorbed.clone(),
-                    );
-                }
-                effects.push(Effect::Replay(url.clone(), reqs));
+        if !reqs.is_empty() {
+            for req in &reqs {
+                self.attribution
+                    .record_send(&url, &req.sub_id, &req.filter, req.absorbed.clone());
             }
+            effects.push(Effect::Replay(url.clone(), reqs));
         }
         // Capability probe (plan §6 E): idempotent -- a relay whose verdict
         // is already cached (`Supported`/`Unsupported`) from an earlier

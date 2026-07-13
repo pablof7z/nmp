@@ -73,7 +73,7 @@ use nmp_signer::{SignerOp, SigningCapability};
 use nmp_store::EventStore;
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp};
 
-use nmp_transport::{DurableSendOutcome, Pool, PoolConfig, PoolEvent, WireFrame};
+use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
@@ -337,13 +337,24 @@ impl EngineThread {
         store: S,
         directory: D,
         cap: usize,
-        pool_config: PoolConfig,
+        mut pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
     ) -> (Self, Handle)
     where
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
+        // One limit owns both compilation and connection admission. Legacy
+        // zero values select the finite default; conflicting mechanism-test
+        // inputs fail closed to the smaller non-zero ceiling.
+        let cap = match (cap, pool_config.max_relays) {
+            (0, 0) => nmp_transport::DEFAULT_MAX_RELAYS,
+            (0, pool) => pool,
+            (router, 0) => router,
+            (router, pool) => router.min(pool),
+        };
+        pool_config.max_relays = cap;
+
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let (pool_evt_tx, pool_evt_rx) =
@@ -813,7 +824,9 @@ fn engine_loop<S, D>(
                 // the relay-cap rejection count too, not only the ones fanned
                 // out later.
                 let mut snapshot = core.diagnostics_snapshot();
-                snapshot.relays_rejected_over_cap = pool.admission_rejections();
+                snapshot.relays_rejected_over_cap = snapshot
+                    .relays_rejected_over_cap
+                    .saturating_add(pool.admission_rejections());
                 tx.send(snapshot);
                 if reply.send((id, rx)).is_err() {
                     // Caller already gave up -- nothing to register.
@@ -989,7 +1002,13 @@ fn dispatch_effect(
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::Replay(url, reqs) => apply_replay(&url, reqs, pool, preambles),
         Effect::PublishEvent(url, event, correlation) => {
-            let handle = pool.ensure_open(&url);
+            let Ok(handle) = pool.ensure_open(&url) else {
+                let _ = self_inbox.send(Cmd::Engine(EngineMsg::EventHandoff(
+                    correlation,
+                    HandoffResult::NotHandedOff,
+                )));
+                return;
+            };
             let json = ClientMessage::event(event).as_json();
             if let DurableSendOutcome::Resolved(result) =
                 pool.send_durable(handle, correlation, WireFrame::Text(json))
@@ -1068,7 +1087,9 @@ fn dispatch_effect(
             // both the core-built snapshot AND the `Pool`, so it stitches the
             // count in here before fan-out. Idempotent per snapshot (a fresh
             // read each time), monotonic across snapshots.
-            snapshot.relays_rejected_over_cap = pool.admission_rejections();
+            snapshot.relays_rejected_over_cap = snapshot
+                .relays_rejected_over_cap
+                .saturating_add(pool.admission_rejections());
             // Fan out to every currently-registered observer (M5 plan §1.2
             // step 4) -- each observer's own `LatestSender` overwrites its
             // own slot, so a slow consumer only ever sees the newest
@@ -1089,23 +1110,31 @@ fn dispatch_effect(
             // its synchronous reply. There is no receipt stream to fan out.
         }
         Effect::StartProbe(url, sub_id, filter, initial_hex) => {
-            let handle = pool.ensure_open(&url);
+            let Ok(handle) = pool.ensure_open(&url) else {
+                return;
+            };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegOpen(probed, sub_id, filter, initial_hex) => {
             let relay = probed.url().clone();
-            let handle = pool.ensure_open(&relay);
+            let Ok(handle) = pool.ensure_open(&relay) else {
+                return;
+            };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegMsg(relay, sub_id, message_hex) => {
-            let handle = pool.ensure_open(&relay);
+            let Ok(handle) = pool.ensure_open(&relay) else {
+                return;
+            };
             let text = neg_msg_frame_text(&sub_id, message_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegClose(relay, sub_id) => {
-            let handle = pool.ensure_open(&relay);
+            let Ok(handle) = pool.ensure_open(&relay) else {
+                return;
+            };
             let text = neg_close_frame_text(&sub_id);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
@@ -1158,7 +1187,9 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
 /// here.
 fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
     for (relay, ops) in &delta.ops {
-        let handle = pool.ensure_open(relay);
+        let Ok(handle) = pool.ensure_open(relay) else {
+            continue;
+        };
         let entry = preambles.entry(relay.clone()).or_default();
         for op in ops {
             match op {
@@ -1191,7 +1222,9 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
 /// idempotent overwrite (NIP-01: a REQ with an existing sub-id replaces that
 /// sub).
 fn apply_replay(url: &RelayUrl, reqs: Vec<WireReq>, pool: &Pool, preambles: &mut Preambles) {
-    let handle = pool.ensure_open(url);
+    let Ok(handle) = pool.ensure_open(url) else {
+        return;
+    };
     let entry = preambles.entry(url.clone()).or_default();
     entry.clear();
     for req in &reqs {

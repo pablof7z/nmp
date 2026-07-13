@@ -98,28 +98,22 @@ pub struct NmpEngineConfig {
     /// callers — adding it must not break records constructed before #121.
     #[uniffi(default = [])]
     pub allowed_local_relay_hosts: Vec<String>,
-    /// OPT-IN, defense-in-depth ceiling on concurrently-connected relays
-    /// (issue #121). `0` imposes no cap; a non-zero value refuses relay dials
-    /// past it and counts them in the diagnostics `relays_rejected_over_cap`.
-    /// NOT the primary worker-exhaustion defense — fan-out is already bounded
-    /// by `nmp-router`'s solver cap; this is a coarse absolute backstop.
+    /// The one whole-engine relay ceiling. It bounds the complete compiled
+    /// demand and the transport worker set with the same effective value.
+    /// Legacy zero is normalized to the finite default, never uncapped.
     ///
     /// The `default =` literal below MUST stay equal to
     /// [`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,
     /// never a const path) — the const is the single Rust-side knob; the
-    /// literal is its foreign-binding mirror. The default VALUE itself is an
-    /// open owner decision (sane cap vs. uncapped, issue #121); `0` is the
-    /// interim uncapped placeholder.
-    #[uniffi(default = 0)]
+    /// literal is its foreign-binding mirror.
+    #[uniffi(default = 10)]
     pub max_relays: u32,
 }
 
 /// The default relay-count ceiling for a freshly-constructed engine config
-/// (issue #121). HOLD: the value is an open owner decision (a sane cap vs.
-/// uncapped); `0` (uncapped) is the interim placeholder. When the owner picks
-/// a number, update BOTH this const AND the `#[uniffi(default = N)]` literal
+/// (#20). Update BOTH this const AND the `#[uniffi(default = N)]` literal
 /// on [`NmpEngineConfig::max_relays`] above — they must match.
-pub const DEFAULT_MAX_RELAYS: u32 = 0;
+pub const DEFAULT_MAX_RELAYS: u32 = 10;
 
 /// Destructively reset a closed persistent NMP store. This removes all
 /// canonical engine state at `store_path`, while leaving any separately
@@ -132,10 +126,8 @@ pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
 }
 
 // Compile-time guard that the Rust `Default` derive for `NmpEngineConfig`
-// (which yields `0` for `max_relays`) still agrees with `DEFAULT_MAX_RELAYS`.
-// If the owner raises the const without giving `NmpEngineConfig` a matching
-// manual `Default`, this fails the build rather than silently diverging.
-const _: () = assert!(DEFAULT_MAX_RELAYS == 0);
+// Keep the native-facing literal pinned to the canonical finite default.
+const _: () = assert!(DEFAULT_MAX_RELAYS == 10);
 
 impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {

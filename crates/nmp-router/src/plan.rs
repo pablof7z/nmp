@@ -69,6 +69,15 @@ pub struct WireReq {
 #[derive(Clone, Default, Debug)]
 pub struct RelayPlan {
     pub reqs: BTreeMap<RelayUrl, Vec<WireReq>>,
+    /// Narrow demand atoms for which the whole-demand relay ceiling removed
+    /// at least one otherwise-routable source. Kept as coverage keys so the
+    /// engine can join the fact back to the exact contextual atom without
+    /// weakening descriptor identity.
+    pub limited: BTreeSet<CoverageKey>,
+    /// Distinct relay candidates refused by the whole-demand ceiling. This
+    /// is diagnostics evidence, not a second routing input: only `reqs` may
+    /// reach the wire.
+    pub refused_relays: BTreeSet<RelayUrl>,
 }
 
 /// A single wire operation. `Req` is open-or-replace (same sub-id
@@ -169,6 +178,7 @@ mod tests {
         };
         RelayPlan {
             reqs: BTreeMap::from([(relay, vec![req])]),
+            ..RelayPlan::default()
         }
     }
 

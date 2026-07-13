@@ -29,6 +29,40 @@ mod worker;
 
 use inner::PoolInner;
 
+/// Safe default for the single engine/transport relay ceiling. Zero is
+/// normalized to this value as well, so legacy/default construction cannot
+/// silently re-enable unbounded worker growth.
+pub const DEFAULT_MAX_RELAYS: usize = 10;
+
+/// A typed refusal to create or recover a relay worker.
+///
+/// Callers must handle this result before they receive a [`RelayHandle`], so
+/// a relay-cap refusal cannot be mistaken for a live generation and silently
+/// fed into [`Pool::send`] as an opaque sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayOpenError {
+    /// Opening another live worker would exceed the pool-wide ceiling.
+    AtCapacity { max_relays: usize },
+    /// The pool has entered terminal shutdown and cannot reopen workers.
+    ShuttingDown,
+    /// Pool state was poisoned; fail closed instead of returning a handle.
+    Unavailable,
+}
+
+impl std::fmt::Display for RelayOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AtCapacity { max_relays } => {
+                write!(f, "relay pool capacity {max_relays} exhausted")
+            }
+            Self::ShuttingDown => f.write_str("relay pool is shutting down"),
+            Self::Unavailable => f.write_str("relay pool state is unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for RelayOpenError {}
+
 /// A frame handed to the pool for sending. Substrate-grade: no "kind"/
 /// "pubkey" here — the pool moves bytes, it never interprets Nostr
 /// semantics.
@@ -287,7 +321,7 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_relays: 0,
+            max_relays: DEFAULT_MAX_RELAYS,
             ingest_queue_capacity: 1_024,
             event_sink_queue_capacity: 1_024,
             verifier_workers: 0,
@@ -327,11 +361,19 @@ impl Pool {
     /// Ensure a worker is dialing/connected for `url`. Idempotent for a
     /// live slot (returns the current handle unchanged). If the URL was
     /// previously closed via [`Self::close`], the slot reopens with a fresh
-    /// generation — the prior handle is now stale.
-    pub fn ensure_open(&self, url: &RelayUrl) -> RelayHandle {
+    /// generation — the prior handle is now stale. Every refusal is returned
+    /// as a typed error; this API never manufactures an invalid handle.
+    pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
         match self.inner.lock() {
-            Ok(mut guard) => guard.ensure_open(url),
-            Err(_) => dead_handle(),
+            Ok(mut guard) => {
+                let handle = guard.ensure_open(url);
+                if handle.slot == u32::MAX {
+                    Err(guard.open_refusal())
+                } else {
+                    Ok(handle)
+                }
+            }
+            Err(_) => Err(RelayOpenError::Unavailable),
         }
     }
 
@@ -461,15 +503,5 @@ impl Pool {
         if let Some(handle) = handle {
             let _ = handle.join();
         }
-    }
-}
-
-/// Sentinel handle returned when the pool's lock is poisoned or the pool
-/// has already been shut down — matches every other stale-handle path
-/// (`send`/`close`/`health` on it are all structural no-ops).
-fn dead_handle() -> RelayHandle {
-    RelayHandle {
-        slot: u32::MAX,
-        generation: 0,
     }
 }

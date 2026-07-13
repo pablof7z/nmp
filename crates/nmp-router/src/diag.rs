@@ -26,6 +26,9 @@ pub struct RelayDiagnostics {
 pub struct Diagnostics {
     pub per_relay: BTreeMap<RelayUrl, RelayDiagnostics>,
     pub uncovered_authors: BTreeMap<PubkeyHex, Shortfall>,
+    /// Distinct candidates rejected by the one whole-demand relay ceiling.
+    /// They are absent from `per_relay` by construction.
+    pub relays_refused_by_cap: usize,
     pub dropped_merge_rules: Vec<&'static str>,
 }
 
@@ -60,6 +63,7 @@ pub(crate) fn build(
     Diagnostics {
         per_relay,
         uncovered_authors,
+        relays_refused_by_cap: plan.refused_relays.len(),
         dropped_merge_rules,
     }
 }
