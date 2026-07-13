@@ -652,6 +652,250 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiFollowActionFailure",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidTarget",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SignedOut",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "AccountChanged",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "AcquisitionTimedOut",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "NoContactList",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "CachedOnly",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SourceUnavailable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "BaseHasWrongAuthor",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "BaseHasWrongKind",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "TimestampExhausted",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidGeneratedTag",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ReceiptUnavailable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiFollowActionStatus",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Acquiring",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "NoChange",
+            discr: None,
+            fields: [
+                Field {
+                    name: "following",
+                    type_: Boolean,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Receipt",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "status",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiWriteStatus",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Failed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "failure",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiFollowActionFailure",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiFollowAvailability",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "SignedOut",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Acquiring",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Ready",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "NoContactList",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "CachedOnly",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SourceUnavailable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiFollowRelationship",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Unknown",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "NotFollowing",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Following",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiIdentityField",
     module_path: "nmp_ffi",
     remote: false,
@@ -1758,6 +2002,29 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "ReplaceableConflict",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "actual",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
             name: "Failed",
             discr: None,
             fields: [
@@ -2230,6 +2497,55 @@ record Record {
     docstring: Some(
         "One filter's proven coverage state at one relay (M5 plan §1.1). `filter`\nis the EXACT wire JSON -- the same rendering as the parallel entry in\n`FfiRelayDiagnostics.filters`. `coverage` is `None` -- \"no row = not\ncovered\", unchanged from the store's own rule.",
     ),
+}
+
+record Record {
+    name: "FfiFollowSnapshot",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "active_pubkey",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "target",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relationship",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiFollowRelationship",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "availability",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiFollowAvailability",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "base_event_id",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
 }
 
 record Record {
@@ -4403,6 +4719,67 @@ object Object {
             ),
         },
         Method {
+            name: "follow",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "target",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "FollowActionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_follow",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "target",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Ask NMP to follow `target`. This is the complete NIP-02 action: it\nwaits for the module's source-evidence policy, preserves the exact\nkind:3 base, atomically guards that base, signs, routes, and streams\nthe durable receipt. The native button owns none of those steps.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_follow",
+            checksum: Some(
+                33567,
+            ),
+        },
+        Method {
             name: "observe",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -4631,6 +5008,82 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_diagnostics",
             checksum: Some(
                 22841,
+            ),
+        },
+        Method {
+            name: "observe_following",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "target",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "FollowObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpFollowHandle",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_observe_following",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "target",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpFollowHandle",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Observe the active account's relationship to `target` through the\nNMP-owned NIP-02 resource. The returned handle only owns demand\ncancellation; contact-list semantics and acquisition state stay in\nRust and arrive as closed snapshots.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_following",
+            checksum: Some(
+                25912,
             ),
         },
         Method {
@@ -4950,6 +5403,67 @@ object Object {
                 40424,
             ),
         },
+        Method {
+            name: "unfollow",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "target",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "FollowActionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_unfollow",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "target",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "The inverse of [`Self::follow`], with the same acquisition,\ncompare-and-swap, signer, routing, and receipt guarantees.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_unfollow",
+            checksum: Some(
+                15069,
+            ),
+        },
     ],
     uniffi_traits: [],
     trait_impls: [],
@@ -4990,6 +5504,87 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "The UniFFI-exported engine object. `new` is the ONE construction call the\nM4 kill test (plan §7) requires -- everything past construction is a\nmethod call on this object, never a second container the app must adopt.\nWraps a single [`nmp::Engine`] -- the one supported Rust product surface\n-- rather than independently assembling `nmp-store`/`nmp-router`/\n`nmp-transport`/`nmp-resolver` mechanism types (#52).",
+    ),
+}
+
+object Object {
+    name: "NmpFollowHandle",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpFollowHandle",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpfollowhandle_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpFollowHandle",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpfollowhandle_cancel",
+            checksum: Some(
+                7443,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpfollowhandle",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpFollowHandle",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpFollowHandle",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpfollowhandle",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpFollowHandle",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Deinit-tied cancellation for one following relationship observation.",
     ),
 }
 
@@ -5160,6 +5755,174 @@ callback CallbackInterface {
     docstring: Some(
         "Drains a live diagnostics stream (`nmp::Engine::observe_diagnostics`'s\n`DiagnosticsSubscription`, M5 plan §1.2 step 5). `on_snapshot` fires once\nper delivered snapshot, in order, on a dedicated drain thread — never on\nthe engine thread itself. Because the underlying mailbox is latest-wins\n(see `nmp::DiagnosticsSubscription::recv`'s doc), a slow Swift-side\nconsumer may observe fewer snapshots than were actually produced, but\nnever a stale one out of order. `on_closed` fires exactly once, when the\nobserver is cancelled or the engine shuts down.",
     ),
+}
+
+callback CallbackInterface {
+    name: "FollowActionObserver",
+    module_path: "nmp_ffi",
+    methods: [
+        Method {
+            name: "on_status",
+            object_name: "FollowActionObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "status",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiFollowActionStatus",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_followactionobserver_on_status",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followactionobserver_on_status",
+            checksum: Some(
+                20290,
+            ),
+        },
+        Method {
+            name: "on_closed",
+            object_name: "FollowActionObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_followactionobserver_on_closed",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followactionobserver_on_closed",
+            checksum: Some(
+                65442,
+            ),
+        },
+    ],
+    ffi_init_callback: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_init_callback_vtable_followactionobserver",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "vtable",
+                type_: Reference(
+                    Struct(
+                        "VTableCallbackInterfaceFollowActionObserver",
+                    ),
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: false,
+        is_object_free_function: false,
+    },
+    docstring: None,
+}
+
+callback CallbackInterface {
+    name: "FollowObserver",
+    module_path: "nmp_ffi",
+    methods: [
+        Method {
+            name: "on_snapshot",
+            object_name: "FollowObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "snapshot",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiFollowSnapshot",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_followobserver_on_snapshot",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followobserver_on_snapshot",
+            checksum: Some(
+                37686,
+            ),
+        },
+        Method {
+            name: "on_closed",
+            object_name: "FollowObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_followobserver_on_closed",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followobserver_on_closed",
+            checksum: Some(
+                24807,
+            ),
+        },
+    ],
+    ffi_init_callback: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_init_callback_vtable_followobserver",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "vtable",
+                type_: Reference(
+                    Struct(
+                        "VTableCallbackInterfaceFollowObserver",
+                    ),
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: false,
+        is_object_free_function: false,
+    },
+    docstring: None,
 }
 
 callback CallbackInterface {
