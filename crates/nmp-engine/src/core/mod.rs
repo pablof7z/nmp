@@ -4862,6 +4862,189 @@ mod affected_handle_invalidation_tests {
         assert_remembered_rows_match_oracle(&core, handle);
     }
 
+    fn apply_local_differential_accept(
+        core: &mut EngineCore<MemoryStore>,
+        event: SignedEvent,
+        accepted_at: u64,
+        direct: bool,
+    ) -> (IntentId, SignedEvent) {
+        let accepted = core
+            .resolver
+            .accept_local_detailed(nmp_resolver::testkit::accept_write_of(event, accepted_at))
+            .unwrap();
+        let (intent_id, pending) = match &accepted.outcome {
+            AcceptOutcome::Inserted { intent_id, row, .. }
+            | AcceptOutcome::Superseded { intent_id, row, .. }
+            | AcceptOutcome::Kind5Processed { intent_id, row, .. } => {
+                (*intent_id, row.event.clone())
+            }
+            other => panic!("differential mutation must commit a pending row, got {other:?}"),
+        };
+        let mut effects = Vec::new();
+        if direct {
+            core.apply_committed_mutation(accepted.committed, &mut effects);
+        } else {
+            core.recompile(&mut effects);
+            core.refresh_all_handles(&mut effects);
+        }
+        (intent_id, pending)
+    }
+
+    fn apply_local_differential_compensation(
+        core: &mut EngineCore<MemoryStore>,
+        intent_id: IntentId,
+        pending: SignedEvent,
+        direct: bool,
+    ) {
+        let outcome = core
+            .resolver
+            .store_mut()
+            .compensate_write(intent_id)
+            .unwrap();
+        let committed = core
+            .resolver
+            .react_to_compensation_detailed(pending, &outcome)
+            .unwrap();
+        let mut effects = Vec::new();
+        if direct {
+            core.apply_committed_mutation(committed, &mut effects);
+        } else {
+            core.recompile(&mut effects);
+            core.refresh_all_handles(&mut effects);
+        }
+    }
+
+    fn apply_local_differential_expiry(
+        core: &mut EngineCore<MemoryStore>,
+        now: Timestamp,
+        direct: bool,
+    ) {
+        let expired = core.resolver.store_mut().expire_due(now).unwrap();
+        let removed = expired.into_iter().map(|row| row.event).collect();
+        let committed = core.resolver.retract_detailed(removed).unwrap();
+        let mut effects = Vec::new();
+        if direct {
+            core.apply_committed_mutation(committed, &mut effects);
+        } else {
+            core.recompile(&mut effects);
+            core.refresh_all_handles(&mut effects);
+        }
+    }
+
+    #[test]
+    fn mixed_local_accept_compensate_and_expiry_match_forced_full_refresh() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://local-differential.example").unwrap();
+        let predecessor = EventBuilder::new(Kind::ContactList, "old")
+            .custom_created_at(Timestamp::from(10u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let target = room_event(&keys, 31, 0, 11);
+        let expiring = EventBuilder::new(Kind::TextNote, "expires")
+            .tag(Tag::expiration(Timestamp::from(100u64)))
+            .custom_created_at(Timestamp::from(12u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let seed = [predecessor.clone(), target.clone(), expiring.clone()];
+
+        let make_core = || {
+            let mut store = MemoryStore::new();
+            store
+                .insert_batch(
+                    seed.iter()
+                        .cloned()
+                        .map(|event| {
+                            (
+                                event,
+                                RelayObserved::new(relay.clone(), Timestamp::from(13u64)),
+                            )
+                        })
+                        .collect(),
+                )
+                .unwrap();
+            let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 13);
+            let subscribed = core.handle(EngineMsg::Subscribe(
+                LiveQuery::from_filter(Filter::default()),
+                Box::new(CapturingSink::default()),
+            ));
+            let handle = subscribed_handle(&subscribed);
+            (core, handle)
+        };
+        let (mut direct, direct_handle) = make_core();
+        let (mut oracle, oracle_handle) = make_core();
+
+        let assert_same = |direct: &EngineCore<MemoryStore>, oracle: &EngineCore<MemoryStore>| {
+            assert_remembered_rows_match_oracle(direct, direct_handle);
+            assert_remembered_rows_match_oracle(oracle, oracle_handle);
+            assert_eq!(
+                direct.handles[&direct_handle].last_rows,
+                oracle.handles[&oracle_handle].last_rows
+            );
+        };
+        assert_same(&direct, &oracle);
+
+        let winner = EventBuilder::new(Kind::ContactList, "new")
+            .custom_created_at(Timestamp::from(20u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (direct_replaceable_id, direct_replaceable) =
+            apply_local_differential_accept(&mut direct, winner.clone(), 21, true);
+        let (oracle_replaceable_id, oracle_replaceable) =
+            apply_local_differential_accept(&mut oracle, winner, 21, false);
+        assert_same(&direct, &oracle);
+
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(target.id))
+            .custom_created_at(Timestamp::from(30u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (direct_deletion_id, direct_deletion) =
+            apply_local_differential_accept(&mut direct, deletion.clone(), 31, true);
+        let (oracle_deletion_id, oracle_deletion) =
+            apply_local_differential_accept(&mut oracle, deletion, 31, false);
+        assert_same(&direct, &oracle);
+
+        let ordinary = room_event(&keys, 31, 1, 40);
+        apply_local_differential_accept(&mut direct, ordinary.clone(), 41, true);
+        apply_local_differential_accept(&mut oracle, ordinary, 41, false);
+        assert_same(&direct, &oracle);
+
+        apply_local_differential_compensation(
+            &mut direct,
+            direct_deletion_id,
+            direct_deletion,
+            true,
+        );
+        apply_local_differential_compensation(
+            &mut oracle,
+            oracle_deletion_id,
+            oracle_deletion,
+            false,
+        );
+        assert_same(&direct, &oracle);
+
+        apply_local_differential_compensation(
+            &mut direct,
+            direct_replaceable_id,
+            direct_replaceable,
+            true,
+        );
+        apply_local_differential_compensation(
+            &mut oracle,
+            oracle_replaceable_id,
+            oracle_replaceable,
+            false,
+        );
+        assert_same(&direct, &oracle);
+
+        apply_local_differential_expiry(&mut direct, Timestamp::from(100u64), true);
+        apply_local_differential_expiry(&mut oracle, Timestamp::from(100u64), false);
+        assert_same(&direct, &oracle);
+        assert!(!direct.handles[&direct_handle]
+            .last_rows
+            .contains_key(&expiring.id));
+    }
+
     #[test]
     fn ordinary_room_batch_queries_only_the_matching_handle_and_skips_router_compile() {
         let keys = Keys::generate();
