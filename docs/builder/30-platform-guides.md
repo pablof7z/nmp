@@ -36,6 +36,11 @@ container or scene-phase coordinator.
 The SDK supplies a standard Keychain-backed signer provider. The app owns
 identity policy and may attach remote/hardware/custom providers.
 
+For the currently built local remote-signer path, add `primalconnect` to the
+host app's `LSApplicationQueriesSchemes`, call
+`NMPLocalSignerDiscovery.installed()`, start `oneClickConnectNip46`, and wait
+for `.ready`. `UIApplication.open` returning `true` is not readiness.
+
 Query and diagnostics bridges buffer newest state. Receipt facts remain
 reattachable rather than relying on an unbounded `AsyncStream` backlog.
 
@@ -48,6 +53,14 @@ The Android product includes a standard Keystore-backed provider and proves
 process-death receipt/signer reattachment, not merely JVM binding generation.
 Newest-state observation is bounded/conflated while receipt history remains
 recoverable.
+
+The current desktop-JVM projection can already consume Android package-query
+results through `installedAndroid(packageIds)` and produce an exact
+`NMPAndroidSignerHandoff(uri, packageName)`. A real Android host must declare
+package visibility for the signer packages/schemes, start
+`connectNip46(invitation)` before launching the URI, and apply
+`Intent.setPackage(packageName)` so a shared scheme never selects the wrong
+app. Android AAR/Compose/Keystore and NIP-55 execution remain open work.
 
 ## Other platforms
 

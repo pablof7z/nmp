@@ -33,6 +33,7 @@
 //! - `Engine::from_parts`, an in-workspace/test hatch for `nmp-bdd`'s
 //!   scripted-relay harness (may freely need mechanism-crate types; it is
 //!   not expected to be usable from an `nmp`-only dependency).
+//!
 //! External [`SigningCapability`] implementations are supported: the engine's
 //! promotion boundary independently verifies every returned event against the
 //! frozen accepted template before it can reach the wire.
@@ -100,7 +101,7 @@ pub fn admits_network_relay_hint(relay: &nostr::RelayUrl) -> bool {
 // facade surface.
 pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::WriteStatus;
-pub use nmp_engine::runtime::{ReceiptReattachment, ReceiptStream};
+pub use nmp_engine::runtime::{ReceiptReattachment, ReceiptStream, SignerRegistration};
 pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
@@ -129,6 +130,14 @@ pub use nmp_store::CoverageInterval;
 // already re-exported below).
 pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
+// Supported signer/provider surface. The engine's promotion boundary now
+// validates every external signer result against the frozen accepted event.
+pub use nmp_signer::{
+    known_local_signers, LocalSignerApp, LocalSignerProtocol, Nip46ClientMetadata,
+    Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer, SignerError, SignerOp,
+    SigningCapability,
+};
+
 #[cfg(test)]
 mod relay_hint_tests {
     use super::*;
@@ -149,14 +158,6 @@ mod relay_hint_tests {
         ));
     }
 }
-
-// Supported signer/provider surface. The engine's promotion boundary now
-// validates every external signer result against the frozen accepted event.
-pub use nmp_signer::{
-    known_local_signers, LocalSignerApp, LocalSignerProtocol, Nip46ClientMetadata,
-    Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer, SignerError, SignerOp,
-    SigningCapability,
-};
 
 // The concrete mechanism types are internal by default (#52's "internal or
 // explicitly unstable"). `Engine::from_parts` needs `EventStore`/

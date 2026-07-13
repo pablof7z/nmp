@@ -884,8 +884,9 @@ fn boot_catches_up_past_due_expiry() {
 /// `Handle`'s public surface is the original verbs plus diagnostics and the
 /// two stable-receipt operations (`publish_tracked`/`reattach_receipt`) -- no
 /// `relays:` parameter, no open-REQ method anywhere on it
-/// (ledger #2/#3 preserved at the top edge; `add_signer` is M4's deliberate
-/// widening, closing the multi-account gap; `observe_diagnostics` is M5's --
+/// (ledger #2/#3 preserved at the top edge; `add_signer`/`remove_signer` are
+/// M4's deliberate lifecycle widening, closing the multi-account and remote
+/// signer detach gaps; `observe_diagnostics` is M5's --
 /// read-only, off the data path, never influences routing/delivery). Asserted
 /// by reading this crate's own source rather than by reflection (Rust has
 /// none) -- the same "grep-guard" idiom the plan itself names.
@@ -918,6 +919,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "publish",
         "publish_tracked",
         "reattach_receipt",
+        "remove_signer",
         "set_active_account",
         "shutdown",
         "subscribe",

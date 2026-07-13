@@ -3,6 +3,7 @@
 //! Rust owns catalog/protocol/lifecycle policy. Native shells only execute
 //! the supplied OS probe/launch URI and render these bounded progress facts.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
@@ -52,6 +53,7 @@ pub trait Nip46ConnectionObserver: Send + Sync {
     /// this engine. A callback/deep-link alone never produces this fact.
     fn on_ready(&self, user_public_key: String);
     fn on_failed(&self, reason: String);
+    fn on_closed(&self);
 }
 
 #[derive(uniffi::Object)]
@@ -59,13 +61,21 @@ pub struct FfiNip46Invitation {
     inner: Mutex<Option<nmp::Nip46Invitation>>,
 }
 
-/// Owns one attached remote signer for exactly as long as its FFI engine.
-/// The session callback only retains a `Weak` reference to this coordinator,
-/// avoiding a signer -> callback -> signer ownership cycle.
-pub(crate) struct Nip46Connection {
+struct Nip46Attachment {
+    signer: Option<nmp::Nip46Signer>,
+    registration: Option<nmp::SignerRegistration>,
+}
+
+/// Owns one remote-signer session. The native connection handle, not the
+/// engine, owns this value: `disconnect()`/drop therefore detach
+/// deterministically instead of accumulating sessions until engine shutdown. The session
+/// callback retains only a `Weak` reference, avoiding an ownership cycle.
+#[derive(uniffi::Object)]
+pub struct Nip46Connection {
     engine: Arc<nmp::Engine>,
     observer: Arc<dyn Nip46ConnectionObserver>,
-    signer: Mutex<Option<nmp::Nip46Signer>>,
+    attachment: Mutex<Nip46Attachment>,
+    closed: AtomicBool,
 }
 
 impl Nip46Connection {
@@ -73,45 +83,127 @@ impl Nip46Connection {
         Arc::new(Self {
             engine,
             observer,
-            signer: Mutex::new(None),
+            attachment: Mutex::new(Nip46Attachment {
+                signer: None,
+                registration: None,
+            }),
+            closed: AtomicBool::new(false),
         })
     }
 
     fn on_event(&self, event: nmp::Nip46ConnectionEvent) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut reattached_public_key = None;
         match &event {
             nmp::Nip46ConnectionEvent::Available => {
-                if let Some(signer) = self.signer.lock().ok().and_then(|slot| slot.clone()) {
-                    let _ = self.engine.add_signer(signer);
+                let mut attachment = self
+                    .attachment
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if attachment.registration.is_none() {
+                    if let Some(signer) = attachment.signer.clone() {
+                        match self.engine.add_signer(signer) {
+                            Ok(registration) => {
+                                reattached_public_key = Some(registration.public_key());
+                                attachment.registration = Some(registration);
+                            }
+                            Err(error) => {
+                                drop(attachment);
+                                self.fail(error.to_string());
+                                return;
+                            }
+                        }
+                    }
                 }
             }
             nmp::Nip46ConnectionEvent::Unavailable => {
-                if let Some(signer) = self.signer.lock().ok().and_then(|slot| slot.clone()) {
-                    let _ = self.engine.remove_signer(signer.user_public_key());
+                let registration = self
+                    .attachment
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .registration
+                    .take();
+                if let Some(registration) = registration {
+                    let _ = self.engine.remove_signer(registration);
                 }
             }
             _ => {}
         }
-        self.observer.on_event(event_to_ffi(event));
+        if !self.closed.load(Ordering::Acquire) {
+            self.observer.on_event(event_to_ffi(event));
+        }
+        if let Some(public_key) = reattached_public_key {
+            if !self.closed.load(Ordering::Acquire) {
+                self.observer.on_ready(public_key.to_hex());
+            }
+        }
     }
 
-    fn attach(
-        self: &Arc<Self>,
-        signer: nmp::Nip46Signer,
-        retained: &Mutex<Vec<Arc<Nip46Connection>>>,
-    ) {
+    fn attach(&self, signer: nmp::Nip46Signer) {
         let pubkey = signer.user_public_key();
-        match self.engine.add_signer(signer.clone()) {
-            Ok(_) => {
-                if let Ok(mut slot) = self.signer.lock() {
-                    *slot = Some(signer);
-                }
-                if let Ok(mut connections) = retained.lock() {
-                    connections.push(Arc::clone(self));
-                }
-                self.observer.on_ready(pubkey.to_hex());
-            }
-            Err(error) => self.observer.on_failed(error.to_string()),
+        let mut attachment = self
+            .attachment
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if self.closed.load(Ordering::Acquire) {
+            return;
         }
+        match self.engine.add_signer(signer.clone()) {
+            Ok(registration) => {
+                attachment.signer = Some(signer);
+                attachment.registration = Some(registration);
+                drop(attachment);
+                if !self.closed.load(Ordering::Acquire) {
+                    self.observer.on_ready(pubkey.to_hex());
+                }
+            }
+            Err(error) => {
+                drop(attachment);
+                self.fail(error.to_string());
+            }
+        }
+    }
+
+    fn fail(&self, reason: String) {
+        if !self.closed.load(Ordering::Acquire) {
+            self.observer.on_failed(reason);
+            self.close_inner();
+        }
+    }
+
+    fn close_inner(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let registration = {
+            let mut attachment = self
+                .attachment
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            attachment.signer = None;
+            attachment.registration.take()
+        };
+        if let Some(registration) = registration {
+            let _ = self.engine.remove_signer(registration);
+        }
+        self.observer.on_closed();
+    }
+}
+
+impl Drop for Nip46Connection {
+    fn drop(&mut self) {
+        self.close_inner();
+    }
+}
+
+#[uniffi::export]
+impl Nip46Connection {
+    /// Idempotently end this connection and detach only its exact signer
+    /// registration. An older session cannot remove a newer replacement.
+    pub fn disconnect(&self) {
+        self.close_inner();
     }
 }
 
@@ -140,7 +232,11 @@ impl FfiNip46Invitation {
             .ok_or_else(|| FfiError::InvalidSigner {
                 reason: format!("local signer {signer_id:?} does not support NIP-46"),
             })?;
-        Ok(invitation.uri_with_scheme(scheme))
+        invitation
+            .uri_with_scheme(scheme)
+            .map_err(|error| FfiError::InvalidSigner {
+                reason: error.to_string(),
+            })
     }
 }
 
@@ -206,11 +302,12 @@ impl NmpEngine {
         bunker_uri: String,
         timeout_millis: u64,
         observer: Box<dyn Nip46ConnectionObserver>,
-    ) {
+    ) -> Arc<Nip46Connection> {
         let engine = Arc::clone(&self.engine);
-        let retained = Arc::clone(&self.nip46_connections);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
-        spawn_bunker_connection(engine, retained, bunker_uri, timeout_millis, observer);
+        let connection = Nip46Connection::new(engine, observer);
+        spawn_bunker_connection(Arc::clone(&connection), bunker_uri, timeout_millis);
+        connection
     }
 
     pub fn connect_nip46_invitation(
@@ -218,7 +315,7 @@ impl NmpEngine {
         invitation: Arc<FfiNip46Invitation>,
         timeout_millis: u64,
         observer: Box<dyn Nip46ConnectionObserver>,
-    ) -> Result<(), FfiError> {
+    ) -> Result<Arc<Nip46Connection>, FfiError> {
         let invitation = invitation
             .inner
             .lock()
@@ -230,22 +327,19 @@ impl NmpEngine {
                 reason: "NIP-46 invitation was already consumed".to_string(),
             })?;
         let engine = Arc::clone(&self.engine);
-        let retained = Arc::clone(&self.nip46_connections);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
-        spawn_invitation_connection(engine, retained, invitation, timeout_millis, observer);
-        Ok(())
+        let connection = Nip46Connection::new(engine, observer);
+        spawn_invitation_connection(Arc::clone(&connection), invitation, timeout_millis);
+        Ok(connection)
     }
 }
 
 fn spawn_bunker_connection(
-    engine: Arc<nmp::Engine>,
-    retained: Arc<Mutex<Vec<Arc<Nip46Connection>>>>,
+    connection: Arc<Nip46Connection>,
     bunker_uri: String,
     timeout_millis: u64,
-    observer: Arc<dyn Nip46ConnectionObserver>,
 ) {
     thread::spawn(move || {
-        let connection = Nip46Connection::new(engine, observer);
         let events = lifecycle_sink(Arc::downgrade(&connection));
         match nmp::Nip46Signer::connect_bunker_observed(
             &bunker_uri,
@@ -254,25 +348,22 @@ fn spawn_bunker_connection(
             Duration::from_millis(timeout_millis),
             events,
         ) {
-            Ok(signer) => connection.attach(signer, &retained),
-            Err(error) => connection.observer.on_failed(error.to_string()),
+            Ok(signer) => connection.attach(signer),
+            Err(error) => connection.fail(error.to_string()),
         }
     });
 }
 
 fn spawn_invitation_connection(
-    engine: Arc<nmp::Engine>,
-    retained: Arc<Mutex<Vec<Arc<Nip46Connection>>>>,
+    connection: Arc<Nip46Connection>,
     invitation: nmp::Nip46Invitation,
     timeout_millis: u64,
-    observer: Arc<dyn Nip46ConnectionObserver>,
 ) {
     thread::spawn(move || {
-        let connection = Nip46Connection::new(engine, observer);
         let events = lifecycle_sink(Arc::downgrade(&connection));
         match invitation.connect_observed(Duration::from_millis(timeout_millis), events) {
-            Ok(signer) => connection.attach(signer, &retained),
-            Err(error) => connection.observer.on_failed(error.to_string()),
+            Ok(signer) => connection.attach(signer),
+            Err(error) => connection.fail(error.to_string()),
         }
     });
 }
@@ -311,6 +402,23 @@ fn event_to_ffi(event: nmp::Nip46ConnectionEvent) -> FfiNip46ConnectionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct CloseCountingObserver {
+        closed: Arc<AtomicUsize>,
+    }
+
+    impl Nip46ConnectionObserver for CloseCountingObserver {
+        fn on_event(&self, _event: FfiNip46ConnectionEvent) {}
+
+        fn on_ready(&self, _user_public_key: String) {}
+
+        fn on_failed(&self, _reason: String) {}
+
+        fn on_closed(&self) {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn catalog_keeps_probe_launch_package_and_provider_distinct() {
@@ -335,5 +443,37 @@ mod tests {
             primal.android_provider_authority.as_deref(),
             Some("net.primal.android")
         );
+    }
+
+    #[test]
+    fn connection_close_and_drop_are_idempotent_and_stream_scoped() {
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let closed_a = Arc::new(AtomicUsize::new(0));
+        let closed_b = Arc::new(AtomicUsize::new(0));
+        let connection_a = Nip46Connection::new(
+            Arc::clone(&engine),
+            Arc::new(CloseCountingObserver {
+                closed: Arc::clone(&closed_a),
+            }),
+        );
+        let connection_b = Nip46Connection::new(
+            Arc::clone(&engine),
+            Arc::new(CloseCountingObserver {
+                closed: Arc::clone(&closed_b),
+            }),
+        );
+
+        connection_a.disconnect();
+        connection_a.disconnect();
+        assert_eq!(closed_a.load(Ordering::SeqCst), 1);
+        assert_eq!(closed_b.load(Ordering::SeqCst), 0);
+        drop(connection_a);
+        assert_eq!(closed_a.load(Ordering::SeqCst), 1);
+
+        connection_b.disconnect();
+        assert_eq!(closed_b.load(Ordering::SeqCst), 1);
+        drop(connection_b);
+        assert_eq!(closed_b.load(Ordering::SeqCst), 1);
+        engine.shutdown();
     }
 }

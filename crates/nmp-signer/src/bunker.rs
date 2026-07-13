@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 /// A real bunker URI is a few hundred bytes. Bound attacker-controlled input
 /// before URL/query allocation.
 pub const MAX_BUNKER_URI_LEN: usize = 4 * 1024;
+pub const MAX_NIP46_RELAYS: usize = 8;
 
 /// Parsed `bunker://<remote-signer-key>?relay=...` connection token.
 #[derive(Clone, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub enum BunkerParseError {
     MissingRemoteSignerKey,
     InvalidRemoteSignerKey,
     MissingRelay,
+    TooManyRelays(usize),
     InvalidRelay(String),
     Malformed(String),
 }
@@ -48,6 +50,9 @@ impl fmt::Display for BunkerParseError {
             Self::MissingRemoteSignerKey => f.write_str("bunker URI has no remote signer key"),
             Self::InvalidRemoteSignerKey => f.write_str("bunker URI remote signer key is invalid"),
             Self::MissingRelay => f.write_str("bunker URI requires at least one relay"),
+            Self::TooManyRelays(count) => {
+                write!(f, "bunker URI exceeds {MAX_NIP46_RELAYS} relays: {count}")
+            }
             Self::InvalidRelay(relay) => write!(f, "invalid bunker relay: {relay}"),
             Self::Malformed(reason) => write!(f, "malformed bunker URI: {reason}"),
         }
@@ -93,6 +98,9 @@ pub fn parse_bunker_uri(input: &str) -> Result<BunkerUri, BunkerParseError> {
                 }
                 if !relays.contains(&relay) {
                     relays.push(relay);
+                    if relays.len() > MAX_NIP46_RELAYS {
+                        return Err(BunkerParseError::TooManyRelays(relays.len()));
+                    }
                 }
             }
             "secret" if !value.is_empty() => secret = Some(Zeroizing::new(value.into_owned())),
@@ -151,6 +159,14 @@ mod tests {
         assert!(matches!(
             parse_bunker_uri(&"x".repeat(MAX_BUNKER_URI_LEN + 1)),
             Err(BunkerParseError::TooLong(_))
+        ));
+        let relays = (0..=MAX_NIP46_RELAYS)
+            .map(|i| format!("relay=wss%3A%2F%2Frelay-{i}.example"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(matches!(
+            parse_bunker_uri(&format!("bunker://{}?{relays}", remote.to_hex())),
+            Err(BunkerParseError::TooManyRelays(_))
         ));
     }
 }

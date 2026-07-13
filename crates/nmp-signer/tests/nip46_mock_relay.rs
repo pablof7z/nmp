@@ -4,7 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use nmp_signer::{
-    CryptoCapability, Nip46ConnectionEvent, Nip46Signer, SignerOp, SigningCapability,
+    CryptoCapability, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation, Nip46Signer,
+    SignerError, SignerOp, SigningCapability,
 };
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -45,7 +46,9 @@ fn event_frame(subscription_id: &str, event: Event) -> String {
     json!(["EVENT", subscription_id, event]).to_string()
 }
 
-fn spawn_mock_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<Vec<String>>) {
+fn spawn_mock_remote_signer(
+    mutate_sign_event: bool,
+) -> (String, Keys, Keys, mpsc::Receiver<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let relay_url = format!("ws://{address}");
@@ -123,12 +126,17 @@ fn spawn_mock_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<Vec<String>
                                 .map(Tag::parse)
                                 .collect::<Result<Vec<_>, _>>()
                                 .unwrap();
+                            let content = if mutate_sign_event {
+                                "mutated by signer".to_string()
+                            } else {
+                                body.content
+                            };
                             let unsigned = UnsignedEvent::new(
                                 user_for_thread.public_key(),
                                 Timestamp::from(body.created_at),
                                 Kind::from_u16(body.kind),
                                 tags,
-                                body.content,
+                                content,
                             );
                             let auth = response_event(
                                 &remote_for_thread,
@@ -186,7 +194,7 @@ fn spawn_mock_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<Vec<String>
 
 #[test]
 fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
-    let (relay, remote, user, seen) = spawn_mock_remote_signer();
+    let (relay, remote, user, seen) = spawn_mock_remote_signer(false);
     let uri = format!(
         "bunker://{}?relay={}&secret=one-use-secret",
         remote.public_key().to_hex(),
@@ -240,6 +248,125 @@ fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
         "nip44_encrypt".to_string(),
         "nip44_decrypt".to_string(),
     ]));
+}
+
+#[test]
+fn valid_but_mutated_signer_event_is_terminal_invalid_response() {
+    let (relay, remote, user, _seen) = spawn_mock_remote_signer(true);
+    let uri = format!(
+        "bunker://{}?relay={}&secret=one-use-secret",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+    );
+    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_001),
+        Kind::TextNote,
+        vec![],
+        "the frozen body",
+    );
+    assert!(matches!(
+        signer.sign(unsigned).wait(Duration::from_secs(5)),
+        Err(SignerError::InvalidResponse(reason)) if reason.contains("mutated")
+    ));
+}
+
+#[test]
+fn client_invitation_ignores_forged_secret_then_accepts_valid_signer() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let invitation = Nip46Invitation::new(
+        vec![nostr::RelayUrl::parse(&relay).unwrap()],
+        None,
+        Nip46ClientMetadata::default(),
+    )
+    .unwrap();
+    let uri = url::Url::parse(&invitation.uri()).unwrap();
+    let client = PublicKey::from_hex(uri.host_str().unwrap()).unwrap();
+    let secret = uri
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let attacker = Keys::generate();
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let expected_remote = remote.public_key();
+    let expected_user = user.public_key();
+
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = tungstenite::accept(stream).unwrap();
+        let mut subscription_id = None;
+        while let Ok(message) = socket.read() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            match parts.first().and_then(Value::as_str) {
+                Some("REQ") => {
+                    subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                    let forged = response_event(
+                        &attacker,
+                        client,
+                        "connect-forged",
+                        Some("wrong-secret".to_string()),
+                        None,
+                    );
+                    socket
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), forged).into(),
+                        ))
+                        .unwrap();
+                    let valid = response_event(
+                        &remote,
+                        client,
+                        "connect-valid",
+                        Some(secret.clone()),
+                        None,
+                    );
+                    socket
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), valid).into(),
+                        ))
+                        .unwrap();
+                }
+                Some("EVENT") => {
+                    let event = Event::from_json(parts[1].to_string()).unwrap();
+                    let plaintext = nip44::decrypt(
+                        remote.secret_key(),
+                        &event.pubkey,
+                        event.content.as_bytes(),
+                    )
+                    .unwrap();
+                    let request: Value = serde_json::from_str(&plaintext).unwrap();
+                    let id = request["id"].as_str().unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    let result = match method {
+                        "get_public_key" => user.public_key().to_hex(),
+                        "switch_relays" => "null".to_string(),
+                        other => panic!("unexpected method {other}"),
+                    };
+                    let response = response_event(&remote, event.pubkey, id, Some(result), None);
+                    socket
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                        ))
+                        .unwrap();
+                    if method == "switch_relays" {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let signer = invitation.connect(Duration::from_secs(5)).unwrap();
+    assert_eq!(signer.remote_signer_public_key(), expected_remote);
+    assert_eq!(signer.user_public_key(), expected_user);
 }
 
 #[test]

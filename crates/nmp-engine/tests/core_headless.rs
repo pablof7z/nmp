@@ -2821,6 +2821,10 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
             effect,
             Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability) if *rid == id
         )));
+        assert!(waiting.iter().any(|effect| matches!(
+            effect,
+            Effect::RearmSignerIfAvailable(pubkey) if *pubkey == a.public_key()
+        )));
         assert_eq!(
             sink.0.lock().unwrap().last(),
             Some(&WriteStatus::AwaitingCapability)

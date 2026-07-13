@@ -162,12 +162,14 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         RelayAdmissionPolicy::default(),
     );
 
-    let pk_a = handle
+    let registration_a = handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("LocalKeySigner always reports a public key");
-    let pk_b = handle
+    let registration_b = handle
         .add_signer(LocalKeySigner::new(b.clone()))
         .expect("LocalKeySigner always reports a public key");
+    let pk_a = registration_a.public_key();
+    let pk_b = registration_b.public_key();
     assert_eq!(pk_a, a.public_key());
     assert_eq!(pk_b, b.public_key());
 
@@ -445,6 +447,60 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         "the intent accepted while B was active must stay pinned to B after switching to A"
     );
 
+    handle.shutdown();
+    engine_thread.join();
+}
+
+#[test]
+fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
+    let keys = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    );
+
+    // Exact replacement-race order: install A, install B for the same key,
+    // detach stale A, then prove B still signs accepted work.
+    let registration_a = handle
+        .add_signer(LocalKeySigner::new(keys.clone()))
+        .expect("local signer A has a public key");
+    let registration_b = handle
+        .add_signer(LocalKeySigner::new(keys.clone()))
+        .expect("local signer B has a public key");
+    assert_eq!(registration_a.public_key(), registration_b.public_key());
+    assert!(
+        !handle.remove_signer(registration_a),
+        "stale registration A must not detach replacement B"
+    );
+
+    handle.set_active_account(Some(keys.public_key()));
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::now(),
+                Kind::TextNote,
+                vec![],
+                "replacement remains usable",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
+    assert!(wait_for_status(
+        &receipt,
+        Duration::from_secs(5),
+        |status| matches!(status, WriteStatus::Signed(_))
+    ));
+
+    assert!(handle.remove_signer(registration_b.clone()));
+    assert!(
+        !handle.remove_signer(registration_b),
+        "detaching one registration must be idempotent"
+    );
     handle.shutdown();
     engine_thread.join();
 }

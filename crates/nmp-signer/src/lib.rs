@@ -22,7 +22,9 @@ mod local;
 mod nip46;
 mod op;
 
-pub use bunker::{parse_bunker_uri, BunkerParseError, BunkerUri, MAX_BUNKER_URI_LEN};
+pub use bunker::{
+    parse_bunker_uri, BunkerParseError, BunkerUri, MAX_BUNKER_URI_LEN, MAX_NIP46_RELAYS,
+};
 pub use capability::{CryptoCapability, SigningCapability};
 pub use catalog::{known_local_signers, LocalSignerApp, LocalSignerProtocol};
 pub use local::LocalKeySigner;

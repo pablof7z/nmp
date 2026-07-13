@@ -3,6 +3,7 @@ package com.nmp.sdk
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class RemoteSignerTest {
@@ -52,6 +53,15 @@ class RemoteSignerTest {
                 generic.removePrefix("nostrconnect"),
                 appSpecific.removePrefix("primalconnect"),
             )
+            assertEquals(
+                NMPAndroidSignerHandoff(
+                    uri = appSpecific,
+                    packageName = "net.primal.android",
+                ),
+                invitation.androidHandoff(primal),
+            )
+            val amber = NMPLocalSignerDiscovery.known.single { it.id == "amber" }
+            assertFailsWith<NMPError.InvalidSigner> { invitation.androidHandoff(amber) }
         }
     }
 }

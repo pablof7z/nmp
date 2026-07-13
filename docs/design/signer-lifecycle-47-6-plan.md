@@ -1,7 +1,12 @@
 # Signer lifecycle — implementation plan (#47 + #6)
 
 - **Date:** 2026-07-11
-- **Status:** Design / implementation plan. **No code.** Governs GitHub issues
+- **Status:** Partially implemented. The selection-by-frozen-pubkey,
+  retryable/terminal signer split, event-driven reattachment, current NIP-46
+  adapter, local-signer catalog, and Swift/Kotlin connection projections are
+  built with a real delayed-bunker restart proof. Standard platform vault
+  providers, per-write identity override, NIP-55 execution, and permanent
+  signer diagnostics remain. Governs GitHub issues
   **#47** (default identity, per-write override, reattachment, platform vault
   providers) and **#6** (NIP-46 async signer: offline `AwaitingSigner`, exact
   response validation, independent retry ownership). This is step 4 of #43's

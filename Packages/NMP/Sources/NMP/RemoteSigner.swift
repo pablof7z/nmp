@@ -100,7 +100,7 @@ final class NIP46Observer: Nip46ConnectionObserver, @unchecked Sendable {
 
     init() {
         var captured: AsyncStream<NMPNip46ConnectionState>.Continuation!
-        stream = AsyncStream { captured = $0 }
+        stream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { captured = $0 }
         continuation = captured
     }
 
@@ -122,18 +122,28 @@ final class NIP46Observer: Nip46ConnectionObserver, @unchecked Sendable {
 
     func onFailed(reason: String) {
         continuation.yield(.failed(reason: reason))
+    }
+
+    func onClosed() {
         continuation.finish()
     }
 }
 
-public struct NMPNip46Connection: Sendable {
+public final class NMPNip46Connection: @unchecked Sendable {
     public let states: AsyncStream<NMPNip46ConnectionState>
     fileprivate let observer: NIP46Observer
+    private let ffiConnection: Nip46Connection
 
-    fileprivate init() {
-        let observer = NIP46Observer()
+    fileprivate init(observer: NIP46Observer, ffiConnection: Nip46Connection) {
         self.observer = observer
+        self.ffiConnection = ffiConnection
         states = observer.stream
+    }
+
+    /// Idempotently detach this exact signer session and finish `states`.
+    /// Dropping the last connection reference has the same effect.
+    public func close() {
+        ffiConnection.disconnect()
     }
 }
 
@@ -168,13 +178,13 @@ extension NMPEngine {
         bunkerURI: String,
         timeout: Duration = .seconds(60)
     ) -> NMPNip46Connection {
-        let connection = NMPNip46Connection()
-        ffi.connectNip46Bunker(
+        let observer = NIP46Observer()
+        let ffiConnection = ffi.connectNip46Bunker(
             bunkerUri: bunkerURI,
             timeoutMillis: timeout.milliseconds,
-            observer: connection.observer
+            observer: observer
         )
-        return connection
+        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
     }
 
     @discardableResult
@@ -182,15 +192,15 @@ extension NMPEngine {
         invitation: NMPNip46Invitation,
         timeout: Duration = .seconds(60)
     ) throws -> NMPNip46Connection {
-        let connection = NMPNip46Connection()
-        try nmpRethrowing {
+        let observer = NIP46Observer()
+        let ffiConnection = try nmpRethrowing {
             try ffi.connectNip46Invitation(
                 invitation: invitation.ffi,
                 timeoutMillis: timeout.milliseconds,
-                observer: connection.observer
+                observer: observer
             )
         }
-        return connection
+        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
     }
 
     #if canImport(UIKit)
@@ -220,6 +230,7 @@ extension NMPEngine {
         let connection = try connectNip46(invitation: invitation, timeout: timeout)
         guard await UIApplication.shared.open(url) else {
             connection.observer.onFailed(reason: "the signer app did not accept the handoff")
+            connection.close()
             return connection
         }
         return connection

@@ -23,7 +23,7 @@
 //! auto-discovery). `NmpEngineConfig` no longer accepts a pre-resolved
 //! write-relay map -- there is nothing for a caller to resolve up front.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use crate::convert::{
@@ -149,7 +149,6 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
 #[derive(uniffi::Object)]
 pub struct NmpEngine {
     pub(crate) engine: Arc<nmp::Engine>,
-    pub(crate) nip46_connections: Arc<Mutex<Vec<Arc<crate::signer::Nip46Connection>>>>,
 }
 
 #[uniffi::export]
@@ -157,10 +156,7 @@ impl NmpEngine {
     #[uniffi::constructor]
     pub fn new(config: NmpEngineConfig) -> Result<Arc<Self>, FfiError> {
         let engine = Arc::new(nmp::Engine::new(config.into())?);
-        Ok(Arc::new(Self {
-            engine,
-            nip46_connections: Arc::new(Mutex::new(Vec::new())),
-        }))
+        Ok(Arc::new(Self { engine }))
     }
 
     /// Register an account from its secret key (hex or bech32 `nsec`). The

@@ -27,7 +27,9 @@ use std::sync::Mutex;
 
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, Handle, ReceiptReattachment, ReceiptStream};
+use nmp_engine::runtime::{
+    EngineThread, Handle, ReceiptReattachment, ReceiptStream, SignerRegistration,
+};
 use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore};
@@ -202,11 +204,12 @@ impl Engine {
     /// `add_signer` covers instead).
     pub fn add_account(&self, secret_key: &str) -> Result<PublicKey, EngineError> {
         let keys = Keys::parse(secret_key).map_err(|_| EngineError::InvalidSecretKey)?;
-        self.with_handle(|handle| {
+        let registration = self.with_handle(|handle| {
             handle
                 .add_signer(nmp_signer::LocalKeySigner::new(keys))
                 .expect("LocalKeySigner::public_key() always returns a key")
-        })
+        })?;
+        Ok(registration.public_key())
     }
 
     /// Register an arbitrary signing capability (e.g. a NIP-46/bunker
@@ -218,7 +221,7 @@ impl Engine {
     /// kind, tags, and content against the frozen accepted template before
     /// any relay publication. Capabilities without a stable public key are
     /// rejected rather than stored unreachably.
-    pub fn add_signer<Sig>(&self, signer: Sig) -> Result<PublicKey, EngineError>
+    pub fn add_signer<Sig>(&self, signer: Sig) -> Result<SignerRegistration, EngineError>
     where
         Sig: nmp_signer::SigningCapability + Send + 'static,
     {
@@ -229,10 +232,11 @@ impl Engine {
         })?
     }
 
-    /// Detach a signer capability without changing active identity or any
-    /// accepted write's frozen author.
-    pub fn remove_signer(&self, pubkey: PublicKey) -> Result<bool, EngineError> {
-        self.with_handle(|handle| handle.remove_signer(pubkey))
+    /// Detach one exact signer installation without changing active identity
+    /// or any accepted write's frozen author. A stale registration cannot
+    /// detach a newer signer installed for the same public key.
+    pub fn remove_signer(&self, registration: SignerRegistration) -> Result<bool, EngineError> {
+        self.with_handle(|handle| handle.remove_signer(registration))
     }
 
     /// Re-root every reactive query AND the active signing capability

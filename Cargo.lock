@@ -1432,11 +1432,13 @@ dependencies = [
  "nostr 0.44.4",
  "nostr-relay-builder",
  "redb",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing-subscriber",
  "tungstenite 0.29.0",
+ "url",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 package com.nmp.sdk
 
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlin.time.Duration
@@ -10,6 +11,7 @@ import uniffi.nmp_ffi.FfiLocalSignerProtocol
 import uniffi.nmp_ffi.FfiNip46ClientMetadata
 import uniffi.nmp_ffi.FfiNip46ConnectionEvent
 import uniffi.nmp_ffi.FfiNip46Invitation
+import uniffi.nmp_ffi.Nip46Connection
 import uniffi.nmp_ffi.Nip46ConnectionObserver
 import uniffi.nmp_ffi.localSignerCatalog
 
@@ -77,7 +79,10 @@ sealed interface NMPNip46ConnectionState {
 }
 
 internal class NMPNip46Observer : Nip46ConnectionObserver {
-    private val channel = Channel<NMPNip46ConnectionState>(Channel.BUFFERED)
+    private val channel = Channel<NMPNip46ConnectionState>(
+        capacity = 32,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     val states: Flow<NMPNip46ConnectionState> = channel.receiveAsFlow()
 
     override fun onEvent(event: FfiNip46ConnectionEvent) {
@@ -102,21 +107,44 @@ internal class NMPNip46Observer : Nip46ConnectionObserver {
 
     override fun onFailed(reason: String) {
         channel.trySend(NMPNip46ConnectionState.Failed(reason))
+    }
+
+    override fun onClosed() {
         channel.close()
     }
 }
 
 class NMPNip46Connection internal constructor(
-    internal val observer: NMPNip46Observer = NMPNip46Observer(),
-) {
+    internal val observer: NMPNip46Observer,
+    private val ffiConnection: Nip46Connection,
+) : AutoCloseable {
     val states: Flow<NMPNip46ConnectionState> = observer.states
+
+    /** Idempotently detach this exact signer session and finish [states]. */
+    override fun close() {
+        ffiConnection.disconnect()
+    }
 }
 
 class NMPNip46Invitation internal constructor(internal val ffi: FfiNip46Invitation) {
     /** Generic chooser URI, or an app-specific URI when [signer] is supplied. */
     fun uri(signer: NMPLocalSigner? = null): String =
         nmpRethrowing { ffi.uri(signer?.id) }
+
+    /** Exact Android one-click handoff. The host launches [uri] with
+     * `Intent.setPackage(packageName)`; OS acceptance is not signer readiness,
+     * which is reported later as [NMPNip46ConnectionState.Ready]. */
+    fun androidHandoff(signer: NMPLocalSigner): NMPAndroidSignerHandoff {
+        if (NMPLocalSignerProtocol.Nip46 !in signer.protocols) {
+            throw NMPError.InvalidSigner("${signer.displayName} does not support NIP-46")
+        }
+        val packageName = signer.androidPackageId
+            ?: throw NMPError.InvalidSigner("${signer.displayName} has no Android package")
+        return NMPAndroidSignerHandoff(uri = uri(signer), packageName = packageName)
+    }
 }
+
+data class NMPAndroidSignerHandoff(val uri: String, val packageName: String)
 
 fun NMPEngine.nip46Invitation(
     relays: List<String>,
@@ -129,23 +157,27 @@ fun NMPEngine.nip46Invitation(
 fun NMPEngine.connectNip46(
     bunkerUri: String,
     timeout: Duration = 60.seconds,
-): NMPNip46Connection = NMPNip46Connection().also { connection ->
-    ffi.connectNip46Bunker(
+): NMPNip46Connection {
+    val observer = NMPNip46Observer()
+    val ffiConnection = ffi.connectNip46Bunker(
         bunkerUri,
         timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
-        connection.observer,
+        observer,
     )
+    return NMPNip46Connection(observer, ffiConnection)
 }
 
 fun NMPEngine.connectNip46(
     invitation: NMPNip46Invitation,
     timeout: Duration = 60.seconds,
-): NMPNip46Connection = NMPNip46Connection().also { connection ->
-    nmpRethrowing {
+): NMPNip46Connection {
+    val observer = NMPNip46Observer()
+    val ffiConnection = nmpRethrowing {
         ffi.connectNip46Invitation(
             invitation.ffi,
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
-            connection.observer,
+            observer,
         )
     }
+    return NMPNip46Connection(observer, ffiConnection)
 }

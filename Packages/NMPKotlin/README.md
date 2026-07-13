@@ -27,6 +27,29 @@ NMPEngine(NMPConfig(indexerRelays = listOf("wss://purplepag.es"))).use { nmp ->
 
 See `src/main/kotlin/com/nmp/sdk/Engine.kt` for the full public surface.
 
+Remote-signer discovery is already projected as pure JVM values so an Android
+host can execute the OS-specific steps without moving policy out of Rust:
+
+```kotlin
+val primal = NMPLocalSignerDiscovery
+    .installedAndroid(installedPackageIds)
+    .single { it.id == "primal" }
+val invitation = nmp.nip46Invitation(relays)
+val handoff = invitation.androidHandoff(primal)
+val connection = nmp.connectNip46(invitation) // listen before launch
+startActivity(Intent(ACTION_VIEW, Uri.parse(handoff.uri)).setPackage(handoff.packageName))
+// later: connection.close() // idempotent; also finishes connection.states
+```
+
+The Android app must declare package visibility for the packages/schemes it
+queries. Launch acceptance is not connection readiness; collect
+`connection.states` until `Ready`. This module remains desktop JVM, so the
+`Intent`/`PackageManager` calls above belong to the consuming Android host.
+Amber appears in discovery as NIP-55-only and is rejected by
+`androidHandoff`; NIP-55 execution belongs to the future Android AAR.
+`NMPNip46Connection` is `AutoCloseable`, and closing it detaches only its exact
+session even if another connection has since replaced the same pubkey.
+
 The same package also exposes the optional content substrate:
 
 ```kotlin

@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     parse_bunker_uri, BunkerParseError, CryptoCapability, SignerError, SignerOp, SigningCapability,
+    MAX_BUNKER_URI_LEN, MAX_NIP46_RELAYS,
 };
 
 const DEFAULT_PERMISSIONS: &str = "sign_event,nip44_encrypt,nip44_decrypt";
@@ -52,7 +53,10 @@ pub enum Nip46ConnectionEvent {
 pub enum Nip46Error {
     InvalidBunkerUri(BunkerParseError),
     MissingRelay,
+    TooManyRelays(usize),
+    InvitationTooLong(usize),
     InvalidRelay(String),
+    InvalidLaunchScheme(String),
     InvalidInvitation,
     SecretMismatch,
     Timeout,
@@ -66,7 +70,19 @@ impl fmt::Display for Nip46Error {
         match self {
             Self::InvalidBunkerUri(error) => error.fmt(f),
             Self::MissingRelay => f.write_str("NIP-46 requires at least one relay"),
+            Self::TooManyRelays(count) => {
+                write!(f, "NIP-46 exceeds {MAX_NIP46_RELAYS} relays: {count}")
+            }
+            Self::InvitationTooLong(len) => {
+                write!(
+                    f,
+                    "NIP-46 invitation exceeds {MAX_BUNKER_URI_LEN} bytes: {len}"
+                )
+            }
             Self::InvalidRelay(relay) => write!(f, "invalid NIP-46 relay: {relay}"),
+            Self::InvalidLaunchScheme(scheme) => {
+                write!(f, "invalid NIP-46 launch scheme: {scheme}")
+            }
             Self::InvalidInvitation => f.write_str("invalid NIP-46 invitation"),
             Self::SecretMismatch => f.write_str("NIP-46 connect secret mismatch"),
             Self::Timeout => f.write_str("NIP-46 connection timed out"),
@@ -121,34 +137,48 @@ impl Nip46Invitation {
         if relays.is_empty() {
             return Err(Nip46Error::MissingRelay);
         }
+        if relays.len() > MAX_NIP46_RELAYS {
+            return Err(Nip46Error::TooManyRelays(relays.len()));
+        }
         let client_keys = Keys::generate();
         let secret = Keys::generate().public_key().to_hex();
-        Ok(Self {
+        let invitation = Self {
             client_keys,
             relays,
             secret: Zeroizing::new(secret),
             permissions: permissions.unwrap_or_else(|| DEFAULT_PERMISSIONS.to_string()),
             metadata,
-        })
+        };
+        let len = invitation.uri().len();
+        if len > MAX_BUNKER_URI_LEN {
+            return Err(Nip46Error::InvitationTooLong(len));
+        }
+        Ok(invitation)
     }
 
     /// Generic system-chooser URI.
     #[must_use]
     pub fn uri(&self) -> String {
         self.uri_with_scheme("nostrconnect")
+            .expect("the standard NIP-46 launch scheme is valid")
     }
 
     /// App-specific handoff URI (for example `primalconnect`). The scheme is
     /// only a launch affordance; the embedded NIP-46 origin and parameters are
     /// unchanged.
-    #[must_use]
-    pub fn uri_with_scheme(&self, scheme: &str) -> String {
+    pub fn uri_with_scheme(&self, scheme: &str) -> Result<String, Nip46Error> {
+        if scheme.len() > 32 {
+            return Err(Nip46Error::InvalidLaunchScheme(scheme.to_string()));
+        }
         let mut url = url::Url::parse(&format!(
             "{}://{}",
             scheme,
             self.client_keys.public_key().to_hex()
         ))
-        .expect("generated NIP-46 origin is a valid URL");
+        .map_err(|_| Nip46Error::InvalidLaunchScheme(scheme.to_string()))?;
+        if url.scheme() != scheme {
+            return Err(Nip46Error::InvalidLaunchScheme(scheme.to_string()));
+        }
         {
             let mut query = url.query_pairs_mut();
             for relay in &self.relays {
@@ -168,7 +198,7 @@ impl Nip46Invitation {
                 query.append_pair("image", image);
             }
         }
-        url.into()
+        Ok(url.into())
     }
 
     /// Wait for a signer-launched connect response and finish the handshake.
@@ -340,6 +370,10 @@ impl Nip46Signer {
 impl SigningCapability for Nip46Signer {
     fn public_key(&self) -> Option<PublicKey> {
         Some(self.user_public_key)
+    }
+
+    fn is_available(&self) -> bool {
+        self.session.is_available()
     }
 
     fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<Event> {
@@ -551,10 +585,18 @@ impl Session {
             let Ok(relays) = serde_json::from_str::<Vec<String>>(&result) else {
                 return;
             };
-            let parsed = relays
-                .into_iter()
-                .filter_map(|relay| RelayUrl::parse(&relay).ok())
-                .collect::<Vec<_>>();
+            let mut parsed = Vec::new();
+            for relay in relays {
+                let Ok(relay) = RelayUrl::parse(&relay) else {
+                    return;
+                };
+                if !parsed.contains(&relay) {
+                    parsed.push(relay);
+                    if parsed.len() > MAX_NIP46_RELAYS {
+                        return;
+                    }
+                }
+            }
             if !parsed.is_empty() {
                 let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
             }
@@ -714,6 +756,9 @@ impl SessionWorker {
                         .store(self.handles.len(), Ordering::Release);
                 }
                 if self.handles.is_empty() {
+                    for (_, pending) in self.pending.drain() {
+                        let _ = pending.reply.send(Err(SignerError::Disconnected));
+                    }
                     self.emit(Nip46ConnectionEvent::Unavailable);
                 }
             }
@@ -766,7 +811,7 @@ impl SessionWorker {
         };
 
         if self.remote.is_none() {
-            let Some((expected_secret, reply)) = self.invitation.take() else {
+            let Some((expected_secret, _)) = self.invitation.as_ref() else {
                 return;
             };
             let current_result = envelope
@@ -783,9 +828,14 @@ impl SessionWorker {
             if current_result.as_deref() != Some(expected_secret.as_str())
                 && legacy_secret.as_deref() != Some(expected_secret.as_str())
             {
-                let _ = reply.send(Err(Nip46Error::SecretMismatch));
+                // A forged p-tagged response must not consume the one-shot
+                // invitation and turn the anti-spoofing secret into a DoS.
                 return;
             }
+            let (_, reply) = self
+                .invitation
+                .take()
+                .expect("invitation was just validated");
             self.remote = Some(event.pubkey);
             self.refresh_preambles();
             let _ = reply.send(Ok(event.pubkey));
@@ -811,7 +861,9 @@ impl SessionWorker {
         }
         let result = match envelope.result {
             Some(Value::String(value)) => Ok(value),
-            Some(value) => Ok(value.to_string()),
+            Some(_) => Err(SignerError::InvalidResponse(
+                "response result is not a string".to_string(),
+            )),
             None => Err(SignerError::InvalidResponse(
                 "response contains neither result nor error".to_string(),
             )),
@@ -880,8 +932,7 @@ impl SessionWorker {
 }
 
 fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> SignerOp<String> {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    let id = format!("nmp-{:016x}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let id = Keys::generate().public_key().to_hex();
     let (tx, rx) = mpsc::channel();
     if session
         .commands
@@ -995,10 +1046,35 @@ mod tests {
         )
         .unwrap();
         let generic = invitation.uri();
-        let primal = invitation.uri_with_scheme("primalconnect");
+        let primal = invitation.uri_with_scheme("primalconnect").unwrap();
         assert_eq!(
             generic.strip_prefix("nostrconnect"),
             primal.strip_prefix("primalconnect")
         );
+    }
+
+    #[test]
+    fn invalid_app_scheme_is_a_typed_error_not_a_panic() {
+        let invitation = Nip46Invitation::new(
+            vec![RelayUrl::parse("wss://relay.example").unwrap()],
+            None,
+            Nip46ClientMetadata::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            invitation.uri_with_scheme("not a scheme"),
+            Err(Nip46Error::InvalidLaunchScheme(_))
+        ));
+    }
+
+    #[test]
+    fn invitation_relay_fanout_is_bounded() {
+        let relays = (0..=MAX_NIP46_RELAYS)
+            .map(|i| RelayUrl::parse(&format!("wss://relay-{i}.example")).unwrap())
+            .collect();
+        assert!(matches!(
+            Nip46Invitation::new(relays, None, Nip46ClientMetadata::default()),
+            Err(Nip46Error::TooManyRelays(_))
+        ));
     }
 }
