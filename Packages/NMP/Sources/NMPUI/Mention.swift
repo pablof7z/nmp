@@ -35,10 +35,15 @@ public struct NMPProfileMention: View {
     }
 
     public var body: some View {
-        Button(action: { action?() }) {
-            label
+        Group {
+            if let action {
+                Button(action: action) { label }
+                    .buttonStyle(.plain)
+            } else {
+                label
+            }
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.45).onEnded { _ in
                 guard showsLongPressPreview else { return }
@@ -48,7 +53,13 @@ public struct NMPProfileMention: View {
         .popover(isPresented: $showsPreview, attachmentAnchor: .rect(.bounds), arrowEdge: .bottom) {
             NMPMentionPreview(pubkey: pubkey, profile: profile)
         }
+        .accessibilityLabel("Mention \(NMPDisplayName.resolve(pubkey: pubkey, profile: profile))")
         .accessibilityHint(action == nil ? "" : "Opens profile")
+        .modifier(
+            NMPMentionPreviewAccessibility(enabled: showsLongPressPreview) {
+                showsPreview = true
+            }
+        )
     }
 
     @ViewBuilder
@@ -79,6 +90,20 @@ public struct NMPProfileMention: View {
             .padding(.trailing, 9)
             .background(theme.elevatedSurface, in: Capsule())
             .overlay(Capsule().strokeBorder(theme.border, lineWidth: 0.5))
+        }
+    }
+}
+
+private struct NMPMentionPreviewAccessibility: ViewModifier {
+    let enabled: Bool
+    let show: () -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.accessibilityAction(named: "Show profile preview", show)
+        } else {
+            content
         }
     }
 }

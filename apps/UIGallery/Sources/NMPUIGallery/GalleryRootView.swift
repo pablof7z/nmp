@@ -16,6 +16,12 @@ struct GalleryRootView: View {
 
             NavigationStack { LiveProofGallery(model: model) }
                 .tabItem { Label("Live proof", systemImage: "dot.radiowaves.left.and.right") }
+
+            NavigationStack { ConformanceGallery(model: model) }
+                .tabItem { Label("States", systemImage: "checklist") }
+
+            NavigationStack { StressGallery(model: model) }
+                .tabItem { Label("Stress", systemImage: "gauge.with.dots.needle.67percent") }
         }
         .tint(Color(red: 0.45, green: 0.22, blue: 0.93))
         .nmpImageLoader(.system)
@@ -239,6 +245,10 @@ private struct ContentGallery: View {
                     }
                 }
 
+                GallerySection("Article primitives", note: "The cards below are compositions of the same public image, title, summary, byline, and reading-time leaves.") {
+                    GalleryResolvedArticlePrimitives(session: model.articleSession)
+                }
+
                 GallerySection("Article · portrait", note: "Featured editorial layout with lead image, title, summary, reading time, and live author identity.") {
                     NostrContent(
                         session: model.articleSession,
@@ -430,7 +440,7 @@ private struct LiveProofGallery: View {
     }
 }
 
-private struct GalleryIntro: View {
+struct GalleryIntro: View {
     let eyebrow: String
     let title: String
     let description: String
@@ -440,17 +450,17 @@ private struct GalleryIntro: View {
             Text(eyebrow)
                 .font(.caption2.weight(.bold))
                 .tracking(1.2)
-                .foregroundStyle(.purple)
+                .foregroundStyle(Color(red: 0.36, green: 0.08, blue: 0.68))
             Text(title)
                 .font(.largeTitle.weight(.bold))
             Text(description)
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.primary.opacity(0.64))
         }
     }
 }
 
-private struct GallerySection<Content: View>: View {
+struct GallerySection<Content: View>: View {
     let title: String
     let note: String
     let content: Content
@@ -465,10 +475,66 @@ private struct GallerySection<Content: View>: View {
         VStack(alignment: .leading, spacing: 13) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.title3.weight(.bold))
-                Text(note).font(.caption).foregroundStyle(.secondary)
+                Text(note).font(.caption).foregroundStyle(Color.primary.opacity(0.64))
             }
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
+
+private struct GalleryResolvedArticlePrimitives: View {
+    @ObservedObject var session: NostrContentSession
+    @State private var claim: NostrContentClaim?
+
+    var body: some View {
+        Group {
+            if let article {
+                VStack(alignment: .leading, spacing: 10) {
+                    NMPArticleImage(article: article)
+                        .frame(height: 128)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                    NMPArticleTitle(article: article)
+                        .font(.headline)
+                        .lineLimit(2)
+                    NMPArticleSummary(article: article)
+                        .font(.subheadline)
+                        .lineLimit(2)
+                    NMPResolvedProfile(session: session, pubkey: article.author) { profile in
+                        NMPArticleByline(article: article, authorProfile: profile)
+                    }
+                    NMPArticleReadingTime(article: article)
+                        .font(.caption)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Resolving the real NIP-23 article…")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .onAppear {
+            guard claim == nil, let referenceID else { return }
+            claim = session.claim(referenceID: referenceID)
+        }
+        .onDisappear {
+            claim?.cancel()
+            claim = nil
+        }
+    }
+
+    private var occurrence: NostrReferenceOccurrence? {
+        session.snapshot.document.references.first
+    }
+
+    private var referenceID: UInt64? { occurrence?.id }
+
+    private var resource: NostrContentResource? {
+        guard let occurrence else { return nil }
+        return session.snapshot.state(for: occurrence).resource
+    }
+
+    private var article: NostrArticle? { resource?.article }
+
 }

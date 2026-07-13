@@ -35,4 +35,31 @@ final class NMPUITests: XCTestCase {
             String(describing: NMPAvatar.placeholderColor(for: pubkey))
         )
     }
+
+    func testArticleLeafTextUsesStableFallbacks() {
+        let article = NostrArticle(
+            eventID: "event",
+            author: "author",
+            createdAt: 1,
+            identifier: "article",
+            title: "   ",
+            summary: "  useful summary  ",
+            content: "one two three"
+        )
+        XCTAssertEqual(NMPArticleText.title(article), "Untitled article")
+        XCTAssertEqual(NMPArticleText.summary(article), "useful summary")
+    }
+
+    func testAvatarGroupReportsOverflowDeterministically() {
+        let people = (0..<6).map { index in
+            NMPAvatarItem(pubkey: String(repeating: "\(index)", count: 64))
+        }
+        let group = NMPAvatarGroup(people: people, maximumVisible: 4)
+        XCTAssertEqual(group.overflowCount, 2)
+    }
+
+    func testCompactCountsMatchReactionComponents() {
+        XCTAssertEqual(NMPCompactCount.string(for: 999), "999")
+        XCTAssertEqual(NMPCompactCount.string(for: 1_250), "1.2k")
+    }
 }

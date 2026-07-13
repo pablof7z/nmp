@@ -52,9 +52,13 @@ about current code:
   arbitrary-native-view content flow, immutable local renderer sets, three
   mention treatments, generic event chrome, genuinely distinct portrait and
   Medium-style article cards, three user-card layouts, and three reaction
-  interaction families. The native iOS Gallery consumes those exact components
-  against real data and configures only the two indexers. Live Swift tests prove
-  a profile mention and a relay-less NIP-23 `naddr` using only the two configured
+  interaction families. Network-free scripted sessions make loading, shortfall,
+  cycle, unknown-kind, and custom-document previews deterministic without an
+  engine. The native iOS Gallery consumes those exact components against real
+  data and configures only the two indexers; separate States and 72-row Stress
+  tabs exercise Dynamic Type, RTL, reduced motion, dark appearance, long
+  Markdown, and visible-reference claim release. Live Swift tests prove a
+  profile mention and a relay-less NIP-23 `naddr` using only the two configured
   indexers and normal NMP outbox discovery. Still unbuilt at this checkpoint:
   Compose UI parity and Gallery,
   the conflict-honest `nmp-ui` open-code registry/CLI, NIP-25 live reaction

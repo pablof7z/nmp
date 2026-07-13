@@ -61,6 +61,18 @@ view.nmpImageLoader(
 kind:0 through the existing content session and supplies the optional profile
 to arbitrary child views; it does not independently query.
 
+The same leaves are available below the composed cards:
+
+```swift
+NMPNIP05(profile.nip05 ?? "")
+NMPAvatarGroup(people: people, maximumVisible: 4)
+NMPArticleImage(article: article)
+NMPArticleTitle(article: article)
+NMPArticleSummary(article: article)
+NMPArticleByline(article: article, authorProfile: profile)
+NMPArticleReadingTime(article: article)
+```
+
 ## Replace one renderer
 
 Renderer sets are immutable ordinary values. The last explicit builder call on
@@ -104,11 +116,38 @@ An event renderer receives the validated current row, authored placement,
 render purpose, structural recursion context, parent content session, actions,
 and the renderer set for nested content. It does not fetch.
 
+## Script previews and deterministic states
+
+Previews and component tests do not need an engine, fake socket, or app-root
+provider. A scripted session has the same synchronous rendering contract, but
+its claims are inert and it cannot open a query:
+
+```swift
+let preview = NostrContentSession.scripted(
+    document: document,
+    resources: [
+        target: .resolved(
+            resource: .event(fixtureRow),
+            evidence: NostrContentEvidence()
+        )
+    ]
+)
+
+NostrContent(session: preview, renderers: .standard)
+```
+
+`Row` has a public raw-value initializer for fixtures and import adapters. It
+does not validate or insert anything into NMP. If an application owns a Djot,
+AsciiDoc, or custom-kind parser, it constructs `NostrContentDocument` directly
+and passes that document to either a live or scripted session. NMP reference
+targets inside the document keep the same rendering and acquisition contract.
+
 ## Ready-made components
 
 The first SwiftUI family includes:
 
-- `NMPAvatar`, `NMPName`, and `NMPProfileIdentity`;
+- `NMPAvatar`, `NMPName`, `NMPNIP05`, `NMPProfileIdentity`, and
+  `NMPAvatarGroup`;
 - `NMPProfileMention` in text, avatar-name, and pill variants, with optional
   long-press profile preview;
 - `NMPEventChrome` in compact, standard, and editorial compositions, accepting
@@ -116,6 +155,8 @@ The first SwiftUI family includes:
 - `NMPArticlePortraitCard`, a large editorial feature composition;
 - `NMPArticleMediumCard`, a materially different horizontal list/embed
   composition;
+- `NMPArticleImage`, `NMPArticleTitle`, `NMPArticleSummary`,
+  `NMPArticleByline`, and `NMPArticleReadingTime` as reusable card leaves;
 - `NMPUserCard` in featured, landscape, and compact compositions;
 - `NMPReactionButton` in heart, spark, and minimal variants;
 - `NMPAvatarReactionButton` and `NMPEmojiReactionBar`.
@@ -159,3 +200,10 @@ configures only `purplepag.es` and `relay.primal.net`, and hardcodes real
 profile/article/note entities. Its article and note seeds have no relay URL;
 the Live proof screen shows the additional author relays NMP discovers through
 ordinary kind:10002 outbox routing.
+
+The States tab is the deterministic conformance surface for loading, shortfall,
+cycle, unknown-kind, missing media, Dynamic Type, RTL, reduced motion, dark
+appearance, and long Markdown. The Stress tab mounts 72 production content
+rows with two live references each and exposes the current visible-claim count
+while rapidly scrolling. Those tabs are intentionally separate from the live
+relay proof so a missing network never disguises a rendering regression.
