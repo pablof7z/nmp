@@ -17,6 +17,7 @@ use crate::{sentinel_signature, HandoffEvidence};
 const WORKER: &str = "redb_store::crash_atomicity_tests::redb_crash_worker";
 const SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const RELAY: &str = "wss://crash-proof.example";
+const RELAY_TWO: &str = "wss://crash-proof-two.example";
 
 fn keys() -> Keys {
     Keys::parse(SECRET).expect("fixed crash-proof key")
@@ -171,6 +172,13 @@ fn redb_crash_worker() {
                 .intent_id;
             let _ = store.compensate_write(intent);
         }
+        "observation-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::ObservationBeforeCommit)
+                    .expect("open worker store");
+            let relay = RelayUrl::parse(RELAY_TWO).expect("second relay");
+            let _ = store.insert(signed, RelayObserved::new(relay, Timestamp::from(2_000u64)));
+        }
         "start-before-commit" => {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::StartAttemptBeforeCommit)
@@ -315,6 +323,49 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         drop(reopened);
         assert_path_canonical_integrity(&path);
     }
+}
+
+#[test]
+fn relay_observation_dictionary_and_refcount_are_atomic_across_process_death() {
+    let (_dir, path) = fixture();
+    let (_, signed) = event_pair();
+    let first = RelayUrl::parse(RELAY).expect("first relay");
+    let second = RelayUrl::parse(RELAY_TWO).expect("second relay");
+    {
+        let mut store = RedbStore::open(&path).expect("open initial store");
+        store
+            .insert(
+                signed.clone(),
+                RelayObserved::new(first.clone(), Timestamp::from(1_000u64)),
+            )
+            .expect("insert initial observation");
+    }
+
+    crash(&path, "observation-before-commit");
+    let mut reopened = RedbStore::open(&path).expect("reopen observation crash");
+    let row = reopened
+        .query(&Filter::new().id(signed.id))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        row.provenance.seen,
+        BTreeMap::from([(first, Timestamp::from(1_000u64))])
+    );
+
+    reopened
+        .insert(
+            signed.clone(),
+            RelayObserved::new(second.clone(), Timestamp::from(2_000u64)),
+        )
+        .expect("commit second observation after rollback");
+    drop(reopened);
+    assert_path_canonical_integrity(&path);
+    let store = RedbStore::open(&path).expect("reopen committed observations");
+    let row = store.query(&Filter::new().id(signed.id)).unwrap().remove(0);
+    assert_eq!(
+        row.provenance.seen.get(&second),
+        Some(&Timestamp::from(2_000u64))
+    );
 }
 
 #[test]
