@@ -570,6 +570,21 @@ enum Enum {
             ),
         },
         Variant {
+            name: "StoreResetFailed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The requested closed persistent store could not be removed.",
+            ),
+        },
+        Variant {
             name: "InvalidSignature",
             discr: None,
             fields: [
@@ -4145,6 +4160,50 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_nostr_content",
     checksum: Some(
         18165,
+    ),
+}
+
+function Function {
+    name: "reset_persistent_store",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "store_path",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: None,
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_reset_persistent_store",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "store_path",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Destructively reset a closed persistent NMP store. This removes all\ncanonical engine state at `store_path`, while leaving any separately\nconfigured native account checkpoint untouched. The operation is\nidempotent when the store does not exist.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reset_persistent_store",
+    checksum: Some(
+        22685,
     ),
 }
 

@@ -29,6 +29,7 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidSigner(String)
     case receiptCorrelationIdExhausted
     case storeOpenFailed(String)
+    case storeResetFailed(String)
     case invalidSignature(String)
     case engineClosed
     /// `decodeNostrEntity`'s input was not valid bech32, had an
@@ -64,6 +65,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidSigner(let reason): self = .invalidSigner(reason)
         case .ReceiptCorrelationIdExhausted: self = .receiptCorrelationIdExhausted
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
+        case .StoreResetFailed(let reason): self = .storeResetFailed(reason)
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed
         case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)
