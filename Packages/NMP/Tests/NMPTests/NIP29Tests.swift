@@ -51,90 +51,123 @@ final class NIP29Tests: XCTestCase {
         XCTAssertFalse(remembered.hasPrivateContent)
     }
 
-    // MARK: - groupSendIntent / publishComposed (#115)
+    // MARK: - groupMessageIntent / publishComposed (#156)
 
-    func testGroupSendIntentComposesAKindBlindGroupSend() throws {
-        // Construction-only: proves the wrapper builds and is callable with
-        // arbitrary/unusual kinds -- the live round-trip (reaches only the
-        // pinned host, frozen template, read-back) is the Rust falsifier
-        // (`pinned_host_write.rs`), never re-driven against a live relay here.
-        _ = try NMP.groupSendIntent(
-            host: "wss://group-host.example.com",
-            groupId: "group-a",
-            authorPubkey: String(repeating: "a", count: 64),
-            createdAt: 1,
-            kind: 9999,
-            content: "hi"
-        )
-    }
-
-    func testGroupSendIntentRejectsAReservedExtraTag() {
-        XCTAssertThrowsError(
-            try NMP.groupSendIntent(
-                host: "wss://group-host.example.com",
-                groupId: "group-a",
-                authorPubkey: String(repeating: "a", count: 64),
-                createdAt: 1,
-                kind: 9,
-                content: "hi",
-                extraTags: [["h", "sneaky"]]
-            )
-        ) { error in
-            guard case NMPError.reservedGroupTag(let got) = error else {
-                return XCTFail("expected .reservedGroupTag, got \(error)")
-            }
-            XCTAssertEqual(got, "h")
-        }
-    }
-
-    func testGroupSendIntentComposesFromCouriedRows() throws {
-        // `recentRows` couriers delivered rows exactly as a live
-        // `groupContentDemand` read would render them -- proves the wrapper
-        // plumbs `Row` through to the FFI boundary without the caller ever
-        // touching an `FfiRow`.
-        let recent = Row(
-            FfiRow(
-                id: String(repeating: "1", count: 64), pubkey: String(repeating: "a", count: 64),
-                createdAt: 100, kind: 9, tags: [["h", "group-a"]], content: "earlier", sig: "sig",
-                sources: []
-            )
-        )
-        _ = try NMP.groupSendIntent(
-            host: "wss://group-host.example.com",
-            groupId: "group-a",
-            authorPubkey: String(repeating: "a", count: 64),
-            createdAt: 200,
-            kind: 9,
-            content: "hi",
-            recentRows: [recent]
-        )
-    }
-
-    /// Take-once (falsifier 10), no live relay needed: mirrors the Rust FFI
-    /// falsifier (`ffi_publish_composed_takes_the_intent_exactly_once`) --
-    /// no signer is ever attached, so the first `publishComposed` settles
-    /// into the retained `.accepted`/`.awaitingCapability` steady state; a
-    /// second call on the SAME `GroupSendIntent` must throw
-    /// `.intentAlreadyConsumed`.
-    func testPublishComposedTakesTheIntentExactlyOnce() async throws {
+    func testGroupMessageIntentRequiresAnActiveAccount() throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
-        let pubkey = String(repeating: "a", count: 64)
-        try engine.setActiveAccount(pubkey)
+        XCTAssertThrowsError(
+            try engine.groupMessageIntent(
+                host: "wss://group-host.example.com",
+                groupID: "group-a",
+                content: "hello"
+            )
+        ) { error in
+            guard case NMPError.noActiveAccount = error else {
+                return XCTFail("expected .noActiveAccount, got \(error)")
+            }
+        }
+    }
 
-        let intent = try NMP.groupSendIntent(
-            host: "wss://group-host.example.com",
-            groupId: "group-a",
-            authorPubkey: pubkey,
-            createdAt: 1,
+    /// Crosses the real Swift -> UniFFI -> Rust -> canonical-store path and
+    /// reads the accepted row back through an ordinary pinned live query.
+    /// This proves Swift supplies only semantic values while NMP owns the
+    /// exact author/time/kind/content/tag template.
+    func testGroupMessageIntentMaterializesTheCanonicalSemanticTemplate() async throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+
+        let author = try await engine.addAccount(
+            secretKey: String(repeating: "0", count: 63) + "1"
+        )
+        try engine.setActiveAccount(author)
+
+        let host = "wss://group-host.example.com"
+        let groupID = "group-a"
+        let first = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+        let second = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
+        let parentID = String(repeating: "1", count: 64)
+        let previousID = String(repeating: "2", count: 64)
+        let query = try engine.observe(NMP.groupContentDemand(host: host, groupId: groupID))
+        let rowTask = Task { await Self.firstRow(from: query, timeoutSeconds: 5) }
+        let recent = Row(
+            id: previousID,
+            pubkey: author,
+            createdAt: 100,
             kind: 9,
-            content: "hi"
+            tags: [["h", groupID]],
+            content: "earlier",
+            sig: "sig",
+            sources: []
         )
 
+        let intent = try engine.groupMessageIntent(
+            host: host,
+            groupID: groupID,
+            content: "hello",
+            recipients: [first, first, second],
+            reply: GroupReplyParent(eventID: parentID, authorPubkey: first),
+            recentRows: [recent]
+        )
         let receipt = try await engine.publishComposed(intent)
-        let first = await Self.firstStatus(from: receipt, timeoutSeconds: 5)
-        XCTAssertEqual(first, .accepted)
+        let status = await Self.firstStatus(from: receipt, timeoutSeconds: 5)
+        XCTAssertEqual(status, .accepted)
+
+        let row = await rowTask.value
+        XCTAssertEqual(row?.pubkey, author)
+        XCTAssertEqual(row?.kind, 9)
+        XCTAssertGreaterThan(row?.createdAt ?? 0, 1_700_000_000)
+        XCTAssertEqual(
+            row?.content,
+            "nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 " +
+            "nostr:npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg hello"
+        )
+        XCTAssertEqual(
+            row?.tags,
+            [
+                ["p", first],
+                ["p", second],
+                ["e", parentID, "", "reply", first],
+                ["h", groupID],
+                ["previous", "22222222"],
+            ]
+        )
+    }
+
+    func testGroupMessageIntentRejectsMalformedTypedRecipients() throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+        try engine.setActiveAccount(String(repeating: "a", count: 64))
+
+        XCTAssertThrowsError(
+            try engine.groupMessageIntent(
+                host: "wss://group-host.example.com",
+                groupID: "group-a",
+                content: "hello",
+                recipients: ["not-a-pubkey"]
+            )
+        ) { error in
+            guard case NMPError.invalidPublicKey(let got) = error else {
+                return XCTFail("expected .invalidPublicKey, got \(error)")
+            }
+            XCTAssertEqual(got, "not-a-pubkey")
+        }
+    }
+
+    func testPublishComposedTakesTheIntentExactlyOnce() async throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+        try engine.setActiveAccount(String(repeating: "a", count: 64))
+
+        let intent = try engine.groupMessageIntent(
+            host: "wss://group-host.example.com",
+            groupID: "group-a",
+            content: "hi"
+        )
+        let receipt = try await engine.publishComposed(intent)
+        let status = await Self.firstStatus(from: receipt, timeoutSeconds: 5)
+        XCTAssertEqual(status, .accepted)
 
         do {
             _ = try await engine.publishComposed(intent)
@@ -149,6 +182,27 @@ final class NIP29Tests: XCTestCase {
             group.addTask {
                 for await status in receipt.status {
                     return status
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                return nil
+            }
+
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private static func firstRow(from query: NMPQuery, timeoutSeconds: UInt64) async -> Row? {
+        await withTaskGroup(of: Row?.self) { group in
+            group.addTask {
+                for await batch in query {
+                    if let row = batch.rows.first {
+                        return row
+                    }
                 }
                 return nil
             }

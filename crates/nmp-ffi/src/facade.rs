@@ -310,6 +310,32 @@ impl NmpEngine {
         Ok(receipt_id)
     }
 
+    /// Compose an ordinary kind:9 NIP-29 message from semantic inputs
+    /// (#156). The caller supplies no author, timestamp, kind, bech32
+    /// encoding, or raw tags: NMP reads the active account, owns event time,
+    /// materializes ordered/deduplicated `nostr:npub…` content references,
+    /// and composes `p`/reply-`e`/`h`/`previous` plus pinned-host routing.
+    /// Publish the returned take-once value through [`Self::publish_composed`].
+    pub fn group_message_intent(
+        &self,
+        host: String,
+        group_id: String,
+        content: String,
+        recipient_pubkeys: Vec<String>,
+        reply_to: Option<crate::nip29::FfiGroupReplyParent>,
+        recent_rows: Vec<crate::types::FfiRow>,
+    ) -> Result<Arc<crate::nip29::FfiComposedWriteIntent>, FfiError> {
+        crate::nip29::group_message_intent(
+            &self.engine,
+            host,
+            group_id,
+            content,
+            recipient_pubkeys,
+            reply_to,
+            recent_rows,
+        )
+    }
+
     /// Publish a `nmp_nip29::compose_group_send`-composed intent (#115).
     /// Take-once: `intent` is consumed by this call (`FfiComposedWriteIntent
     /// ::take`) -- a second call on the SAME handle fails closed with
@@ -884,7 +910,7 @@ mod tests {
         engine.shutdown();
     }
 
-    /// #115 falsifier 10: `publish_composed` takes its `FfiComposedWriteIntent`
+    /// #156: `publish_composed` takes its `FfiComposedWriteIntent`
     /// exactly once. No signer is ever attached (`set_active_account` without
     /// `add_account`), so the first call settles into the SAME retained
     /// `Accepted`+`AwaitingCapability` steady state
@@ -901,17 +927,16 @@ mod tests {
             .set_active_account(Some(keys.public_key().to_hex()))
             .expect("account must activate");
 
-        let intent = crate::nip29::group_send_intent(
-            "wss://group-host.example.com".to_string(),
-            "group-a".to_string(),
-            keys.public_key().to_hex(),
-            nostr::Timestamp::now().as_secs(),
-            9,
-            "hi".to_string(),
-            vec![],
-            vec![],
-        )
-        .expect("a well-formed group send must compose");
+        let intent = engine
+            .group_message_intent(
+                "wss://group-host.example.com".to_string(),
+                "group-a".to_string(),
+                "hi".to_string(),
+                vec![],
+                None,
+                vec![],
+            )
+            .expect("a well-formed group message must compose");
 
         let (tx_a, rx_a) = mpsc::channel();
         let observer_a = Box::new(ChannelReceiptObserver {

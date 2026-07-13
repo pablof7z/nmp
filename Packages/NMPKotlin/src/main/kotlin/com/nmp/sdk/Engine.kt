@@ -86,7 +86,20 @@ class NMPEngine(config: NMPConfig) : AutoCloseable {
     /** Enqueue a write and return its stable id plus status stream. */
     fun publish(intent: WriteIntent): Receipt = publishReceipt(ffi, intent)
 
-    /** Publish a [GroupSendIntent] from `groupSendIntent` (#115). Take-once
+    /** Compose an ordinary kind:9 NIP-29 group message from semantic native
+     * state. NMP derives the active author/time, mention content, protocol
+     * tags, and pinned-host routing. */
+    fun groupMessageIntent(
+        host: String,
+        groupId: String,
+        content: String,
+        recipients: List<String> = emptyList(),
+        reply: GroupReplyParent? = null,
+        recentRows: List<Row> = emptyList(),
+    ): GroupSendIntent =
+        composeGroupMessageIntent(ffi, host, groupId, content, recipients, reply, recentRows)
+
+    /** Publish a [GroupSendIntent] from `groupMessageIntent` (#156). Take-once
      * -- see [publishComposedReceipt]'s own doc. */
     fun publishComposed(intent: GroupSendIntent): Receipt = publishComposedReceipt(ffi, intent)
 

@@ -3,12 +3,10 @@
 // needed to call any of these. Pass the returned `NMPDemand` straight to
 // `NMPEngine.observe(_ demand:)`, exactly like any other `NMPDemand`.
 //
-// `groupSendIntent`/`GroupSendIntent` (#115) are this file's write-side
-// counterpart: an app couriers `Row`s it already has from a live
-// `groupContentDemand` read, and `nmp-nip29::compose_group_send` owns 100%
-// of the `h`/`previous` tag composition -- the app never sees either tag,
-// routing, or host authority directly, only the opaque, take-once
-// `GroupSendIntent` `NMPEngine.publishComposed(_:)` consumes.
+// `NMPEngine.groupMessageIntent`/`GroupSendIntent` (#156) are this file's
+// write-side counterpart. The app supplies semantic composer state; NMP owns
+// author/time/kind, NIP-27 mention materialization, `p`/reply-`e` tags, and
+// the existing `h`/`previous`/pinned-host composition.
 
 import NMPFFI
 
@@ -75,46 +73,67 @@ public func decodeRememberedGroups(_ row: Row) -> RememberedGroups {
     return RememberedGroups(NMPFFI.decodeRememberedGroups(row: ffiRow))
 }
 
-/// A composed NIP-29 group send (#115), returned by `groupSendIntent`.
+/// A direct reply parent for a kind:9 group message. NMP turns this into the
+/// marked reply `e` row plus the author's deduplicated recipient `p` row.
+public struct GroupReplyParent: Sendable, Hashable {
+    public let eventID: String
+    public let authorPubkey: String
+
+    public init(eventID: String, authorPubkey: String) {
+        self.eventID = eventID
+        self.authorPubkey = authorPubkey
+    }
+
+    func toFfi() -> FfiGroupReplyParent {
+        FfiGroupReplyParent(eventId: eventID, authorPubkey: authorPubkey)
+    }
+}
+
+/// A composed NIP-29 group message (#156), returned by
+/// `NMPEngine.groupMessageIntent`.
 /// Opaque and take-once -- pass it to `NMPEngine.publishComposed(_:)`
 /// exactly once; a second attempt throws `NMPError.intentAlreadyConsumed`.
-/// Never exposes `h`, `previous`, routing, or host authority: this crate
-/// composed all of that internally from the couriered `recentRows`.
+/// Never exposes the materialized tags, routing, author, or timestamp.
 public struct GroupSendIntent: Sendable {
     let ffi: FfiComposedWriteIntent
 }
 
-/// Compose a NIP-29 group send (#115): `recentRows` are delivered kind:9/
-/// 30315 `Row`s the app is already rendering from its own live
-/// `groupContentDemand` read (#108) -- couriered, not hand-rolled (see
-/// `nmp_nip29::compose_group_send`'s own doc for that distinction). This
-/// function owns 100% of the `h`/`previous` tag
-/// selection/verification/truncation/encoding; the app supplies only the
-/// primitives it already has. `kind` is entirely the caller's choice --
-/// this call (and everything it reaches) is kind-blind. Publish the
-/// result via `NMPEngine.publishComposed(_:)`.
-public func groupSendIntent(
-    host: String,
-    groupId: String,
-    authorPubkey: String,
-    createdAt: UInt64,
-    kind: UInt16,
-    content: String,
-    extraTags: [[String]] = [],
-    recentRows: [Row] = []
-) throws -> GroupSendIntent {
-    let ffiRows = recentRows.map {
-        FfiRow(
-            id: $0.id, pubkey: $0.pubkey, createdAt: $0.createdAt, kind: $0.kind,
-            tags: $0.tags, content: $0.content, sig: $0.sig, sources: $0.sources
-        )
-    }
-    return try GroupSendIntent(
-        ffi: nmpRethrowing {
-            try NMPFFI.groupSendIntent(
-                host: host, groupId: groupId, authorPubkey: authorPubkey, createdAt: createdAt,
-                kind: kind, content: content, extraTags: extraTags, recentRows: ffiRows
+extension NMPEngine {
+    /// Compose an ordinary kind:9 group message from the state a native
+    /// composer actually owns. `recipients` retain selection order; NMP
+    /// deduplicates them, prefixes their `nostr:npub…` references to
+    /// `content`, and emits matching `p` rows. `reply` contributes the marked
+    /// direct-parent `e` row and its author recipient. `recentRows` are
+    /// couriered only so NMP can derive NIP-29 `previous` evidence.
+    ///
+    /// The active account supplies the author and NMP supplies event time.
+    /// The caller cannot choose a kind or inject raw tags. Publish the opaque
+    /// result via `publishComposed(_:)`.
+    public func groupMessageIntent(
+        host: String,
+        groupID: String,
+        content: String,
+        recipients: [String] = [],
+        reply: GroupReplyParent? = nil,
+        recentRows: [Row] = []
+    ) throws -> GroupSendIntent {
+        let ffiRows = recentRows.map {
+            FfiRow(
+                id: $0.id, pubkey: $0.pubkey, createdAt: $0.createdAt, kind: $0.kind,
+                tags: $0.tags, content: $0.content, sig: $0.sig, sources: $0.sources
             )
         }
-    )
+        return try GroupSendIntent(
+            ffi: nmpRethrowing {
+                try ffi.groupMessageIntent(
+                    host: host,
+                    groupId: groupID,
+                    content: content,
+                    recipientPubkeys: recipients,
+                    replyTo: reply?.toFfi(),
+                    recentRows: ffiRows
+                )
+            }
+        )
+    }
 }

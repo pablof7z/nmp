@@ -13,17 +13,15 @@
 //! `NmpEngine::observe_demand`, exactly like any other `FfiDemand` (#107).
 //! No new subscribe verb exists or is needed for this feature.
 //!
-//! `group_send_intent`/[`FfiComposedWriteIntent`] (#115) are this module's
-//! write-side counterpart: an app couriers rows it already has from a live
-//! `group_content_demand` read, and this crate's `nmp_nip29::
-//! compose_group_send` owns 100% of the `h`/`previous` tag composition --
-//! the app never sees either tag, `WriteRouting`, or `HostAuthority`
-//! directly, only the opaque, take-once handle `NmpEngine::
-//! publish_composed` consumes.
+//! `NmpEngine::group_message_intent`/[`FfiComposedWriteIntent`] (#156) are
+//! this module's write-side counterpart: an app supplies semantic composer
+//! state while NMP owns author/time/kind, mention materialization,
+//! `p`/reply-`e`, `h`/`previous`, and pinned-host routing. The app receives
+//! only the opaque, take-once handle `NmpEngine::publish_composed` consumes.
 
 use std::sync::{Arc, Mutex};
 
-use nostr::{EventId, RelayUrl, Timestamp};
+use nostr::{EventId, RelayUrl};
 
 use crate::convert::{demand_to_ffi, parse_pubkey, FfiError};
 use crate::types::{FfiDemand, FfiGroupRef, FfiRememberedGroups, FfiRow};
@@ -98,6 +96,14 @@ pub fn decode_remembered_groups(row: FfiRow) -> FfiRememberedGroups {
     }
 }
 
+/// Typed reply contribution for an ordinary kind:9 group message (#156).
+/// Native callers never spell the corresponding `e`/`p` rows.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiGroupReplyParent {
+    pub event_id: String,
+    pub author_pubkey: String,
+}
+
 /// Take-once wrapper around a `nmp_nip29::compose_group_send`-composed
 /// `WriteIntent` (#115). Opaque and generically named -- a future protocol
 /// module's own composed intent could reuse this same wrapper shape,
@@ -112,6 +118,12 @@ pub struct FfiComposedWriteIntent {
 }
 
 impl FfiComposedWriteIntent {
+    pub(crate) fn new(intent: nmp_grammar::WriteIntent) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(Some(intent)),
+        })
+    }
+
     /// Take the wrapped intent exactly once. Called only from
     /// `crate::facade::NmpEngine::publish_composed`.
     pub(crate) fn take(&self) -> Result<nmp_grammar::WriteIntent, FfiError> {
@@ -123,35 +135,35 @@ impl FfiComposedWriteIntent {
     }
 }
 
-/// Compose a NIP-29 group send (#115): `recent_rows` are delivered
-/// kind:9/30315 rows the app is already rendering from its own live
-/// `group_content_demand` read (#108) -- couriered, not hand-rolled (see
-/// `nmp_nip29::compose_group_send`'s own doc for that distinction). This
-/// function owns 100% of the `h`/`previous` tag
-/// selection/verification/truncation/encoding; the app supplies only the
-/// primitives it already has.
-///
-/// `kind` is entirely the caller's choice -- this function (and everything
-/// it calls) is kind-blind. Publish the result via
-/// [`crate::facade::NmpEngine::publish_composed`].
-// Mirrors `nmp_nip29::compose_group_send`'s own ratified 8-argument
-// signature one-for-one across the FFI boundary (plus `recent_rows` in
-// place of a `&GroupTimelineEvidence` reference); same
-// `#[allow(clippy::too_many_arguments)]` precedent as that function.
-#[allow(clippy::too_many_arguments)]
-#[uniffi::export]
-pub fn group_send_intent(
+/// Parse native semantic inputs and delegate to NMP's typed kind:9 group-
+/// message operation (#156). This is intentionally crate-private: the UniFFI
+/// surface is [`crate::facade::NmpEngine::group_message_intent`], because the
+/// active author and wall-clock are engine/NMP state rather than caller
+/// parameters.
+pub(crate) fn group_message_intent(
+    engine: &nmp::Engine,
     host: String,
     group_id: String,
-    author_pubkey: String,
-    created_at: u64,
-    kind: u16,
     content: String,
-    extra_tags: Vec<Vec<String>>,
+    recipient_pubkeys: Vec<String>,
+    reply_to: Option<FfiGroupReplyParent>,
     recent_rows: Vec<FfiRow>,
 ) -> Result<Arc<FfiComposedWriteIntent>, FfiError> {
     let host = parse_host(host)?;
-    let author = parse_pubkey(&author_pubkey)?;
+    let recipients = recipient_pubkeys
+        .iter()
+        .map(|pubkey| parse_pubkey(pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
+    let reply_to = reply_to
+        .map(|parent| {
+            let event_id =
+                EventId::from_hex(&parent.event_id).map_err(|_| FfiError::InvalidEventId {
+                    got: parent.event_id.clone(),
+                })?;
+            let author = parse_pubkey(&parent.author_pubkey)?;
+            Ok::<_, FfiError>(nmp_nip29::GroupReplyParent { event_id, author })
+        })
+        .transpose()?;
 
     let rows = recent_rows
         .into_iter()
@@ -164,27 +176,19 @@ pub fn group_send_intent(
         .collect::<Result<Vec<_>, FfiError>>()?;
     let previous = nmp_nip29::GroupTimelineEvidence::from_events(&group_id, rows);
 
-    let intent = nmp_nip29::compose_group_send(
-        host,
-        &group_id,
-        author,
-        Timestamp::from(created_at),
-        kind,
-        content,
-        extra_tags,
-        &previous,
+    let intent = nmp_nip29::compose_group_message(
+        engine, host, &group_id, content, recipients, reply_to, &previous,
     )
     .map_err(FfiError::from)?;
 
-    Ok(Arc::new(FfiComposedWriteIntent {
-        inner: Mutex::new(Some(intent)),
-    }))
+    Ok(FfiComposedWriteIntent::new(intent))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::FfiSourceAuthority;
+    use nmp::{EngineConfig, WritePayload};
 
     #[test]
     fn active_account_demand_projects_the_reactive_authors_binding() {
@@ -221,6 +225,108 @@ mod tests {
         )
         .expect("well-formed host url");
         assert_eq!(demand.selection.kinds, Some(vec![9, 30315]));
+    }
+
+    #[test]
+    fn semantic_group_message_projects_mentions_and_reply_without_raw_native_inputs() {
+        let engine = nmp::Engine::new(EngineConfig::default()).unwrap();
+        let author = nostr::Keys::generate().public_key();
+        engine.set_active_account(Some(author)).unwrap();
+        let first = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let second = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let parent_id = "11".repeat(32);
+
+        let wrapped = group_message_intent(
+            &engine,
+            "wss://group-host.example.com".to_string(),
+            "group-a".to_string(),
+            "hello".to_string(),
+            vec![first.to_string(), first.to_string(), second.to_string()],
+            Some(FfiGroupReplyParent {
+                event_id: parent_id.clone(),
+                author_pubkey: first.to_string(),
+            }),
+            vec![],
+        )
+        .unwrap();
+        let intent = wrapped.take().unwrap();
+        let WritePayload::Unsigned(unsigned) = intent.payload else {
+            panic!("semantic group messages must produce unsigned intents")
+        };
+
+        assert_eq!(unsigned.pubkey, author);
+        assert_eq!(unsigned.kind, nostr::Kind::from(9u16));
+        assert_eq!(
+            unsigned.content,
+            concat!(
+                "nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 ",
+                "nostr:npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg ",
+                "hello"
+            )
+        );
+        let rows = unsigned
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                vec!["p".to_string(), first.to_string()],
+                vec!["p".to_string(), second.to_string()],
+                vec![
+                    "e".to_string(),
+                    parent_id,
+                    String::new(),
+                    "reply".to_string(),
+                    first.to_string(),
+                ],
+                vec!["h".to_string(), "group-a".to_string()],
+            ]
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn semantic_group_message_requires_an_active_account() {
+        let engine = nmp::Engine::new(EngineConfig::default()).unwrap();
+        let result = group_message_intent(
+            &engine,
+            "wss://group-host.example.com".to_string(),
+            "group-a".to_string(),
+            "hello".to_string(),
+            vec![],
+            None,
+            vec![],
+        );
+        match result {
+            Err(error) => assert_eq!(error, FfiError::NoActiveAccount),
+            Ok(_) => panic!("signed-out group composition must fail"),
+        }
+        engine.shutdown();
+    }
+
+    #[test]
+    fn semantic_group_message_rejects_malformed_typed_inputs() {
+        let engine = nmp::Engine::new(EngineConfig::default()).unwrap();
+        engine
+            .set_active_account(Some(nostr::Keys::generate().public_key()))
+            .unwrap();
+        let result = group_message_intent(
+            &engine,
+            "wss://group-host.example.com".to_string(),
+            "group-a".to_string(),
+            "hello".to_string(),
+            vec!["not-a-pubkey".to_string()],
+            None,
+            vec![],
+        );
+        match result {
+            Err(FfiError::InvalidPublicKey { got }) => assert_eq!(got, "not-a-pubkey"),
+            Err(other) => panic!("expected InvalidPublicKey, got {other:?}"),
+            Ok(_) => panic!("malformed recipients must fail"),
+        }
+        engine.shutdown();
     }
 
     #[test]

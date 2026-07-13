@@ -1,10 +1,13 @@
 package com.nmp.sdk
 
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.fail
 import org.junit.jupiter.api.Test
@@ -63,75 +66,107 @@ class NIP29Test {
         assertFalse(remembered.hasPrivateContent)
     }
 
-    // groupSendIntent / publishComposed (#115)
+    // groupMessageIntent / publishComposed (#156)
 
     @Test
-    fun groupSendIntentComposesAKindBlindGroupSend() {
-        // Construction-only: proves the wrapper builds and is callable with
-        // arbitrary/unusual kinds -- the live round-trip (reaches only the
-        // pinned host, frozen template, read-back) is the Rust falsifier
-        // (pinned_host_write.rs), never re-driven against a live relay here.
-        groupSendIntent(
-            host = "wss://group-host.example.com",
-            groupId = "group-a",
-            authorPubkey = "a".repeat(64),
-            createdAt = 1uL,
-            kind = 9999u,
-            content = "hi",
-        )
-    }
-
-    @Test
-    fun groupSendIntentRejectsAReservedExtraTag() {
-        val error =
-            assertThrows(NMPError.ReservedGroupTag::class.java) {
-                groupSendIntent(
+    fun groupMessageIntentRequiresAnActiveAccount() {
+        NMPEngine(NMPConfig()).use { engine ->
+            assertThrows(NMPError.NoActiveAccount::class.java) {
+                engine.groupMessageIntent(
                     host = "wss://group-host.example.com",
                     groupId = "group-a",
-                    authorPubkey = "a".repeat(64),
-                    createdAt = 1uL,
-                    kind = 9u,
-                    content = "hi",
-                    extraTags = listOf(listOf("h", "sneaky")),
+                    content = "hello",
                 )
             }
-        assertEquals("h", error.got)
+        }
     }
 
     @Test
-    fun groupSendIntentComposesFromCouriedRows() {
-        // recentRows couriers delivered rows exactly as a live
-        // groupContentDemand read would render them -- proves the wrapper
-        // plumbs Row through to the FFI boundary without the caller ever
-        // touching an FfiRow.
-        val recent =
-            Row(
-                id = "1".repeat(64),
-                pubkey = "a".repeat(64),
-                createdAt = 100uL,
-                kind = 9u,
-                tags = listOf(listOf("h", "group-a")),
-                content = "earlier",
-                sig = "sig",
-                sources = emptyList(),
-            )
-        groupSendIntent(
-            host = "wss://group-host.example.com",
-            groupId = "group-a",
-            authorPubkey = "a".repeat(64),
-            createdAt = 200uL,
-            kind = 9u,
-            content = "hi",
-            recentRows = listOf(recent),
-        )
+    fun groupMessageIntentMaterializesTheCanonicalSemanticTemplate() {
+        runBlocking {
+            NMPEngine(NMPConfig()).use { engine ->
+                val author = engine.addAccount("0".repeat(63) + "1")
+                engine.setActiveAccount(author)
+                val host = "wss://group-host.example.com"
+                val groupId = "group-a"
+                val first = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+                val second = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
+                val parentId = "1".repeat(64)
+                val previousId = "2".repeat(64)
+                val rowDeferred =
+                    async {
+                        withTimeoutOrNull(5_000) {
+                            engine.observe(groupContentDemand(host, groupId))
+                                .first { it.rows.isNotEmpty() }
+                                .rows
+                                .first()
+                        }
+                    }
+                val recent =
+                    Row(
+                        id = previousId,
+                        pubkey = author,
+                        createdAt = 100uL,
+                        kind = 9u,
+                        tags = listOf(listOf("h", groupId)),
+                        content = "earlier",
+                        sig = "sig",
+                        sources = emptyList(),
+                    )
+
+                val intent =
+                    engine.groupMessageIntent(
+                        host = host,
+                        groupId = groupId,
+                        content = "hello",
+                        recipients = listOf(first, first, second),
+                        reply = GroupReplyParent(parentId, first),
+                        recentRows = listOf(recent),
+                    )
+                val receipt = engine.publishComposed(intent)
+                assertEquals(WriteStatus.Accepted, withTimeoutOrNull(5_000) { receipt.status.first() })
+
+                val row = rowDeferred.await()
+                assertNotNull(row)
+                assertEquals(author, row?.pubkey)
+                assertEquals(9u.toUShort(), row?.kind)
+                assertTrue((row?.createdAt ?: 0uL) > 1_700_000_000uL)
+                assertEquals(
+                    "nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6 " +
+                        "nostr:npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg hello",
+                    row?.content,
+                )
+                assertEquals(
+                    listOf(
+                        listOf("p", first),
+                        listOf("p", second),
+                        listOf("e", parentId, "", "reply", first),
+                        listOf("h", groupId),
+                        listOf("previous", "22222222"),
+                    ),
+                    row?.tags,
+                )
+            }
+        }
     }
 
-    /** Take-once (falsifier 10), no live relay needed: mirrors the Rust FFI
-     * falsifier (`ffi_publish_composed_takes_the_intent_exactly_once`) --
-     * no signer is ever attached, so the first `publishComposed` settles
-     * into the retained `Accepted`/`AwaitingCapability` steady state; a
-     * second call on the SAME `GroupSendIntent` must throw
-     * `NMPError.IntentAlreadyConsumed`. */
+    @Test
+    fun groupMessageIntentRejectsMalformedTypedRecipients() {
+        NMPEngine(NMPConfig()).use { engine ->
+            engine.setActiveAccount("a".repeat(64))
+            val error =
+                assertThrows(NMPError.InvalidPublicKey::class.java) {
+                    engine.groupMessageIntent(
+                        host = "wss://group-host.example.com",
+                        groupId = "group-a",
+                        content = "hello",
+                        recipients = listOf("not-a-pubkey"),
+                    )
+                }
+            assertEquals("not-a-pubkey", error.got)
+        }
+    }
+
     @Test
     fun publishComposedTakesTheIntentExactlyOnce() {
         runBlocking {
@@ -140,12 +175,9 @@ class NIP29Test {
                 engine.setActiveAccount(pubkey)
 
                 val intent =
-                    groupSendIntent(
+                    engine.groupMessageIntent(
                         host = "wss://group-host.example.com",
                         groupId = "group-a",
-                        authorPubkey = pubkey,
-                        createdAt = 1uL,
-                        kind = 9u,
                         content = "hi",
                     )
 

@@ -151,7 +151,7 @@ pub fn compose_group_send(
     extra_tags: Vec<Vec<String>>,
     previous: &GroupTimelineEvidence,
 ) -> Result<WriteIntent, GroupSendError> {
-    let mut tags = Vec::with_capacity(extra_tags.len() + 2);
+    let mut tags = Vec::with_capacity(extra_tags.len());
     for row in extra_tags {
         match row.first().map(String::as_str) {
             Some("h") | Some("previous") => {
@@ -163,6 +163,29 @@ pub fn compose_group_send(
         tags.push(tag);
     }
 
+    Ok(compose_group_send_with_tags(
+        host, group_id, author, created_at, kind, content, tags, previous,
+    ))
+}
+
+/// Typed interior seam used by the semantic group-message operation. The
+/// public raw composer above remains the validation boundary for callers that
+/// deliberately supply arbitrary event tags; this helper accepts only tags
+/// already minted by this crate and therefore cannot fail with
+/// [`GroupSendError`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compose_group_send_with_tags(
+    host: RelayUrl,
+    group_id: &str,
+    author: PublicKey,
+    created_at: Timestamp,
+    kind: u16,
+    content: String,
+    mut tags: Vec<Tag>,
+    previous: &GroupTimelineEvidence,
+) -> WriteIntent {
+    tags.reserve(2);
+
     tags.push(Tag::parse(["h", group_id]).expect("'h' is a well-formed non-empty row"));
     if !previous.is_empty() {
         let mut row = vec!["previous".to_string()];
@@ -172,11 +195,11 @@ pub fn compose_group_send(
 
     let unsigned = UnsignedEvent::new(author, created_at, Kind::from(kind), tags, content);
 
-    Ok(WriteIntent {
+    WriteIntent {
         payload: WritePayload::Unsigned(unsigned),
         durability: Durability::Durable,
         routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(host)),
-    })
+    }
 }
 
 #[cfg(test)]
