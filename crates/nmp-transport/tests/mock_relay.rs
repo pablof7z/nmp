@@ -11,7 +11,6 @@
 //! runtime here drives the test relay, not `nmp-transport`.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -63,43 +62,12 @@ fn frame_contains(event: &PoolEvent, needle: &str) -> bool {
     matches!(event, PoolEvent::Frame { frame, .. } if frame.clone().into_message().as_json().contains(needle))
 }
 
-/// Reserve an ephemeral TCP port by binding then immediately dropping the
-/// listener. Relay A and relay B use distinct backend ports; sequential
-/// [`ConnectionOwner`] values supply the one stable client-facing address.
-static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(0);
-
+/// Ask the OS for an available ephemeral backend port. Relay A and relay B
+/// use distinct allocations while sequential [`ConnectionOwner`] values
+/// supply the stable client-facing address.
 fn free_port() -> u16 {
-    let base = 20_000 + (std::process::id() % 20_000) as u16;
-    let _ = NEXT_TEST_PORT.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed);
-    loop {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
-        if port < 20_000 {
-            NEXT_TEST_PORT.store(base, Ordering::Relaxed);
-            continue;
-        }
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-}
-
-/// `LocalRelay::run` starts its listener task asynchronously. Prove the TCP
-/// accept loop is live before asking the pool to dial, so a loaded CI host
-/// cannot turn startup scheduling into a reconnect-test timeout.
-async fn wait_for_listener(port: u16) {
-    tokio::time::timeout(Duration::from_secs(5), async move {
-        loop {
-            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                Ok(stream) => {
-                    drop(stream);
-                    return;
-                }
-                Err(_) => tokio::task::yield_now().await,
-            }
-        }
-    })
-    .await
-    .expect("test relay listener did not become ready");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+    listener.local_addr().expect("ephemeral address").port()
 }
 
 fn loopback(port: u16) -> SocketAddr {
@@ -158,7 +126,6 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
         .port(port_a)
         .build();
     relay_a.run().await.expect("run relay_a");
-    wait_for_listener(port_a).await;
     relay_a
         .add_event(event.clone())
         .await
@@ -251,7 +218,6 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
         .port(port_b)
         .build();
     relay_b.run().await.expect("run relay_b");
-    wait_for_listener(port_b).await;
     relay_b
         .add_event(event.clone())
         .await
@@ -330,7 +296,6 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
         .port(port_a)
         .build();
     relay_a.run().await.expect("run relay_a");
-    wait_for_listener(port_a).await;
     let connection_owner = ConnectionOwner::bind(loopback(0), loopback(port_a))
         .await
         .expect("bind client-facing relay connection owner");
@@ -388,7 +353,6 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
         .port(port_b)
         .build();
     relay_b.run().await.expect("run relay_b");
-    wait_for_listener(port_b).await;
     connection_owner
         .shutdown()
         .await
@@ -498,7 +462,6 @@ async fn durable_event_resolves_written_exactly_once() {
         .port(port)
         .build();
     relay.run().await.expect("run relay");
-    wait_for_listener(port).await;
     let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
