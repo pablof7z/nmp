@@ -192,11 +192,11 @@ fn wait_for_status(
 
 fn wait_for_exact_rows(
     rows: &mpsc::Receiver<RowsMsg>,
+    current: &mut BTreeSet<EventId>,
     expected_present: EventId,
     expected_absent: EventId,
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut current = BTreeSet::new();
     loop {
         let (deltas, _) = rows
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -380,7 +380,8 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
             .to_hex()]))),
         ..Filter::default()
     }));
-    wait_for_exact_rows(&rows, predecessor.id, replacement_id);
+    let mut current_rows = BTreeSet::new();
+    wait_for_exact_rows(&rows, &mut current_rows, predecessor.id, replacement_id);
     let bunker_uri = format!(
         "bunker://{}?relay={}&secret=terminal-proof",
         remote.public_key().to_hex(),
@@ -400,7 +401,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
     request_observed_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("the signer response is blocked after the optimistic accept");
-    wait_for_exact_rows(&rows, replacement_id, predecessor.id);
+    wait_for_exact_rows(&rows, &mut current_rows, replacement_id, predecessor.id);
     release_response_tx
         .send(())
         .expect("release the deliberately mutated signer response");
