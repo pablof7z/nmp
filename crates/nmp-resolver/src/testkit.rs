@@ -79,9 +79,11 @@ impl Harness {
     /// store outcome (so a test can assert the `Inserted`/`Superseded`/
     /// `Stale` classification) and the `DemandDelta`.
     pub fn accept(&mut self, accept: AcceptWrite) -> (AcceptOutcome, DemandDelta) {
-        self.engine
+        let accepted = self
+            .engine
             .accept_local(accept)
-            .expect("accept_write persistence (MemoryStore never fails a door)")
+            .expect("accept_write persistence (MemoryStore never fails a door)");
+        (accepted.outcome, accepted.committed.delta)
     }
 
     /// The wire-facing demand set (selection-only, two-hash-domains): what

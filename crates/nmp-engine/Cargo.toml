@@ -12,6 +12,10 @@ bench-instrumentation = ["nmp-store/bench-instrumentation"]
 name = "incremental_delta_bench"
 required-features = ["bench-instrumentation"]
 
+[[example]]
+name = "local_mutation_delta_bench"
+required-features = ["bench-instrumentation"]
+
 [dependencies]
 crossbeam-channel = "0.5"
 nostr.workspace = true

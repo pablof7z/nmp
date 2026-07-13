@@ -13,7 +13,7 @@ use nmp_grammar::{
 };
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, EventStore, InsertOutcome, PersistenceError,
-    RelayObserved,
+    RelayObserved, StoredEvent,
 };
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
@@ -35,6 +35,24 @@ pub struct RelayIngestResult {
     pub row_changes: CommittedRowChanges,
 }
 
+/// Exact live-query consequences of one already-committed canonical store
+/// mutation. The store door remains the sole authority for what became
+/// current; this value only carries those durable facts across the
+/// resolver/engine boundary so simple projections need not rediscover them
+/// by replaying their full history.
+pub struct CommittedMutationResult {
+    pub delta: DemandDelta,
+    pub affected_handles: BTreeSet<HandleId>,
+    pub row_changes: CommittedRowChanges,
+}
+
+/// Full result of durable local acceptance: the unchanged governed store
+/// outcome plus its exact post-commit live-query consequences.
+pub struct LocalAcceptResult {
+    pub outcome: AcceptOutcome,
+    pub committed: CommittedMutationResult,
+}
+
 /// One canonical current row together with every relay in this writer batch
 /// that observed it. For a new row this is its complete initial source set;
 /// for provenance growth callers union these sources into remembered state.
@@ -53,6 +71,53 @@ pub struct CommittedRowChanges {
     pub inserted: Vec<CommittedCurrentRow>,
     pub removed: Vec<nostr::Event>,
     pub provenance_grew: Vec<CommittedCurrentRow>,
+}
+
+fn committed_current_row(row: &StoredEvent) -> CommittedCurrentRow {
+    CommittedCurrentRow {
+        event: row.event.clone(),
+        observed_relays: row.provenance.seen.keys().cloned().collect(),
+    }
+}
+
+/// Consolidate exact current rows and removals to the durable before/after
+/// visibility delta. The overlap rule mirrors relay-batch consolidation: an
+/// id present on both sides was transient inside the mutation and therefore
+/// was never a distinct app-visible row transition.
+fn committed_row_changes(
+    inserted: impl IntoIterator<Item = StoredEvent>,
+    removed: impl IntoIterator<Item = nostr::Event>,
+) -> CommittedRowChanges {
+    let mut inserted_by_id = BTreeMap::<nostr::EventId, CommittedCurrentRow>::new();
+    for row in inserted {
+        let current = committed_current_row(&row);
+        inserted_by_id
+            .entry(current.event.id)
+            .and_modify(|prior| {
+                prior
+                    .observed_relays
+                    .extend(current.observed_relays.iter().cloned());
+            })
+            .or_insert(current);
+    }
+    let removed_by_id: BTreeMap<_, _> =
+        removed.into_iter().map(|event| (event.id, event)).collect();
+    let transient: BTreeSet<_> = inserted_by_id
+        .keys()
+        .filter(|event_id| removed_by_id.contains_key(event_id))
+        .copied()
+        .collect();
+    CommittedRowChanges {
+        inserted: inserted_by_id
+            .into_iter()
+            .filter_map(|(event_id, row)| (!transient.contains(&event_id)).then_some(row))
+            .collect(),
+        removed: removed_by_id
+            .into_iter()
+            .filter_map(|(event_id, event)| (!transient.contains(&event_id)).then_some(event))
+            .collect(),
+        provenance_grew: Vec::new(),
+    }
 }
 
 use crate::eval::{project_events, resolve_reactive, resolve_setop};
@@ -752,19 +817,20 @@ impl<S: EventStore> Engine<S> {
     pub fn accept_local(
         &mut self,
         accept: AcceptWrite,
-    ) -> Result<(AcceptOutcome, DemandDelta), PersistenceError> {
+    ) -> Result<LocalAcceptResult, PersistenceError> {
+        let before_shapes = self.projection_shapes();
         let outcome = self.store.accept_write(accept)?;
-        let mut inserted: Vec<nostr::Event> = Vec::new();
-        let mut removed: Vec<nostr::Event> = Vec::new();
+        let mut inserted_rows: Vec<StoredEvent> = Vec::new();
+        let mut removed_rows: Vec<nostr::Event> = Vec::new();
         match &outcome {
-            AcceptOutcome::Inserted { row, .. } => inserted.push(row.event.clone()),
+            AcceptOutcome::Inserted { row, .. } => inserted_rows.push(row.clone()),
             AcceptOutcome::Superseded { row, replaced, .. } => {
-                inserted.push(row.event.clone());
-                removed.push(replaced.event.clone());
+                inserted_rows.push(row.clone());
+                removed_rows.push(replaced.event.clone());
             }
             AcceptOutcome::Kind5Processed { row, hidden, .. } => {
-                inserted.push(row.event.clone());
-                removed.extend(hidden.iter().map(|se| se.event.clone()));
+                inserted_rows.push(row.clone());
+                removed_rows.extend(hidden.iter().map(|se| se.event.clone()));
             }
             // Never a new query fact -- empty delta: a `Duplicate` row was
             // already reflected in the store (relay echo / co-owner join),
@@ -774,8 +840,23 @@ impl<S: EventStore> Engine<S> {
             | AcceptOutcome::Stale { .. }
             | AcceptOutcome::Refused(_) => {}
         }
-        let delta = self.react(inserted, removed)?;
-        Ok((outcome, delta))
+        let inserted_events: Vec<_> = inserted_rows.iter().map(|row| row.event.clone()).collect();
+        let changed_events: Vec<_> = inserted_events
+            .iter()
+            .chain(removed_rows.iter())
+            .cloned()
+            .collect();
+        let row_changes = committed_row_changes(inserted_rows, removed_rows.clone());
+        let delta = self.react(inserted_events, removed_rows)?;
+        let affected_handles = self.affected_handles(&before_shapes, &changed_events);
+        Ok(LocalAcceptResult {
+            outcome,
+            committed: CommittedMutationResult {
+                delta,
+                affected_handles,
+                row_changes,
+            },
+        })
     }
 
     /// Apply the graph invalidation produced by the store's atomic
@@ -783,21 +864,38 @@ impl<S: EventStore> Engine<S> {
     /// happened when this is called; this method only feeds its exact
     /// removed/inserted facts through the same symmetric `react` lane used
     /// by relay ingest and expiry.
+    /// Carries the exact restored/revealed rows and removed pending row that
+    /// the store committed atomically.
     pub fn react_to_compensation(
         &mut self,
         removed_pending: nostr::Event,
         outcome: &CompensateOutcome,
-    ) -> Result<DemandDelta, PersistenceError> {
+    ) -> Result<CommittedMutationResult, PersistenceError> {
+        let before_shapes = self.projection_shapes();
         match outcome {
             CompensateOutcome::Compensated { restored, revealed } => {
-                let mut inserted: Vec<nostr::Event> =
-                    revealed.iter().map(|row| row.event.clone()).collect();
+                let mut inserted_rows: Vec<StoredEvent> = revealed.clone();
                 if let Some(restored) = restored {
-                    inserted.push(restored.event.clone());
+                    inserted_rows.push((**restored).clone());
                 }
-                self.react(inserted, vec![removed_pending])
+                let inserted_events: Vec<_> =
+                    inserted_rows.iter().map(|row| row.event.clone()).collect();
+                let mut changed_events = inserted_events.clone();
+                changed_events.push(removed_pending.clone());
+                let row_changes = committed_row_changes(inserted_rows, [removed_pending.clone()]);
+                let delta = self.react(inserted_events, vec![removed_pending])?;
+                let affected_handles = self.affected_handles(&before_shapes, &changed_events);
+                Ok(CommittedMutationResult {
+                    delta,
+                    affected_handles,
+                    row_changes,
+                })
             }
-            CompensateOutcome::NotFound => Ok(DemandDelta::default()),
+            CompensateOutcome::NotFound => Ok(CommittedMutationResult {
+                delta: DemandDelta::default(),
+                affected_handles: BTreeSet::new(),
+                row_changes: CommittedRowChanges::default(),
+            }),
         }
     }
 
@@ -809,8 +907,20 @@ impl<S: EventStore> Engine<S> {
     /// from the store itself (`EventStore::expire_due`/`remove`) before
     /// calling this: `retract` only re-evaluates the graph, it never
     /// touches the store door.
-    pub fn retract(&mut self, removed: Vec<nostr::Event>) -> Result<DemandDelta, PersistenceError> {
-        self.react(Vec::new(), removed)
+    pub fn retract(
+        &mut self,
+        removed: Vec<nostr::Event>,
+    ) -> Result<CommittedMutationResult, PersistenceError> {
+        let before_shapes = self.projection_shapes();
+        let changed_events = removed.clone();
+        let row_changes = committed_row_changes(Vec::<StoredEvent>::new(), removed.clone());
+        let delta = self.react(Vec::new(), removed)?;
+        let affected_handles = self.affected_handles(&before_shapes, &changed_events);
+        Ok(CommittedMutationResult {
+            delta,
+            affected_handles,
+            row_changes,
+        })
     }
 
     /// The one recompute engine (retraction-and-negative-deltas.md §1.2):
