@@ -1097,7 +1097,7 @@ impl<S: EventStore> EngineCore<S> {
         match self.resolver.store_mut().expire_due(now) {
             Ok(expired) if !expired.is_empty() => {
                 let removed: Vec<_> = expired.into_iter().map(|se| se.event).collect();
-                match self.resolver.retract_detailed(removed) {
+                match self.resolver.retract(removed) {
                     Ok(committed) => {
                         self.apply_committed_mutation(committed, &mut effects);
                     }
@@ -1377,11 +1377,11 @@ impl<S: EventStore> EngineCore<S> {
                 },
                 accepted_at: self.clock,
             };
-            let LocalAcceptResult { outcome, committed } =
-                match self.resolver.accept_local_detailed(accept) {
-                    Ok(value) => value,
-                    Err(err) => return self.fail_unaccepted(sink, err.to_string()),
-                };
+            let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept)
+            {
+                Ok(value) => value,
+                Err(err) => return self.fail_unaccepted(sink, err.to_string()),
+            };
             let Some(intent_id) = outcome.journaled_intent_id() else {
                 let AcceptOutcome::Refused(reason) = outcome else {
                     unreachable!("only Refused omits journal ids")
@@ -1933,7 +1933,7 @@ impl<S: EventStore> EngineCore<S> {
                     // (issue #122) degrades to read-only rather than panics.
                     match self
                         .resolver
-                        .react_to_compensation_detailed(pending.frozen.clone(), &outcome)
+                        .react_to_compensation(pending.frozen.clone(), &outcome)
                     {
                         Ok(committed) => {
                             self.apply_committed_mutation(committed, effects);
@@ -3553,7 +3553,7 @@ impl EngineCore<nmp_store::RedbStore> {
     pub fn bench_accept_local(&mut self, accept: AcceptWrite) -> Vec<Effect> {
         let accepted = self
             .resolver
-            .accept_local_detailed(accept)
+            .accept_local(accept)
             .expect("benchmark local acceptance commit");
         assert!(
             accepted.outcome.journaled_intent_id().is_some(),
@@ -3571,7 +3571,7 @@ impl EngineCore<nmp_store::RedbStore> {
     pub fn bench_accept_local_with_forced_refresh(&mut self, accept: AcceptWrite) -> Vec<Effect> {
         let accepted = self
             .resolver
-            .accept_local_detailed(accept)
+            .accept_local(accept)
             .expect("benchmark local acceptance commit");
         assert!(
             accepted.outcome.journaled_intent_id().is_some(),
@@ -3613,7 +3613,7 @@ impl EngineCore<nmp_store::RedbStore> {
         let removed = expired.into_iter().map(|row| row.event).collect();
         let committed = self
             .resolver
-            .retract_detailed(removed)
+            .retract(removed)
             .expect("benchmark expiry reaction");
         let mut effects = Vec::new();
         if force_refresh {
@@ -4870,7 +4870,7 @@ mod affected_handle_invalidation_tests {
     ) -> (IntentId, SignedEvent) {
         let accepted = core
             .resolver
-            .accept_local_detailed(nmp_resolver::testkit::accept_write_of(event, accepted_at))
+            .accept_local(nmp_resolver::testkit::accept_write_of(event, accepted_at))
             .unwrap();
         let (intent_id, pending) = match &accepted.outcome {
             AcceptOutcome::Inserted { intent_id, row, .. }
@@ -4903,7 +4903,7 @@ mod affected_handle_invalidation_tests {
             .unwrap();
         let committed = core
             .resolver
-            .react_to_compensation_detailed(pending, &outcome)
+            .react_to_compensation(pending, &outcome)
             .unwrap();
         let mut effects = Vec::new();
         if direct {
@@ -4921,7 +4921,7 @@ mod affected_handle_invalidation_tests {
     ) {
         let expired = core.resolver.store_mut().expire_due(now).unwrap();
         let removed = expired.into_iter().map(|row| row.event).collect();
-        let committed = core.resolver.retract_detailed(removed).unwrap();
+        let committed = core.resolver.retract(removed).unwrap();
         let mut effects = Vec::new();
         if direct {
             core.apply_committed_mutation(committed, &mut effects);

@@ -817,18 +817,6 @@ impl<S: EventStore> Engine<S> {
     pub fn accept_local(
         &mut self,
         accept: AcceptWrite,
-    ) -> Result<(AcceptOutcome, DemandDelta), PersistenceError> {
-        let detailed = self.accept_local_detailed(accept)?;
-        Ok((detailed.outcome, detailed.committed.delta))
-    }
-
-    /// Detailed local-acceptance door used by `nmp-engine` to deliver exact
-    /// committed row changes without re-reading an affected simple handle's
-    /// full history. [`Self::accept_local`] remains the compatibility wrapper
-    /// for callers that only need the governed store outcome and atom delta.
-    pub fn accept_local_detailed(
-        &mut self,
-        accept: AcceptWrite,
     ) -> Result<LocalAcceptResult, PersistenceError> {
         let before_shapes = self.projection_shapes();
         let outcome = self.store.accept_write(accept)?;
@@ -876,19 +864,9 @@ impl<S: EventStore> Engine<S> {
     /// happened when this is called; this method only feeds its exact
     /// removed/inserted facts through the same symmetric `react` lane used
     /// by relay ingest and expiry.
+    /// Carries the exact restored/revealed rows and removed pending row that
+    /// the store committed atomically.
     pub fn react_to_compensation(
-        &mut self,
-        removed_pending: nostr::Event,
-        outcome: &CompensateOutcome,
-    ) -> Result<DemandDelta, PersistenceError> {
-        Ok(self
-            .react_to_compensation_detailed(removed_pending, outcome)?
-            .delta)
-    }
-
-    /// Detailed compensation reaction carrying the exact restored/revealed
-    /// rows and removed pending row that the store committed atomically.
-    pub fn react_to_compensation_detailed(
         &mut self,
         removed_pending: nostr::Event,
         outcome: &CompensateOutcome,
@@ -929,13 +907,7 @@ impl<S: EventStore> Engine<S> {
     /// from the store itself (`EventStore::expire_due`/`remove`) before
     /// calling this: `retract` only re-evaluates the graph, it never
     /// touches the store door.
-    pub fn retract(&mut self, removed: Vec<nostr::Event>) -> Result<DemandDelta, PersistenceError> {
-        Ok(self.retract_detailed(removed)?.delta)
-    }
-
-    /// Detailed retraction reaction used by expiry and other store-owned
-    /// removal doors to deliver exact committed removals to simple handles.
-    pub fn retract_detailed(
+    pub fn retract(
         &mut self,
         removed: Vec<nostr::Event>,
     ) -> Result<CommittedMutationResult, PersistenceError> {

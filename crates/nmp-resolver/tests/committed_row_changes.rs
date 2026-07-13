@@ -126,12 +126,10 @@ fn local_supersession_and_compensation_carry_exact_inverse_row_changes() {
     let winner = event(&keys, Kind::from(10_000u16), "new", 20);
     let mut engine = Engine::new(MemoryStore::new());
     engine
-        .accept_local_detailed(accept_write_of(predecessor.clone(), 11))
+        .accept_local(accept_write_of(predecessor.clone(), 11))
         .unwrap();
 
-    let accepted = engine
-        .accept_local_detailed(accept_write_of(winner, 21))
-        .unwrap();
+    let accepted = engine.accept_local(accept_write_of(winner, 21)).unwrap();
     let (intent_id, pending) = match &accepted.outcome {
         AcceptOutcome::Superseded { intent_id, row, .. } => (*intent_id, row.event.clone()),
         other => panic!("expected local supersession, got {other:?}"),
@@ -150,7 +148,7 @@ fn local_supersession_and_compensation_carry_exact_inverse_row_changes() {
     let outcome = engine.store_mut().compensate_write(intent_id).unwrap();
     assert!(matches!(outcome, CompensateOutcome::Compensated { .. }));
     let compensated = engine
-        .react_to_compensation_detailed(pending.clone(), &outcome)
+        .react_to_compensation(pending.clone(), &outcome)
         .unwrap();
     assert_eq!(compensated.row_changes.inserted.len(), 1);
     assert_eq!(compensated.row_changes.inserted[0].event.id, predecessor.id);
@@ -171,12 +169,10 @@ fn local_kind5_compensation_carries_exact_revealed_target() {
         .unwrap();
     let mut engine = Engine::new(MemoryStore::new());
     engine
-        .accept_local_detailed(accept_write_of(target.clone(), 11))
+        .accept_local(accept_write_of(target.clone(), 11))
         .unwrap();
 
-    let accepted = engine
-        .accept_local_detailed(accept_write_of(deletion, 21))
-        .unwrap();
+    let accepted = engine.accept_local(accept_write_of(deletion, 21)).unwrap();
     let (intent_id, pending) = match &accepted.outcome {
         AcceptOutcome::Kind5Processed { intent_id, row, .. } => (*intent_id, row.event.clone()),
         other => panic!("expected local kind5, got {other:?}"),
@@ -191,7 +187,7 @@ fn local_kind5_compensation_carries_exact_revealed_target() {
 
     let outcome = engine.store_mut().compensate_write(intent_id).unwrap();
     let compensated = engine
-        .react_to_compensation_detailed(pending.clone(), &outcome)
+        .react_to_compensation(pending.clone(), &outcome)
         .unwrap();
     assert_eq!(compensated.row_changes.inserted.len(), 1);
     assert_eq!(compensated.row_changes.inserted[0].event.id, target.id);
@@ -217,7 +213,7 @@ fn expiry_retraction_carries_the_exact_removed_row() {
         .expire_due(Timestamp::from(100u64))
         .unwrap();
     let removed: Vec<_> = expired.into_iter().map(|row| row.event).collect();
-    let retracted = engine.retract_detailed(removed).unwrap();
+    let retracted = engine.retract(removed).unwrap();
 
     assert!(retracted.row_changes.inserted.is_empty());
     assert_eq!(retracted.row_changes.removed, vec![expiring]);
@@ -231,11 +227,9 @@ fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
 
     let ordinary = event(&keys, Kind::TextNote, "ordinary", 10);
     engine
-        .accept_local_detailed(accept_write_of(ordinary.clone(), 11))
+        .accept_local(accept_write_of(ordinary.clone(), 11))
         .unwrap();
-    let duplicate = engine
-        .accept_local_detailed(accept_write_of(ordinary, 12))
-        .unwrap();
+    let duplicate = engine.accept_local(accept_write_of(ordinary, 12)).unwrap();
     assert!(matches!(duplicate.outcome, AcceptOutcome::Duplicate { .. }));
     assert!(duplicate.committed.delta.is_empty());
     assert!(duplicate.committed.affected_handles.is_empty());
@@ -245,12 +239,8 @@ fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
 
     let winner = event(&keys, Kind::from(10_000u16), "winner", 30);
     let loser = event(&keys, Kind::from(10_000u16), "loser", 20);
-    engine
-        .accept_local_detailed(accept_write_of(winner, 31))
-        .unwrap();
-    let stale = engine
-        .accept_local_detailed(accept_write_of(loser, 32))
-        .unwrap();
+    engine.accept_local(accept_write_of(winner, 31)).unwrap();
+    let stale = engine.accept_local(accept_write_of(loser, 32)).unwrap();
     assert!(matches!(stale.outcome, AcceptOutcome::Stale { .. }));
     assert!(stale.committed.delta.is_empty());
     assert!(stale.committed.affected_handles.is_empty());
@@ -263,9 +253,7 @@ fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
         .custom_created_at(Timestamp::from(39u64))
         .sign_with_keys(&keys)
         .unwrap();
-    let refused = engine
-        .accept_local_detailed(accept_write_of(expired, 41))
-        .unwrap();
+    let refused = engine.accept_local(accept_write_of(expired, 41)).unwrap();
     assert!(matches!(refused.outcome, AcceptOutcome::Refused(_)));
     assert!(refused.committed.delta.is_empty());
     assert!(refused.committed.affected_handles.is_empty());
