@@ -65,6 +65,23 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Destructively remove one closed persistent engine store.
+    ///
+    /// This clears NMP's canonical events, pending writes, receipts,
+    /// coverage/evidence, and all other state held in that store. It does not
+    /// touch any separately configured platform signer-provider checkpoint.
+    /// The caller must shut down and drop every engine using `path` before
+    /// invoking this operation. A missing path is already reset and succeeds.
+    pub fn reset_persistent_store(path: impl AsRef<std::path::Path>) -> Result<(), EngineError> {
+        match std::fs::remove_file(path.as_ref()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(EngineError::StoreResetFailed {
+                reason: error.to_string(),
+            }),
+        }
+    }
+
     /// The ONE construction call: config -> store/directory selection,
     /// router cap, everything `nmp-ffi::facade::build_directory` and
     /// `nmp-demo`'s hand-rolled assembly used to duplicate independently.
@@ -321,6 +338,33 @@ impl Drop for Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_store_reset_is_destructive_and_idempotent() {
+        let fixture = tempfile::tempdir().expect("temporary directory");
+        let path = fixture.path().join("nmp.redb");
+        let config = EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        };
+
+        let engine = Engine::new(config.clone()).expect("persistent engine must build");
+        engine.shutdown();
+        assert!(
+            path.exists(),
+            "opening the persistent engine creates its store"
+        );
+
+        Engine::reset_persistent_store(&path).expect("a closed store must reset");
+        assert!(
+            !path.exists(),
+            "reset must remove the complete canonical store"
+        );
+        Engine::reset_persistent_store(&path).expect("a missing store is already reset");
+
+        let reopened = Engine::new(config).expect("reset path must open as a fresh store");
+        reopened.shutdown();
+    }
     use nmp_grammar::{Durability, WritePayload, WriteRouting};
     use nostr::ToBech32;
 

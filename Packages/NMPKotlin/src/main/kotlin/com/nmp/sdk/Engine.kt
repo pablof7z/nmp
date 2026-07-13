@@ -8,6 +8,7 @@ package com.nmp.sdk
 import kotlinx.coroutines.flow.Flow
 import uniffi.nmp_ffi.NmpEngine
 import uniffi.nmp_ffi.NmpEngineConfig
+import uniffi.nmp_ffi.resetPersistentStore as ffiResetPersistentStore
 
 /** Construction config for `NMPEngine`. The only relay facts this app ever
  * supplies are the three operator-configured lanes -- `indexerRelays`,
@@ -43,6 +44,13 @@ class NMPEngine(
     config: NMPConfig,
     private val localAccountStore: NMPInsecureFileAccountStore? = null,
 ) : AutoCloseable {
+    companion object {
+        /** Destructively remove one closed persistent NMP store. A separate
+         * local-account checkpoint is not touched. */
+        fun resetPersistentStore(storePath: String) =
+            nmpRethrowing { ffiResetPersistentStore(storePath) }
+    }
+
     internal val ffi: NmpEngine = nmpRethrowing { NmpEngine(config.toFfi()) }
 
     init {

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
@@ -56,6 +57,28 @@ class InsecureFileAccountStoreTest {
 
         assertThrows(NMPError.InvalidSecretKey::class.java) {
             NMPEngine(NMPConfig(), store)
+        }
+    }
+
+    @Test
+    fun persistentStoreResetPreservesAccountCheckpoint() {
+        val checkpoint = root.resolve("local-account.nsec")
+        val database = root.resolve("nmp.redb")
+        val store = NMPInsecureFileAccountStore(checkpoint)
+        val config = NMPConfig(storePath = database.toString())
+
+        NMPEngine(config, store).use { first ->
+            val pubkey = first.addAccount(secretOne)
+            first.setActiveAccount(pubkey)
+        }
+
+        NMPEngine.resetPersistentStore(database.toString())
+        assertFalse(Files.exists(database))
+        assertTrue(Files.exists(checkpoint))
+        NMPEngine.resetPersistentStore(database.toString())
+
+        NMPEngine(config, store).use { restored ->
+            assertEquals(publicOne, restored.activeAccount())
         }
     }
 }

@@ -28,6 +28,8 @@ repository today?
   switching, signing, NIP-44 crypto, local Primal discovery, and restart
   reattachment of a durable pending write through relay ACK.
 - Rust/FFI/Swift/Kotlin expose live queries, writes, and permanent diagnostics.
+- Rust/FFI/Swift/Kotlin expose an idempotent destructive reset for a closed
+  persistent store without deleting a separate platform account checkpoint.
 - The canonical `nmp` facade and UniFFI component have pinned reproducible
   surface snapshots with an append-only governance gate.
 - The Swift falsifier app runs against public relays as a normal SwiftUI app.
@@ -44,7 +46,6 @@ repository today?
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
 | Diagnostics | raw connection, AUTH, retry, error, and limit evidence remains incomplete | [#51](https://github.com/pablof7z/nmp/issues/51) |
-| Shared-cache logout | explicit destructive engine reset remains | [#53](https://github.com/pablof7z/nmp/issues/53) |
 | Android | JVM Flow exists; AAR/Compose/Keystore falsification does not | [#40](https://github.com/pablof7z/nmp/issues/40) |
 
 The umbrella ordering and design-signoff trail live in
