@@ -12,7 +12,7 @@
 //!
 //! Module layout:
 //! - `facts` — `Lane`, `LanedRelay`, `RelayDirectory` trait, `FixtureDirectory`,
-//!   `RelayLimits`, `DiscoveryKinds`.
+//!   `DiscoveryKinds`.
 //! - `route` — atom classification (outbox vs pinned) + candidate assembly +
 //!   pinned-route lookup.
 //! - `solver` — the 2-relay-min + cap coverage solver (greedy set-cover) +
@@ -41,7 +41,7 @@ pub use deliver::deliver;
 pub use diag::{Diagnostics, RelayDiagnostics};
 pub use facts::{
     test_relay, DiscoveryKinds, FixtureDirectory, Lane, LanedRelay, LiveDirectory, PubkeyHex,
-    RelayDirectory, RelayLimits, RelayUrl,
+    RelayDirectory, RelayUrl,
 };
 pub use plan::{diff_plans, RelayPlan, SubId, WireDelta, WireOp, WireReq};
 pub use route::{RouteKind, RouteProvenance, Skeleton};

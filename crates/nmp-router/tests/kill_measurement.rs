@@ -3,27 +3,36 @@
 //! overlapping write-relay distribution: a handful of "big" relays most
 //! authors share, plus a wider spread of smaller relays), compiles it
 //! DEDUP-ONLY (registry empty) and measures per-relay `wire_sub_count` +
-//! the max author-count of any single filter against `RelayLimits`, PRINTS
+//! the max author-count of any single filter against this test's own
+//! admission thresholds (`MAX_SUBS_PER_RELAY` / `MAX_FILTER_AUTHORS`), PRINTS
 //! the numbers, then recompiles WITH `AuthorUnion` and re-measures.
 //!
 //! The kill is pre-committed: with coalescing fully disabled (dedup-only
 //! floor), M1's per-author atoms should indeed blow relay sub-count limits
 //! on the popular relays (expected, not itself a failure). The kill FIRES
 //! only if even `AuthorUnion` -- the one trivially-provable widening rule
-//! (test 10) -- fails to bring every relay back within `RelayLimits`. If it
+//! (test 10) -- fails to bring every relay back within those thresholds. If it
 //! fires, that is reported honestly, not hidden.
 
 use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, PubkeyHex, RelayLimits, RelayUrl, Router,
-    RuleRegistry,
+    test_relay, DiscoveryKinds, FixtureDirectory, PubkeyHex, RelayUrl, Router, RuleRegistry,
 };
 
 const NUM_AUTHORS: usize = 300;
 const POOL_SIZE: usize = 15;
 const NUM_BIG_RELAYS: usize = 3;
+
+/// The relay-admission thresholds this measurement asserts the compiled plan
+/// stays within. Previously read off `RelayLimits` (deleted in #123 as a
+/// never-enforced router contract); the kill measurement is the ONLY thing
+/// that ever consumed them, so the values now live here as the test's own
+/// v1-evidence expectations (relays accept large author arrays but cap
+/// concurrent subscriptions).
+const MAX_SUBS_PER_RELAY: usize = 20;
+const MAX_FILTER_AUTHORS: usize = 1_000;
 
 fn author_hex(i: usize) -> PubkeyHex {
     format!("{i:064}")
@@ -87,19 +96,16 @@ fn measure(router: &Router) -> Measurement {
     }
 }
 
-fn print_measurement(label: &str, m: &Measurement, limits: &RelayLimits) {
+fn print_measurement(label: &str, m: &Measurement) {
     println!("--- {label} ---");
     let mut sorted = m.per_relay_sub_count.clone();
     sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     for (relay, count) in &sorted {
-        println!(
-            "  {relay}: wire_sub_count={count} (limit {})",
-            limits.max_subs_per_relay
-        );
+        println!("  {relay}: wire_sub_count={count} (limit {MAX_SUBS_PER_RELAY})");
     }
     println!(
-        "  max_filter_authors={} (limit {})",
-        m.max_filter_authors, limits.max_filter_authors
+        "  max_filter_authors={} (limit {MAX_FILTER_AUTHORS})",
+        m.max_filter_authors
     );
 }
 
@@ -107,38 +113,37 @@ fn print_measurement(label: &str, m: &Measurement, limits: &RelayLimits) {
 fn kill_measurement_dedup_only_within_relay_limits() {
     let dir = realistic_directory();
     let demand = falsifier_demand();
-    let limits = RelayLimits::default();
     let discovery = DiscoveryKinds::default();
     let cap = POOL_SIZE;
 
     // ---- Tier 1: dedup-only floor (registry EMPTY) ----------------------
-    let mut router_dedup_only = Router::new(limits, discovery.clone(), RuleRegistry::dedup_only());
+    let mut router_dedup_only = Router::new(discovery.clone(), RuleRegistry::dedup_only());
     router_dedup_only.compile(&demand, &dir, cap);
     let m_dedup = measure(&router_dedup_only);
-    print_measurement("dedup-only floor", &m_dedup, &limits);
+    print_measurement("dedup-only floor", &m_dedup);
 
     let dedup_over_sub_limit = m_dedup
         .per_relay_sub_count
         .iter()
-        .any(|(_, c)| *c > limits.max_subs_per_relay);
+        .any(|(_, c)| *c > MAX_SUBS_PER_RELAY);
     println!(
         "dedup-only exceeds max_subs_per_relay on >=1 relay: {dedup_over_sub_limit} (expected: true -- \
          M1 emits per-author atoms, so a relay serving many authors gets one sub per author)"
     );
 
     // ---- Tier 2: with AuthorUnion ----------------------------------------
-    let mut router_with_union = Router::new(limits, discovery, RuleRegistry::default_widen_only());
+    let mut router_with_union = Router::new(discovery, RuleRegistry::default_widen_only());
     router_with_union.compile(&demand, &dir, cap);
     let m_union = measure(&router_with_union);
-    print_measurement("with AuthorUnion", &m_union, &limits);
+    print_measurement("with AuthorUnion", &m_union);
 
     // ---- The kill verdict, printed honestly ------------------------------
     let union_over_sub_limit: Vec<_> = m_union
         .per_relay_sub_count
         .iter()
-        .filter(|(_, c)| *c > limits.max_subs_per_relay)
+        .filter(|(_, c)| *c > MAX_SUBS_PER_RELAY)
         .collect();
-    let union_over_filter_limit = m_union.max_filter_authors > limits.max_filter_authors;
+    let union_over_filter_limit = m_union.max_filter_authors > MAX_FILTER_AUTHORS;
     let kill_fired = !union_over_sub_limit.is_empty() || union_over_filter_limit;
     println!("KILL VERDICT: fired={kill_fired}");
     if kill_fired {
@@ -148,7 +153,7 @@ fn kill_measurement_dedup_only_within_relay_limits() {
         );
         println!(
             "  max_filter_authors after AuthorUnion: {} (limit {})",
-            m_union.max_filter_authors, limits.max_filter_authors
+            m_union.max_filter_authors, MAX_FILTER_AUTHORS
         );
     }
 

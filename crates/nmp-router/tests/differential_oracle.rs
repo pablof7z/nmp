@@ -23,7 +23,7 @@ use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Keys};
 
 use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, RelayLimits, RelayUrl, Router, RuleRegistry,
+    test_relay, DiscoveryKinds, FixtureDirectory, RelayUrl, Router, RuleRegistry,
 };
 
 fn my_follows_filter() -> Filter {
@@ -98,15 +98,14 @@ fn differential_oracle_identical_delivery() {
         relay_store.insert(relay.clone(), events);
     }
 
-    let limits = RelayLimits::default();
     let discovery = DiscoveryKinds::default();
     let cap = 10;
 
     // ---- Act: compile both paths over the identical demand/facts -------
-    let mut router_a = Router::new(limits, discovery.clone(), RuleRegistry::dedup_only());
+    let mut router_a = Router::new(discovery.clone(), RuleRegistry::dedup_only());
     router_a.compile(&demand_ctx, &dir, cap);
 
-    let mut router_b = Router::new(limits, discovery, RuleRegistry::default_widen_only());
+    let mut router_b = Router::new(discovery, RuleRegistry::default_widen_only());
     router_b.compile(&demand_ctx, &dir, cap);
 
     // ---- Path A: one WireReq per (author, relay), no merge --------------
