@@ -122,7 +122,8 @@ Kotlin/JVM exposes the same connection flow plus package-filtered Android
 discovery. `androidHandoff` returns the generated URI and exact package name;
 both are resolved again from the Rust catalog by signer id, so a copied native
 value cannot redirect the secret-bearing URI to another package. Lifecycle
-facts use one bounded multicast `SharedFlow`. An Android host launches the
+facts use one bounded multicast `Flow`; `Closed` is terminal and completes every
+collector. An Android host launches the
 handoff pair with an explicit package. The current
 package is a JVM falsifier, not an Android AAR, so it deliberately does not
 import `Intent` or `PackageManager` itself. Amber is catalogued as Android

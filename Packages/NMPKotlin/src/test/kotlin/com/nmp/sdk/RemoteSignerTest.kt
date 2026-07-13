@@ -2,7 +2,6 @@ package com.nmp.sdk
 
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicInteger
@@ -83,11 +82,12 @@ class RemoteSignerTest {
     @Test
     fun connectionStatesMulticastReadyAndClosedToEveryCollector() = runBlocking {
         val observer = NMPNip46Observer()
-        val first = async(start = CoroutineStart.UNDISPATCHED) { observer.states.take(2).toList() }
-        val second = async(start = CoroutineStart.UNDISPATCHED) { observer.states.take(2).toList() }
+        val first = async(start = CoroutineStart.UNDISPATCHED) { observer.states.toList() }
+        val second = async(start = CoroutineStart.UNDISPATCHED) { observer.states.toList() }
 
         observer.onReady("user-key")
         observer.onClosed()
+        observer.onReady("must-not-follow-closed")
 
         val expected = listOf(
             NMPNip46ConnectionState.Ready("user-key"),
@@ -95,6 +95,11 @@ class RemoteSignerTest {
         )
         assertEquals(expected, first.await())
         assertEquals(expected, second.await())
+        assertEquals(
+            listOf(NMPNip46ConnectionState.Closed),
+            observer.states.toList(),
+            "a late collector replays Closed and completes immediately",
+        )
     }
 
     @Test

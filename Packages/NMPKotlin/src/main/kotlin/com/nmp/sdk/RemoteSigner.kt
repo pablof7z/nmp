@@ -1,9 +1,9 @@
 package com.nmp.sdk
 
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.transformWhile
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -81,15 +81,28 @@ sealed interface NMPNip46ConnectionState {
 }
 
 internal class NMPNip46Observer : Nip46ConnectionObserver {
+    private val lock = Any()
+    private var closed = false
     private val mutableStates = MutableSharedFlow<NMPNip46ConnectionState>(
         replay = 1,
         extraBufferCapacity = 31,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    val states: SharedFlow<NMPNip46ConnectionState> = mutableStates.asSharedFlow()
+    val states: Flow<NMPNip46ConnectionState> = mutableStates.transformWhile { state ->
+        emit(state)
+        state !is NMPNip46ConnectionState.Closed
+    }
+
+    private fun emitIfOpen(state: NMPNip46ConnectionState) {
+        synchronized(lock) {
+            if (!closed) {
+                mutableStates.tryEmit(state)
+            }
+        }
+    }
 
     override fun onEvent(event: FfiNip46ConnectionEvent) {
-        mutableStates.tryEmit(
+        emitIfOpen(
             when (event) {
                 FfiNip46ConnectionEvent.Connecting -> NMPNip46ConnectionState.Connecting
                 FfiNip46ConnectionEvent.Available -> NMPNip46ConnectionState.Available
@@ -105,15 +118,20 @@ internal class NMPNip46Observer : Nip46ConnectionObserver {
     }
 
     override fun onReady(userPublicKey: String) {
-        mutableStates.tryEmit(NMPNip46ConnectionState.Ready(userPublicKey))
+        emitIfOpen(NMPNip46ConnectionState.Ready(userPublicKey))
     }
 
     override fun onFailed(reason: String) {
-        mutableStates.tryEmit(NMPNip46ConnectionState.Failed(reason))
+        emitIfOpen(NMPNip46ConnectionState.Failed(reason))
     }
 
     override fun onClosed() {
-        mutableStates.tryEmit(NMPNip46ConnectionState.Closed)
+        synchronized(lock) {
+            if (!closed) {
+                closed = true
+                mutableStates.tryEmit(NMPNip46ConnectionState.Closed)
+            }
+        }
     }
 }
 
@@ -127,7 +145,7 @@ class NMPNip46Connection internal constructor(
     )
 
     private val closed = AtomicBoolean(false)
-    val states: SharedFlow<NMPNip46ConnectionState> = observer.states
+    val states: Flow<NMPNip46ConnectionState> = observer.states
 
     /** Idempotently detach this exact signer session and emit [NMPNip46ConnectionState.Closed]. */
     override fun close() {

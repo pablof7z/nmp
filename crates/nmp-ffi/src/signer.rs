@@ -3,6 +3,7 @@
 //! Rust owns catalog/protocol/lifecycle policy. Native shells only execute
 //! the supplied OS probe/launch URI and render these bounded progress facts.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
@@ -67,6 +68,20 @@ struct Nip46Attachment {
     available: bool,
 }
 
+enum ObserverDelivery {
+    Event(FfiNip46ConnectionEvent),
+    Ready(String),
+    Failed(String),
+    Closed,
+}
+
+#[derive(Default)]
+struct ObserverDeliveryState {
+    queue: VecDeque<ObserverDelivery>,
+    draining: bool,
+    terminal_queued: bool,
+}
+
 /// Owns one remote-signer session. The native connection handle, not the
 /// engine, owns this value: `disconnect()`/drop therefore detach
 /// deterministically instead of accumulating sessions until engine shutdown.
@@ -76,6 +91,11 @@ struct Nip46Attachment {
 pub struct Nip46Connection {
     engine: Arc<nmp::Engine>,
     observer: Arc<dyn Nip46ConnectionObserver>,
+    /// Serializes attachment transitions with observer-queue insertion. The
+    /// queue itself invokes callbacks outside this lock, so a callback may
+    /// safely call `disconnect()` without deadlocking.
+    lifecycle: Mutex<()>,
+    deliveries: Mutex<ObserverDeliveryState>,
     attachment: Mutex<Nip46Attachment>,
     cancellation: nmp_signer::Nip46Cancellation,
     closed: AtomicBool,
@@ -86,6 +106,8 @@ impl Nip46Connection {
         Arc::new(Self {
             engine,
             observer,
+            lifecycle: Mutex::new(()),
+            deliveries: Mutex::new(ObserverDeliveryState::default()),
             attachment: Mutex::new(Nip46Attachment {
                 signer: None,
                 registration: None,
@@ -97,97 +119,135 @@ impl Nip46Connection {
     }
 
     fn on_event(&self, event: nmp::Nip46ConnectionEvent) {
-        if self.closed.load(Ordering::Acquire) {
-            return;
-        }
-        let mut reattached_public_key = None;
-        match &event {
-            nmp::Nip46ConnectionEvent::Available => {
-                let mut attachment = self
-                    .attachment
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
-                attachment.available = true;
-                if attachment.registration.is_none() {
-                    if let Some(signer) = attachment.signer.clone() {
-                        match self.engine.add_signer(signer) {
-                            Ok(registration) => {
-                                reattached_public_key = Some(registration.public_key());
-                                attachment.registration = Some(registration);
-                            }
-                            Err(error) => {
-                                drop(attachment);
-                                self.fail(error.to_string());
-                                return;
-                            }
-                        }
-                    }
-                }
+        let should_drain = {
+            let _lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if self.closed.load(Ordering::Acquire) {
+                return;
             }
-            nmp::Nip46ConnectionEvent::Unavailable => {
-                let registration = {
+            let mut reattached_public_key = None;
+            let mut failure = None;
+            match &event {
+                nmp::Nip46ConnectionEvent::Available => {
                     let mut attachment = self
                         .attachment
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner());
-                    attachment.available = false;
-                    attachment.registration.take()
-                };
-                if let Some(registration) = registration {
-                    let _ = self.engine.remove_signer(registration);
+                    attachment.available = true;
+                    if attachment.registration.is_none() {
+                        if let Some(signer) = attachment.signer.clone() {
+                            match self.engine.add_signer(signer) {
+                                Ok(registration) => {
+                                    reattached_public_key = Some(registration.public_key());
+                                    attachment.registration = Some(registration);
+                                }
+                                Err(error) => failure = Some(error.to_string()),
+                            }
+                        }
+                    }
                 }
+                nmp::Nip46ConnectionEvent::Unavailable => {
+                    let registration = {
+                        let mut attachment = self
+                            .attachment
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner());
+                        attachment.available = false;
+                        attachment.registration.take()
+                    };
+                    if let Some(registration) = registration {
+                        let _ = self.engine.remove_signer(registration);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        if !self.closed.load(Ordering::Acquire) {
-            self.observer.on_event(event_to_ffi(event));
-        }
-        if let Some(public_key) = reattached_public_key {
-            if !self.closed.load(Ordering::Acquire) {
-                self.observer.on_ready(public_key.to_hex());
+            if let Some(reason) = failure {
+                self.fail_locked(reason)
+            } else {
+                let mut should_drain =
+                    self.enqueue_delivery(ObserverDelivery::Event(event_to_ffi(event)));
+                if let Some(public_key) = reattached_public_key {
+                    should_drain |=
+                        self.enqueue_delivery(ObserverDelivery::Ready(public_key.to_hex()));
+                }
+                should_drain
             }
-        }
+        };
+        self.drain_deliveries(should_drain);
     }
 
     fn attach(&self, signer: nmp::Nip46Signer) {
-        let pubkey = signer.user_public_key();
-        let mut attachment = self
-            .attachment
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if self.closed.load(Ordering::Acquire) {
-            return;
-        }
-        attachment.signer = Some(signer.clone());
-        if !attachment.available {
-            return;
-        }
-        match self.engine.add_signer(signer) {
-            Ok(registration) => {
-                attachment.registration = Some(registration);
-                drop(attachment);
-                if !self.closed.load(Ordering::Acquire) {
-                    self.observer.on_ready(pubkey.to_hex());
+        let should_drain = {
+            let _lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let pubkey = signer.user_public_key();
+            let mut attachment = self
+                .attachment
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            attachment.signer = Some(signer.clone());
+            if !attachment.available {
+                return;
+            }
+            match self.engine.add_signer(signer) {
+                Ok(registration) => {
+                    attachment.registration = Some(registration);
+                    drop(attachment);
+                    self.enqueue_delivery(ObserverDelivery::Ready(pubkey.to_hex()))
+                }
+                Err(error) => {
+                    drop(attachment);
+                    self.fail_locked(error.to_string())
                 }
             }
-            Err(error) => {
-                drop(attachment);
-                self.fail(error.to_string());
-            }
-        }
+        };
+        self.drain_deliveries(should_drain);
     }
 
     fn fail(&self, reason: String) {
-        if !self.closed.load(Ordering::Acquire) {
-            self.observer.on_failed(reason);
-            self.close_inner();
+        let should_drain = {
+            let _lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            self.fail_locked(reason)
+        };
+        self.drain_deliveries(should_drain);
+    }
+
+    fn fail_locked(&self, reason: String) -> bool {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return false;
         }
+        let mut should_drain = self.enqueue_delivery(ObserverDelivery::Failed(reason));
+        self.detach_locked();
+        should_drain |= self.enqueue_delivery(ObserverDelivery::Closed);
+        should_drain
     }
 
     fn close_inner(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return;
-        }
+        let should_drain = {
+            let _lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if self.closed.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            self.detach_locked();
+            self.enqueue_delivery(ObserverDelivery::Closed)
+        };
+        self.drain_deliveries(should_drain);
+    }
+
+    fn detach_locked(&self) {
         self.cancellation.cancel();
         let registration = {
             let mut attachment = self
@@ -200,7 +260,57 @@ impl Nip46Connection {
         if let Some(registration) = registration {
             let _ = self.engine.remove_signer(registration);
         }
-        self.observer.on_closed();
+    }
+
+    /// Queue one observer fact. Returns true only to the caller elected to
+    /// drain the queue; all other producers leave their facts for that same
+    /// drainer. `Closed` seals the queue before its callback runs, so no later
+    /// producer can append a post-terminal fact.
+    fn enqueue_delivery(&self, delivery: ObserverDelivery) -> bool {
+        let mut state = self
+            .deliveries
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.terminal_queued {
+            return false;
+        }
+        if matches!(&delivery, ObserverDelivery::Closed) {
+            state.terminal_queued = true;
+        }
+        state.queue.push_back(delivery);
+        if state.draining {
+            false
+        } else {
+            state.draining = true;
+            true
+        }
+    }
+
+    fn drain_deliveries(&self, should_drain: bool) {
+        if !should_drain {
+            return;
+        }
+        loop {
+            let delivery = {
+                let mut state = self
+                    .deliveries
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                match state.queue.pop_front() {
+                    Some(delivery) => delivery,
+                    None => {
+                        state.draining = false;
+                        return;
+                    }
+                }
+            };
+            match delivery {
+                ObserverDelivery::Event(event) => self.observer.on_event(event),
+                ObserverDelivery::Ready(public_key) => self.observer.on_ready(public_key),
+                ObserverDelivery::Failed(reason) => self.observer.on_failed(reason),
+                ObserverDelivery::Closed => self.observer.on_closed(),
+            }
+        }
     }
 }
 
@@ -461,6 +571,49 @@ mod tests {
         }
     }
 
+    struct ReentrantObserver {
+        deliveries: Arc<Mutex<Vec<&'static str>>>,
+        connection: Mutex<Weak<Nip46Connection>>,
+    }
+
+    impl Nip46ConnectionObserver for ReentrantObserver {
+        fn on_event(&self, _event: FfiNip46ConnectionEvent) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push("event");
+        }
+
+        fn on_ready(&self, _user_public_key: String) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push("ready");
+            if let Some(connection) = self
+                .connection
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .upgrade()
+            {
+                connection.disconnect();
+            }
+        }
+
+        fn on_failed(&self, _reason: String) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push("failed");
+        }
+
+        fn on_closed(&self) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push("closed");
+        }
+    }
+
     #[test]
     fn catalog_keeps_probe_launch_package_and_provider_distinct() {
         let primal = local_signer_catalog()
@@ -515,6 +668,38 @@ mod tests {
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
         drop(connection_b);
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn observer_delivery_is_reentrant_and_closed_is_terminal() {
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let deliveries = Arc::new(Mutex::new(Vec::new()));
+        let observer = Arc::new(ReentrantObserver {
+            deliveries: Arc::clone(&deliveries),
+            connection: Mutex::new(Weak::new()),
+        });
+        let connection = Nip46Connection::new(Arc::clone(&engine), observer.clone());
+        *observer
+            .connection
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Arc::downgrade(&connection);
+
+        let should_drain =
+            connection.enqueue_delivery(ObserverDelivery::Ready("user-key".to_string()));
+        connection.drain_deliveries(should_drain);
+        let after_closed = connection
+            .enqueue_delivery(ObserverDelivery::Event(FfiNip46ConnectionEvent::Connecting));
+        connection.drain_deliveries(after_closed);
+
+        assert_eq!(
+            *deliveries
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+            vec!["ready", "closed"],
+            "a reentrant close is ordered after the active callback and seals the stream"
+        );
+        connection.disconnect();
         engine.shutdown();
     }
 

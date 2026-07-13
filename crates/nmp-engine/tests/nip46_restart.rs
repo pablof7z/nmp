@@ -2,15 +2,17 @@
 //! process that accepted it, then a real NIP-46 session reattaches and drives
 //! the ordinary promotion/publication path to a relay ACK.
 
+use std::collections::BTreeSet;
 use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp_engine::core::RelayAdmissionPolicy;
+use nmp_engine::core::{RelayAdmissionPolicy, RowDelta};
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, ReceiptReattachment};
-use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
+use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
+use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::Nip46Signer;
 use nmp_store::{EventStore, RedbStore, RelayObserved, SigState};
@@ -47,7 +49,15 @@ fn response_event(remote: &Keys, client: PublicKey, id: &str, result: String) ->
         .unwrap()
 }
 
-fn spawn_signer_relay(mutate_sign_event: bool) -> (RelayUrl, Keys, Keys) {
+struct SignResponseBarrier {
+    request_observed: mpsc::Sender<()>,
+    release_response: mpsc::Receiver<()>,
+}
+
+fn spawn_signer_relay(
+    mutate_sign_event: bool,
+    sign_barrier: Option<SignResponseBarrier>,
+) -> (RelayUrl, Keys, Keys) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let relay = RelayUrl::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
     let remote = Keys::generate();
@@ -83,6 +93,16 @@ fn spawn_signer_relay(mutate_sign_event: bool) -> (RelayUrl, Keys, Keys) {
                         "get_public_key" => user_thread.public_key().to_hex(),
                         "switch_relays" => "null".to_string(),
                         "sign_event" => {
+                            if let Some(barrier) = &sign_barrier {
+                                barrier
+                                    .request_observed
+                                    .send(())
+                                    .expect("test receives the blocked signing request");
+                                barrier
+                                    .release_response
+                                    .recv_timeout(Duration::from_secs(5))
+                                    .expect("test releases the blocked signing response");
+                            }
                             let body: SignBody =
                                 serde_json::from_str(params[0].as_str().unwrap()).unwrap();
                             let tags = body
@@ -170,11 +190,39 @@ fn wait_for_status(
     }
 }
 
+fn wait_for_exact_rows(
+    rows: &mpsc::Receiver<RowsMsg>,
+    expected_present: EventId,
+    expected_absent: EventId,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut current = BTreeSet::new();
+    loop {
+        let (deltas, _) = rows
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("expected live row state before deadline");
+        for delta in deltas {
+            match delta {
+                RowDelta::Added(row) => {
+                    current.insert(row.event.id);
+                }
+                RowDelta::Removed(id) => {
+                    current.remove(&id);
+                }
+                RowDelta::SourcesGrew { .. } => {}
+            }
+        }
+        if current.contains(&expected_present) && !current.contains(&expected_absent) {
+            return;
+        }
+    }
+}
+
 #[test]
 fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("nip46-restart.redb");
-    let (signer_relay, remote, user) = spawn_signer_relay(false);
+    let (signer_relay, remote, user) = spawn_signer_relay(false, None);
     let (write_relay, published) = spawn_write_relay();
     let directory =
         || FixtureDirectory::new().with_write(user.public_key().to_hex(), [write_relay.clone()]);
@@ -275,7 +323,15 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
 fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predecessor() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("nip46-terminal-compensation.redb");
-    let (signer_relay, remote, user) = spawn_signer_relay(true);
+    let (request_observed_tx, request_observed_rx) = mpsc::channel();
+    let (release_response_tx, release_response_rx) = mpsc::channel();
+    let (signer_relay, remote, user) = spawn_signer_relay(
+        true,
+        Some(SignResponseBarrier {
+            request_observed: request_observed_tx,
+            release_response: release_response_rx,
+        }),
+    );
     let source_relay = RelayUrl::parse("wss://source.example").unwrap();
     let predecessor = UnsignedEvent::new(
         user.public_key(),
@@ -317,6 +373,14 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
         RelayAdmissionPolicy::default(),
     );
     handle.set_active_account(Some(user.public_key()));
+    let (query_handle, rows) = handle.subscribe(LiveQuery::from_filter(Filter {
+        kinds: Some(BTreeSet::from([Kind::Metadata.as_u16()])),
+        authors: Some(Binding::Literal(BTreeSet::from([user
+            .public_key()
+            .to_hex()]))),
+        ..Filter::default()
+    }));
+    wait_for_exact_rows(&rows, predecessor.id, replacement_id);
     let bunker_uri = format!(
         "bunker://{}?relay={}&secret=terminal-proof",
         remote.public_key().to_hex(),
@@ -333,11 +397,19 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
         })
         .unwrap();
     assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
+    request_observed_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the signer response is blocked after the optimistic accept");
+    wait_for_exact_rows(&rows, replacement_id, predecessor.id);
+    release_response_tx
+        .send(())
+        .expect("release the deliberately mutated signer response");
     assert!(matches!(
         wait_for_status(&receipt.statuses, |status| matches!(status, WriteStatus::Failed(_))),
         WriteStatus::Failed(reason) if reason.contains("mutated")
     ));
 
+    handle.unsubscribe(query_handle);
     handle.shutdown();
     engine.join();
 
