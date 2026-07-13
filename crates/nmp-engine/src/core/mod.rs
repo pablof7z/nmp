@@ -3597,7 +3597,7 @@ impl EngineCore<nmp_store::RedbStore> {
     }
 
     /// Exact pre-#228 expiry comparison: same governed store mutation and
-    /// resolver reaction, former affected-handle full refresh.
+    /// resolver reaction, followed by the former recompile/full refresh.
     #[doc(hidden)]
     pub fn bench_expire_due_with_forced_refresh(&mut self, now: Timestamp) -> Vec<Effect> {
         self.bench_expire_due_with_mode(now, true)
