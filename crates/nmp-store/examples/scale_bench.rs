@@ -52,13 +52,20 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const GENERATOR_VERSION: &str = "nmp-scale-v1";
+const GENERATOR_VERSION: &str = "nmp-scale-v2";
+const EVENT_SHAPE_VERSION: &str = "nmp-scale-v1";
+const DEFAULT_CANONICAL_ROWS: u64 = 1_000_000;
 const AUTHOR_COUNT: usize = 1_024;
 const TAIL_ROOM_COUNT: u64 = 4_096;
 const BATCH_SIZE: usize = 4_096;
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 const HOT_ROOM: &str = "nmp-scale-hot-room";
 const SECOND_ROOM: &str = "nmp-scale-second-room";
+const DISCOVERY_ORDINAL: u64 = 1_024;
+const DISCOVERY_RELAY: &str = "wss://nmp-device-proof.invalid";
+const EXPECTED_MILLION_HOT_ROOM_ROWS: usize = 59_915;
+const EXPECTED_MILLION_HOT_ROOM_TOP_200_NEWEST_ID: &str =
+    "4718e3ccdff3511ade3b5b96b3a2f8561afc888f7b78ed2ff2c698e910743cc8";
 
 #[derive(Default)]
 struct BuildStats {
@@ -79,6 +86,11 @@ struct FixtureManifest {
     hot_room: String,
     hot_room_rows: usize,
     hot_room_member_rows: usize,
+    hot_room_top_200_newest_id: String,
+    discovery_room: String,
+    discovery_relay: String,
+    discovery_rows: usize,
+    discovery_newest_id: String,
 }
 
 impl FixtureManifest {
@@ -90,6 +102,14 @@ impl FixtureManifest {
         assert_eq!(self.batch_size, BATCH_SIZE);
         assert_eq!(self.event_shape_seed, BASE_CREATED_AT);
         assert_eq!(self.hot_room, HOT_ROOM);
+        assert_eq!(self.discovery_room, HOT_ROOM);
+        assert_eq!(self.discovery_relay, DISCOVERY_RELAY);
+        assert_eq!(self.discovery_rows, 1);
+        assert_million_contract(
+            canonical_rows,
+            self.hot_room_rows,
+            &self.hot_room_top_200_newest_id,
+        );
     }
 }
 
@@ -183,9 +203,26 @@ fn ordinary_event(ordinal: u64, canonical_rows: u64, authors: &[Keys], hot_membe
         created_at,
         tags,
         format!(
-            "{GENERATOR_VERSION} ordinal={ordinal} author={author} payload={:016x}",
+            "{EVENT_SHAPE_VERSION} ordinal={ordinal} author={author} payload={:016x}",
             ordinal.wrapping_mul(0xd6e8_feb8_6659_fd93)
         ),
+    )
+}
+
+fn discovery_event(authors: &[Keys]) -> Event {
+    sign(
+        &authors[0],
+        Kind::from(39_000u16),
+        BASE_CREATED_AT + DISCOVERY_ORDINAL * 4 + 2,
+        vec![
+            tag("d", HOT_ROOM),
+            tag("name", "NMP Scale Hot Room"),
+            tag(
+                "about",
+                "Deterministic million-row proof room for bounded NMP store queries",
+            ),
+        ],
+        format!("{GENERATOR_VERSION} discovery={HOT_ROOM}"),
     )
 }
 
@@ -209,7 +246,7 @@ fn events_for_ordinal(
                 Kind::TextNote,
                 created_at,
                 vec![Tag::expiration(Timestamp::from(created_at + 1))],
-                format!("{GENERATOR_VERSION} expired={ordinal}"),
+                format!("{EVENT_SHAPE_VERSION} expired={ordinal}"),
             ),
             redeliver: false,
         });
@@ -242,7 +279,7 @@ fn events_for_ordinal(
                     Kind::from(30_000u16),
                     timestamp,
                     vec![tag("d", d.clone())],
-                    format!("{GENERATOR_VERSION} address={d} revision={revision}"),
+                    format!("{EVENT_SHAPE_VERSION} address={d} revision={revision}"),
                 ),
                 redeliver: revision == "winner",
             });
@@ -255,7 +292,7 @@ fn events_for_ordinal(
             Kind::TextNote,
             created_at,
             Vec::new(),
-            format!("{GENERATOR_VERSION} deletion-target={ordinal}"),
+            format!("{EVENT_SHAPE_VERSION} deletion-target={ordinal}"),
         );
         let deletion = sign(
             keys,
@@ -271,6 +308,11 @@ fn events_for_ordinal(
         out.push(GeneratedEvent {
             event: deletion,
             redeliver: true,
+        });
+    } else if ordinal == DISCOVERY_ORDINAL {
+        out.push(GeneratedEvent {
+            event: discovery_event(authors),
+            redeliver: false,
         });
     } else {
         out.push(GeneratedEvent {
@@ -313,6 +355,7 @@ fn build_fixture(path: &Path, canonical_rows: u64) -> BuildStats {
                 .expect("benchmark relay URL")
         })
         .collect();
+    let discovery_relay = RelayUrl::parse(DISCOVERY_RELAY).expect("proof relay URL");
     let mut store = RedbStore::open(path).expect("create scale store");
     let mut stats = BuildStats::default();
     let mut batch = Vec::with_capacity(BATCH_SIZE + BATCH_SIZE / 4);
@@ -324,9 +367,14 @@ fn build_fixture(path: &Path, canonical_rows: u64) -> BuildStats {
         for generated in generated {
             let observed_at = Timestamp::from(generated.event.created_at.as_secs() + 10);
             let primary = (ordinal as usize) % relays.len();
+            let relay = if generated.event.kind == Kind::from(39_000u16) {
+                discovery_relay.clone()
+            } else {
+                relays[primary].clone()
+            };
             batch.push((
                 generated.event.clone(),
-                RelayObserved::new(relays[primary].clone(), observed_at),
+                RelayObserved::new(relay, observed_at),
             ));
             if generated.redeliver {
                 batch.push((
@@ -362,12 +410,37 @@ fn assert_newest_order(rows: &[nmp_store::StoredEvent]) {
     }));
 }
 
+fn assert_million_contract(
+    canonical_rows: u64,
+    hot_room_rows: usize,
+    hot_room_top_200_newest_id: &str,
+) {
+    if canonical_rows == DEFAULT_CANONICAL_ROWS {
+        assert_eq!(hot_room_rows, EXPECTED_MILLION_HOT_ROOM_ROWS);
+        assert_eq!(
+            hot_room_top_200_newest_id,
+            EXPECTED_MILLION_HOT_ROOM_TOP_200_NEWEST_ID
+        );
+    }
+}
+
+struct BoundedSummary {
+    rows: usize,
+    newest_id: String,
+}
+
 fn percentile(samples: &mut [Duration], numerator: usize, denominator: usize) -> Duration {
     samples.sort_unstable();
     samples[(samples.len() - 1) * numerator / denominator]
 }
 
-fn bounded_case(store: &RedbStore, label: &str, filter: &Filter, limit: usize, iterations: u32) {
+fn bounded_case(
+    store: &RedbStore,
+    label: &str,
+    filter: &Filter,
+    limit: usize,
+    iterations: u32,
+) -> BoundedSummary {
     let warm = store
         .query_newest(filter, limit)
         .expect("warm bounded query");
@@ -410,6 +483,10 @@ fn bounded_case(store: &RedbStore, label: &str, filter: &Filter, limit: usize, i
     println!("query_event_values={event_values}");
     println!("query_materialized_rows={materialized_rows}");
     println!("query_allocation_ops={allocations}");
+    BoundedSummary {
+        rows: rows.len(),
+        newest_id: newest,
+    }
 }
 
 fn complete_case(store: &RedbStore, label: &str, filter: &Filter) -> usize {
@@ -457,7 +534,7 @@ fn main() {
                 .parse()
                 .expect("canonical_rows is u64")
         })
-        .unwrap_or(1_000_000);
+        .unwrap_or(DEFAULT_CANONICAL_ROWS);
     let iterations: u32 = args
         .next()
         .map(|value| value.to_string_lossy().parse().expect("iterations is u32"))
@@ -509,11 +586,14 @@ fn main() {
     let store = RedbStore::open(&path).expect("open scale store for queries");
     let h = SingleLetterTag::lowercase(Alphabet::H);
     let p = SingleLetterTag::lowercase(Alphabet::P);
+    let d = SingleLetterTag::lowercase(Alphabet::D);
     let authors: Vec<_> = (0..AUTHOR_COUNT).map(deterministic_keys).collect();
     let hot_member = authors[AUTHOR_COUNT - 1].public_key().to_hex();
     let hot_author: PublicKey = authors[0].public_key();
     let kind9 = Kind::from(9u16);
+    let kind39000 = Kind::from(39_000u16);
     let hot_room_filter = Filter::new().kind(kind9).custom_tag(h, HOT_ROOM);
+    let discovery_filter = Filter::new().kind(kind39000).custom_tag(d, HOT_ROOM);
     let hot_member_filter = hot_room_filter.clone().custom_tag(p, hot_member.clone());
     let hot_author_filter = Filter::new().author(hot_author);
     let hot_author_kind_filter = hot_author_filter.clone().kind(kind9);
@@ -521,6 +601,14 @@ fn main() {
     let authors_43_filter = Filter::new().authors(authors_43);
 
     bounded_case(&store, "global_top_200", &Filter::new(), 200, iterations);
+    let discovery_top = bounded_case(
+        &store,
+        "hot_room_discovery_top_200",
+        &discovery_filter,
+        200,
+        iterations,
+    );
+    assert_eq!(discovery_top.rows, 1);
     bounded_case(
         &store,
         "kind9_top_200",
@@ -528,7 +616,7 @@ fn main() {
         200,
         iterations,
     );
-    bounded_case(
+    let hot_room_top = bounded_case(
         &store,
         "hot_room_top_200",
         &hot_room_filter,
@@ -565,15 +653,21 @@ fn main() {
     );
 
     let hot_room_rows = complete_case(&store, "hot_room", &hot_room_filter);
+    let discovery_rows = complete_case(&store, "hot_room_discovery", &discovery_filter);
+    assert_eq!(discovery_rows, 1);
     let hot_member_rows = complete_case(&store, "hot_room_member", &hot_member_filter);
     let all_rows = complete_case(&store, "global", &Filter::new());
     assert_eq!(
         all_rows as u64, canonical_rows,
         "governed final cardinality"
     );
+    assert_million_contract(canonical_rows, hot_room_rows, &hot_room_top.newest_id);
     if let Some(manifest) = existing_manifest {
         assert_eq!(hot_room_rows, manifest.hot_room_rows);
         assert_eq!(hot_member_rows, manifest.hot_room_member_rows);
+        assert_eq!(hot_room_top.newest_id, manifest.hot_room_top_200_newest_id);
+        assert_eq!(discovery_rows, manifest.discovery_rows);
+        assert_eq!(discovery_top.newest_id, manifest.discovery_newest_id);
     } else {
         let manifest = FixtureManifest {
             generator: GENERATOR_VERSION.to_owned(),
@@ -585,6 +679,11 @@ fn main() {
             hot_room: HOT_ROOM.to_owned(),
             hot_room_rows,
             hot_room_member_rows: hot_member_rows,
+            hot_room_top_200_newest_id: hot_room_top.newest_id.clone(),
+            discovery_room: HOT_ROOM.to_owned(),
+            discovery_relay: DISCOVERY_RELAY.to_owned(),
+            discovery_rows,
+            discovery_newest_id: discovery_top.newest_id.clone(),
         };
         fs::write(
             &manifest_path,
@@ -593,6 +692,9 @@ fn main() {
         .expect("write fixture manifest");
     }
     println!("hot_room_rows={hot_room_rows}");
+    println!("hot_room_top_200_newest_id={}", hot_room_top.newest_id);
+    println!("hot_room_discovery_rows={discovery_rows}");
+    println!("hot_room_discovery_newest_id={}", discovery_top.newest_id);
     println!("hot_room_member_rows={hot_member_rows}");
     drop(store);
 
