@@ -358,7 +358,7 @@ impl WritePolicy for LoggingWritePolicy {
         Box::pin(async move {
             if reject {
                 WritePolicyResult::reject(
-                    MachineReadablePrefix::Error,
+                    MachineReadablePrefix::Blocked,
                     "nmp-bdd scripted relay: configured to reject every event",
                 )
             } else {

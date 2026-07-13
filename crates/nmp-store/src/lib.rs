@@ -845,6 +845,7 @@ pub enum TransientCause {
     ConnectionLost,
     RelayRateLimited,
     RelayError,
+    AuthRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1347,6 +1348,23 @@ pub trait EventStore {
         _eligible_at: Timestamp,
         _cause: TransientCause,
         _raw_reason: Option<String>,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        Err(PersistenceError("outbox lanes unsupported".into()))
+    }
+
+    /// End the current ordinal as a nonterminal wait with no deadline.
+    /// The attempt detail and waiting cursor advance atomically, so restart
+    /// cannot mistake an AUTH/offline wait for a live ambiguous send.
+    #[allow(clippy::too_many_arguments)]
+    fn suspend_lane_attempt(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _ordinal: u64,
+        _at: Timestamp,
+        _cause: TransientCause,
+        _raw_reason: Option<String>,
+        _auth: bool,
     ) -> Result<RecoveredLane, PersistenceError> {
         Err(PersistenceError("outbox lanes unsupported".into()))
     }

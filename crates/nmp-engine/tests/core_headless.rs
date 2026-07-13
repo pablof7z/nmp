@@ -109,6 +109,97 @@ struct FailOnceCompensationStore {
     fail_next_attempt_finish: bool,
 }
 
+macro_rules! delegate_lane_methods {
+    ($inner:ident) => {
+        fn bootstrap_outbox_lanes(
+            &mut self,
+            intent_id: nmp_store::IntentId,
+        ) -> Result<Vec<nmp_store::RecoveredLane>, PersistenceError> {
+            self.$inner.bootstrap_outbox_lanes(intent_id)
+        }
+        fn recover_outbox_lanes(
+            &self,
+            intent_id: nmp_store::IntentId,
+        ) -> Result<Vec<nmp_store::RecoveredLane>, PersistenceError> {
+            self.$inner.recover_outbox_lanes(intent_id)
+        }
+        fn due_outbox_deadlines(
+            &self,
+            now: Timestamp,
+            limit: usize,
+        ) -> Result<Vec<nmp_store::LaneDeadline>, PersistenceError> {
+            self.$inner.due_outbox_deadlines(now, limit)
+        }
+        fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+            self.$inner.next_outbox_deadline()
+        }
+        fn set_lane_waiting(
+            &mut self,
+            key: &nmp_store::LaneKey,
+            revision: u64,
+            auth: bool,
+        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+            self.$inner.set_lane_waiting(key, revision, auth)
+        }
+        fn set_lane_eligible(
+            &mut self,
+            key: &nmp_store::LaneKey,
+            revision: u64,
+            since: Timestamp,
+        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+            self.$inner.set_lane_eligible(key, revision, since)
+        }
+        fn set_lane_transient(
+            &mut self,
+            key: &nmp_store::LaneKey,
+            revision: u64,
+            ordinal: u64,
+            eligible_at: Timestamp,
+            cause: nmp_store::TransientCause,
+            raw_reason: Option<String>,
+        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+            self.$inner
+                .set_lane_transient(key, revision, ordinal, eligible_at, cause, raw_reason)
+        }
+        fn suspend_lane_attempt(
+            &mut self,
+            key: &nmp_store::LaneKey,
+            revision: u64,
+            ordinal: u64,
+            at: Timestamp,
+            cause: nmp_store::TransientCause,
+            raw_reason: Option<String>,
+            auth: bool,
+        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+            self.$inner
+                .suspend_lane_attempt(key, revision, ordinal, at, cause, raw_reason, auth)
+        }
+        fn record_lane_handoff(
+            &mut self,
+            key: &nmp_store::LaneKey,
+            revision: u64,
+            ordinal: u64,
+            detail: nmp_store::AttemptHandoffDetail,
+            next: nmp_store::PostHandoffState,
+        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+            self.$inner
+                .record_lane_handoff(key, revision, ordinal, detail, next)
+        }
+        fn recover_attempt_details(
+            &self,
+            intent_id: nmp_store::IntentId,
+        ) -> Result<Vec<nmp_store::RecoveredAttemptDetails>, PersistenceError> {
+            self.$inner.recover_attempt_details(intent_id)
+        }
+        fn close_terminal_intent(
+            &mut self,
+            intent_id: nmp_store::IntentId,
+        ) -> Result<nmp_store::CloseIntentOutcome, PersistenceError> {
+            self.$inner.close_terminal_intent(intent_id)
+        }
+    };
+}
+
 impl FailOnceCompensationStore {
     fn new() -> Self {
         Self {
@@ -238,6 +329,32 @@ impl EventStore for FailOnceCompensationStore {
     ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
+    delegate_lane_methods!(inner);
+    fn start_lane_attempt(
+        &mut self,
+        key: &nmp_store::LaneKey,
+        revision: u64,
+        event: nostr::Event,
+        started_at: Timestamp,
+    ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
+        self.inner
+            .start_lane_attempt(key, revision, event, started_at)
+    }
+    fn finish_lane_attempt(
+        &mut self,
+        key: &nmp_store::LaneKey,
+        revision: u64,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+        finished_at: Timestamp,
+    ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+        if self.fail_next_attempt_finish {
+            self.fail_next_attempt_finish = false;
+            return Err(PersistenceError("injected attempt finish failure".into()));
+        }
+        self.inner
+            .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
+    }
     fn accept_ephemeral(
         &mut self,
         frozen_id: nostr::EventId,
@@ -247,17 +364,16 @@ impl EventStore for FailOnceCompensationStore {
     }
 }
 
-#[derive(Clone)]
 struct SharedFailStartStore {
-    inner: Arc<Mutex<MemoryStore>>,
-    failed_relays: Arc<Mutex<BTreeSet<RelayUrl>>>,
+    inner: MemoryStore,
+    failed_relays: BTreeSet<RelayUrl>,
 }
 
 impl SharedFailStartStore {
     fn new(failed_relays: impl IntoIterator<Item = RelayUrl>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(MemoryStore::new())),
-            failed_relays: Arc::new(Mutex::new(failed_relays.into_iter().collect())),
+            inner: MemoryStore::new(),
+            failed_relays: failed_relays.into_iter().collect(),
         }
     }
 }
@@ -268,23 +384,23 @@ impl EventStore for SharedFailStartStore {
         event: nostr::Event,
         from: RelayObserved,
     ) -> Result<InsertOutcome, PersistenceError> {
-        self.inner.lock().unwrap().insert(event, from)
+        self.inner.insert(event, from)
     }
     fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.lock().unwrap().query(filter)
+        self.inner.query(filter)
     }
     fn remove(
         &mut self,
         id: nostr::EventId,
         reason: RetractReason,
     ) -> Result<Option<StoredEvent>, PersistenceError> {
-        self.inner.lock().unwrap().remove(id, reason)
+        self.inner.remove(id, reason)
     }
     fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.lock().unwrap().expire_due(now)
+        self.inner.expire_due(now)
     }
     fn next_expiration(&self) -> Option<Timestamp> {
-        self.inner.lock().unwrap().next_expiration()
+        self.inner.next_expiration()
     }
     fn record_coverage(
         &mut self,
@@ -292,60 +408,51 @@ impl EventStore for SharedFailStartStore {
         relay: &RelayUrl,
         proven: CoverageInterval,
     ) -> Result<(), PersistenceError> {
-        self.inner
-            .lock()
-            .unwrap()
-            .record_coverage(atom, relay, proven)
+        self.inner.record_coverage(atom, relay, proven)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
-        self.inner.lock().unwrap().get_coverage(key, relay)
+        self.inner.get_coverage(key, relay)
     }
     fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
-        self.inner.lock().unwrap().gc(claims)
+        self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
-        self.inner.lock().unwrap().accept_write(accept)
+        self.inner.accept_write(accept)
     }
     fn promote_signed(
         &mut self,
         intent_id: nmp_store::IntentId,
         sig: nostr::secp256k1::schnorr::Signature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner.lock().unwrap().promote_signed(intent_id, sig)
+        self.inner.promote_signed(intent_id, sig)
     }
     fn compensate_write(
         &mut self,
         intent_id: nmp_store::IntentId,
     ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.lock().unwrap().compensate_write(intent_id)
+        self.inner.compensate_write(intent_id)
     }
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
-        self.inner.lock().unwrap().recover_outbox()
+        self.inner.recover_outbox()
     }
     fn reattach_receipt(
         &self,
         receipt_id: u64,
     ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
-        self.inner.lock().unwrap().reattach_receipt(receipt_id)
+        self.inner.reattach_receipt(receipt_id)
     }
     fn record_route_revision(
         &mut self,
         intent_id: nmp_store::IntentId,
         relays: BTreeSet<RelayUrl>,
     ) -> Result<RecoveredRouteRevision, PersistenceError> {
-        self.inner
-            .lock()
-            .unwrap()
-            .record_route_revision(intent_id, relays)
+        self.inner.record_route_revision(intent_id, relays)
     }
     fn recover_route_revisions(
         &self,
         intent_id: nmp_store::IntentId,
     ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
-        self.inner
-            .lock()
-            .unwrap()
-            .recover_route_revisions(intent_id)
+        self.inner.recover_route_revisions(intent_id)
     }
     fn start_attempt(
         &mut self,
@@ -353,13 +460,10 @@ impl EventStore for SharedFailStartStore {
         relay: RelayUrl,
         event: nostr::Event,
     ) -> Result<RecoveredAttempt, PersistenceError> {
-        if self.failed_relays.lock().unwrap().contains(&relay) {
+        if self.failed_relays.contains(&relay) {
             return Err(PersistenceError("injected attempt start failure".into()));
         }
-        self.inner
-            .lock()
-            .unwrap()
-            .start_attempt(intent_id, relay, event)
+        self.inner.start_attempt(intent_id, relay, event)
     }
     fn finish_attempt(
         &mut self,
@@ -369,25 +473,45 @@ impl EventStore for SharedFailStartStore {
         outcome: AttemptOutcome,
     ) -> Result<FinishAttemptOutcome, PersistenceError> {
         self.inner
-            .lock()
-            .unwrap()
             .finish_attempt(intent_id, relay, ordinal, outcome)
     }
     fn recover_attempts(
         &self,
         intent_id: nmp_store::IntentId,
     ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
-        self.inner.lock().unwrap().recover_attempts(intent_id)
+        self.inner.recover_attempts(intent_id)
+    }
+    delegate_lane_methods!(inner);
+    fn start_lane_attempt(
+        &mut self,
+        key: &nmp_store::LaneKey,
+        revision: u64,
+        event: nostr::Event,
+        started_at: Timestamp,
+    ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
+        if self.failed_relays.contains(&key.relay) {
+            return Err(PersistenceError("injected attempt start failure".into()));
+        }
+        self.inner
+            .start_lane_attempt(key, revision, event, started_at)
+    }
+    fn finish_lane_attempt(
+        &mut self,
+        key: &nmp_store::LaneKey,
+        revision: u64,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+        finished_at: Timestamp,
+    ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+        self.inner
+            .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
     }
     fn accept_ephemeral(
         &mut self,
         frozen_id: nostr::EventId,
         expected_pubkey: nostr::PublicKey,
     ) -> Result<u64, PersistenceError> {
-        self.inner
-            .lock()
-            .unwrap()
-            .accept_ephemeral(frozen_id, expected_pubkey)
+        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
     }
 }
 
@@ -521,6 +645,31 @@ impl EventStore for RedbFailStartStore {
     ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
+    delegate_lane_methods!(inner);
+    fn start_lane_attempt(
+        &mut self,
+        key: &nmp_store::LaneKey,
+        revision: u64,
+        event: nostr::Event,
+        started_at: Timestamp,
+    ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
+        if self.failed_relays.contains(&key.relay) {
+            return Err(PersistenceError("injected attempt start failure".into()));
+        }
+        self.inner
+            .start_lane_attempt(key, revision, event, started_at)
+    }
+    fn finish_lane_attempt(
+        &mut self,
+        key: &nmp_store::LaneKey,
+        revision: u64,
+        ordinal: u64,
+        outcome: AttemptOutcome,
+        finished_at: Timestamp,
+    ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+        self.inner
+            .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
+    }
     fn accept_ephemeral(
         &mut self,
         frozen_id: nostr::EventId,
@@ -553,7 +702,7 @@ fn wire_sub_string(sub_id: &SubId) -> String {
     format!("{}", sub_id.1)
 }
 
-fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
+fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot,
@@ -561,6 +710,23 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec
         },
         url.clone(),
     ))
+}
+
+fn mark_written<S: EventStore>(
+    core: &mut EngineCore<S>,
+    effects: &[Effect],
+    relay: &RelayUrl,
+) -> Vec<Effect> {
+    let correlation = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PublishEvent(candidate, _, correlation) if candidate == relay => {
+                Some(*correlation)
+            }
+            _ => None,
+        })
+        .expect("expected a persisted scheduled publish for connected relay");
+    core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written))
 }
 
 fn publish_private<S: EventStore>(
@@ -2169,12 +2335,22 @@ fn enqueue_is_not_converged() {
         .count();
     assert_eq!(publish_count, 1, "at-most-once sends exactly once");
 
-    let effects = core.handle(EngineMsg::RelayDisconnected(0));
+    let correlation = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PublishEvent(relay, _, correlation) if relay == &relay0 => Some(*correlation),
+            _ => None,
+        })
+        .unwrap();
+    let effects = core.handle(EngineMsg::EventHandoff(
+        correlation,
+        HandoffResult::Ambiguous,
+    ));
     assert!(
         effects.iter().any(
-            |e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::GaveUp(r)) if *rid == amo_id && r == &relay0)
+            |e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::OutcomeUnknown(r)) if *rid == amo_id && r == &relay0)
         ),
-        "a relay dropping before it acks must surface as a terminal GaveUp"
+        "an ambiguous at-most-once handoff must become terminal OutcomeUnknown"
     );
     assert!(
         !effects
@@ -2182,6 +2358,199 @@ fn enqueue_is_not_converged() {
             .any(|e| matches!(e, Effect::PublishEvent(..))),
         "no retry Effect::PublishEvent after a failure -- no blind retry"
     );
+}
+
+#[test]
+fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://auth-wait.example").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth-wait.redb");
+
+    let (intent, event) = {
+        let mut core = EngineCore::new(
+            RedbStore::open(&path).unwrap(),
+            Box::new(FixtureDirectory::new()),
+            10,
+        );
+        let (_, event, offline) = publish_private(
+            &mut core,
+            &author,
+            [relay.clone()],
+            CapturingReceiptSink::default(),
+        );
+        assert!(offline
+            .iter()
+            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay)));
+        assert!(!offline
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        drop(core);
+
+        let store = RedbStore::open(&path).unwrap();
+        let intent = store.recover_outbox()[0].intent_id;
+        assert!(store.recover_attempts(intent).unwrap().is_empty());
+        drop(store);
+
+        let mut core = EngineCore::new(
+            RedbStore::open(&path).unwrap(),
+            Box::new(FixtureDirectory::new()),
+            10,
+        );
+        core.recover_on_boot();
+        let first = connect(&mut core, 0, &relay);
+        mark_written(&mut core, &first, &relay);
+        let auth = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            RelayFrame::from(RelayMessage::ok(
+                event.id,
+                false,
+                "auth-required: authenticate",
+            )),
+        ));
+        assert!(!auth
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        assert_eq!(
+            core.next_deadline(),
+            None,
+            "AUTH wait has no polling deadline"
+        );
+        assert!(!core
+            .handle(EngineMsg::Tick(Timestamp::from(100_000)))
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+
+        let second = core.handle(EngineMsg::RelayAuthReady(relay.clone()));
+        assert_eq!(
+            second
+                .iter()
+                .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &relay))
+                .count(),
+            1
+        );
+        (intent, event)
+    };
+
+    let store = RedbStore::open(&path).unwrap();
+    let attempts = store.recover_attempts(intent).unwrap();
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|attempt| attempt.ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "offline/AUTH time allocates nothing; explicit AUTH wake allocates the next ordinal"
+    );
+    assert!(attempts.iter().all(|attempt| attempt.event == event));
+}
+
+#[test]
+fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://transient-retry.example").unwrap();
+    let mut core = new_core(FixtureDirectory::new());
+    connect(&mut core, 0, &relay);
+    let (_, event, first) = publish_private(
+        &mut core,
+        &author,
+        [relay.clone()],
+        CapturingReceiptSink::default(),
+    );
+    mark_written(&mut core, &first, &relay);
+    let classified = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        RelayFrame::from(RelayMessage::ok(event.id, false, "rate-limited: slow down")),
+    ));
+    assert!(!classified
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    let due = core
+        .next_deadline()
+        .expect("transient retry must arm one deadline");
+    assert!((3..8).contains(&due.as_secs()));
+
+    assert!(!core
+        .handle(EngineMsg::Tick(Timestamp::from(due.as_secs() - 1)))
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    let retry = core.handle(EngineMsg::Tick(due));
+    assert_eq!(
+        retry
+            .iter()
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, e, _) if r == &relay && e.id == event.id))
+            .count(),
+        1
+    );
+    assert_eq!(
+        core.next_deadline(),
+        None,
+        "the exposed due row is consumed before the next deadline is armed"
+    );
+    assert!(
+        !core
+            .handle(EngineMsg::Tick(due))
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))),
+        "repeating the same tick cannot duplicate an already in-flight lane"
+    );
+}
+
+#[test]
+fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
+    let author = Keys::generate();
+    let mut relays = (0..33)
+        .map(|i| RelayUrl::parse(&format!("wss://cap-{i:02}.example")).unwrap())
+        .collect::<Vec<_>>();
+    relays.sort();
+    let mut core = new_core(FixtureDirectory::new());
+    for (slot, relay) in relays.iter().enumerate() {
+        connect(&mut core, slot as u32, relay);
+    }
+    let (_, event, first_wave) = publish_private(
+        &mut core,
+        &author,
+        relays.clone(),
+        CapturingReceiptSink::default(),
+    );
+    let published = first_wave
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::PublishEvent(relay, _, _) => Some(relay.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(published, relays[..32]);
+
+    let first = &relays[0];
+    mark_written(&mut core, &first_wave, first);
+    let released = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        RelayFrame::from(RelayMessage::ok(event.id, true, "")),
+    ));
+    assert_eq!(
+        released
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::PublishEvent(relay, _, _) => Some(relay.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![relays[32].clone()],
+        "freeing one global slot schedules the stable next lane"
+    );
+    assert!(!released
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == first)));
 }
 
 fn all_row_deltas(effects: &[Effect]) -> Vec<&RowDelta> {
@@ -2641,6 +3010,9 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     assert!(routed
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &nack)));
+    mark_written(&mut core, &routed, &ack);
+    mark_written(&mut core, &routed, &nack);
+    mark_written(&mut core, &routed, &drop_relay);
 
     let acked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -2670,10 +3042,13 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     )));
 
     let dropped = core.handle(EngineMsg::RelayDisconnected(2));
-    assert!(dropped.iter().any(|effect| matches!(
-        effect,
-        Effect::EmitReceipt(id, WriteStatus::GaveUp(relay)) if *id == id_a && relay == &drop_relay
-    )));
+    assert!(!dropped.iter().any(
+        |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::GaveUp(_)) if *id == id_a)
+    ));
+    assert!(
+        core.next_deadline().is_some(),
+        "durable disconnect arms retry eligibility"
+    );
 }
 
 #[test]
@@ -2685,6 +3060,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     let mut core = new_core(dir);
     activate(&mut core, &a);
     connect(&mut core, 0, &source);
+    connect(&mut core, 1, &out);
     let template = unsigned(&a, 1, "relay wins signing race");
     let sink_a = CapturingReceiptSink::default();
     let sink_b = CapturingReceiptSink::default();
@@ -2726,7 +3102,24 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
             .iter()
             .filter(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &out))
             .count(),
-        2
+        1,
+        "the per-relay cap admits only one co-owner lane at a time"
+    );
+    mark_written(&mut core, &effects, &out);
+    let advanced = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
+    ));
+    assert_eq!(
+        advanced
+            .iter()
+            .filter(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &out))
+            .count(),
+        1,
+        "terminalizing the first lane wakes the next fair lane"
     );
     assert!(core
         .handle(EngineMsg::SignerCompleted(
@@ -3101,6 +3494,8 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     let store = SharedFailStartStore::new([blocked.clone()]);
     let sink = CapturingReceiptSink::default();
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    connect(&mut core, 0, &good);
+    connect(&mut core, 1, &blocked);
 
     let (id, _, effects) = publish_private(
         &mut core,
@@ -3144,6 +3539,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
     let sink = CapturingReceiptSink::default();
+    connect(&mut core, 0, &relay);
 
     let (id, _signed, effects) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
 
@@ -3295,6 +3691,8 @@ fn not_handed_off_and_ambiguous_never_emit_any_receipt_status() {
     );
     let mut core = new_core(dir);
     let sink = CapturingReceiptSink::default();
+    connect(&mut core, 0, &relay_a);
+    connect(&mut core, 1, &relay_b);
 
     let (_id, _signed, effects) = publish_private(
         &mut core,
@@ -3316,18 +3714,16 @@ fn not_handed_off_and_ambiguous_never_emit_any_receipt_status() {
         correlation_for(&relay_a),
         HandoffResult::NotHandedOff,
     ));
-    assert!(
-        not_handed_off.is_empty(),
-        "NotHandedOff must produce no effects, got {not_handed_off:?}"
-    );
+    assert!(!not_handed_off
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitReceipt(..))));
     let ambiguous = core.handle(EngineMsg::EventHandoff(
         correlation_for(&relay_b),
         HandoffResult::Ambiguous,
     ));
-    assert!(
-        ambiguous.is_empty(),
-        "Ambiguous must produce no effects, got {ambiguous:?}"
-    );
+    assert!(!ambiguous
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitReceipt(..))));
     assert!(
         !sink
             .0
@@ -3363,6 +3759,8 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     let store = SharedFailStartStore::new([a.clone(), b.clone()]);
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
     let sink = CapturingReceiptSink::default();
+    connect(&mut core, 0, &a);
+    connect(&mut core, 1, &b);
 
     let (id, _, effects) =
         publish_private(&mut core, &author, [a.clone(), b.clone()], sink.clone());
@@ -3400,12 +3798,14 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
         },
         good.clone(),
     ));
-    let (id, signed, _) = publish_private(
+    connect(&mut core, 1, &blocked);
+    let (id, signed, scheduled) = publish_private(
         &mut core,
         &author,
         [good.clone(), blocked.clone()],
         CapturingReceiptSink::default(),
     );
+    mark_written(&mut core, &scheduled, &good);
     let acked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -3441,6 +3841,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
             Box::new(FixtureDirectory::new()),
             10,
         );
+        connect(&mut first, 0, &relay);
         let (id, _, effects) = publish_private(
             &mut first,
             &author,
@@ -3458,7 +3859,11 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         Box::new(FixtureDirectory::new()),
         10,
     );
-    assert!(still_blocked.recover_on_boot().is_empty());
+    assert!(still_blocked
+        .recover_on_boot()
+        .iter()
+        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay)));
+    connect(&mut still_blocked, 0, &relay);
     let replay = CapturingReceiptSink::default();
     assert!(still_blocked
         .reattach_receipt(receipt, Box::new(replay.clone()))
@@ -3475,7 +3880,11 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         Box::new(FixtureDirectory::new()),
         10,
     );
-    let effects = recovered.recover_on_boot();
+    let boot = recovered.recover_on_boot();
+    assert!(boot
+        .iter()
+        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay)));
+    let effects = connect(&mut recovered, 0, &relay);
     assert_eq!(
         effects
             .iter()
@@ -3506,6 +3915,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
             Box::new(directory),
             10,
         );
+        connect(&mut core, 0, &relay);
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -3542,7 +3952,8 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         Box::new(FixtureDirectory::new()),
         10,
     );
-    let effects = recovered.recover_on_boot();
+    recovered.recover_on_boot();
+    let effects = connect(&mut recovered, 0, &relay);
     assert_eq!(
         effects
             .iter()
@@ -3571,6 +3982,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
             Box::new(directory),
             10,
         );
+        connect(&mut core, 0, &old);
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -3600,7 +4012,8 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
             Box::new(changed),
             10,
         );
-        let effects = core.recover_on_boot();
+        core.recover_on_boot();
+        let effects = connect(&mut core, 0, &old);
         let old_event = effects
             .iter()
             .find_map(|effect| match effect {
@@ -3614,13 +4027,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &new)));
-        core.handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            old.clone(),
-        ));
+        mark_written(&mut core, &effects, &old);
         let acked = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
@@ -3660,7 +4067,8 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
     // so it is correctly not published again.
     let changed = FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [new.clone()]);
     let mut core = EngineCore::new(RedbFailStartStore::open(&path, []), Box::new(changed), 10);
-    let effects = core.recover_on_boot();
+    core.recover_on_boot();
+    let effects = connect(&mut core, 0, &new);
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &old)));
@@ -3755,6 +4163,8 @@ fn write_ack_per_relay() {
         2,
         "a durable AuthorOutbox write reaches both of the author's write relays"
     );
+    mark_written(&mut core, &effects, &relay_ok);
+    mark_written(&mut core, &effects, &relay_bad);
 
     let ok_frame = RelayFrame::from(RelayMessage::ok(signed.id, true, ""));
     let effects = core.handle(EngineMsg::RelayFrame(
@@ -3817,11 +4227,12 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
     ));
     let (id, generation, unsigned) = find_sign_request(&effects);
     let signed = unsigned.sign_with_keys(&a).unwrap();
-    core.handle(EngineMsg::SignerCompleted(
+    let scheduled = core.handle(EngineMsg::SignerCompleted(
         id,
         generation,
         Ok(signed.clone()),
     ));
+    mark_written(&mut core, &scheduled, &relay);
     let frame = || RelayFrame::from(RelayMessage::ok(signed.id, true, ""));
     let failed = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -4377,6 +4788,7 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
         );
     let mut core = new_core(dir);
     activate(&mut core, &author);
+    connect(&mut core, 0, &read_relay);
 
     let sink = CapturingReceiptSink::default();
     let effects = core.handle(EngineMsg::Publish(

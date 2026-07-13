@@ -56,9 +56,11 @@ use nmp_router::{
 };
 use nmp_signer::SignerError;
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, CompensateOutcome, CoverageKey,
-    EventStore, IntentId, IntentSigState, PersistenceError, PromoteOutcome, ReceiptState,
-    RelayObserved, WriteDurability,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome,
+    CloseIntentOutcome, CompensateOutcome, CoverageKey, DeadlineKind, EventStore, HandoffEvidence,
+    InFlightPhase, IntentId, IntentSigState, LaneKey, LaneState, PersistenceError,
+    PostHandoffState, PromoteOutcome, ReceiptState, RecoveredLane, RelayObserved, TransientCause,
+    WriteDurability,
 };
 use nmp_transport::{
     AttemptCorrelation, HandoffResult, RelayFrame, RelayHandle as TransportRelayHandle, RelayHealth,
@@ -73,6 +75,144 @@ use crate::outbox::{ReceiptSink, WriteStatus};
 /// again on the same generation -- `tick`'s own staleness sweep is the only
 /// caller of this constant).
 const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
+
+const RETRY_INITIAL_SECS: u64 = 3;
+const RETRY_MAX_SECS: u64 = 300;
+const RETRY_JITTER_MAX_SECS: u64 = 5;
+const ACK_TIMEOUT_SECS: u64 = 30;
+const MAX_GLOBAL_ATTEMPTS: usize = 32;
+const DEADLINE_READ_BATCH: usize = 1_024;
+
+fn retry_delay_secs(key: &LaneKey, ordinal: u64) -> u64 {
+    let exponent = ordinal.saturating_sub(1).min(63) as u32;
+    let base = RETRY_INITIAL_SECS
+        .checked_shl(exponent)
+        .unwrap_or(u64::MAX)
+        .min(RETRY_MAX_SECS);
+
+    // FNV-1a is used as a deliberately tiny, fully specified stable hash.
+    // Jitter is policy spreading, not a security boundary; unlike
+    // DefaultHasher this remains identical across processes and releases.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in key
+        .intent_id
+        .0
+        .to_be_bytes()
+        .into_iter()
+        .chain(key.relay.as_str().as_bytes().iter().copied())
+        .chain(ordinal.to_be_bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    base.saturating_add(hash % RETRY_JITTER_MAX_SECS)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayAckClass {
+    Acked,
+    Transient(TransientCause),
+    WaitingAuth,
+    Rejected,
+}
+
+fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
+    if status {
+        return RelayAckClass::Acked;
+    }
+    let Some((prefix, _)) = message.split_once(':') else {
+        return RelayAckClass::Rejected;
+    };
+    match prefix {
+        "duplicate" => RelayAckClass::Acked,
+        "rate-limited" => RelayAckClass::Transient(TransientCause::RelayRateLimited),
+        "error" => RelayAckClass::Transient(TransientCause::RelayError),
+        "auth-required" => RelayAckClass::WaitingAuth,
+        "invalid" | "pow" | "blocked" | "restricted" | "mute" => RelayAckClass::Rejected,
+        _ => RelayAckClass::Rejected,
+    }
+}
+
+#[cfg(test)]
+mod durable_retry_policy_tests {
+    use super::*;
+
+    fn key() -> LaneKey {
+        LaneKey {
+            intent_id: IntentId(42),
+            relay: RelayUrl::parse("wss://retry-policy.example").unwrap(),
+        }
+    }
+
+    #[test]
+    fn standardized_ok_prefixes_and_unknown_default_are_exact() {
+        assert_eq!(classify_relay_ack(true, "anything"), RelayAckClass::Acked);
+        assert_eq!(
+            classify_relay_ack(false, "duplicate: already have this event"),
+            RelayAckClass::Acked
+        );
+        assert_eq!(
+            classify_relay_ack(false, "rate-limited: slow down"),
+            RelayAckClass::Transient(TransientCause::RelayRateLimited)
+        );
+        assert_eq!(
+            classify_relay_ack(false, "error: temporary relay failure"),
+            RelayAckClass::Transient(TransientCause::RelayError)
+        );
+        assert_eq!(
+            classify_relay_ack(false, "auth-required: authenticate"),
+            RelayAckClass::WaitingAuth
+        );
+        for prefix in ["invalid", "pow", "blocked", "restricted", "mute"] {
+            assert_eq!(
+                classify_relay_ack(false, &format!("{prefix}: reason")),
+                RelayAckClass::Rejected
+            );
+        }
+        for raw in [
+            "unknown: reason",
+            "malformed without delimiter",
+            "duplicate but only in free-form text",
+            "Duplicate: prefix matching is case-sensitive",
+            " rate-limited: leading whitespace is not a prefix",
+        ] {
+            assert_eq!(
+                classify_relay_ack(false, raw),
+                RelayAckClass::Rejected,
+                "free-form relay text must never be heuristically classified: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_and_deterministic_from_persisted_identity() {
+        let key = key();
+        let first = retry_delay_secs(&key, 1);
+        assert!((3..8).contains(&first));
+        assert_eq!(first, retry_delay_secs(&key, 1));
+        for ordinal in 1..=16 {
+            let delay = retry_delay_secs(&key, ordinal);
+            let exponent = ordinal.saturating_sub(1).min(63) as u32;
+            let base = RETRY_INITIAL_SECS
+                .checked_shl(exponent)
+                .unwrap_or(u64::MAX)
+                .min(RETRY_MAX_SECS);
+            assert!((base..base + RETRY_JITTER_MAX_SECS).contains(&delay));
+        }
+        assert!((300..305).contains(&retry_delay_secs(&key, u64::MAX)));
+        assert_ne!(
+            retry_delay_secs(&key, 1),
+            retry_delay_secs(
+                &LaneKey {
+                    intent_id: IntentId(43),
+                    relay: key.relay,
+                },
+                1
+            ),
+            "this fixture must prove persisted attempt identity participates in jitter"
+        );
+    }
+}
 
 /// NIP-65 Relay List Metadata — the kind the self-bootstrapping outbox (M5)
 /// auto-discovers for any author the current demand references but whose
@@ -249,6 +389,10 @@ pub enum EngineMsg {
     /// `EngineCore::on_event_handoff`'s doc for what this does and does
     /// NOT do in this unit.
     EventHandoff(AttemptCorrelation, HandoffResult),
+    /// AUTH negotiation (#8) calls this seam after the relay has accepted
+    /// authentication. #95 owns only waking persisted WaitingAuth lanes;
+    /// it does not negotiate NIP-42 itself.
+    RelayAuthReady(RelayUrl),
     Tick(Timestamp),
 }
 
@@ -321,6 +465,10 @@ pub enum Effect {
     /// scoped and reports back exactly one typed `HandoffResult`, never
     /// silently carried into a later connection.
     PublishEvent(RelayUrl, SignedEvent, AttemptCorrelation),
+    /// Ensure a write-only relay is dialing without creating an attempt.
+    /// An ordinal is allocated only after `RelayConnected` proves the relay
+    /// online, so offline time consumes zero attempts.
+    EnsureRelay(RelayUrl),
 }
 
 /// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
@@ -542,6 +690,11 @@ pub struct EngineCore<S: EventStore> {
     /// the richer policy explicitly deferred here.
     store_degraded: Option<String>,
     transport_degraded: Option<String>,
+    /// A failed durable-lane deadline transition is removed from the armed
+    /// deadline set until another real engine message retries the reducer.
+    /// This prevents a persistent I/O error from becoming recv_timeout(0)
+    /// busy-spin while retaining the due row durably for recovery.
+    retry_scheduler_blocked: bool,
     /// Test-only work counters for the affected-handle invalidation
     /// falsifier. Production pays no field or increment cost.
     #[cfg(test)]
@@ -555,6 +708,9 @@ pub struct EngineCore<S: EventStore> {
 struct AttemptCorrelationTarget {
     receipt: ReceiptId,
     relay: RelayUrl,
+    /// Durable/AtMostOnce correlations identify the exact persisted lane
+    /// ordinal. Ephemeral correlations have no outbox row.
+    lane: Option<(IntentId, u64)>,
     /// Ephemeral drops its `PendingWrite` immediately after producing the
     /// handoff effects, so each correlation snapshots the observer set that
     /// must still receive a truthful async `Sent`. Durable/AtMostOnce leave
@@ -598,6 +754,7 @@ impl<S: EventStore> EngineCore<S> {
             discovered_private_relays_rejected: 0,
             store_degraded: None,
             transport_degraded: None,
+            retry_scheduler_blocked: false,
             #[cfg(test)]
             projection_store_queries: Cell::new(0),
             #[cfg(test)]
@@ -640,26 +797,69 @@ impl<S: EventStore> EngineCore<S> {
         Ok(AttemptCorrelation(id))
     }
 
+    fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
+        self.pending
+            .iter()
+            .find_map(|(id, pending)| (pending.intent_id == Some(intent_id)).then_some(*id))
+    }
+
+    fn emit_write_status(&self, id: ReceiptId, status: WriteStatus, effects: &mut Vec<Effect>) {
+        if let Some(pending) = self.pending.get(&id) {
+            Self::notify(pending, status.clone());
+        }
+        effects.push(Effect::EmitReceipt(id, status));
+    }
+
+    fn remove_active_lane(&mut self, id: ReceiptId, relay: &RelayUrl) {
+        if let Some(pending) = self.pending.get_mut(&id) {
+            pending.pending_relays.remove(relay);
+            pending.attempt_ordinals.remove(relay);
+        }
+    }
+
+    fn close_if_all_lanes_terminal(&mut self, id: ReceiptId) {
+        let Some((intent_id, event_id)) = self
+            .pending
+            .get(&id)
+            .filter(|pending| pending.route_blocked_relays.is_empty())
+            .and_then(|pending| Some((pending.intent_id?, pending.event_id)))
+        else {
+            return;
+        };
+        let Ok(lanes) = self.resolver.store().recover_outbox_lanes(intent_id) else {
+            return;
+        };
+        if lanes.is_empty()
+            || lanes
+                .iter()
+                .any(|lane| !matches!(lane.state, LaneState::Terminal { .. }))
+        {
+            return;
+        }
+        let Ok(CloseIntentOutcome::Closed | CloseIntentOutcome::AlreadyClosed) =
+            self.resolver.store_mut().close_terminal_intent(intent_id)
+        else {
+            return;
+        };
+        self.pending.remove(&id);
+        if let Some(event_id) = event_id {
+            if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
+                receipts.remove(&id);
+                if receipts.is_empty() {
+                    self.event_to_receipts.remove(&event_id);
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn set_next_attempt_correlation_for_test(&mut self, next: Option<u64>) {
         self.next_attempt_correlation = next;
     }
 
-    /// The one, ever, resolution of `correlation`'s `HandoffResult` (issue
-    /// #93). An unknown correlation (already resolved, or never minted by
-    /// this process) is a structural no-op -- this is what makes a
-    /// defensive duplicate delivery harmless even though the transport side
-    /// never actually produces one.
-    ///
-    /// `Written` is the ONLY case that emits `WriteStatus::Sent` -- the
-    /// synchronous "queue-accepted" `Sent` this reducer used to emit right
-    /// after handing a frame to the pool is gone; a claim of `Sent` is now
-    /// truthful only once transport has actually confirmed the write.
-    /// `NotHandedOff`/`Ambiguous` stay a typed INTERNAL fact only: no
-    /// receipt status, no retry action -- #96 wires governed visibility,
-    /// #95 wires the scheduler that acts on it. This unit's whole job is
-    /// making sure the fact reaches the engine at all, correlated and
-    /// generation-safe, never silently dropped or requeued by transport.
+    /// Consume the one, ever, typed transport handoff for an exact persisted
+    /// lane ordinal. The next lane fact commits before any receipt claim or
+    /// subsequent wire effect: transport never becomes a second retry owner.
     fn on_event_handoff(
         &mut self,
         correlation: AttemptCorrelation,
@@ -669,30 +869,377 @@ impl<S: EventStore> EngineCore<S> {
         let Some(target) = self.attempt_correlations.remove(&correlation) else {
             return effects;
         };
-        if let HandoffResult::Written = result {
-            if let Some(pending) = self.pending.get(&target.receipt) {
-                Self::notify(pending, WriteStatus::Sent(target.relay.clone()));
-                effects.push(Effect::EmitReceipt(
-                    target.receipt,
-                    WriteStatus::Sent(target.relay.clone()),
-                ));
-            } else if !target.ephemeral_sinks.is_empty() {
+
+        let Some((intent_id, ordinal)) = target.lane else {
+            if result == HandoffResult::Written && !target.ephemeral_sinks.is_empty() {
                 let status = WriteStatus::Sent(target.relay.clone());
                 for sink in &target.ephemeral_sinks {
                     sink.on_status(status.clone());
                 }
                 effects.push(Effect::EmitReceipt(target.receipt, status));
             }
+            return effects;
+        };
+
+        let key = LaneKey {
+            intent_id,
+            relay: target.relay.clone(),
+        };
+        let Ok(Some(lane)) = self
+            .resolver
+            .store()
+            .recover_outbox_lanes(intent_id)
+            .map(|lanes| lanes.into_iter().find(|lane| lane.key == key))
+        else {
+            return effects;
+        };
+        if !matches!(
+            lane.state,
+            LaneState::InFlight {
+                ordinal: current,
+                phase: InFlightPhase::AwaitingHandoff,
+            } if current == ordinal
+        ) {
+            return effects;
         }
+
+        let durability = self.pending.get(&target.receipt).map(|p| p.durability);
+        let detail = AttemptHandoffDetail {
+            at: self.clock,
+            result: match result {
+                HandoffResult::NotHandedOff => HandoffEvidence::NotHandedOff,
+                HandoffResult::Written => HandoffEvidence::Written,
+                HandoffResult::Ambiguous => HandoffEvidence::Ambiguous,
+            },
+        };
+        let next = match (result, durability) {
+            (HandoffResult::NotHandedOff, _) => PostHandoffState::WaitingConnection,
+            (HandoffResult::Written, _) | (HandoffResult::Ambiguous, Some(Durability::Durable)) => {
+                PostHandoffState::AwaitingAck {
+                    deadline: self.clock + ACK_TIMEOUT_SECS,
+                }
+            }
+            (HandoffResult::Ambiguous, Some(Durability::AtMostOnce)) => {
+                PostHandoffState::Terminal {
+                    outcome: AttemptOutcome::OutcomeUnknown,
+                    finished_at: self.clock,
+                }
+            }
+            (HandoffResult::Ambiguous, _) => return effects,
+        };
+        if self
+            .resolver
+            .store_mut()
+            .record_lane_handoff(&key, lane.revision, ordinal, detail, next)
+            .is_err()
+        {
+            return effects;
+        }
+
+        match (result, durability) {
+            (HandoffResult::Written, _) => {
+                self.emit_write_status(
+                    target.receipt,
+                    WriteStatus::Sent(target.relay),
+                    &mut effects,
+                );
+            }
+            (HandoffResult::Ambiguous, Some(Durability::AtMostOnce)) => {
+                self.remove_active_lane(target.receipt, &target.relay);
+                self.emit_write_status(
+                    target.receipt,
+                    WriteStatus::OutcomeUnknown(target.relay),
+                    &mut effects,
+                );
+                self.close_if_all_lanes_terminal(target.receipt);
+            }
+            (HandoffResult::NotHandedOff, _) => {
+                self.remove_active_lane(target.receipt, &target.relay);
+                self.connected_relays.remove(&target.relay);
+                effects.push(Effect::EnsureRelay(target.relay));
+            }
+            (HandoffResult::Ambiguous, _) => {}
+        }
+        effects.extend(self.schedule_ready(self.clock));
+        effects
+    }
+
+    fn recover_all_lanes(&self) -> Result<Vec<(ReceiptId, RecoveredLane)>, PersistenceError> {
+        let mut lanes = Vec::new();
+        for (id, pending) in &self.pending {
+            let Some(intent_id) = pending.intent_id else {
+                continue;
+            };
+            lanes.extend(
+                self.resolver
+                    .store()
+                    .recover_outbox_lanes(intent_id)?
+                    .into_iter()
+                    .map(|lane| (*id, lane)),
+            );
+        }
+        lanes.sort_by(|(_, left), (_, right)| left.key.cmp(&right.key));
+        Ok(lanes)
+    }
+
+    /// The only path that allocates durable attempt ordinals. Eligibility is
+    /// persisted first; this reducer then applies stable ordering and the
+    /// ratified 32-global/1-per-relay caps before committing Started.
+    fn schedule_ready(&mut self, now: Timestamp) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let Ok(lanes) = self.recover_all_lanes() else {
+            self.retry_scheduler_blocked = true;
+            return effects;
+        };
+
+        let mut in_flight_relays = BTreeSet::new();
+        let mut in_flight = 0usize;
+        let mut eligible = Vec::new();
+        for (id, lane) in lanes {
+            match lane.state {
+                LaneState::InFlight { .. } | LaneState::LegacyInFlight { .. } => {
+                    in_flight = in_flight.saturating_add(1);
+                    in_flight_relays.insert(lane.key.relay.clone());
+                }
+                LaneState::Eligible { since } => eligible.push((since, id, lane)),
+                _ => {}
+            }
+        }
+        eligible.sort_by(|(at_a, _, lane_a), (at_b, _, lane_b)| {
+            at_a.cmp(at_b).then_with(|| lane_a.key.cmp(&lane_b.key))
+        });
+
+        for (_, id, lane) in eligible {
+            if !self.connected_relays.contains(&lane.key.relay) {
+                if self
+                    .resolver
+                    .store_mut()
+                    .set_lane_waiting(&lane.key, lane.revision, false)
+                    .is_ok()
+                {
+                    effects.push(Effect::EnsureRelay(lane.key.relay));
+                } else {
+                    self.retry_scheduler_blocked = true;
+                }
+                continue;
+            }
+            if in_flight >= MAX_GLOBAL_ATTEMPTS || in_flight_relays.contains(&lane.key.relay) {
+                continue;
+            }
+            let Some(event) = self.pending.get(&id).map(|pending| pending.frozen.clone()) else {
+                continue;
+            };
+            let Ok(correlation) = self.alloc_attempt_correlation() else {
+                continue;
+            };
+            let (attempt, advanced) = match self.resolver.store_mut().start_lane_attempt(
+                &lane.key,
+                lane.revision,
+                event.clone(),
+                now,
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(pending) = self.pending.get_mut(&id) {
+                        pending.unstarted_relays.insert(lane.key.relay.clone());
+                    }
+                    self.emit_write_status(
+                        id,
+                        WriteStatus::PersistenceBlocked(lane.key.relay),
+                        &mut effects,
+                    );
+                    continue;
+                }
+            };
+            debug_assert_eq!(
+                advanced.state,
+                LaneState::InFlight {
+                    ordinal: attempt.ordinal,
+                    phase: InFlightPhase::AwaitingHandoff,
+                }
+            );
+            if let Some(pending) = self.pending.get_mut(&id) {
+                pending.unstarted_relays.remove(&lane.key.relay);
+                pending.pending_relays.insert(lane.key.relay.clone());
+                pending
+                    .attempt_ordinals
+                    .insert(lane.key.relay.clone(), attempt.ordinal);
+            }
+            self.event_to_receipts
+                .entry(event.id)
+                .or_default()
+                .insert(id);
+            self.attempt_correlations.insert(
+                correlation,
+                AttemptCorrelationTarget {
+                    receipt: id,
+                    relay: lane.key.relay.clone(),
+                    lane: Some((lane.key.intent_id, attempt.ordinal)),
+                    ephemeral_sinks: Vec::new(),
+                },
+            );
+            effects.push(Effect::PublishEvent(
+                lane.key.relay.clone(),
+                event,
+                correlation,
+            ));
+            in_flight += 1;
+            in_flight_relays.insert(lane.key.relay);
+        }
+        effects
+    }
+
+    fn wake_relay_lanes(&mut self, relay: &RelayUrl, auth_only: bool) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let Ok(lanes) = self.recover_all_lanes() else {
+            self.retry_scheduler_blocked = true;
+            return effects;
+        };
+        for (_, lane) in lanes {
+            if &lane.key.relay != relay {
+                continue;
+            }
+            let should_wake = if auth_only {
+                matches!(lane.state, LaneState::WaitingAuth)
+            } else {
+                matches!(lane.state, LaneState::WaitingConnection)
+            };
+            if !should_wake {
+                continue;
+            }
+            if self
+                .resolver
+                .store_mut()
+                .set_lane_eligible(&lane.key, lane.revision, self.clock)
+                .is_err()
+            {
+                self.retry_scheduler_blocked = true;
+            }
+        }
+        effects.extend(self.schedule_ready(self.clock));
+        effects
+    }
+
+    fn consume_due_outbox_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        loop {
+            let due = match self
+                .resolver
+                .store()
+                .due_outbox_deadlines(now, DEADLINE_READ_BATCH)
+            {
+                Ok(due) => due,
+                Err(_) => {
+                    self.retry_scheduler_blocked = true;
+                    break;
+                }
+            };
+            if due.is_empty() {
+                break;
+            }
+            for deadline in due {
+                let id = self.receipt_for_intent(deadline.key.intent_id);
+                let lane = self
+                    .resolver
+                    .store()
+                    .recover_outbox_lanes(deadline.key.intent_id)
+                    .ok()
+                    .and_then(|lanes| {
+                        lanes.into_iter().find(|lane| {
+                            lane.key == deadline.key && lane.revision == deadline.lane_revision
+                        })
+                    });
+                let Some(lane) = lane else {
+                    self.retry_scheduler_blocked = true;
+                    continue;
+                };
+                match (deadline.kind, lane.state.clone()) {
+                    (DeadlineKind::RetryEligible, LaneState::Transient { .. }) => {
+                        if self
+                            .resolver
+                            .store_mut()
+                            .set_lane_eligible(&lane.key, lane.revision, deadline.at)
+                            .is_err()
+                        {
+                            self.retry_scheduler_blocked = true;
+                        }
+                    }
+                    (
+                        DeadlineKind::AckTimeout,
+                        LaneState::InFlight {
+                            ordinal,
+                            phase: InFlightPhase::AwaitingAck { .. },
+                        },
+                    ) => {
+                        let durability =
+                            id.and_then(|id| self.pending.get(&id).map(|p| p.durability));
+                        if durability == Some(Durability::AtMostOnce) {
+                            if self
+                                .resolver
+                                .store_mut()
+                                .finish_lane_attempt(
+                                    &lane.key,
+                                    lane.revision,
+                                    ordinal,
+                                    AttemptOutcome::OutcomeUnknown,
+                                    now,
+                                )
+                                .is_ok()
+                            {
+                                if let Some(id) = id {
+                                    self.remove_active_lane(id, &lane.key.relay);
+                                    self.emit_write_status(
+                                        id,
+                                        WriteStatus::OutcomeUnknown(lane.key.relay.clone()),
+                                        &mut effects,
+                                    );
+                                    self.close_if_all_lanes_terminal(id);
+                                }
+                            } else {
+                                self.retry_scheduler_blocked = true;
+                            }
+                        } else {
+                            let eligible_at = now + retry_delay_secs(&lane.key, ordinal);
+                            if self
+                                .resolver
+                                .store_mut()
+                                .set_lane_transient(
+                                    &lane.key,
+                                    lane.revision,
+                                    ordinal,
+                                    eligible_at,
+                                    TransientCause::AckTimeout,
+                                    Some("ack timeout".to_string()),
+                                )
+                                .is_ok()
+                            {
+                                if let Some(id) = id {
+                                    self.remove_active_lane(id, &lane.key.relay);
+                                }
+                            } else {
+                                self.retry_scheduler_blocked = true;
+                            }
+                        }
+                    }
+                    _ => self.retry_scheduler_blocked = true,
+                }
+            }
+            if self.retry_scheduler_blocked {
+                break;
+            }
+        }
+        effects.extend(self.schedule_ready(now));
         effects
     }
 
     /// Rebuild volatile ownership from the journal without reinserting a
     /// single row. Called exactly once by the runtime before its first
-    /// command. No retry clock is armed here: #79 owns eligibility policy.
+    /// command. Retry clocks are reconstructed only from persisted lane facts.
     pub fn recover_on_boot(&mut self) -> Vec<Effect> {
         let recovered = self.resolver.store().recover_outbox();
         let mut effects = Vec::new();
+        let mut recovered_ids = Vec::new();
+
         for intent in recovered {
             let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
             let routing_valid = parsed_routing.is_some();
@@ -706,7 +1253,6 @@ impl<S: EventStore> EngineCore<S> {
                 WriteDurability::Durable => Durability::Durable,
                 WriteDurability::AtMostOnce => Durability::AtMostOnce,
             };
-            let attempts = self.resolver.store().recover_attempts(intent.intent_id);
             let already_signed = intent.sig_state == IntentSigState::Signed;
             self.pending.insert(
                 id,
@@ -728,187 +1274,121 @@ impl<S: EventStore> EngineCore<S> {
                     attempt_ordinals: BTreeMap::new(),
                 },
             );
+            recovered_ids.push(id);
 
             if !already_signed {
                 continue;
             }
+            self.event_to_receipts
+                .entry(intent.frozen.id)
+                .or_default()
+                .insert(id);
 
-            let Ok(attempts) = attempts else {
-                // Corrupt/unknown attempt evidence must not panic and must
-                // not make the parent journal disappear. Keep the rebuilt
-                // obligation owned, fail closed on wire output, and await an
-                // explicit repair/migration.
-                continue;
-            };
-
-            let Ok(revisions) = self
+            let revisions = match self
                 .resolver
                 .store()
                 .recover_route_revisions(intent.intent_id)
-            else {
-                // As with corrupt attempt evidence, keep the parent intent
-                // owned but emit no wire fact from undecodable persistence.
-                continue;
+            {
+                Ok(revisions) => revisions,
+                Err(_) => continue,
             };
-            let mut durable_relays = revisions
-                .into_iter()
-                .flat_map(|revision| revision.relays)
+            let durable_relays = revisions
+                .iter()
+                .flat_map(|revision| revision.relays.iter().cloned())
                 .collect::<BTreeSet<_>>();
-            let mut existing_relays = BTreeSet::new();
-            for attempt in attempts {
-                durable_relays.insert(attempt.relay.clone());
-                existing_relays.insert(attempt.relay.clone());
-                if attempt.outcome != AttemptOutcome::Started {
-                    continue;
-                }
-                match durability {
-                    Durability::Durable => {
-                        let Ok(correlation) = self.alloc_attempt_correlation() else {
-                            // No unique handoff identity means no volatile
-                            // lane bookkeeping and no wire fact.
-                            continue;
-                        };
-                        if let Some(pending) = self.pending.get_mut(&id) {
-                            pending.pending_relays.insert(attempt.relay.clone());
-                            pending
-                                .attempt_ordinals
-                                .insert(attempt.relay.clone(), attempt.ordinal);
-                        }
-                        self.event_to_receipts
-                            .entry(attempt.event.id)
-                            .or_default()
-                            .insert(id);
-                        self.attempt_correlations.insert(
-                            correlation,
-                            AttemptCorrelationTarget {
-                                receipt: id,
-                                relay: attempt.relay.clone(),
-                                ephemeral_sinks: Vec::new(),
-                            },
-                        );
-                        // Exact retained bytes, same ordinal. The Started row
-                        // already predates this replay effect.
-                        effects.push(Effect::PublishEvent(
-                            attempt.relay,
-                            attempt.event,
-                            correlation,
-                        ));
-                    }
-                    Durability::AtMostOnce => {
-                        if self
-                            .resolver
-                            .store_mut()
-                            .finish_attempt(
-                                intent.intent_id,
-                                &attempt.relay,
-                                attempt.ordinal,
-                                AttemptOutcome::OutcomeUnknown,
-                            )
-                            .is_err()
-                        {
-                            if let Some(pending) = self.pending.get_mut(&id) {
-                                pending.pending_relays.insert(attempt.relay.clone());
-                                pending
-                                    .attempt_ordinals
-                                    .insert(attempt.relay.clone(), attempt.ordinal);
-                            }
-                            self.event_to_receipts
-                                .entry(attempt.event.id)
-                                .or_default()
-                                .insert(id);
-                        }
-                    }
-                    Durability::Ephemeral => unreachable!(),
-                }
-            }
 
-            // Every persisted route remains owned even if the dynamic
-            // directory is now empty or removed it. Re-resolution may append
-            // new lanes, but can never subtract durable ones.
-            let mut lanes_to_start = durable_relays
-                .difference(&existing_relays)
-                .cloned()
-                .collect::<BTreeSet<_>>();
             if routing_valid {
                 let current_routes = self
-                    .pending
-                    .get(&id)
-                    .and_then(|pending| {
-                        self.resolve_routes(&pending.routing, &intent.frozen.pubkey.to_hex())
-                            .ok()
-                    })
+                    .resolve_routes(&self.pending[&id].routing, &intent.frozen.pubkey.to_hex())
                     .unwrap_or_default();
                 let new_routes = current_routes
                     .difference(&durable_relays)
                     .cloned()
                     .collect::<BTreeSet<_>>();
-                if !new_routes.is_empty() {
-                    match self
+                if !new_routes.is_empty()
+                    && self
                         .resolver
                         .store_mut()
                         .record_route_revision(intent.intent_id, current_routes)
-                    {
-                        Ok(revision) => {
-                            debug_assert!(new_routes.is_subset(&revision.relays));
-                            lanes_to_start.extend(new_routes);
-                        }
-                        Err(_) => {
-                            if let Some(pending) = self.pending.get_mut(&id) {
-                                pending.route_blocked_relays.extend(new_routes);
-                            }
-                        }
+                        .is_err()
+                {
+                    if let Some(pending) = self.pending.get_mut(&id) {
+                        pending.route_blocked_relays.extend(new_routes);
                     }
                 }
             }
 
-            for relay in lanes_to_start {
-                let Ok(correlation) = self.alloc_attempt_correlation() else {
-                    // Exhaustion is typed and fail-closed: do not create a
-                    // new Started lane that cannot be correlated to transport.
-                    continue;
-                };
-                let attempt = match self.resolver.store_mut().start_attempt(
-                    intent.intent_id,
-                    relay.clone(),
-                    intent.frozen.clone(),
-                ) {
-                    Ok(attempt) => attempt,
-                    Err(_) => {
-                        if let Some(pending) = self.pending.get_mut(&id) {
-                            pending.unstarted_relays.insert(relay);
+            let lanes = match self
+                .resolver
+                .store_mut()
+                .bootstrap_outbox_lanes(intent.intent_id)
+            {
+                Ok(lanes) => lanes,
+                Err(_) => continue,
+            };
+            for lane in lanes {
+                match lane.state {
+                    LaneState::LegacyInFlight { ordinal }
+                    | LaneState::InFlight {
+                        ordinal,
+                        phase: InFlightPhase::AwaitingHandoff,
+                    } => match durability {
+                        Durability::Durable => {
+                            let eligible_at = self.clock;
+                            let _ = self.resolver.store_mut().set_lane_transient(
+                                &lane.key,
+                                lane.revision,
+                                ordinal,
+                                eligible_at,
+                                TransientCause::Interrupted,
+                                Some("process restarted before handoff resolved".to_string()),
+                            );
                         }
-                        continue;
-                    }
-                };
-                if let Some(pending) = self.pending.get_mut(&id) {
-                    pending.pending_relays.insert(relay.clone());
-                    pending
-                        .attempt_ordinals
-                        .insert(relay.clone(), attempt.ordinal);
-                }
-                self.event_to_receipts
-                    .entry(intent.frozen.id)
-                    .or_default()
-                    .insert(id);
-                self.attempt_correlations.insert(
-                    correlation,
-                    AttemptCorrelationTarget {
-                        receipt: id,
-                        relay: relay.clone(),
-                        ephemeral_sinks: Vec::new(),
+                        Durability::AtMostOnce => {
+                            if self
+                                .resolver
+                                .store_mut()
+                                .finish_lane_attempt(
+                                    &lane.key,
+                                    lane.revision,
+                                    ordinal,
+                                    AttemptOutcome::OutcomeUnknown,
+                                    self.clock,
+                                )
+                                .is_ok()
+                            {
+                                effects.push(Effect::EmitReceipt(
+                                    id,
+                                    WriteStatus::OutcomeUnknown(lane.key.relay),
+                                ));
+                            }
+                        }
+                        Durability::Ephemeral => unreachable!(),
                     },
-                );
-                effects.push(Effect::PublishEvent(
-                    relay,
-                    intent.frozen.clone(),
-                    correlation,
-                ));
+                    LaneState::WaitingConnection
+                    | LaneState::Eligible { .. }
+                    | LaneState::Transient { .. } => {
+                        effects.push(Effect::EnsureRelay(lane.key.relay));
+                    }
+                    LaneState::InFlight {
+                        phase: InFlightPhase::AwaitingAck { .. },
+                        ..
+                    }
+                    | LaneState::WaitingAuth => {
+                        effects.push(Effect::EnsureRelay(lane.key.relay));
+                    }
+                    LaneState::Terminal { .. } => {}
+                }
             }
+        }
+
+        self.retry_scheduler_blocked = false;
+        effects.extend(self.consume_due_outbox_deadlines(self.clock));
+        for id in recovered_ids {
+            self.close_if_all_lanes_terminal(id);
         }
         effects
     }
-
-    /// Attach another observer to an existing durable receipt and replay
     /// its retained facts. Unknown ids do not create state.
     pub fn reattach_receipt(
         &mut self,
@@ -1069,8 +1549,8 @@ impl<S: EventStore> EngineCore<S> {
     /// liveness-deadline REQ fallback"): any reconciliation session open
     /// longer than [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is
     /// abandoned in favor of a plain REQ for the same (unfloored/unlimited)
-    /// filter. Backoff/keepalive scheduling stays D/A2 territory --
-    /// untouched here.
+    /// filter. The same tick first consumes every due durable-lane retry/ACK
+    /// deadline through the one outbox scheduler.
     ///
     /// `runtime::engine_loop` (§3.3, #39) is what actually drives this on
     /// its own now: it arms `cmd_rx.recv_timeout` off [`Self::next_deadline`]
@@ -1082,6 +1562,8 @@ impl<S: EventStore> EngineCore<S> {
     pub fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
         self.clock = now;
         let mut effects = Vec::new();
+        self.retry_scheduler_blocked = false;
+        effects.extend(self.consume_due_outbox_deadlines(now));
 
         // NIP-40 expiry (retraction-and-negative-deltas.md §3.2). The
         // deadline-armed runtime driver above dispatches this tick at the
@@ -1157,14 +1639,18 @@ impl<S: EventStore> EngineCore<S> {
             .values()
             .map(|session| session.started_at + NEG_LIVENESS_DEADLINE_SECS)
             .min();
-        match (expiry, neg_liveness) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) | (None, Some(a)) => Some(a),
-            (None, None) => None,
-        }
+        let outbox = (!self.retry_scheduler_blocked)
+            .then(|| self.resolver.store().next_outbox_deadline().ok().flatten())
+            .flatten();
+        [expiry, neg_liveness, outbox].into_iter().flatten().min()
     }
 
     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
+        // A prior persistence failure suppresses a due outbox deadline only
+        // until real work arrives. Re-expose it after this message so the
+        // runtime immediately drives a fresh Tick instead of either spinning
+        // on the failed transition or suppressing retry forever.
+        self.retry_scheduler_blocked = false;
         match msg {
             EngineMsg::Subscribe(query, sink) => self.on_subscribe(query, sink),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
@@ -1182,10 +1668,15 @@ impl<S: EventStore> EngineCore<S> {
                 self.on_signer_unavailable(id, generation)
             }
             EngineMsg::SignerAttached(pk) => self.on_signer_attached(pk),
-            EngineMsg::CancelWrite(id) => self.on_cancel_write(id),
+            EngineMsg::CancelWrite(id) => {
+                let mut effects = self.on_cancel_write(id);
+                effects.extend(self.schedule_ready(self.clock));
+                effects
+            }
             EngineMsg::EventHandoff(correlation, result) => {
                 self.on_event_handoff(correlation, result)
             }
+            EngineMsg::RelayAuthReady(relay) => self.on_relay_auth_ready(relay),
             EngineMsg::Tick(now) => self.tick(now),
         }
     }
@@ -1625,30 +2116,25 @@ impl<S: EventStore> EngineCore<S> {
 
         if let Some(pending) = self.pending.get_mut(&id) {
             pending.event_id = Some(event.id);
+            pending.frozen = event.clone();
         }
 
         if let Some(pending) = self.pending.get(&id) {
             Self::notify(pending, WriteStatus::Signed(event.id));
             effects.push(Effect::EmitReceipt(id, WriteStatus::Signed(event.id)));
             if !pending.routing_valid {
-                // Corrupt/unknown persisted routing is fail-closed, but the
-                // durable obligation remains owned and reattachable. Never
-                // silently `continue` it out of recovery and never guess a
-                // relay. A future migration/explicit cancellation can
-                // resolve it.
                 return;
             }
         }
 
         let author_hex = event.pubkey.to_hex();
-        let route_result = match self.pending.get(&id) {
-            Some(pending) => self.resolve_routes(&pending.routing, &author_hex),
-            None => return,
-        };
-
-        let relays = match route_result {
-            Ok(relays) => relays,
-            Err(reason) => {
+        let relays = match self
+            .pending
+            .get(&id)
+            .map(|pending| self.resolve_routes(&pending.routing, &author_hex))
+        {
+            Some(Ok(relays)) => relays,
+            Some(Err(reason)) => {
                 if let Some(pending) = self.pending.remove(&id) {
                     let status = WriteStatus::Failed(reason);
                     Self::notify(&pending, status.clone());
@@ -1656,122 +2142,81 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 return;
             }
+            None => return,
         };
 
-        if let Some(pending) = self.pending.get(&id) {
-            Self::notify(pending, WriteStatus::Routed(relays.clone()));
-            effects.push(Effect::EmitReceipt(id, WriteStatus::Routed(relays.clone())));
+        self.emit_write_status(id, WriteStatus::Routed(relays.clone()), effects);
+
+        if self
+            .pending
+            .get(&id)
+            .is_some_and(|pending| pending.durability == Durability::Ephemeral)
+        {
+            let ephemeral_sinks = self.pending[&id].sinks.clone();
+            for relay in relays {
+                let Ok(correlation) = self.alloc_attempt_correlation() else {
+                    continue;
+                };
+                self.attempt_correlations.insert(
+                    correlation,
+                    AttemptCorrelationTarget {
+                        receipt: id,
+                        relay: relay.clone(),
+                        lane: None,
+                        ephemeral_sinks: ephemeral_sinks.clone(),
+                    },
+                );
+                effects.push(Effect::PublishEvent(relay, event.clone(), correlation));
+            }
+            self.pending.remove(&id);
+            return;
         }
 
-        // Dynamic routing policy is not itself an exact relay obligation.
-        // Persist the resolved set before any corresponding attempt or wire
-        // effect, so a failed attempt start remains discoverable on restart
-        // even if the directory is then empty or changed.
-        if let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id) {
-            if self
-                .resolver
-                .store_mut()
-                .record_route_revision(intent_id, relays.clone())
-                .is_err()
-            {
-                if let Some(pending) = self.pending.get_mut(&id) {
-                    pending.route_blocked_relays = relays.clone();
-                }
-                if let Some(pending) = self.pending.get(&id) {
-                    for relay in &relays {
-                        let status = WriteStatus::RoutePersistenceBlocked(relay.clone());
-                        Self::notify(pending, status.clone());
-                        effects.push(Effect::EmitReceipt(id, status));
-                    }
+        let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id) else {
+            return;
+        };
+        if self
+            .resolver
+            .store_mut()
+            .record_route_revision(intent_id, relays.clone())
+            .is_err()
+        {
+            if let Some(pending) = self.pending.get_mut(&id) {
+                pending.route_blocked_relays = relays.clone();
+            }
+            for relay in relays {
+                self.emit_write_status(id, WriteStatus::RoutePersistenceBlocked(relay), effects);
+            }
+            return;
+        }
+
+        let lanes = match self.resolver.store_mut().bootstrap_outbox_lanes(intent_id) {
+            Ok(lanes) => lanes,
+            Err(_) => {
+                for relay in relays {
+                    self.emit_write_status(id, WriteStatus::PersistenceBlocked(relay), effects);
                 }
                 return;
             }
-        }
-
-        // The durable attempt fact is committed before the corresponding
-        // wire effect can exist. Ephemeral has no obligation/attempt row.
-        let mut sent_relays = BTreeSet::new();
-        let mut blocked_relays = BTreeSet::new();
-        for relay in &relays {
-            let Ok(correlation) = self.alloc_attempt_correlation() else {
-                // Leave the lane and pending bookkeeping untouched. A
-                // transport EVENT without a unique correlation cannot exist.
-                continue;
-            };
-            let ordinal = match self.pending.get(&id).and_then(|p| p.intent_id) {
-                Some(intent_id) => match self.resolver.store_mut().start_attempt(
-                    intent_id,
-                    relay.clone(),
-                    event.clone(),
-                ) {
-                    Ok(attempt) => Some(attempt.ordinal),
-                    Err(_) => {
-                        blocked_relays.insert(relay.clone());
-                        None
-                    }
-                },
-                None => Some(0),
-            };
-            let Some(ordinal) = ordinal else {
-                continue;
-            };
-            if let Some(pending) = self.pending.get_mut(&id) {
-                if ordinal != 0 {
-                    pending.attempt_ordinals.insert(relay.clone(), ordinal);
+        };
+        self.event_to_receipts
+            .entry(event.id)
+            .or_default()
+            .insert(id);
+        for lane in lanes {
+            if matches!(lane.state, LaneState::WaitingConnection) {
+                if self.connected_relays.contains(&lane.key.relay) {
+                    let _ = self.resolver.store_mut().set_lane_eligible(
+                        &lane.key,
+                        lane.revision,
+                        self.clock,
+                    );
+                } else {
+                    effects.push(Effect::EnsureRelay(lane.key.relay));
                 }
             }
-            sent_relays.insert(relay.clone());
-            let ephemeral_sinks = self
-                .pending
-                .get(&id)
-                .filter(|pending| pending.durability == Durability::Ephemeral)
-                .map(|pending| pending.sinks.clone())
-                .unwrap_or_default();
-            self.attempt_correlations.insert(
-                correlation,
-                AttemptCorrelationTarget {
-                    receipt: id,
-                    relay: relay.clone(),
-                    ephemeral_sinks,
-                },
-            );
-            effects.push(Effect::PublishEvent(
-                relay.clone(),
-                event.clone(),
-                correlation,
-            ));
         }
-        // `Sent` is no longer emitted synchronously here (issue #93): the
-        // frame being handed to the pool's outbound queue is not the same
-        // fact as the relay actually receiving it. `Self::on_event_handoff`
-        // is the ONLY place `Sent` now fires, gated on the async `Written`
-        // result. `sent_relays` above still drives `pending.pending_relays`
-        // (below) and the correlation bookkeeping -- it just no longer
-        // implies delivery on its own.
-        if let Some(pending) = self.pending.get(&id) {
-            for relay in &blocked_relays {
-                let status = WriteStatus::PersistenceBlocked(relay.clone());
-                Self::notify(pending, status.clone());
-                effects.push(Effect::EmitReceipt(id, status));
-            }
-        }
-
-        let ephemeral = matches!(
-            self.pending.get(&id).map(|p| p.durability),
-            Some(Durability::Ephemeral)
-        );
-        if ephemeral {
-            // Fire-and-forget owns no ACK obligation. Each correlation has
-            // snapshotted the observers needed for its async handoff result.
-            self.pending.remove(&id);
-        } else if let Some(pending) = self.pending.get_mut(&id) {
-            pending.pending_relays = sent_relays;
-            pending.unstarted_relays = blocked_relays;
-            self.event_to_receipts
-                .entry(event.id)
-                .or_default()
-                .insert(id);
-        }
+        effects.extend(self.schedule_ready(self.clock));
     }
 
     fn freeze_payload(payload: &WritePayload) -> Result<SignedEvent, String> {
@@ -2076,128 +2521,187 @@ impl<S: EventStore> EngineCore<S> {
         let Some(ids) = self.event_to_receipts.get(&event_id).cloned() else {
             return;
         };
-        let mut terminal = Vec::new();
+        let class = classify_relay_ack(status, &message);
         for id in ids {
-            let Some(pending) = self.pending.get(&id) else {
-                terminal.push(id);
+            let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id)
+            else {
                 continue;
             };
-            if !pending.pending_relays.contains(relay) {
-                continue;
-            }
-            let attempt = pending
-                .intent_id
-                .zip(pending.attempt_ordinals.get(relay).copied());
-            if let Some((intent_id, ordinal)) = attempt {
-                let outcome = if status {
-                    AttemptOutcome::Acked
-                } else {
-                    AttemptOutcome::Rejected(message.clone())
-                };
-                if self
-                    .resolver
-                    .store_mut()
-                    .finish_attempt(intent_id, relay, ordinal, outcome)
-                    .is_err()
-                {
-                    continue;
-                }
-            }
-            let pending = self
-                .pending
-                .get_mut(&id)
-                .expect("lane checked immediately above");
-            pending.pending_relays.remove(relay);
-            pending.attempt_ordinals.remove(relay);
-            let new_status = if status {
-                WriteStatus::Acked(relay.clone())
-            } else {
-                WriteStatus::Rejected(relay.clone(), message.clone())
+            let key = LaneKey {
+                intent_id,
+                relay: relay.clone(),
             };
-            Self::notify(pending, new_status.clone());
-            effects.push(Effect::EmitReceipt(id, new_status));
-            if pending.pending_relays.is_empty()
-                && pending.unstarted_relays.is_empty()
-                && pending.route_blocked_relays.is_empty()
-            {
-                terminal.push(id);
-            }
-        }
-        for id in terminal {
-            self.pending.remove(&id);
-            if let Some(owners) = self.event_to_receipts.get_mut(&event_id) {
-                owners.remove(&id);
-            }
-        }
-        if self
-            .event_to_receipts
-            .get(&event_id)
-            .is_some_and(BTreeSet::is_empty)
-        {
-            self.event_to_receipts.remove(&event_id);
-        }
-    }
+            let lane = self
+                .resolver
+                .store()
+                .recover_outbox_lanes(intent_id)
+                .ok()
+                .and_then(|lanes| lanes.into_iter().find(|lane| lane.key == key));
+            let Some(lane) = lane else {
+                continue;
+            };
+            let LaneState::InFlight {
+                ordinal,
+                phase: InFlightPhase::AwaitingAck { .. },
+            } = lane.state
+            else {
+                continue;
+            };
 
-    /// A relay disconnecting before it ever acked a pending write is a
-    /// terminal `GaveUp` for every write still waiting on it — NOT a retry.
-    /// No durability class re-sends here (ledger's `AtMostOnce` amendment:
-    /// "no blind retry"; `Durable`'s stronger ack tracking is about
-    /// accuracy of the receipt stream, not automatic resend, which this
-    /// builder does not implement — see the report).
-    fn give_up_pending_writes(&mut self, relay: &RelayUrl, effects: &mut Vec<Effect>) {
-        let ids: Vec<ReceiptId> = self
-            .pending
-            .iter()
-            .filter(|(_, p)| p.pending_relays.contains(relay))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
-            let attempt = self.pending.get(&id).and_then(|pending| {
-                pending
-                    .intent_id
-                    .zip(pending.attempt_ordinals.get(relay).copied())
-            });
-            if let Some((intent_id, ordinal)) = attempt {
-                if self
-                    .resolver
-                    .store_mut()
-                    .finish_attempt(intent_id, relay, ordinal, AttemptOutcome::GaveUp)
-                    .is_err()
-                {
-                    continue;
+            match &class {
+                RelayAckClass::Acked => {
+                    if self
+                        .resolver
+                        .store_mut()
+                        .finish_lane_attempt(
+                            &key,
+                            lane.revision,
+                            ordinal,
+                            AttemptOutcome::Acked,
+                            self.clock,
+                        )
+                        .is_ok()
+                    {
+                        self.remove_active_lane(id, relay);
+                        self.emit_write_status(id, WriteStatus::Acked(relay.clone()), effects);
+                        self.close_if_all_lanes_terminal(id);
+                    }
                 }
-            }
-            let event_id = if let Some(pending) = self.pending.get_mut(&id) {
-                pending.pending_relays.remove(relay);
-                pending.attempt_ordinals.remove(relay);
-                let status = WriteStatus::GaveUp(relay.clone());
-                Self::notify(pending, status.clone());
-                effects.push(Effect::EmitReceipt(id, status));
-                if pending.pending_relays.is_empty()
-                    && pending.unstarted_relays.is_empty()
-                    && pending.route_blocked_relays.is_empty()
-                {
-                    pending.event_id
-                } else {
-                    None
+                RelayAckClass::Rejected => {
+                    if self
+                        .resolver
+                        .store_mut()
+                        .finish_lane_attempt(
+                            &key,
+                            lane.revision,
+                            ordinal,
+                            AttemptOutcome::Rejected(message.clone()),
+                            self.clock,
+                        )
+                        .is_ok()
+                    {
+                        self.remove_active_lane(id, relay);
+                        self.emit_write_status(
+                            id,
+                            WriteStatus::Rejected(relay.clone(), message.clone()),
+                            effects,
+                        );
+                        self.close_if_all_lanes_terminal(id);
+                    }
                 }
-            } else {
-                None
-            };
-            if event_id.is_some() {
-                self.pending.remove(&id);
-            }
-            if let Some(event_id) = event_id {
-                if let Some(owners) = self.event_to_receipts.get_mut(&event_id) {
-                    owners.remove(&id);
-                    if owners.is_empty() {
-                        self.event_to_receipts.remove(&event_id);
+                RelayAckClass::Transient(cause) => {
+                    let eligible_at = self.clock + retry_delay_secs(&key, ordinal);
+                    if self
+                        .resolver
+                        .store_mut()
+                        .set_lane_transient(
+                            &key,
+                            lane.revision,
+                            ordinal,
+                            eligible_at,
+                            *cause,
+                            Some(message.clone()),
+                        )
+                        .is_ok()
+                    {
+                        self.remove_active_lane(id, relay);
+                    }
+                }
+                RelayAckClass::WaitingAuth => {
+                    if self
+                        .resolver
+                        .store_mut()
+                        .suspend_lane_attempt(
+                            &key,
+                            lane.revision,
+                            ordinal,
+                            self.clock,
+                            TransientCause::AuthRequired,
+                            Some(message.clone()),
+                            true,
+                        )
+                        .is_ok()
+                    {
+                        self.remove_active_lane(id, relay);
                     }
                 }
             }
         }
+        effects.extend(self.schedule_ready(self.clock));
     }
-
+    fn suspend_disconnected_lanes(&mut self, relay: &RelayUrl, effects: &mut Vec<Effect>) {
+        let Ok(lanes) = self.recover_all_lanes() else {
+            self.retry_scheduler_blocked = true;
+            return;
+        };
+        for (id, lane) in lanes {
+            if &lane.key.relay != relay {
+                continue;
+            }
+            match lane.state {
+                LaneState::Eligible { .. } => {
+                    let _ =
+                        self.resolver
+                            .store_mut()
+                            .set_lane_waiting(&lane.key, lane.revision, false);
+                }
+                LaneState::InFlight {
+                    ordinal,
+                    phase: InFlightPhase::AwaitingAck { .. },
+                } => {
+                    let durability = self.pending.get(&id).map(|pending| pending.durability);
+                    if durability == Some(Durability::AtMostOnce) {
+                        if self
+                            .resolver
+                            .store_mut()
+                            .finish_lane_attempt(
+                                &lane.key,
+                                lane.revision,
+                                ordinal,
+                                AttemptOutcome::OutcomeUnknown,
+                                self.clock,
+                            )
+                            .is_ok()
+                        {
+                            self.remove_active_lane(id, relay);
+                            self.emit_write_status(
+                                id,
+                                WriteStatus::OutcomeUnknown(relay.clone()),
+                                effects,
+                            );
+                            self.close_if_all_lanes_terminal(id);
+                        }
+                    } else {
+                        let eligible_at = self.clock + retry_delay_secs(&lane.key, ordinal);
+                        if self
+                            .resolver
+                            .store_mut()
+                            .set_lane_transient(
+                                &lane.key,
+                                lane.revision,
+                                ordinal,
+                                eligible_at,
+                                TransientCause::ConnectionLost,
+                                Some("connection lost while awaiting ACK".to_string()),
+                            )
+                            .is_ok()
+                        {
+                            self.remove_active_lane(id, relay);
+                        }
+                    }
+                }
+                LaneState::WaitingConnection
+                | LaneState::WaitingAuth
+                | LaneState::Transient { .. }
+                | LaneState::InFlight {
+                    phase: InFlightPhase::AwaitingHandoff,
+                    ..
+                }
+                | LaneState::LegacyInFlight { .. }
+                | LaneState::Terminal { .. } => {}
+            }
+        }
+    }
     fn alloc_receipt_id(&mut self) -> Result<ReceiptId, PublishError> {
         const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
         let current = self
@@ -2254,7 +2758,7 @@ impl<S: EventStore> EngineCore<S> {
         // connection on this same `Prober` is never re-probed.
         if let Some(probe) = self.prober.begin_probe(&url) {
             effects.push(Effect::StartProbe(
-                url,
+                url.clone(),
                 probe.sub_id,
                 probe.filter,
                 probe.initial_message_hex,
@@ -2265,6 +2769,7 @@ impl<S: EventStore> EngineCore<S> {
         // -- refresh so that becomes observable via `EmitRows`, same as an
         // EOSE-driven watermark advance below.
         self.refresh_all_handles(&mut effects);
+        effects.extend(self.wake_relay_lanes(&url, false));
         effects
     }
 
@@ -2272,7 +2777,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut effects = Vec::new();
         if let Some(url) = self.slot_to_url.get(&slot).cloned() {
             self.attribution.clear_relay(&url);
-            self.give_up_pending_writes(&url, &mut effects);
+            self.suspend_disconnected_lanes(&url, &mut effects);
             // Any reconciliation open against this relay dies with the
             // connection -- there is nothing left to `NEG-CLOSE` (the socket
             // is already gone), so this is a silent drop, not a fallback
@@ -2288,11 +2793,20 @@ impl<S: EventStore> EngineCore<S> {
             // usable" acceptance criterion -- watermark and link status are
             // deliberately orthogonal fields, never one enum).
             self.connected_relays.remove(&url);
+            effects.push(Effect::EnsureRelay(url));
         }
         // Same reasoning as `on_relay_connected`: a link-status flip alone
         // must become observable via `EmitRows`.
         self.refresh_all_handles(&mut effects);
+        effects.extend(self.schedule_ready(self.clock));
         effects
+    }
+
+    fn on_relay_auth_ready(&mut self, relay: RelayUrl) -> Vec<Effect> {
+        if !self.connected_relays.contains(&relay) {
+            return vec![Effect::EnsureRelay(relay)];
+        }
+        self.wake_relay_lanes(&relay, true)
     }
 
     // ---- inbound relay frame: EVENT/EOSE parsed here (D/E own OK/CLOSED/
