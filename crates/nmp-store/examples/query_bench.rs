@@ -71,6 +71,17 @@ fn mean_allocation_ops(iterations: u32, mut query: impl FnMut() -> usize, expect
     total as f64 / f64::from(iterations)
 }
 
+fn mean_healthy_reopen_ms(path: &std::path::Path, iterations: u32) -> f64 {
+    let mut elapsed = Duration::ZERO;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let store = RedbStore::open(path).expect("healthy benchmark reopen");
+        elapsed += started.elapsed();
+        drop(store);
+    }
+    elapsed.as_secs_f64() * 1_000.0 / f64::from(iterations)
+}
+
 fn main() {
     let mut args = env::args_os().skip(1);
     let input_path = args
@@ -331,6 +342,7 @@ fn main() {
     ];
     drop(store);
 
+    let healthy_reopen_ms = mean_healthy_reopen_ms(&path, iterations);
     let started = Instant::now();
     let reopened = RedbStore::open(&path).expect("reopen redb store");
     let reopened_rows = reopened
@@ -365,5 +377,6 @@ fn main() {
     for (name, allocations) in allocation_matrix {
         println!("{name}_mean_allocation_ops={allocations:.1}");
     }
+    println!("healthy_reopen_mean_ms={healthy_reopen_ms:.3}");
     println!("reopened_first_room_member_ms={reopened_first_ms:.3}");
 }

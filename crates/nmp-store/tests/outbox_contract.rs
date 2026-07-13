@@ -3047,10 +3047,10 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
 /// that same one row again.
 #[test]
 fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
-    const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v5");
-    const EVENT_IDS_TABLE: TableDefinition<&[u8], u64> = TableDefinition::new("event_ids_v5");
+    const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v6");
+    const EVENT_IDS_TABLE: TableDefinition<&[u8; 32], u64> = TableDefinition::new("event_ids_v6");
     const DISPLACED_TABLE: TableDefinition<&str, &[u8]> =
-        TableDefinition::new("outbox_displaced_v5");
+        TableDefinition::new("outbox_displaced_v6");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
@@ -3088,7 +3088,7 @@ fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
     let events = read.open_table(EVENTS_TABLE).expect("open events");
     let event_ids = read.open_table(EVENT_IDS_TABLE).expect("open event ids");
     let target_key = event_ids
-        .get(target_id.as_bytes().as_slice())
+        .get(target_id.as_bytes())
         .expect("read target row")
         .expect("target id mapping")
         .value();
