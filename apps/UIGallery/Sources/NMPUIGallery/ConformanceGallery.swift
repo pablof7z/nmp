@@ -1,3 +1,4 @@
+import NMP
 import NMPContent
 import NMPUI
 import SwiftUI
@@ -37,13 +38,55 @@ struct ConformanceGallery: View {
                     NMPUserCard(
                         pubkey: Self.placeholderPubkey,
                         profile: Self.longProfile,
-                        variant: .landscape,
-                        isFollowing: true,
-                        followAction: {}
+                        variant: .landscape
                     )
                     .dynamicTypeSize(.accessibility3)
                 }
                 .accessibilityIdentifier("gallery.states.dynamic-type")
+
+                GallerySection("Follow action states", note: "The production controlled primitive renders the closed NMP state vocabulary. These fixtures make every state inspectable; the live user cards use the connected NMPFollowing resource.") {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 10) {
+                            NMPFollowButtonBody(
+                                snapshot: followSnapshot(.notFollowing, .ready),
+                                variant: .compact,
+                                action: {}
+                            )
+                            NMPFollowButtonBody(
+                                snapshot: followSnapshot(.following, .ready),
+                                variant: .compact,
+                                action: {}
+                            )
+                            NMPFollowButtonBody(
+                                snapshot: followSnapshot(.notFollowing, .ready),
+                                isActing: true,
+                                variant: .icon,
+                                action: {}
+                            )
+                        }
+                        NMPFollowButtonBody(
+                            snapshot: followSnapshot(.notFollowing, .ready),
+                            variant: .prominent,
+                            action: {}
+                        )
+                        HStack(spacing: 10) {
+                            NMPFollowButtonBody(
+                                snapshot: followSnapshot(.unknown, .acquiring),
+                                action: {}
+                            )
+                            NMPFollowButtonBody(
+                                snapshot: followSnapshot(.following, .cachedOnly),
+                                action: {}
+                            )
+                            NMPFollowButtonBody(
+                                snapshot: followSnapshot(.unknown, .signedOut),
+                                variant: .icon,
+                                action: {}
+                            )
+                        }
+                    }
+                }
+                .accessibilityIdentifier("gallery.states.follow")
 
                 GallerySection("Right-to-left flow", note: "Native layout direction reverses identity, text, and reaction ordering without a parallel renderer.") {
                     HStack(spacing: 12) {
@@ -79,8 +122,7 @@ struct ConformanceGallery: View {
                     NMPUserCard(
                         pubkey: Self.placeholderPubkey,
                         profile: Self.longProfile,
-                        variant: .featured,
-                        followAction: {}
+                        variant: .featured
                     )
                     .padding(12)
                     .background(Color.black, in: RoundedRectangle(cornerRadius: 22))
@@ -125,6 +167,19 @@ struct ConformanceGallery: View {
                 maximumLinesPerBlock: 1
             )
         }
+    }
+
+    private func followSnapshot(
+        _ relationship: NMPFollowRelationship,
+        _ availability: NMPFollowAvailability
+    ) -> NMPFollowingSnapshot {
+        NMPFollowingSnapshot(
+            activePubkey: availability == .signedOut ? nil : Self.placeholderPubkey,
+            target: Self.placeholderPubkey,
+            relationship: relationship,
+            availability: availability,
+            baseEventID: relationship == .unknown ? nil : String(repeating: "01", count: 32)
+        )
     }
 
     private static let placeholderPubkey = String(repeating: "7a", count: 32)

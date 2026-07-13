@@ -35,6 +35,7 @@ uniffi = { workspace = true, features = ["cli"] }
 # Kotlin app links, so it bundles the projection directly, same treatment
 # as `nmp-grammar` itself gets here.
 nmp-nip51.workspace = true
+nmp-nip02.workspace = true
 nmp-nip29.workspace = true
 nmp-content.workspace = true
 

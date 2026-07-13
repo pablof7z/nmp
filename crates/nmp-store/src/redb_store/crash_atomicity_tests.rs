@@ -48,6 +48,7 @@ fn event_pair() -> (Event, Event) {
 fn accept(frozen: Event) -> AcceptWrite {
     AcceptWrite {
         frozen,
+        replaceable_base: None,
         expected_pubkey: keys().public_key(),
         signing_identity_ref: "u5-fixed-key".into(),
         durability: WriteDurability::Durable,

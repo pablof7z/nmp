@@ -317,6 +317,18 @@ pub enum RefuseReason {
     /// the same author (retraction-and-negative-deltas.md §2, §7:
     /// tombstone retention is PERMANENT — never GC-claimed).
     Tombstoned,
+    /// A whole-value replacement was composed from `expected`, but the
+    /// canonical winner at that exact replaceable/addressable coordinate
+    /// was `actual` when the store's atomic acceptance transaction ran.
+    /// Nothing was stored or journaled and no ids were allocated.
+    ReplaceableBaseChanged {
+        expected: Option<EventId>,
+        actual: Option<EventId>,
+    },
+    /// A caller attached a replaceable-base precondition to an event kind
+    /// that has no replaceable/addressable coordinate. Fail closed instead
+    /// of silently accepting an unchecked write.
+    ReplaceableBaseOnRegularEvent,
 }
 
 /// Why an [`EventStore::remove`] call is removing a row. Exists so
@@ -393,6 +405,12 @@ pub struct AcceptWrite {
     /// `event.sig` must be [`sentinel_signature`] until
     /// [`EventStore::promote_signed`] swaps in the real one.
     pub frozen: Event,
+    /// Optional compare-and-swap guard for a whole-value replacement. The
+    /// store derives the coordinate from `frozen` and compares its current
+    /// canonical winner inside the same transaction that would accept the
+    /// new row. `Some(None)` means the caller observed no local base;
+    /// `None` means this is an ordinary, unconditional write.
+    pub replaceable_base: Option<Option<EventId>>,
     /// The pinned signing identity (#43 "pins the chosen identity at
     /// acceptance"). Ordinarily equal to `frozen.pubkey`; kept as an
     /// explicit field because it is a distinct journal fact (#2's "expected

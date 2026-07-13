@@ -15,6 +15,7 @@ final class GalleryModel: ObservableObject {
     static let profilePubkey = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
 
     let engine: NMPEngine
+    let following: NMPFollowing
     let content: NMPContentClient
     let profileSession: NostrContentSession
     let articleSession: NostrContentSession
@@ -40,6 +41,7 @@ final class GalleryModel: ObservableObject {
         engine = try NMPEngine(
             config: NMPConfig(storePath: store, indexerRelays: Self.indexers)
         )
+        following = try NMPFollowing(engine: engine, target: Self.profilePubkey)
         let contentClient = NMPContentClient(engine: engine)
         content = contentClient
         profileSession = contentClient.session(content: "nostr:\(Self.profile)")

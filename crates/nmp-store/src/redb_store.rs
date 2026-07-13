@@ -4464,6 +4464,7 @@ impl EventStore for RedbStore {
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         let AcceptWrite {
             mut frozen,
+            replaceable_base,
             expected_pubkey,
             signing_identity_ref,
             durability,
@@ -4510,6 +4511,30 @@ impl EventStore for RedbStore {
             let mut outbox_suppress_by_addr = write_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ADDR)
                 .map_err(persist_err)?;
+
+            if let Some(expected) = replaceable_base {
+                let Some(address) = address_key_for(&frozen) else {
+                    return Ok(AcceptOutcome::Refused(
+                        RefuseReason::ReplaceableBaseOnRegularEvent,
+                    ));
+                };
+                let address_key = address.to_redb_key();
+                let actual = match addr_index
+                    .get(address_key.as_str())
+                    .map_err(persist_err)?
+                    .map(|guard| guard.value())
+                {
+                    Some(event_key) => canonical
+                        .load_by_key(event_key)?
+                        .map(|stored| stored.event.id),
+                    None => None,
+                };
+                if actual != expected {
+                    return Ok(AcceptOutcome::Refused(
+                        RefuseReason::ReplaceableBaseChanged { expected, actual },
+                    ));
+                }
+            }
 
             let existing = canonical.load_by_id(&frozen.id)?;
             let is_deletion = frozen.kind == Kind::EventDeletion;
@@ -7021,6 +7046,7 @@ mod tests {
         let outcome = store
             .accept_write(AcceptWrite {
                 frozen,
+                replaceable_base: None,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "range-proof".into(),
                 durability: WriteDurability::Durable,
@@ -7791,6 +7817,7 @@ mod tests {
         let accepted = store
             .accept_write(AcceptWrite {
                 frozen,
+                replaceable_base: None,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "integrity".into(),
                 durability: WriteDurability::Durable,

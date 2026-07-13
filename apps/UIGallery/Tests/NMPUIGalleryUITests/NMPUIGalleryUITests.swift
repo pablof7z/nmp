@@ -35,6 +35,24 @@ final class NMPUIGalleryUITests: XCTestCase {
         )
     }
 
+    func testConnectedFollowButtonsExposeNMPsSignedOutState() {
+        let scroll = app.scrollViews.firstMatch
+        let featuredUsers = app.staticTexts["Featured users"]
+        for _ in 0..<5 where !featuredUsers.isHittable {
+            scroll.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(featuredUsers.waitForExistence(timeout: 5))
+
+        let followButtons = app.buttons.matching(NSPredicate(format: "label == 'Follow'"))
+        XCTAssertGreaterThanOrEqual(followButtons.count, 3)
+        for index in 0..<3 {
+            let button = followButtons.element(boundBy: index)
+            XCTAssertEqual(button.value as? String, "Signed out")
+            XCTAssertFalse(button.isEnabled)
+        }
+        keepScreenshot("connected-follow-signed-out")
+    }
+
     func testConformanceStatesExposeDeterministicFallbacks() throws {
         app.tabBars.buttons["States"].tap()
         XCTAssertTrue(element("gallery.states.scripted").waitForExistence(timeout: 5))
