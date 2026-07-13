@@ -60,7 +60,7 @@
 mod diagnostics_channel;
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -183,6 +183,13 @@ mod publish_result_tests {
 /// down its own `Pool` clone on the way out (see `spawn`).
 enum Cmd {
     Engine(EngineMsg),
+    /// One ordered relay batch plus an applied acknowledgement. The bridge
+    /// waits for this acknowledgement before draining another frame batch,
+    /// propagating store/engine pressure back into the bounded pool queues.
+    RelayBatch {
+        frames: Vec<(nmp_transport::RelayHandle, nmp_transport::RelayFrame)>,
+        applied: SyncSender<()>,
+    },
     Subscribe {
         query: LiveQuery,
         reply: Sender<(HandleId, Receiver<RowsMsg>)>,
@@ -283,7 +290,8 @@ impl EngineThread {
         D: RelayDirectory + Send + 'static,
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-        let (pool_evt_tx, pool_evt_rx) = mpsc::channel::<PoolEvent>();
+        let (pool_evt_tx, pool_evt_rx) =
+            mpsc::sync_channel::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
         // The pool's OWN mio worker threads + translator thread are interior
         // to `Pool` (harvested, HARVEST-justified in nmp-transport's own
         // docs) — this crate never touches mio/tungstenite directly.
@@ -361,10 +369,17 @@ fn pool_bridge_loop(pool_evt_rx: &Receiver<PoolEvent>, engine_inbox: &Sender<Cmd
                     Err(TryRecvError::Disconnected) => break None,
                 }
             };
+            let (applied_tx, applied_rx) = mpsc::sync_channel(1);
             if engine_inbox
-                .send(Cmd::Engine(EngineMsg::RelayFrames(frames)))
+                .send(Cmd::RelayBatch {
+                    frames,
+                    applied: applied_tx,
+                })
                 .is_err()
             {
+                break;
+            }
+            if applied_rx.recv().is_err() {
                 break;
             }
             if let Some(trailing) = trailing.and_then(translate_pool_event) {
@@ -379,6 +394,65 @@ fn pool_bridge_loop(pool_evt_rx: &Receiver<PoolEvent>, engine_inbox: &Sender<Cmd
                 break; // engine thread is gone; nothing left to feed.
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_bridge_tests {
+    use super::*;
+    use nmp_transport::{RelayFrame, RelayHandle};
+    use nostr::RelayMessage;
+
+    fn notice_frame(text: &str) -> RelayFrame {
+        RelayFrame::from_message(RelayMessage::notice(text))
+    }
+
+    #[test]
+    fn bridge_waits_for_applied_ack_before_enqueuing_another_relay_batch() {
+        let (pool_tx, pool_rx) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &cmd_tx));
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                frame: notice_frame("first"),
+            })
+            .unwrap();
+        let first_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                applied
+            }
+            _ => panic!("bridge must emit a relay batch"),
+        };
+
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                frame: notice_frame("second"),
+            })
+            .unwrap();
+        assert!(
+            matches!(cmd_rx.try_recv(), Err(TryRecvError::Empty)),
+            "a second relay batch cannot enter the engine inbox before ack"
+        );
+
+        first_ack.send(()).unwrap();
+        let second_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                applied
+            }
+            _ => panic!("bridge must emit the second relay batch after ack"),
+        };
+        second_ack.send(()).unwrap();
+        drop(pool_tx);
+        bridge.join().unwrap();
     }
 }
 
@@ -499,6 +573,19 @@ fn engine_loop<S, D>(
         };
         match cmd {
             Cmd::Shutdown => break,
+            Cmd::RelayBatch { frames, applied } => {
+                let effects = core.handle(EngineMsg::RelayFrames(frames));
+                dispatch_effects(
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    self_inbox,
+                );
+                let _ = applied.send(());
+            }
             Cmd::AddSigner { signer, reply } => {
                 let pk = registry.add(signer);
                 let _ = reply.send(pk);

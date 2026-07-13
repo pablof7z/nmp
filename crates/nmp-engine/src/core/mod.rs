@@ -34,8 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use nostr::{
-    Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayMessage, RelayUrl, Timestamp,
-    UnsignedEvent,
+    Event as SignedEvent, EventId, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
 
 use nmp_grammar::{
@@ -2253,25 +2252,19 @@ impl<S: EventStore> EngineCore<S> {
         let mut effects = Vec::new();
         let mut events = Vec::new();
         for (handle, frame) in frames {
-            let parsed_event = match &frame {
-                RelayFrame::Text(text) => RelayMessage::from_json(text.as_bytes()).ok().and_then(
-                    |message| match message {
-                        RelayMessage::Event { event, .. } => {
-                            self.slot_to_url.get(&handle.slot).cloned().map(|relay| {
-                                (event.into_owned(), RelayObserved::new(relay, self.clock))
-                            })
-                        }
-                        _ => None,
-                    },
-                ),
-                RelayFrame::Auth(_) => None,
-            };
-            if let Some(event) = parsed_event {
-                events.push(event);
-                continue;
+            if matches!(frame.as_message(), RelayMessage::Event { .. }) {
+                let RelayMessage::Event { event, .. } = frame.into_message() else {
+                    unreachable!("RelayFrame message was matched as EVENT")
+                };
+                let Some(relay) = self.slot_to_url.get(&handle.slot).cloned() else {
+                    self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                    continue;
+                };
+                events.push((event.into_owned(), RelayObserved::new(relay, self.clock)));
+            } else {
+                self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                effects.extend(self.on_relay_frame(handle, frame));
             }
-            self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
-            effects.extend(self.on_relay_frame(handle, frame));
         }
         self.ingest_relay_events(events, &mut effects);
         effects
@@ -2279,14 +2272,7 @@ impl<S: EventStore> EngineCore<S> {
 
     fn on_relay_frame(&mut self, handle: TransportRelayHandle, frame: RelayFrame) -> Vec<Effect> {
         let mut effects = Vec::new();
-        let RelayFrame::Text(text) = frame else {
-            // AUTH/NIP-42 handshake is deferred (plan §7 non-goal unless a
-            // falsifier test forces it) — not B's job.
-            return effects;
-        };
-        let Ok(msg) = RelayMessage::from_json(text.as_bytes()) else {
-            return effects; // malformed frame: an untrusted-network fact, not a panic.
-        };
+        let msg = frame.into_message();
         let Some(relay) = self.slot_to_url.get(&handle.slot).cloned() else {
             return effects; // frame from a slot we never saw RelayConnected for.
         };
@@ -3329,7 +3315,7 @@ mod nip65_read_write_split_tests {
     use nmp_store::MemoryStore;
     use nmp_transport::RelayFrame;
     use nostr::nips::nip65::RelayMetadata;
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage, SubscriptionId, Tag, Tags};
+    use nostr::{EventBuilder, Keys, Kind, RelayMessage, SubscriptionId, Tag, Tags};
 
     use super::*;
 
@@ -3435,7 +3421,7 @@ mod nip65_read_write_split_tests {
                 slot: 0,
                 generation: 1,
             },
-            RelayFrame::Text(RelayMessage::event(SubscriptionId::new("s"), event).as_json()),
+            RelayFrame::from(RelayMessage::event(SubscriptionId::new("s"), event)),
         ));
 
         let author_hex = author.public_key().to_hex();
@@ -3483,7 +3469,7 @@ mod relay_admission_tests {
     use nmp_router::LiveDirectory;
     use nmp_store::MemoryStore;
     use nmp_transport::RelayFrame;
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage, SubscriptionId, Tag, Tags};
+    use nostr::{EventBuilder, Keys, Kind, RelayMessage, SubscriptionId, Tag, Tags};
 
     // `RelayDirectory` (the trait whose `write_relays`/`read_relays` these
     // tests call) is already in scope via `use super::*` — importing it again
@@ -3521,7 +3507,7 @@ mod relay_admission_tests {
                 slot: SLOT,
                 generation: GEN,
             },
-            RelayFrame::Text(RelayMessage::event(SubscriptionId::new("s"), event).as_json()),
+            RelayFrame::from(RelayMessage::event(SubscriptionId::new("s"), event)),
         ));
     }
 

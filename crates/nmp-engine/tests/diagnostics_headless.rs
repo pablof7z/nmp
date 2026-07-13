@@ -16,9 +16,7 @@ use nmp_resolver::LiveQuery;
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};
-use nostr::{
-    EventBuilder, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp,
-};
+use nostr::{EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
 
 /// A `RowSink` that ignores everything -- these tests only care about
 /// `Effect`s and `diagnostics_snapshot()`, never the row-delivery path
@@ -51,11 +49,11 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec
 }
 
 fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
-    RelayFrame::Text(RelayMessage::event(SubscriptionId::new(sub), event).as_json())
+    RelayFrame::from(RelayMessage::event(SubscriptionId::new(sub), event))
 }
 
 fn eose_frame(sub: &str) -> RelayFrame {
-    RelayFrame::Text(RelayMessage::eose(SubscriptionId::new(sub)).as_json())
+    RelayFrame::from(RelayMessage::eose(SubscriptionId::new(sub)))
 }
 
 /// Find the single `WireOp::Req` sub-id opened for `relay` inside `effects`

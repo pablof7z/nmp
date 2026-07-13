@@ -16,7 +16,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nostr::RelayUrl;
+use nostr::{RelayMessage, RelayUrl};
 
 use crate::handle::RelayHandle;
 use crate::health::RelayHealth;
@@ -74,15 +74,49 @@ pub enum HandoffResult {
     Ambiguous,
 }
 
-/// An inbound frame off the wire. The pool pre-classifies `AUTH` only;
-/// everything else stays opaque text for the engine reducer to parse
-/// (`EVENT`/`EOSE`/`OK`/`CLOSED`/`NEG-*`). Keepalive `Ping`/`Pong` and the
+/// One parsed, owned relay message off the wire.
+///
+/// Text is parsed exactly once at the transport boundary. The signature gate
+/// inspects an `EVENT` through [`Self::as_message`] and the engine consumes the
+/// same owned value through [`Self::into_message`]; neither layer reparses or
+/// reserializes its JSON. Keepalive `Ping`/`Pong`, binary messages, and the
 /// WebSocket `Close` frame never reach this type — they are consumed by the
 /// worker's keepalive FSM / surfaced instead as [`PoolEvent::Disconnected`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelayFrame {
-    Text(String),
-    Auth(String),
+pub struct RelayFrame {
+    message: Box<RelayMessage<'static>>,
+}
+
+impl RelayFrame {
+    /// Wrap an already-owned relay message.
+    ///
+    /// This is primarily the typed construction door used by headless engine
+    /// tests. Live wire input is constructed only by `pool::frame`, after its
+    /// single JSON parse.
+    #[must_use]
+    pub fn from_message(message: RelayMessage<'static>) -> Self {
+        Self {
+            message: Box::new(message),
+        }
+    }
+
+    /// Borrow the parsed message without cloning its event payload.
+    #[must_use]
+    pub fn as_message(&self) -> &RelayMessage<'static> {
+        self.message.as_ref()
+    }
+
+    /// Move the parsed message into the engine without another parse or clone.
+    #[must_use]
+    pub fn into_message(self) -> RelayMessage<'static> {
+        *self.message
+    }
+}
+
+impl From<RelayMessage<'static>> for RelayFrame {
+    fn from(message: RelayMessage<'static>) -> Self {
+        Self::from_message(message)
+    }
 }
 
 /// Why a relay slot disconnected.
@@ -150,12 +184,33 @@ impl PoolEventSink for std::sync::mpsc::Sender<PoolEvent> {
     }
 }
 
+impl PoolEventSink for std::sync::mpsc::SyncSender<PoolEvent> {
+    fn on_event(&self, event: PoolEvent) {
+        let _ = self.send(event);
+    }
+}
+
 /// Construction-time knobs (bounded send/recv queues, reconnect backoff
 /// bounds, keepalive interval — A2 fills in the concrete fields per the
 /// harvested constants).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PoolConfig {
     pub max_relays: usize,
+    /// Maximum worker events waiting for the translator. A full queue blocks
+    /// the socket worker, propagating pressure back to TCP reads.
+    pub ingest_queue_capacity: usize,
+    /// Maximum translated pool events waiting for the engine bridge.
+    pub event_sink_queue_capacity: usize,
+    /// Persistent native verification workers. Zero selects available host
+    /// parallelism; wasm always uses the deterministic sequential path.
+    pub verifier_workers: usize,
+    /// Maximum verification tasks queued at each persistent worker.
+    pub verifier_queue_capacity: usize,
+    /// Maximum verified id/signature entries retained by the translator.
+    /// Eviction only causes later re-verification; it never changes policy.
+    pub verified_cache_capacity: usize,
+    /// Maximum worker events drained into one ordered verification batch.
+    pub max_verify_batch: usize,
     /// Override for the keepalive idle threshold; `None` uses the
     /// production default ([`crate::keepalive::KEEPALIVE_IDLE_THRESHOLD`]).
     /// Tests on millisecond budgets pass a small value.
@@ -178,6 +233,24 @@ pub struct PoolConfig {
     /// Integration tests that force a reconnect pass `Some(Duration::ZERO)`
     /// so retries fire back-to-back instead of racing a per-URL lottery.
     pub reconnect_jitter_max: Option<Duration>,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_relays: 0,
+            ingest_queue_capacity: 1_024,
+            event_sink_queue_capacity: 1_024,
+            verifier_workers: 0,
+            verifier_queue_capacity: 64,
+            verified_cache_capacity: 65_536,
+            max_verify_batch: 128,
+            keepalive_idle: None,
+            keepalive_pong_timeout: None,
+            reconnect_delay_initial: None,
+            reconnect_jitter_max: None,
+        }
+    }
 }
 
 /// The generational WebSocket pool: `mio`-driven worker thread(s), one

@@ -1526,7 +1526,6 @@ dependencies = [
  "nostr 0.44.4",
  "nostr-relay-builder",
  "rustls",
- "serde_json",
  "tokio",
  "tracing-subscriber",
  "tungstenite 0.29.0",

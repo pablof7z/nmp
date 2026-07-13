@@ -14,7 +14,7 @@ use nmp_store::{
 };
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
-    EventBuilder, JsonUtil, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
+    EventBuilder, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
 use redb::{Database, ReadableTable, TableDefinition};
 
@@ -171,7 +171,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             slot: 0,
             generation: 1,
         },
-        RelayFrame::Text(RelayMessage::ok(event.id, true, "").as_json()),
+        RelayFrame::from(RelayMessage::ok(event.id, true, "")),
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
