@@ -34,10 +34,10 @@ final class GalleryModel: ObservableObject {
 
     init() throws {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        // NMP is pre-v2 and PR #166 deliberately made the v3 event schema a
+        // NMP is pre-v2 and the store deliberately makes event schemas a
         // recreate boundary. Version the disposable Gallery cache filename so
         // an installed older Gallery cannot strand this proof app at startup.
-        let store = caches?.appendingPathComponent("nmp-ui-gallery-v3.redb").path
+        let store = caches?.appendingPathComponent("nmp-ui-gallery-v6.redb").path
         engine = try NMPEngine(
             config: NMPConfig(storePath: store, indexerRelays: Self.indexers)
         )

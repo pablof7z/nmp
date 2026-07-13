@@ -296,6 +296,12 @@ canonical statement is `docs/VISION.md`; detailed ownership lives in:
 - Pending rows reach observers only through the canonical store path.
   Cancellation or terminal pre-signature failure retracts/compensates through
   that path; relay rejection after signing affects the receipt only.
+- A destructive replaceable edit may be accepted only against the exact local
+  base its protocol operation established. The store compares that base inside
+  atomic acceptance and emits a typed conflict without residue; the operation's
+  separately declared source evidence authorizes composition but never claims
+  global completeness. Native apps cannot mint this guard through raw FFI
+  writes and reach it through semantic operations such as NIP-02 follow.
 - Durable retry uses logical backoff with one owner per domain and one deadline
   scheduler. There is no hidden durable transport buffer, fixed-rate polling,
   or silent give-up during temporary unavailability.

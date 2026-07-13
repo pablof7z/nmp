@@ -23,6 +23,26 @@ boundary records:
 If that transaction fails, the caller receives an acceptance error and no
 pending row becomes visible. `Accepted` never means merely queued in memory.
 
+### Guarded whole-value replacement
+
+A protocol module composing a destructive replaceable/addressable edit may
+attach the exact canonical base event id it observed. `None` means the module
+established no local winner under its explicit source-evidence policy; it does
+not assert global Nostr absence.
+
+The store compares that expected base with the current winner inside the same
+acceptance transaction, before allocating an intent or receipt id and before
+changing the canonical row. A mismatch refuses the acceptance atomically and
+surfaces `WriteStatus::ReplaceableConflict { expected, actual }`. It never
+silently rebases the draft, and a precondition attached to a regular
+non-replaceable event fails closed.
+
+This mechanism closes the local read/accept race. It does not turn EOSE or a
+watermark into global completeness: the protocol operation separately owns
+which planned sources and evidence are sufficient to compose at all. Raw FFI
+writes cannot mint the guard; native callers reach it through semantic
+operations such as NMP's NIP-02 `follow` / `unfollow` action.
+
 ## 2. One row path
 
 The pending row participates in ordinary filters, derived bindings,
@@ -133,6 +153,8 @@ Required proofs include:
 - signer absence survives restart as `AwaitingSigner` and resumes after attach;
 - an invalid or mismatched signer response cannot promote the row;
 - pre-signature cancellation restores a displaced replaceable winner;
+- an exact-base guarded replacement is accepted, while a concurrent winner
+  produces a typed conflict with no intent, receipt, or pending-row residue;
 - all relays rejecting a signed event leaves the signed row intact;
 - transport reconnect cannot duplicate durable buffering ownership;
 - restart preserves attempt ordinal and next eligibility;

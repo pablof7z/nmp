@@ -52,15 +52,20 @@ about current code:
   arbitrary-native-view content flow, immutable local renderer sets, three
   mention treatments, generic event chrome, genuinely distinct portrait and
   Medium-style article cards, three user-card layouts, and three reaction
-  interaction families. Network-free scripted sessions make loading, shortfall,
-  cycle, unknown-kind, and custom-document previews deterministic without an
-  engine. The native iOS Gallery consumes those exact components against real
-  data and configures only the two indexers; separate States and 72-row Stress
-  tabs exercise Dynamic Type, RTL, reduced motion, dark appearance, long
-  Markdown, and visible-reference claim release. Live Swift tests prove a
-  profile mention and a relay-less NIP-23 `naddr` using only the two configured
-  indexers and normal NMP outbox discovery. Still unbuilt at this checkpoint:
-  Compose UI parity and Gallery,
+  interaction families. NIP-02 is now the first component whose protocol
+  resource/action also ships: `NMPFollowing` projects canonical kind:3 state,
+  `NMPEngine.follow`/`unfollow` own source-evidenced tag-preserving guarded
+  replacement, and `NMPFollowButton` only renders and forwards the tap.
+  Network-free scripted sessions make loading, shortfall, cycle, unknown-kind,
+  and custom-document previews deterministic without an engine. The native iOS
+  Gallery consumes those exact components against real data and configures only
+  the two indexers; separate States and 72-row Stress tabs exercise Dynamic
+  Type, RTL, reduced motion, dark appearance, long Markdown, and
+  visible-reference claim release. Live Swift tests prove a profile mention and
+  a relay-less NIP-23 `naddr` using only the two configured indexers and normal
+  NMP outbox discovery. A real loopback parity proof drives follow, duplicate
+  no-op, unrelated-contact preservation, and unfollow through direct Rust and
+  the iOS FFI surface. Still unbuilt at this checkpoint: Compose UI parity and Gallery,
   the conflict-honest `nmp-ui` open-code registry/CLI, NIP-25 live reaction
   resources/write intents (#155), and broader product/photo/highlight/media
   component families. See `docs/design/ui-components-strategy.md` and issue

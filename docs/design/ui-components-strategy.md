@@ -3,8 +3,10 @@
 - **Date:** 2026-07-12
 - **Status:** Ratified architecture for issue #75. The shared content engine
   is implemented by #147. The first SwiftUI family and live iOS Gallery are
-  implemented by #154; Compose, the open-code registry/CLI, and broader
-  protocol families remain separately tracked work.
+  implemented by #154. NIP-02 following is the first NMP-owned semantic
+  resource/action consumed by a view-only component (#180); Compose, the
+  open-code registry/CLI, and broader protocol families remain separately
+  tracked work.
 - **Core boundary:** NMP Core remains the content-neutral live-query and
   write-intent engine. The content runtime and UI kits are optional consumers
   of its public API.
@@ -361,6 +363,7 @@ Candidate primitive families include:
   `Product.Actions`;
 - `Media.Grid`, `Media.Image`, `Media.VideoSlot`, `Media.Overflow`;
 - `Profile.Avatar`, `Profile.Name`, `Profile.Nip05`, `Profile.About`;
+- `Follow.Button`, consuming a protocol-owned relationship/action resource;
 - `UnknownEvent` and `RawEventDisclosure`.
 
 These names are illustrative, not frozen API.
@@ -381,6 +384,28 @@ These names are illustrative, not frozen API.
 - Primitives do not navigate. They emit typed actions such as open profile,
   open event, open URL, open hashtag, inspect relay evidence, or invoke a
   protocol-specific action supplied by its renderer.
+
+### 7.1.1 Protocol resources versus controlled visuals
+
+“State flows down; actions flow up” does not mean every protocol fact becomes
+an app-owned Boolean and callback. When an interaction performs a reusable,
+correctness-sensitive semantic transaction—especially a destructive
+whole-value replacement—the optional protocol module should expose the live
+resource and typed action through NMP's public facade. Native UI renders that
+state and forwards intent.
+
+NIP-02 is the first proof. `NMPFollowing` projects the active account's
+canonical kind:3 relationship and source-scoped readiness;
+`NMPEngine.follow`/`unfollow` preserve the exact list and publish under an
+atomic base precondition; `NMPFollowButton` owns only pixels, accessibility,
+and confirmation animation. The button cannot accept an `isFollowing` Boolean
+or reconstruct kind:3.
+
+Presentation-only or not-yet-semantic interactions may still be controlled
+components. The current NIP-25 reaction visuals accept selected/count/action
+from the host until their separately tracked protocol resource exists. The
+test is ownership, not visual similarity: reusable Nostr correctness belongs
+in an optional NMP module; product state and appearance remain app-owned.
 
 ### 7.2 Resource-owning slots
 
@@ -761,6 +786,10 @@ Implementation should be split into issue-backed vertical proofs:
    rapid-scroll nested-reference case now exercise the production SwiftUI path
    and assert visible claims return to a bounded window. Compose Gallery and
    deeper allocation/frame-time automation remain open.
+8. **First protocol action component — built (#180):** NIP-02 relationship
+   state, guarded follow/unfollow, direct/FFI live-relay parity, and a SwiftUI
+   button prove that reusable semantic action logic can remain in NMP while
+   the optional view remains fully replaceable.
 
 No broad catalog should be built before steps 1-5 prove the architecture. Once
 the foundation is proven, renderer breadth is an ongoing product program rather
