@@ -61,6 +61,15 @@ Platform SDKs provide standard Keychain/Keystore-backed providers. The app owns
 identity import, removal, backup, labels, and login policy and may supply custom
 remote/hardware/memory providers.
 
+For a personal or development app that explicitly accepts plaintext sandbox
+storage, Swift and Kotlin also expose `NMPInsecureFileAccountStore`. Passing it
+to engine construction makes `addAccount` checkpoint the validated key and
+reattach it on the next construction. The checkpoint is separate from the
+canonical event/outbox store, never appears in snapshots or diagnostics, and
+must be cleared before engine shutdown to sign out. Its name is literal: it is
+not Keychain, Keystore, encrypted, hardware-backed, or a substitute for the
+standard secure providers tracked by #47.
+
 A memory-only key may disappear. NMP does not re-author or silently discard its
 accepted intent; the receipt waits for equivalent provider reattachment or
 explicit cancellation/terminal policy.

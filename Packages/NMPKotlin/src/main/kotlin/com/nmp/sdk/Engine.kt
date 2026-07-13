@@ -39,20 +39,47 @@ data class NMPConfig(
 /** The engine object a dev constructs exactly once. Holds zero app-lifecycle
  * concepts -- no scene-phase hook, no required provider/environment
  * wrapper. `NMPEngine(NMPConfig(...))` is the entire adoption cost. */
-class NMPEngine(config: NMPConfig) : AutoCloseable {
+class NMPEngine(
+    config: NMPConfig,
+    private val localAccountStore: NMPInsecureFileAccountStore? = null,
+) : AutoCloseable {
     internal val ffi: NmpEngine = nmpRethrowing { NmpEngine(config.toFfi()) }
+
+    init {
+        try {
+            localAccountStore?.loadSecretKey()?.let { secretKey ->
+                val pubkey = nmpRethrowing { ffi.addAccount(secretKey) }
+                nmpRethrowing { ffi.setActiveAccount(pubkey) }
+            }
+        } catch (error: Throwable) {
+            ffi.shutdown()
+            throw error
+        }
+    }
 
     // MARK: - Identity (P3; multi-account)
 
     /** Register an account from its secret key (hex or bech32 `nsec`). The
      * key crosses this boundary exactly once and lives engine-side from
-     * this point on. Returns the account's hex public key. Does NOT make
-     * the account active -- call `setActiveAccount` for that. */
-    fun addAccount(secretKey: String): String = nmpRethrowing { ffi.addAccount(secretKey) }
+     * this point on. When an [NMPInsecureFileAccountStore] was explicitly
+     * configured, NMP also checkpoints it for restart restoration. Returns
+     * the account's hex public key. Does NOT make the account active -- call
+     * [setActiveAccount] for that. */
+    fun addAccount(secretKey: String): String {
+        val pubkey = nmpRethrowing { ffi.addAccount(secretKey) }
+        localAccountStore?.saveSecretKey(secretKey)
+        return pubkey
+    }
 
     /** Re-root every reactive query AND the active signing capability
      * together onto `pubkey` (`null` -> logged-out / read-only browsing). */
     fun setActiveAccount(pubkey: String?) = nmpRethrowing { ffi.setActiveAccount(pubkey) }
+
+    /** The Rust-owned account currently rooting reactive identity and writes. */
+    fun activeAccount(): String? = nmpRethrowing { ffi.activeAccount() }
+
+    /** Remove the plaintext checkpoint. The live signer remains until close. */
+    fun clearPersistedAccount() = localAccountStore?.clear()
 
     // MARK: - Read noun
 
