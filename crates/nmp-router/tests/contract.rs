@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, Lane, RelayLimits, RouteKind, Router,
+    test_relay, DiscoveryKinds, FixtureDirectory, Lane, RouteKind, Router,
     RuleRegistry, ShortfallReason,
 };
 
@@ -46,7 +46,6 @@ fn pinned(filter: ConcreteFilter) -> ContextualAtom {
 
 fn new_router() -> Router {
     Router::new(
-        RelayLimits::default(),
         DiscoveryKinds::default(),
         RuleRegistry::default_widen_only(),
     )
