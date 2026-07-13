@@ -15,9 +15,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use nmp_transport::{
-    AttemptCorrelation, HandoffResult, Pool, PoolConfig, PoolEvent, RelayFrame, WireFrame,
-};
+use nmp_transport::{AttemptCorrelation, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
+use nostr::{JsonUtil, RelayMessage};
 // Deliberately NOT a glob import: `nostr_relay_builder::prelude::*` re-exports
 // `nostr::prelude::*` from ITS OWN `nostr` dependency (0.45-alpha, distinct
 // from this workspace's pinned `nostr = "0.44.4"` that `nmp-transport`'s
@@ -60,7 +59,7 @@ fn is_connected(event: &PoolEvent) -> bool {
 }
 
 fn frame_contains(event: &PoolEvent, needle: &str) -> bool {
-    matches!(event, PoolEvent::Frame { frame: RelayFrame::Text(text), .. } if text.contains(needle))
+    matches!(event, PoolEvent::Frame { frame, .. } if frame.clone().into_message().as_json().contains(needle))
 }
 
 /// Reserve an ephemeral TCP port by binding then immediately dropping the
@@ -269,15 +268,16 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
         frame_contains(e, "\"EVENT\"")
     });
     match ev_frame {
-        PoolEvent::Frame {
-            frame: RelayFrame::Text(text),
-            ..
-        } => {
-            assert!(
-                text.contains(&event.id.to_hex()),
+        PoolEvent::Frame { frame, .. } => match frame.into_message() {
+            RelayMessage::Event {
+                event: received, ..
+            } => assert_eq!(
+                received.id.to_hex(),
+                event.id.to_hex(),
                 "EVENT frame carries our seeded event"
-            );
-        }
+            ),
+            other => panic!("expected an EVENT message, got {other:?}"),
+        },
         other => panic!("expected a Frame, got {other:?}"),
     }
     recv_matching(&rx, Duration::from_secs(5), |e| {
@@ -599,7 +599,10 @@ async fn durable_event_resolves_written_exactly_once() {
         .expect("sign test event");
     let json = format!(r#"["EVENT",{}]"#, event.as_json());
     let correlation = AttemptCorrelation(1);
-    assert!(pool.send_durable(h, correlation, WireFrame::Text(json)));
+    assert_eq!(
+        pool.send_durable(h, correlation, WireFrame::Text(json)),
+        nmp_transport::DurableSendOutcome::Queued
+    );
 
     let first = recv_matching(
         &rx,

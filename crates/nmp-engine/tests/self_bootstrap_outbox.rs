@@ -21,8 +21,7 @@ use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::nips::nip65::RelayMetadata;
 use nostr::{
-    EventBuilder, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag, Tags,
-    Timestamp,
+    EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag, Tags, Timestamp,
 };
 
 /// A `RowSink` that discards everything -- these tests only care about
@@ -89,7 +88,7 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec
 }
 
 fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
-    RelayFrame::Text(RelayMessage::event(SubscriptionId::new(sub), event).as_json())
+    RelayFrame::from(RelayMessage::event(SubscriptionId::new(sub), event))
 }
 
 /// A kind:3 (contact list) event: `follows` encoded as `p` tags.

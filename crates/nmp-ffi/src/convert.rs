@@ -694,6 +694,7 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
             .collect(),
         discovered_private_relays_rejected: s.discovered_private_relays_rejected,
         relays_rejected_over_cap: s.relays_rejected_over_cap,
+        transport_degraded: s.transport_degraded,
     }
 }
 
@@ -1029,6 +1030,7 @@ mod tests {
             discovered_private_relays_rejected: 0,
             relays_rejected_over_cap: 0,
             store_degraded: None,
+            transport_degraded: Some("signature verification worker unavailable".to_string()),
         });
 
         assert_eq!(ffi.relays[0].relay, relay.to_string());
@@ -1040,6 +1042,10 @@ mod tests {
             })
         );
         assert_eq!(ffi.relays[0].coverage[1].coverage, None);
+        assert_eq!(
+            ffi.transport_degraded.as_deref(),
+            Some("signature verification worker unavailable")
+        );
     }
 
     #[test]

@@ -2109,6 +2109,16 @@ record Record {
                 "Relay dials the transport pool refused because the configured\n`max_relays` ceiling was already reached (issue #121, worker-exhaustion\ndefense). Always `0` when no cap is configured.",
             ),
         },
+        Field {
+            name: "transport_degraded",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: Some(
+                "Latest transport acceptance/verifier failure, if any. This is\nobservational diagnostics and never changes routing or trust policy.",
+            ),
+        },
     ],
     docstring: Some(
         "The engine-global diagnostics snapshot (M5 plan §1.1) -- \"the acceptance\ntest rendered on screen, permanently.\" Pushed reactively via\n`NmpEngine::observe_diagnostics`, never polled; read-only and off the\ndata path (never influences routing/delivery).",
