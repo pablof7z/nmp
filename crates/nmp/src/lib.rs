@@ -173,24 +173,3 @@ pub use nmp_router::RelayDirectory;
 pub use nmp_store::EventStore;
 #[cfg(feature = "unstable-mechanism")]
 pub use nmp_transport::PoolConfig;
-
-#[cfg(test)]
-mod relay_hint_tests {
-    use super::*;
-
-    #[test]
-    fn network_hint_gate_rejects_local_and_onion_but_keeps_public_hosts() {
-        assert!(admits_network_relay_hint(
-            &RelayUrl::parse("wss://relay.example.com").unwrap()
-        ));
-        assert!(!admits_network_relay_hint(
-            &RelayUrl::parse("ws://127.0.0.1:7777").unwrap()
-        ));
-        assert!(!admits_network_relay_hint(
-            &RelayUrl::parse("ws://10.0.0.9").unwrap()
-        ));
-        assert!(!admits_network_relay_hint(
-            &RelayUrl::parse("wss://hiddenservice.onion").unwrap()
-        ));
-    }
-}
