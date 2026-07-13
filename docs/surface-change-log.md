@@ -283,7 +283,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Superseded path removed:** the native free composer that accepted caller-selected author, timestamp, kind, and arbitrary tag rows is deleted rather than aliased; its now-unreachable `ReservedGroupTag` FFI/Swift/Kotlin error projection is removed in the same change. Direct Rust modules that deliberately need arbitrary kinds/tags keep only the pre-existing lower-level `compose_group_send` seam.
 - **Human signoff:** the repository owner explicitly required NMP to own typed group-message recipients, replies, and time so 29er-next never writes raw protocol rows; issue #156 and draft PR #196 are the review record, with exact-head adversarial review and required CI remaining merge gates.
 
-## 2026-07-13 — Add explicit plaintext local-account autologin ([PR #201](https://github.com/pablof7z/nmp/pull/201))
+## 2026-07-13 — Add explicit plaintext local-account autologin ([PR #229](https://github.com/pablof7z/nmp/pull/229))
 
 - **Failure evidence:** issue #197 and 29er-next issue #56 record that a local account imported through `addAccount` vanished on every engine restart, so an app could not offer automatic login without either persisting the nsec itself or waiting for an unrelated protected-vault integration.
 - **Changed projections:** ffi,kotlin,swift
@@ -292,4 +292,4 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Diagnostics impact:** none; restoration failures surface as the existing typed invalid-secret or SDK I/O construction error, while the only new observation is the existing Rust-owned active public key.
 - **Updated falsifiers:** Rust proves the active-account projection follows set/clear lifecycle authority and rejects reads after shutdown. Swift and Kotlin each import a fixed test key, shut down, reconstruct from the same checkpoint, observe only its public key, clear it, and prove a later reconstruction is signed out; corrupt checkpoint content fails closed, and the Swift proof also checks owner-only file permissions.
 - **Superseded path removed:** none; this is a deliberately opt-in provider. It does not add an app-local mirror or compatibility route, and it does not claim to supersede the governed secure provider work tracked by issue #47.
-- **Human signoff:** Pablo explicitly requested nsec preservation and automatic login without Keychain; PR #201 is the review record for the intentionally plaintext tradeoff.
+- **Human signoff:** Pablo explicitly requested nsec preservation and automatic login without Keychain; PR #229 is the review record for the intentionally plaintext tradeoff.
