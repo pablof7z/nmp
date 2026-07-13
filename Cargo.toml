@@ -19,6 +19,7 @@ members = [
     "crates/nmp-nip02",
     "crates/nmp-nip29",
     "crates/nmp-content",
+    "crates/nmp-test-support",
 ]
 
 [workspace.package]
@@ -51,5 +52,6 @@ nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
 nmp-content = { path = "crates/nmp-content" }
+nmp-test-support = { path = "crates/nmp-test-support" }
 proptest = "1"
 uniffi = "0.29"
