@@ -11,7 +11,7 @@ use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nostr::{Event, JsonUtil, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
-const EVENTS_V5: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v5");
+const EVENTS_V6: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v6");
 const CODEC_ROWS: TableDefinition<u64, &[u8]> = TableDefinition::new("codec_rows");
 
 fn encode_v3_event(event: &Event) -> Vec<u8> {
@@ -128,7 +128,7 @@ fn main() {
     let db = Database::create(&path).expect("open packed redb");
     let (rows, v4_value_bytes, event_stats, v4_rows) = {
         let read_txn = db.begin_read().expect("begin packed read");
-        let table = read_txn.open_table(EVENTS_V5).expect("open events_v5");
+        let table = read_txn.open_table(EVENTS_V6).expect("open events_v6");
         let mut rows = 0u64;
         let mut value_bytes = 0u64;
         let mut codec_rows = Vec::new();
@@ -141,7 +141,7 @@ fn main() {
         (
             rows,
             value_bytes,
-            table.stats().expect("events_v5 stats"),
+            table.stats().expect("events_v6 stats"),
             codec_rows,
         )
     };

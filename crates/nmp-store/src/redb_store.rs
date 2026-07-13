@@ -65,34 +65,39 @@ fn persist_err(e: impl std::fmt::Display) -> PersistenceError {
 type EventKey = u64;
 type RelayKey = u32;
 
-/// Breaking v5 event schema. Compatibility is intentionally not carried:
+/// Breaking v6 event schema. Compatibility is intentionally not carried:
 /// immutable notes, local state, interned relay observations, raw-id lookup,
 /// and compact primary keys are independent tables from the first byte.
-const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events_v5");
-const EVENT_IDS: TableDefinition<&[u8], EventKey> = TableDefinition::new("event_ids_v5");
-const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> = TableDefinition::new("event_local_v5");
+const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events_v6");
+const EVENT_IDS: TableDefinition<&[u8; 32], EventKey> = TableDefinition::new("event_ids_v6");
+const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> = TableDefinition::new("event_local_v6");
 const EVENT_STORE_META: TableDefinition<&str, EventKey> =
-    TableDefinition::new("event_store_meta_v5");
+    TableDefinition::new("event_store_meta_v6");
 const NEXT_EVENT_KEY: &str = "next_event_key";
-const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays_v5");
-const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys_v5");
-const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs_v5");
-const RELAY_META: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_meta_v5");
+const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays_v6");
+const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys_v6");
+const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs_v6");
+const RELAY_META: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_meta_v6");
 const NEXT_RELAY_KEY: &str = "next_relay_key";
 /// Fixed-width key: `event_key:u64-be | relay_key:u32-be`; value is the
 /// greatest observation timestamp in seconds.
 const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
-    TableDefinition::new("event_observations_v5");
-const LEGACY_EVENT_TABLES: [&str; 7] = [
+    TableDefinition::new("event_observations_v6");
+const LEGACY_EVENT_TABLES: [&str; 9] = [
     "events",
     "events_v2",
     "events_v3",
     "events_v4",
+    "events_v5",
     "outbox_displaced_v2",
     "outbox_displaced_v3",
     "outbox_displaced_v4",
+    "outbox_displaced_v5",
 ];
-const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index_v5");
+const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
+const SCHEMA_VERSION_KEY: &str = "version";
+const SCHEMA_VERSION: u64 = 6;
+const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index_v6");
 const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
 /// Permanent kind:5 tombstones for individual event ids
 /// (retraction-and-negative-deltas.md §2/§7). Key: `"{id_hex}:{author_hex}"`
@@ -111,19 +116,20 @@ const TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("tombstones
 /// address) — a candidate with `created_at <= ceiling` is tombstoned.
 const ADDR_TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("addr_tombstones");
 /// The persistent NIP-40 expiration index (retraction-and-negative-
-/// deltas.md §3.1). Key: [`expiration_key`] (`"{ts:020}:{id_hex}"`, so
-/// byte-lexicographic order matches numeric deadline order); value: the
-/// canonical event's compact surrogate key.
-const EXPIRATION_INDEX: TableDefinition<&str, EventKey> =
-    TableDefinition::new("expiration_index_v5");
+/// deltas.md §3.1). Key: `expires_at:u64-be | event_id:[u8;32]`, so ordinary
+/// byte ordering matches numeric deadline order without decimal/hex work;
+/// value: the canonical event's compact surrogate key.
+const EXPIRATION_INDEX: TableDefinition<&[u8; 40], EventKey> =
+    TableDefinition::new("expiration_index_v6");
 /// Binary ordered indexes all end in the same sortable suffix:
 /// `created_at:u64-be | !event_id:[u8;32]`. Reverse scans therefore yield
 /// `created_at DESC, event_id ASC` and can stop exactly at the visible limit.
-const BY_CREATED_AT: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_created_at_v5");
-const BY_AUTHOR: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_author_time_v5");
-const BY_KIND: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_kind_time_v5");
-const BY_AUTHOR_KIND: TableDefinition<&[u8], EventKey> =
-    TableDefinition::new("by_author_kind_time_v5");
+const BY_CREATED_AT: TableDefinition<&[u8; 40], EventKey> =
+    TableDefinition::new("by_created_at_v6");
+const BY_AUTHOR: TableDefinition<&[u8; 72], EventKey> = TableDefinition::new("by_author_time_v6");
+const BY_KIND: TableDefinition<&[u8; 42], EventKey> = TableDefinition::new("by_kind_time_v6");
+const BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
+    TableDefinition::new("by_author_kind_time_v6");
 /// NIP-01 single-letter tag index, borrowing nostrdb's clustered
 /// `(tag,value,created_at)` layout. The binary key is:
 ///
@@ -136,7 +142,7 @@ const BY_AUTHOR_KIND: TableDefinition<&[u8], EventKey> =
 /// parsing hex.
 /// Values are compact event keys, so a hit dereferences the immutable note
 /// directly without rebuilding or hex-encoding its NIP-01 id.
-const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v5");
+const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
 /// Exact live-row counts for every ordered-index prefix. Keys are namespaced
 /// binary prefixes (global, author, kind, author+kind, or tag/value); values
 /// count physical index rows in that bucket. Mutations accumulate deltas in
@@ -166,7 +172,7 @@ const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox
 /// `NMPE` value. See [`encode_stored_event`]/[`decode_stored_event`]. Deleted
 /// durably by `promote_signed` (R6) or `compensate_write`; never by
 /// `recover_outbox` (read-only).
-const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> = TableDefinition::new("outbox_displaced_v5");
+const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> = TableDefinition::new("outbox_displaced_v6");
 /// Per-`(intent, relay, ordinal)` durable attempt evidence
 /// (crashsafe-accepted-2-3-plan.md §5) — schema created here so the table
 /// exists for the dispatch-time attempt writer to come (U3/U4: "Persist
@@ -198,6 +204,7 @@ const OUTBOX_ATTEMPT_DETAILS: TableDefinition<&str, &str> =
 const OUTBOX_META: TableDefinition<&str, &str> = TableDefinition::new("outbox_meta");
 const NEXT_INTENT_ID_KEY: &str = "next_intent_id";
 const NEXT_RECEIPT_ID_KEY: &str = "next_receipt_id";
+const PENDING_EPHEMERAL_RECEIPTS_KEY: &str = "pending_ephemeral_receipts";
 /// Durably-RETAINED receipt records, keyed by `receipt_id` (zero-padded
 /// decimal, mirroring [`intent_key`]'s convention) — independent of
 /// `OUTBOX_INTENTS`'s open-work rows (architecture review correction: see
@@ -592,8 +599,7 @@ struct OutboxIntentRecord {
 /// [`OUTBOX_INTENTS`]/[`OUTBOX_DISPLACED`]'s shared key for `id` — a
 /// zero-padded decimal so the two tables can never disagree on how to find
 /// each other's row for the same intent, and so a future ordered scan sorts
-/// by acceptance order (lexicographic == numeric, matching
-/// [`expiration_key`]'s convention).
+/// by acceptance order (lexicographic == numeric).
 fn intent_key(id: IntentId) -> String {
     format!("{:020}", id.0)
 }
@@ -651,6 +657,26 @@ fn alloc_counter_in_txn(
     Ok(current)
 }
 
+fn increment_pending_ephemeral_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+) -> Result<(), PersistenceError> {
+    let current = outbox_meta
+        .get(PENDING_EPHEMERAL_RECEIPTS_KEY)
+        .map_err(persist_err)?
+        .map(|guard| guard.value().parse::<u64>())
+        .transpose()
+        .map_err(|err| PersistenceError(format!("parse pending ephemeral count: {err}")))?
+        .unwrap_or(0);
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| PersistenceError("pending ephemeral receipt count exhausted".into()))?;
+    let encoded = next.to_string();
+    outbox_meta
+        .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_str())
+        .map_err(persist_err)?;
+    Ok(())
+}
+
 /// [`OUTBOX_RECEIPTS`]'s key for `id` — same zero-padding convention as
 /// [`intent_key`].
 fn receipt_key(id: u64) -> String {
@@ -699,12 +725,12 @@ fn update_outbox_receipt(
 /// Boot-time reconciliation: every `Ephemeral` receipt-only record
 /// (`intent_id: None`) still `ReceiptState::Accepted` is flipped to
 /// `Abandoned` — see `ReceiptState::Abandoned`'s doc for why this is sound
-/// without any engine cooperation. Called from `RedbStore::open()`, inside
-/// the SAME write transaction that ensures every table exists (a fresh
-/// store's `OUTBOX_RECEIPTS` is empty, so this is a no-op there). Two
-/// passes (collect then mutate), mirroring `gc`'s victim-collection
-/// pattern: `redb` does not allow mutating a table while iterating it.
-fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &str, &str>) {
+/// without any engine cooperation. `RedbStore::open()` calls this only when
+/// exact metadata reports pending ephemeral receipts, inside the conditional
+/// recovery transaction. Fresh schema creation never calls it. Two passes
+/// (collect then mutate), mirroring `gc`'s victim-collection pattern: `redb`
+/// does not allow mutating a table while iterating it.
+fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &str, &str>) -> usize {
     let mut to_abandon: Vec<(String, OutboxReceiptRecord)> = Vec::new();
     for entry in outbox_receipts.iter().expect("redb: iter outbox_receipts") {
         let (key, value) = entry.expect("redb: read outbox_receipts entry");
@@ -719,6 +745,7 @@ fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &st
             to_abandon.push((key.value().to_string(), record));
         }
     }
+    let reconciled = to_abandon.len();
     for (key, mut record) in to_abandon {
         record.state = ReceiptState::Abandoned;
         let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
@@ -726,6 +753,7 @@ fn reconcile_ephemeral_receipts_in_txn(outbox_receipts: &mut redb::Table<'_, &st
             .insert(key.as_str(), encoded.as_str())
             .expect("redb: update outbox_receipts (ephemeral abandon)");
     }
+    reconciled
 }
 
 /// One provisional kind:5 suppression claim, as persisted in
@@ -1004,7 +1032,7 @@ fn observation_event_key(key: &[u8]) -> EventKey {
 /// also considering its raw-id mapping, local state, and relay observations.
 struct CanonicalWriteTables<'txn> {
     events: redb::Table<'txn, EventKey, &'static [u8]>,
-    event_ids: redb::Table<'txn, &'static [u8], EventKey>,
+    event_ids: redb::Table<'txn, &'static [u8; 32], EventKey>,
     local: redb::Table<'txn, EventKey, &'static [u8]>,
     store_meta: redb::Table<'txn, &'static str, EventKey>,
     observations: redb::Table<'txn, &'static [u8; 12], u64>,
@@ -1013,6 +1041,13 @@ struct CanonicalWriteTables<'txn> {
     relay_refs: redb::Table<'txn, RelayKey, u64>,
     relay_meta: redb::Table<'txn, &'static str, RelayKey>,
     cardinality: redb::Table<'txn, &'static [u8], u64>,
+    /// Surrogate allocators are loaded once per write transaction and only
+    /// flushed if consumed. A large ingest batch therefore writes each hot
+    /// metadata row once, in the same atomic commit as its events/indexes.
+    next_event_key: EventKey,
+    next_relay_key: RelayKey,
+    event_allocator_dirty: bool,
+    relay_allocator_dirty: bool,
     /// Effective counts touched by this transaction. Busy batches commonly
     /// share one relay, so the durable hot row is read and written once.
     relay_ref_counts: HashMap<RelayKey, u64>,
@@ -1024,23 +1059,39 @@ struct CanonicalWriteTables<'txn> {
 
 impl<'txn> CanonicalWriteTables<'txn> {
     fn open(write_txn: &'txn redb::WriteTransaction) -> Result<Self, PersistenceError> {
+        let store_meta = write_txn
+            .open_table(EVENT_STORE_META)
+            .map_err(persist_err)?;
+        let next_event_key = store_meta
+            .get(NEXT_EVENT_KEY)
+            .map_err(persist_err)?
+            .map(|guard| guard.value())
+            .unwrap_or(1);
+        let relay_meta = write_txn.open_table(RELAY_META).map_err(persist_err)?;
+        let next_relay_key = relay_meta
+            .get(NEXT_RELAY_KEY)
+            .map_err(persist_err)?
+            .map(|guard| guard.value())
+            .unwrap_or(1);
         Ok(Self {
             events: write_txn.open_table(EVENTS).map_err(persist_err)?,
             event_ids: write_txn.open_table(EVENT_IDS).map_err(persist_err)?,
             local: write_txn.open_table(EVENT_LOCAL).map_err(persist_err)?,
-            store_meta: write_txn
-                .open_table(EVENT_STORE_META)
-                .map_err(persist_err)?,
+            store_meta,
             observations: write_txn
                 .open_table(EVENT_OBSERVATIONS)
                 .map_err(persist_err)?,
             relays: write_txn.open_table(RELAYS).map_err(persist_err)?,
             relay_keys: write_txn.open_table(RELAY_KEYS).map_err(persist_err)?,
             relay_refs: write_txn.open_table(RELAY_REFS).map_err(persist_err)?,
-            relay_meta: write_txn.open_table(RELAY_META).map_err(persist_err)?,
+            relay_meta,
             cardinality: write_txn
                 .open_table(INDEX_CARDINALITY)
                 .map_err(persist_err)?,
+            next_event_key,
+            next_relay_key,
+            event_allocator_dirty: false,
+            relay_allocator_dirty: false,
             relay_ref_counts: HashMap::new(),
             cardinality_deltas: HashMap::new(),
         })
@@ -1049,7 +1100,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
     fn key_for_id(&self, id: &EventId) -> Result<Option<EventKey>, PersistenceError> {
         Ok(self
             .event_ids
-            .get(id.as_bytes().as_slice())
+            .get(id.as_bytes())
             .map_err(persist_err)?
             .map(|guard| guard.value()))
     }
@@ -1115,34 +1166,20 @@ impl<'txn> CanonicalWriteTables<'txn> {
     }
 
     fn allocate_key(&mut self) -> Result<EventKey, PersistenceError> {
-        let next = self
-            .store_meta
-            .get(NEXT_EVENT_KEY)
-            .map_err(persist_err)?
-            .map(|guard| guard.value())
-            .unwrap_or(1);
-        let following = next
+        let next = self.next_event_key;
+        self.next_event_key = next
             .checked_add(1)
             .ok_or_else(|| PersistenceError("canonical event key space exhausted".to_owned()))?;
-        self.store_meta
-            .insert(NEXT_EVENT_KEY, following)
-            .map_err(persist_err)?;
+        self.event_allocator_dirty = true;
         Ok(next)
     }
 
     fn allocate_relay_key(&mut self) -> Result<RelayKey, PersistenceError> {
-        let next = self
-            .relay_meta
-            .get(NEXT_RELAY_KEY)
-            .map_err(persist_err)?
-            .map(|guard| guard.value())
-            .unwrap_or(1);
-        let following = next
+        let next = self.next_relay_key;
+        self.next_relay_key = next
             .checked_add(1)
             .ok_or_else(|| PersistenceError("relay key space exhausted".to_owned()))?;
-        self.relay_meta
-            .insert(NEXT_RELAY_KEY, following)
-            .map_err(persist_err)?;
+        self.relay_allocator_dirty = true;
         Ok(next)
     }
 
@@ -1201,7 +1238,22 @@ impl<'txn> CanonicalWriteTables<'txn> {
         Ok(())
     }
 
-    fn flush_counts(&mut self) -> Result<(), PersistenceError> {
+    /// Flush every transaction-local mutation exactly once before the caller
+    /// commits: surrogate high-water marks, relay refcounts, and index
+    /// cardinalities remain part of the same crash-atomic event transaction.
+    fn flush_pending(&mut self) -> Result<(), PersistenceError> {
+        if self.event_allocator_dirty {
+            self.store_meta
+                .insert(NEXT_EVENT_KEY, self.next_event_key)
+                .map_err(persist_err)?;
+            self.event_allocator_dirty = false;
+        }
+        if self.relay_allocator_dirty {
+            self.relay_meta
+                .insert(NEXT_RELAY_KEY, self.next_relay_key)
+                .map_err(persist_err)?;
+            self.relay_allocator_dirty = false;
+        }
         for (relay_key, effective) in std::mem::take(&mut self.relay_ref_counts) {
             let persisted = self
                 .relay_refs
@@ -1337,7 +1389,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .insert(key, event_bytes.as_slice())
             .map_err(persist_err)?;
         self.event_ids
-            .insert(event.id.as_bytes().as_slice(), key)
+            .insert(event.id.as_bytes(), key)
             .map_err(persist_err)?;
         if let Some(local) = &provenance.local {
             let encoded =
@@ -1417,9 +1469,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
 
     fn remove_by_key(&mut self, key: EventKey, id: &EventId) -> Result<(), PersistenceError> {
         self.events.remove(key).map_err(persist_err)?;
-        self.event_ids
-            .remove(id.as_bytes().as_slice())
-            .map_err(persist_err)?;
+        self.event_ids.remove(id.as_bytes()).map_err(persist_err)?;
         self.local.remove(key).map_err(persist_err)?;
         self.remove_all_observations(key)?;
         Ok(())
@@ -1434,19 +1484,20 @@ struct AddrTombstoneRecord {
     deleting_author: String,
 }
 
-/// The `expiration_index` table's key: zero-padded decimal seconds so
-/// byte-lexicographic order (what `redb`'s `range` uses) matches numeric
-/// timestamp order, `:`-joined with the event id hex to disambiguate
-/// multiple events sharing one deadline.
-fn expiration_key(ts: Timestamp, id: &EventId) -> String {
-    format!("{:020}:{}", ts.as_secs(), id.to_hex())
+/// The `expiration_index` table's fixed binary key. Big-endian seconds make
+/// redb's byte ordering numeric; raw id bytes disambiguate equal deadlines.
+fn expiration_key(ts: Timestamp, id: &EventId) -> [u8; 40] {
+    let mut key = [0; 40];
+    key[..8].copy_from_slice(&ts.as_secs().to_be_bytes());
+    key[8..].copy_from_slice(id.as_bytes());
+    key
 }
 
-/// The inclusive upper bound of every `expiration_key` at or before `ts`:
-/// `'f'` is the greatest ASCII hex-digit character, so 64 of them sorts
-/// after every real 32-byte id hex sharing that same timestamp prefix.
-fn expiration_key_upper_bound(ts: Timestamp) -> String {
-    format!("{:020}:{}", ts.as_secs(), "f".repeat(64))
+/// The inclusive upper bound of every [`expiration_key`] at or before `ts`.
+fn expiration_key_upper_bound(ts: Timestamp) -> [u8; 40] {
+    let mut key = [u8::MAX; 40];
+    key[..8].copy_from_slice(&ts.as_secs().to_be_bytes());
+    key
 }
 
 /// The `tombstones` table's key for one (target id, claiming author) pair —
@@ -1455,7 +1506,7 @@ fn id_tombstone_key(id: &EventId, author: &PublicKey) -> String {
     format!("{}:{}", id.to_hex(), author.to_hex())
 }
 
-fn ordered_key(prefix: &[u8], created_at: Timestamp, id: &EventId) -> Vec<u8> {
+fn ordered_vec_key(prefix: &[u8], created_at: Timestamp, id: &EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(prefix.len() + 8 + 32);
     key.extend_from_slice(prefix);
     key.extend_from_slice(&created_at.as_secs().to_be_bytes());
@@ -1463,32 +1514,62 @@ fn ordered_key(prefix: &[u8], created_at: Timestamp, id: &EventId) -> Vec<u8> {
     key
 }
 
-fn ordered_range(prefix: &[u8], since: u64, until: u64) -> (Vec<u8>, Vec<u8>) {
-    let mut lower = Vec::with_capacity(prefix.len() + 8 + 32);
+fn ordered_fixed_key<const N: usize>(
+    prefix: &[u8],
+    created_at: Timestamp,
+    id: &EventId,
+) -> [u8; N] {
+    assert_eq!(prefix.len() + 40, N);
+    let mut key = [0; N];
+    key[..prefix.len()].copy_from_slice(prefix);
+    key[prefix.len()..prefix.len() + 8].copy_from_slice(&created_at.as_secs().to_be_bytes());
+    for (dst, byte) in key[prefix.len() + 8..].iter_mut().zip(id.as_bytes()) {
+        *dst = !byte;
+    }
+    key
+}
+
+fn ordered_vec_range(prefix: &[u8], since: u64, until: u64) -> (Vec<u8>, Vec<u8>) {
+    let mut lower = Vec::with_capacity(prefix.len() + 40);
     lower.extend_from_slice(prefix);
     lower.extend_from_slice(&since.to_be_bytes());
-    lower.extend_from_slice(&[0u8; 32]);
-    let mut upper = Vec::with_capacity(prefix.len() + 8 + 32);
+    lower.extend_from_slice(&[0; 32]);
+    let mut upper = Vec::with_capacity(prefix.len() + 40);
     upper.extend_from_slice(prefix);
     upper.extend_from_slice(&until.to_be_bytes());
     upper.extend_from_slice(&[u8::MAX; 32]);
     (lower, upper)
 }
 
-fn created_at_key(event: &Event) -> Vec<u8> {
-    ordered_key(&[], event.created_at, &event.id)
+fn ordered_fixed_range<const N: usize>(
+    prefix: &[u8],
+    since: u64,
+    until: u64,
+) -> ([u8; N], [u8; N]) {
+    assert_eq!(prefix.len() + 40, N);
+    let mut lower = [0; N];
+    lower[..prefix.len()].copy_from_slice(prefix);
+    lower[prefix.len()..prefix.len() + 8].copy_from_slice(&since.to_be_bytes());
+    let mut upper = [u8::MAX; N];
+    upper[..prefix.len()].copy_from_slice(prefix);
+    upper[prefix.len()..prefix.len() + 8].copy_from_slice(&until.to_be_bytes());
+    (lower, upper)
 }
 
-fn by_author_key(event: &Event) -> Vec<u8> {
-    ordered_key(event.pubkey.as_bytes(), event.created_at, &event.id)
+fn created_at_key(event: &Event) -> [u8; 40] {
+    ordered_fixed_key(&[], event.created_at, &event.id)
+}
+
+fn by_author_key(event: &Event) -> [u8; 72] {
+    ordered_fixed_key(event.pubkey.as_bytes(), event.created_at, &event.id)
 }
 
 fn by_author_prefix(author: &PublicKey) -> Vec<u8> {
     author.as_bytes().to_vec()
 }
 
-fn by_kind_key(event: &Event) -> Vec<u8> {
-    ordered_key(
+fn by_kind_key(event: &Event) -> [u8; 42] {
+    ordered_fixed_key(
         &event.kind.as_u16().to_be_bytes(),
         event.created_at,
         &event.id,
@@ -1499,11 +1580,11 @@ fn by_kind_prefix(kind: Kind) -> Vec<u8> {
     kind.as_u16().to_be_bytes().to_vec()
 }
 
-fn by_author_kind_key(event: &Event) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(34);
-    prefix.extend_from_slice(event.pubkey.as_bytes());
-    prefix.extend_from_slice(&event.kind.as_u16().to_be_bytes());
-    ordered_key(&prefix, event.created_at, &event.id)
+fn by_author_kind_key(event: &Event) -> [u8; 74] {
+    let mut prefix = [0; 34];
+    prefix[..32].copy_from_slice(event.pubkey.as_bytes());
+    prefix[32..].copy_from_slice(&event.kind.as_u16().to_be_bytes());
+    ordered_fixed_key(&prefix, event.created_at, &event.id)
 }
 
 fn by_author_kind_prefix(author: &PublicKey, kind: Kind) -> Vec<u8> {
@@ -1574,7 +1655,7 @@ fn tag_index_key(
     created_at: Timestamp,
     id: &EventId,
 ) -> Vec<u8> {
-    ordered_key(&tag_index_prefix(tag, value), created_at, id)
+    ordered_vec_key(&tag_index_prefix(tag, value), created_at, id)
 }
 
 #[cfg(test)]
@@ -1599,7 +1680,29 @@ fn add_event_cardinalities(counts: &mut BTreeMap<Vec<u8>, u64>, event: &Event) {
     }
 }
 
-fn count_ordered_index_prefixes(
+fn count_fixed_ordered_index_prefixes<const N: usize>(
+    counts: &mut BTreeMap<Vec<u8>, u64>,
+    index: &redb::Table<'_, &[u8; N], EventKey>,
+    namespace: u8,
+) -> Result<(), redb::StorageError> {
+    for entry in index.iter()? {
+        let (key, _event_key) = entry?;
+        let key = key.value();
+        let prefix_len = key
+            .len()
+            .checked_sub(40)
+            .expect("redb: ordered index key carries created_at and id");
+        let count = counts
+            .entry(cardinality_key(namespace, &key[..prefix_len]))
+            .or_default();
+        *count = count
+            .checked_add(1)
+            .expect("ordered index cardinality fits in u64");
+    }
+    Ok(())
+}
+
+fn count_variable_ordered_index_prefixes(
     counts: &mut BTreeMap<Vec<u8>, u64>,
     index: &redb::Table<'_, &[u8], EventKey>,
     namespace: u8,
@@ -1621,16 +1724,15 @@ fn count_ordered_index_prefixes(
     Ok(())
 }
 
-/// Bootstrap the independently versioned cardinality sidecar by counting
-/// ordered index keys only. No canonical event value is dereferenced or
-/// materialized during the upgrade. The caller writes the version marker in
-/// the same redb transaction, so a crash exposes either the previous complete
-/// sidecar or no upgrade.
+/// Rebuild the independently versioned cardinality sidecar by counting
+/// ordered index keys only. No canonical event value is dereferenced. The
+/// caller publishes the marker in the same transaction, so a crash exposes
+/// either the prior complete sidecar or the fully rebuilt one.
 fn rebuild_index_cardinality(
-    by_created_at: &redb::Table<'_, &[u8], EventKey>,
-    by_author: &redb::Table<'_, &[u8], EventKey>,
-    by_kind: &redb::Table<'_, &[u8], EventKey>,
-    by_author_kind: &redb::Table<'_, &[u8], EventKey>,
+    by_created_at: &redb::Table<'_, &[u8; 40], EventKey>,
+    by_author: &redb::Table<'_, &[u8; 72], EventKey>,
+    by_kind: &redb::Table<'_, &[u8; 42], EventKey>,
+    by_author_kind: &redb::Table<'_, &[u8; 74], EventKey>,
     by_tag: &redb::Table<'_, &[u8], EventKey>,
     cardinality: &mut redb::Table<'_, &[u8], u64>,
 ) -> Result<(), redb::StorageError> {
@@ -1643,11 +1745,11 @@ fn rebuild_index_cardinality(
     }
 
     let mut counts = BTreeMap::new();
-    count_ordered_index_prefixes(&mut counts, by_created_at, CARDINALITY_GLOBAL)?;
-    count_ordered_index_prefixes(&mut counts, by_author, CARDINALITY_AUTHOR)?;
-    count_ordered_index_prefixes(&mut counts, by_kind, CARDINALITY_KIND)?;
-    count_ordered_index_prefixes(&mut counts, by_author_kind, CARDINALITY_AUTHOR_KIND)?;
-    count_ordered_index_prefixes(&mut counts, by_tag, CARDINALITY_TAG)?;
+    count_fixed_ordered_index_prefixes(&mut counts, by_created_at, CARDINALITY_GLOBAL)?;
+    count_fixed_ordered_index_prefixes(&mut counts, by_author, CARDINALITY_AUTHOR)?;
+    count_fixed_ordered_index_prefixes(&mut counts, by_kind, CARDINALITY_KIND)?;
+    count_fixed_ordered_index_prefixes(&mut counts, by_author_kind, CARDINALITY_AUTHOR_KIND)?;
+    count_variable_ordered_index_prefixes(&mut counts, by_tag, CARDINALITY_TAG)?;
     for (key, count) in counts {
         cardinality.insert(key.as_slice(), count)?;
     }
@@ -1678,9 +1780,45 @@ fn ordered_index_created_at(key: &[u8]) -> u64 {
     )
 }
 
-/// Test-only raw-table audit for v5 event/relay surrogate integrity. Every
+/// Test-only raw-table audit for v6 event/relay surrogate integrity. Every
 /// governed crash/reopen proof calls this directly, without going through
 /// query paths that could hide a missing or orphan pointer.
+#[cfg(test)]
+fn fixed_ordered_rows<const N: usize>(
+    read_txn: &redb::ReadTransaction,
+    definition: TableDefinition<&[u8; N], EventKey>,
+) -> BTreeSet<(Vec<u8>, EventKey)> {
+    let index = read_txn
+        .open_table(definition)
+        .expect("audit fixed ordered index");
+    index
+        .iter()
+        .expect("iterate fixed ordered index")
+        .map(|entry| {
+            let (encoded_key, event_key) = entry.expect("read fixed ordered index");
+            (encoded_key.value().to_vec(), event_key.value())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn variable_ordered_rows(
+    read_txn: &redb::ReadTransaction,
+    definition: TableDefinition<&[u8], EventKey>,
+) -> BTreeSet<(Vec<u8>, EventKey)> {
+    let index = read_txn
+        .open_table(definition)
+        .expect("audit variable ordered index");
+    index
+        .iter()
+        .expect("iterate variable ordered index")
+        .map(|entry| {
+            let (encoded_key, event_key) = entry.expect("read variable ordered index");
+            (encoded_key.value().to_vec(), event_key.value())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 fn assert_canonical_integrity(db: &Database) {
     let read_txn = db.begin_read().expect("begin canonical integrity audit");
@@ -1722,7 +1860,7 @@ fn assert_canonical_integrity(db: &Database) {
         let event = view.materialize_event().expect("audit materialized event");
         assert_eq!(
             event_ids
-                .get(event.id.as_bytes().as_slice())
+                .get(event.id.as_bytes())
                 .expect("audit id lookup")
                 .expect("every event has a raw-id mapping")
                 .value(),
@@ -1741,7 +1879,7 @@ fn assert_canonical_integrity(db: &Database) {
         let event = canonical
             .get(&event_key)
             .expect("raw id mapping points at a live event");
-        assert_eq!(raw_id.value(), event.id.as_bytes().as_slice());
+        assert_eq!(raw_id.value(), event.id.as_bytes());
     }
 
     for entry in local.iter().expect("iterate audit local metadata") {
@@ -1829,19 +1967,6 @@ fn assert_canonical_integrity(db: &Database) {
         assert!(next > *max_key, "relay allocator must not reuse keys");
     }
 
-    let actual_ordered = |definition: TableDefinition<&[u8], EventKey>| {
-        let index = read_txn
-            .open_table(definition)
-            .expect("audit ordered index");
-        index
-            .iter()
-            .expect("iterate audit ordered index")
-            .map(|entry| {
-                let (encoded_key, event_key) = entry.expect("read audit ordered index");
-                (encoded_key.value().to_vec(), event_key.value())
-            })
-            .collect::<BTreeSet<_>>()
-    };
     let mut expected_created = BTreeSet::new();
     let mut expected_author = BTreeSet::new();
     let mut expected_kind = BTreeSet::new();
@@ -1852,10 +1977,10 @@ fn assert_canonical_integrity(db: &Database) {
     let mut expected_cardinality = BTreeMap::new();
     for (&event_key, event) in &canonical {
         add_event_cardinalities(&mut expected_cardinality, event);
-        expected_created.insert((created_at_key(event), event_key));
-        expected_author.insert((by_author_key(event), event_key));
-        expected_kind.insert((by_kind_key(event), event_key));
-        expected_author_kind.insert((by_author_kind_key(event), event_key));
+        expected_created.insert((created_at_key(event).to_vec(), event_key));
+        expected_author.insert((by_author_key(event).to_vec(), event_key));
+        expected_kind.insert((by_kind_key(event).to_vec(), event_key));
+        expected_author_kind.insert((by_author_kind_key(event).to_vec(), event_key));
         for tag in event.tags.iter() {
             let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
             else {
@@ -1873,11 +1998,17 @@ fn assert_canonical_integrity(db: &Database) {
             expected_expiration.insert((expiration_key(timestamp, &event.id), event_key));
         }
     }
-    assert_eq!(actual_ordered(BY_CREATED_AT), expected_created);
-    assert_eq!(actual_ordered(BY_AUTHOR), expected_author);
-    assert_eq!(actual_ordered(BY_KIND), expected_kind);
-    assert_eq!(actual_ordered(BY_AUTHOR_KIND), expected_author_kind);
-    assert_eq!(actual_ordered(BY_TAG), expected_tag);
+    assert_eq!(
+        fixed_ordered_rows(&read_txn, BY_CREATED_AT),
+        expected_created
+    );
+    assert_eq!(fixed_ordered_rows(&read_txn, BY_AUTHOR), expected_author);
+    assert_eq!(fixed_ordered_rows(&read_txn, BY_KIND), expected_kind);
+    assert_eq!(
+        fixed_ordered_rows(&read_txn, BY_AUTHOR_KIND),
+        expected_author_kind
+    );
+    assert_eq!(variable_ordered_rows(&read_txn, BY_TAG), expected_tag);
     let actual_cardinality = cardinality
         .iter()
         .expect("iterate audit cardinality")
@@ -1915,21 +2046,58 @@ fn assert_canonical_integrity(db: &Database) {
     assert_eq!(actual_expiration, expected_expiration);
 }
 
-struct OrderedCursor {
+struct VariableOrderedCursor {
     entries: std::iter::Rev<redb::Range<'static, &'static [u8], EventKey>>,
 }
 
-impl OrderedCursor {
+impl VariableOrderedCursor {
     fn new(
         table: &redb::ReadOnlyTable<&[u8], EventKey>,
         prefix: &[u8],
         since: u64,
         until: u64,
     ) -> Result<Self, PersistenceError> {
-        let (lower, upper) = ordered_range(prefix, since, until);
+        let (lower, upper) = ordered_vec_range(prefix, since, until);
         Ok(Self {
             entries: table
                 .range(lower.as_slice()..=upper.as_slice())
+                .map_err(persist_err)?
+                .rev(),
+        })
+    }
+
+    fn next_head(&mut self, cursor: usize) -> Result<Option<OrderedHead>, PersistenceError> {
+        Ok(match self.entries.next() {
+            Some(entry) => {
+                let (key, value) = entry.map_err(persist_err)?;
+                let key = key.value();
+                Some(OrderedHead {
+                    created_at: ordered_index_created_at(key),
+                    id: ordered_index_event_id(key),
+                    event_key: value.value(),
+                    cursor,
+                })
+            }
+            None => None,
+        })
+    }
+}
+
+struct FixedOrderedCursor<const N: usize> {
+    entries: std::iter::Rev<redb::Range<'static, &'static [u8; N], EventKey>>,
+}
+
+impl<const N: usize> FixedOrderedCursor<N> {
+    fn new(
+        table: &redb::ReadOnlyTable<&[u8; N], EventKey>,
+        prefix: &[u8],
+        since: u64,
+        until: u64,
+    ) -> Result<Self, PersistenceError> {
+        let (lower, upper) = ordered_fixed_range(prefix, since, until);
+        Ok(Self {
+            entries: table
+                .range::<&[u8; N]>(&lower..=&upper)
                 .map_err(persist_err)?
                 .rev(),
         })
@@ -1987,16 +2155,6 @@ enum OrderedIndex {
 }
 
 impl OrderedIndex {
-    fn table(self) -> TableDefinition<'static, &'static [u8], EventKey> {
-        match self {
-            Self::Global => BY_CREATED_AT,
-            Self::Author => BY_AUTHOR,
-            Self::Kind => BY_KIND,
-            Self::AuthorKind => BY_AUTHOR_KIND,
-            Self::Tag(_) => BY_TAG,
-        }
-    }
-
     fn matched(self) -> IndexedMatch {
         match self {
             Self::Global => IndexedMatch::None,
@@ -2185,10 +2343,10 @@ fn remove_tag_index_rows(
 /// tables bundled makes every governed writer go through the same
 /// insert/remove doors that also maintain prefix cardinalities.
 struct QueryIndexWriteTables<'txn> {
-    by_created_at: redb::Table<'txn, &'static [u8], EventKey>,
-    by_author: redb::Table<'txn, &'static [u8], EventKey>,
-    by_kind: redb::Table<'txn, &'static [u8], EventKey>,
-    by_author_kind: redb::Table<'txn, &'static [u8], EventKey>,
+    by_created_at: redb::Table<'txn, &'static [u8; 40], EventKey>,
+    by_author: redb::Table<'txn, &'static [u8; 72], EventKey>,
+    by_kind: redb::Table<'txn, &'static [u8; 42], EventKey>,
+    by_author_kind: redb::Table<'txn, &'static [u8; 74], EventKey>,
     by_tag: redb::Table<'txn, &'static [u8], EventKey>,
 }
 
@@ -2216,19 +2374,19 @@ fn insert_query_index_rows(
     let author_kind = by_author_kind_key(event);
     indexes
         .by_created_at
-        .insert(created.as_slice(), event_key)
+        .insert(&created, event_key)
         .map_err(persist_err)?;
     indexes
         .by_author
-        .insert(author.as_slice(), event_key)
+        .insert(&author, event_key)
         .map_err(persist_err)?;
     indexes
         .by_kind
-        .insert(kind.as_slice(), event_key)
+        .insert(&kind, event_key)
         .map_err(persist_err)?;
     indexes
         .by_author_kind
-        .insert(author_kind.as_slice(), event_key)
+        .insert(&author_kind, event_key)
         .map_err(persist_err)?;
     insert_tag_index_rows(&mut indexes.by_tag, event, event_key).map_err(persist_err)?;
     canonical.adjust_cardinality(global_cardinality_key(), 1)?;
@@ -2259,19 +2417,13 @@ fn remove_query_index_rows(
     let author_kind = by_author_kind_key(event);
     indexes
         .by_created_at
-        .remove(created.as_slice())
+        .remove(&created)
         .map_err(persist_err)?;
-    indexes
-        .by_author
-        .remove(author.as_slice())
-        .map_err(persist_err)?;
-    indexes
-        .by_kind
-        .remove(kind.as_slice())
-        .map_err(persist_err)?;
+    indexes.by_author.remove(&author).map_err(persist_err)?;
+    indexes.by_kind.remove(&kind).map_err(persist_err)?;
     indexes
         .by_author_kind
-        .remove(author_kind.as_slice())
+        .remove(&author_kind)
         .map_err(persist_err)?;
     remove_tag_index_rows(&mut indexes.by_tag, event).map_err(persist_err)?;
     canonical.adjust_cardinality(global_cardinality_key(), -1)?;
@@ -2331,7 +2483,7 @@ fn tombstone_refuses(
 fn remove_row_in_txn(
     canonical: &mut CanonicalWriteTables<'_>,
     addr_index: &mut redb::Table<'_, &str, EventKey>,
-    expiration_index: &mut redb::Table<'_, &str, EventKey>,
+    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
     indexes: &mut QueryIndexWriteTables<'_>,
     id: EventId,
     predicate: impl FnOnce(&StoredEvent) -> bool,
@@ -2362,9 +2514,7 @@ fn remove_row_in_txn(
 
     if let Some(ts) = se.event.tags.expiration().copied() {
         let exp_key = expiration_key(ts, &id);
-        expiration_index
-            .remove(exp_key.as_str())
-            .map_err(persist_err)?;
+        expiration_index.remove(&exp_key).map_err(persist_err)?;
     }
 
     Ok(Some(se))
@@ -2383,7 +2533,7 @@ fn process_kind5_deletions(
     addr_index: &mut redb::Table<'_, &str, EventKey>,
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
-    expiration_index: &mut redb::Table<'_, &str, EventKey>,
+    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
     indexes: &mut QueryIndexWriteTables<'_>,
     deleting: &Event,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
@@ -2494,7 +2644,7 @@ fn fan_out_signed_in_txn(
     addr_index: &mut redb::Table<'_, &str, EventKey>,
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
-    expiration_index: &mut redb::Table<'_, &str, EventKey>,
+    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
     indexes: &mut QueryIndexWriteTables<'_>,
     outbox_intents: &mut redb::Table<'_, &str, &str>,
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
@@ -2773,7 +2923,7 @@ fn reinsert_stashed_in_txn(
     addr_index: &mut redb::Table<'_, &str, EventKey>,
     tombstones: &mut redb::Table<'_, &str, &str>,
     addr_tombstones: &mut redb::Table<'_, &str, &str>,
-    expiration_index: &mut redb::Table<'_, &str, EventKey>,
+    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
     indexes: &mut QueryIndexWriteTables<'_>,
     outbox_intents: &mut redb::Table<'_, &str, &str>,
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
@@ -2883,7 +3033,7 @@ fn reinsert_stashed_in_txn(
             if let Some(ts) = se.event.tags.expiration().copied() {
                 let exp_key = expiration_key(ts, &se.event.id);
                 expiration_index
-                    .insert(exp_key.as_str(), event_key)
+                    .insert(&exp_key, event_key)
                     .map_err(persist_err)?;
             }
             Some(se)
@@ -2906,7 +3056,7 @@ fn reinsert_stashed_in_txn(
                     if let Some(ts) = se.event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &se.event.id);
                         expiration_index
-                            .insert(exp_key.as_str(), event_key)
+                            .insert(&exp_key, event_key)
                             .map_err(persist_err)?;
                     }
                     Some(se)
@@ -2938,7 +3088,7 @@ fn reinsert_stashed_in_txn(
                         if let Some(ts) = se.event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &se.event.id);
                             expiration_index
-                                .insert(exp_key.as_str(), event_key)
+                                .insert(&exp_key, event_key)
                                 .map_err(persist_err)?;
                         }
                         Some(se)
@@ -2988,6 +3138,10 @@ enum RedbCrashPoint {
 
 pub struct RedbStore {
     db: Database,
+    /// Application-level write transactions performed by `open`; the
+    /// healthy v6 reopen falsifier asserts this stays zero.
+    #[cfg(test)]
+    open_write_transactions: u64,
     #[cfg(test)]
     crash_point: AtomicU8,
     /// Owned rows materialized after borrowed filtering.
@@ -3040,87 +3194,160 @@ impl RedbStore {
         Ok(lane)
     }
 
-    /// Open (creating if absent) a `redb` database file at `path`, ensuring
-    /// all tables exist.
+    /// Open (creating if absent) a `redb` database file at `path`.
+    ///
+    /// A healthy v6 database takes only a read transaction: the explicit
+    /// schema marker proves every table exists, and one exact metadata count
+    /// tells us whether crash-abandoned ephemeral receipts need recovery.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
-        // Schema v5 deliberately carries no event-row migration. Refuse any
-        // older NMP event epoch before creating a single v5 table: otherwise
+        // Schema v6 deliberately carries no event-row migration. Refuse any
+        // older NMP event epoch before creating a single v6 table: otherwise
         // canonical events would appear empty while unversioned durable
         // outbox/coverage/tombstone facts from the old epoch remained live.
         // A caller opting into this breaking release must recreate the whole
         // database, never unknowingly run a split-brain mixture.
-        {
+        let (table_count, has_schema_marker, has_legacy_epoch) = {
             let read_txn = db.begin_read()?;
-            let legacy_epoch = read_txn
-                .list_tables()?
-                .any(|table| LEGACY_EVENT_TABLES.contains(&table.name()));
-            if legacy_epoch {
-                return Err(redb::Error::UpgradeRequired(5));
+            let mut table_count = 0usize;
+            let mut has_schema_marker = false;
+            let mut has_legacy_epoch = false;
+            for table in read_txn.list_tables()? {
+                table_count += 1;
+                let name = table.name();
+                has_schema_marker |= name == SCHEMA_META.name();
+                has_legacy_epoch |= LEGACY_EVENT_TABLES.contains(&name);
             }
+            (table_count, has_schema_marker, has_legacy_epoch)
+        };
+        if has_legacy_epoch {
+            return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
         }
-        let write_txn = db.begin_write()?;
-        {
-            write_txn.open_table(EVENTS)?;
-            write_txn.open_table(EVENT_IDS)?;
-            write_txn.open_table(EVENT_LOCAL)?;
-            write_txn.open_table(EVENT_STORE_META)?;
-            write_txn.open_table(EVENT_OBSERVATIONS)?;
-            write_txn.open_table(RELAYS)?;
-            write_txn.open_table(RELAY_KEYS)?;
-            write_txn.open_table(RELAY_REFS)?;
-            write_txn.open_table(RELAY_META)?;
-            write_txn.open_table(ADDR_INDEX)?;
-            write_txn.open_table(COVERAGE)?;
-            write_txn.open_table(TOMBSTONES)?;
-            write_txn.open_table(ADDR_TOMBSTONES)?;
-            write_txn.open_table(EXPIRATION_INDEX)?;
-            let by_created_at = write_txn.open_table(BY_CREATED_AT)?;
-            let by_author = write_txn.open_table(BY_AUTHOR)?;
-            let by_kind = write_txn.open_table(BY_KIND)?;
-            let by_author_kind = write_txn.open_table(BY_AUTHOR_KIND)?;
-            let by_tag = write_txn.open_table(BY_TAG)?;
-            let mut cardinality = write_txn.open_table(INDEX_CARDINALITY)?;
-            let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
-            let cardinality_version = cardinality_meta
-                .get(INDEX_CARDINALITY_VERSION_KEY)?
-                .map(|guard| guard.value());
-            if cardinality_version != Some(INDEX_CARDINALITY_VERSION) {
-                rebuild_index_cardinality(
-                    &by_created_at,
-                    &by_author,
-                    &by_kind,
-                    &by_author_kind,
-                    &by_tag,
-                    &mut cardinality,
-                )?;
+
+        let mut _open_write_transactions = 0;
+        if has_schema_marker {
+            let (needs_cardinality_rebuild, pending_ephemeral) = {
+                let read_txn = db.begin_read()?;
+                let schema_meta = read_txn.open_table(SCHEMA_META)?;
+                let version = schema_meta
+                    .get(SCHEMA_VERSION_KEY)?
+                    .map(|guard| guard.value());
+                if version != Some(SCHEMA_VERSION) {
+                    return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
+                }
+                let cardinality_meta = read_txn.open_table(INDEX_CARDINALITY_META)?;
+                let cardinality_version = cardinality_meta
+                    .get(INDEX_CARDINALITY_VERSION_KEY)?
+                    .map(|guard| guard.value());
+                let outbox_meta = read_txn.open_table(OUTBOX_META)?;
+                let pending_ephemeral = outbox_meta
+                    .get(PENDING_EPHEMERAL_RECEIPTS_KEY)?
+                    .map(|guard| guard.value().parse::<u64>())
+                    .transpose()
+                    .map_err(|err| {
+                        redb::Error::Corrupted(format!(
+                            "invalid pending ephemeral receipt count: {err}"
+                        ))
+                    })?
+                    .unwrap_or(0);
+                (
+                    cardinality_version != Some(INDEX_CARDINALITY_VERSION),
+                    pending_ephemeral,
+                )
+            };
+            if needs_cardinality_rebuild || pending_ephemeral > 0 {
+                let write_txn = db.begin_write()?;
+                {
+                    if needs_cardinality_rebuild {
+                        let by_created_at = write_txn.open_table(BY_CREATED_AT)?;
+                        let by_author = write_txn.open_table(BY_AUTHOR)?;
+                        let by_kind = write_txn.open_table(BY_KIND)?;
+                        let by_author_kind = write_txn.open_table(BY_AUTHOR_KIND)?;
+                        let by_tag = write_txn.open_table(BY_TAG)?;
+                        let mut cardinality = write_txn.open_table(INDEX_CARDINALITY)?;
+                        rebuild_index_cardinality(
+                            &by_created_at,
+                            &by_author,
+                            &by_kind,
+                            &by_author_kind,
+                            &by_tag,
+                            &mut cardinality,
+                        )?;
+                        let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
+                        cardinality_meta
+                            .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
+                    }
+                    if pending_ephemeral > 0 {
+                        let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
+                        let reconciled =
+                            reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts) as u64;
+                        if reconciled != pending_ephemeral {
+                            return Err(redb::Error::Corrupted(format!(
+                                "pending ephemeral receipt count is {pending_ephemeral}, found {reconciled} recoverable rows"
+                            )));
+                        }
+                        let mut outbox_meta = write_txn.open_table(OUTBOX_META)?;
+                        outbox_meta.insert(PENDING_EPHEMERAL_RECEIPTS_KEY, "0")?;
+                    }
+                }
+                write_txn.commit()?;
+                _open_write_transactions += 1;
+            }
+        } else {
+            // A non-empty database without the v6 marker is never treated as
+            // fresh: doing so could combine old unversioned governed facts
+            // with an empty canonical epoch.
+            if table_count != 0 {
+                return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
+            }
+            let write_txn = db.begin_write()?;
+            {
+                write_txn.open_table(EVENTS)?;
+                write_txn.open_table(EVENT_IDS)?;
+                write_txn.open_table(EVENT_LOCAL)?;
+                write_txn.open_table(EVENT_STORE_META)?;
+                write_txn.open_table(EVENT_OBSERVATIONS)?;
+                write_txn.open_table(RELAYS)?;
+                write_txn.open_table(RELAY_KEYS)?;
+                write_txn.open_table(RELAY_REFS)?;
+                write_txn.open_table(RELAY_META)?;
+                write_txn.open_table(ADDR_INDEX)?;
+                write_txn.open_table(COVERAGE)?;
+                write_txn.open_table(TOMBSTONES)?;
+                write_txn.open_table(ADDR_TOMBSTONES)?;
+                write_txn.open_table(EXPIRATION_INDEX)?;
+                write_txn.open_table(BY_CREATED_AT)?;
+                write_txn.open_table(BY_AUTHOR)?;
+                write_txn.open_table(BY_KIND)?;
+                write_txn.open_table(BY_AUTHOR_KIND)?;
+                write_txn.open_table(BY_TAG)?;
+                write_txn.open_table(INDEX_CARDINALITY)?;
+                let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
                 cardinality_meta
                     .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
+                write_txn.open_table(OUTBOX_INTENTS)?;
+                write_txn.open_table(OUTBOX_DISPLACED)?;
+                write_txn.open_table(OUTBOX_ATTEMPTS)?;
+                write_txn.open_table(OUTBOX_ROUTE_REVISIONS)?;
+                write_txn.open_table(OUTBOX_LANES)?;
+                write_txn.open_table(OUTBOX_DEADLINES)?;
+                write_txn.open_table(OUTBOX_DEADLINES_BY_INTENT)?;
+                write_txn.open_table(OUTBOX_ATTEMPT_DETAILS)?;
+                write_txn.open_table(OUTBOX_META)?;
+                write_txn.open_table(OUTBOX_KIND5_CLAIMS)?;
+                write_txn.open_table(OUTBOX_SUPPRESS_BY_ID)?;
+                write_txn.open_table(OUTBOX_SUPPRESS_BY_ADDR)?;
+                write_txn.open_table(OUTBOX_RECEIPTS)?;
+                let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
+                schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
             }
-            write_txn.open_table(OUTBOX_INTENTS)?;
-            write_txn.open_table(OUTBOX_DISPLACED)?;
-            write_txn.open_table(OUTBOX_ATTEMPTS)?;
-            write_txn.open_table(OUTBOX_ROUTE_REVISIONS)?;
-            write_txn.open_table(OUTBOX_LANES)?;
-            write_txn.open_table(OUTBOX_DEADLINES)?;
-            write_txn.open_table(OUTBOX_DEADLINES_BY_INTENT)?;
-            write_txn.open_table(OUTBOX_ATTEMPT_DETAILS)?;
-            write_txn.open_table(OUTBOX_META)?;
-            write_txn.open_table(OUTBOX_KIND5_CLAIMS)?;
-            write_txn.open_table(OUTBOX_SUPPRESS_BY_ID)?;
-            write_txn.open_table(OUTBOX_SUPPRESS_BY_ADDR)?;
-            let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
-            // Boot-time reconciliation (VISION-ratified receipt contract,
-            // team-lead correction): any `Ephemeral` receipt-only record
-            // still `Accepted` at this point can only mean the process
-            // died before any further transition was ever recorded — see
-            // `ReceiptState::Abandoned`'s doc. A no-op on a fresh store
-            // (the table is empty) or a store with no ephemeral receipts.
-            reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts);
+            write_txn.commit()?;
+            _open_write_transactions += 1;
         }
-        write_txn.commit()?;
         Ok(Self {
             db,
+            #[cfg(test)]
+            open_write_transactions: _open_write_transactions,
             #[cfg(test)]
             crash_point: AtomicU8::new(0),
             #[cfg(test)]
@@ -3171,6 +3398,11 @@ impl RedbStore {
             self.attempt_range_rows.load(Ordering::Relaxed),
             self.route_revision_range_rows.load(Ordering::Relaxed),
         )
+    }
+
+    #[cfg(test)]
+    fn open_write_transactions(&self) -> u64 {
+        self.open_write_transactions
     }
 
     /// Current value of [`Self::examined_rows`] — the `query`-indexing
@@ -3284,6 +3516,140 @@ impl RedbStore {
         })
     }
 
+    fn scan_fixed_ordered<const N: usize>(
+        &self,
+        index: &redb::ReadOnlyTable<&[u8; N], EventKey>,
+        prefixes: &[Vec<u8>],
+        since: u64,
+        until: u64,
+        limit: Option<usize>,
+        materialize_if_visible: &mut impl FnMut(
+            EventKey,
+        )
+            -> Result<Option<StoredEvent>, PersistenceError>,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if let [prefix] = prefixes {
+            let (lower, upper) = ordered_fixed_range(prefix, since, until);
+            let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
+            for entry in index
+                .range::<&[u8; N]>(&lower..=&upper)
+                .map_err(persist_err)?
+                .rev()
+            {
+                let (_key, value) = entry.map_err(persist_err)?;
+                #[cfg(test)]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                if let Some(stored) = materialize_if_visible(value.value())? {
+                    out.push(stored);
+                    if limit.is_some_and(|limit| out.len() == limit) {
+                        break;
+                    }
+                }
+            }
+            return Ok(out);
+        }
+
+        let mut cursors: Vec<_> = prefixes
+            .iter()
+            .map(|prefix| FixedOrderedCursor::new(index, prefix, since, until))
+            .collect::<Result<_, _>>()?;
+        let mut heap = BinaryHeap::new();
+        for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
+            if let Some(head) = cursor.next_head(cursor_index)? {
+                #[cfg(test)]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                heap.push(head);
+            }
+        }
+
+        let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
+        let mut last_event_key = None;
+        while let Some(head) = heap.pop() {
+            let is_new = last_event_key.replace(head.event_key) != Some(head.event_key);
+            if is_new {
+                if let Some(stored) = materialize_if_visible(head.event_key)? {
+                    out.push(stored);
+                    if limit.is_some_and(|limit| out.len() == limit) {
+                        break;
+                    }
+                }
+            }
+            if let Some(next) = cursors[head.cursor].next_head(head.cursor)? {
+                #[cfg(test)]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                heap.push(next);
+            }
+        }
+        Ok(out)
+    }
+
+    fn scan_variable_ordered(
+        &self,
+        index: &redb::ReadOnlyTable<&[u8], EventKey>,
+        prefixes: &[Vec<u8>],
+        since: u64,
+        until: u64,
+        limit: Option<usize>,
+        materialize_if_visible: &mut impl FnMut(
+            EventKey,
+        )
+            -> Result<Option<StoredEvent>, PersistenceError>,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if let [prefix] = prefixes {
+            let (lower, upper) = ordered_vec_range(prefix, since, until);
+            let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
+            for entry in index
+                .range(lower.as_slice()..=upper.as_slice())
+                .map_err(persist_err)?
+                .rev()
+            {
+                let (_key, value) = entry.map_err(persist_err)?;
+                #[cfg(test)]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                if let Some(stored) = materialize_if_visible(value.value())? {
+                    out.push(stored);
+                    if limit.is_some_and(|limit| out.len() == limit) {
+                        break;
+                    }
+                }
+            }
+            return Ok(out);
+        }
+
+        let mut cursors: Vec<_> = prefixes
+            .iter()
+            .map(|prefix| VariableOrderedCursor::new(index, prefix, since, until))
+            .collect::<Result<_, _>>()?;
+        let mut heap = BinaryHeap::new();
+        for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
+            if let Some(head) = cursor.next_head(cursor_index)? {
+                #[cfg(test)]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                heap.push(head);
+            }
+        }
+
+        let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
+        let mut last_event_key = None;
+        while let Some(head) = heap.pop() {
+            let is_new = last_event_key.replace(head.event_key) != Some(head.event_key);
+            if is_new {
+                if let Some(stored) = materialize_if_visible(head.event_key)? {
+                    out.push(stored);
+                    if limit.is_some_and(|limit| out.len() == limit) {
+                        break;
+                    }
+                }
+            }
+            if let Some(next) = cursors[head.cursor].next_head(head.cursor)? {
+                #[cfg(test)]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                heap.push(next);
+            }
+        }
+        Ok(out)
+    }
+
     /// Reverse-merge one or more ranges from the planner's chosen index.
     /// Each cursor asks redb for exactly its next key; once `limit` visible
     /// rows have survived the borrowed binary post-filter, no older key or
@@ -3301,9 +3667,6 @@ impl RedbStore {
             .open_table(EVENT_OBSERVATIONS)
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
-        let index = read_txn
-            .open_table(plan.index.table())
-            .map_err(persist_err)?;
         let outbox_suppress_by_id = read_txn
             .open_table(OUTBOX_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
@@ -3348,65 +3711,63 @@ impl RedbStore {
                 Ok(Some(stored))
             };
 
-        // The dominant room/author/kind case is one contiguous range. Keep
-        // redb's iterator alive and walk it once; the cursor-based k-way
-        // merge below is reserved for genuine OR sets.
-        if let [prefix] = plan.prefixes.as_slice() {
-            let (lower, upper) = ordered_range(prefix, since, until);
-            let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-            for entry in index
-                .range(lower.as_slice()..=upper.as_slice())
-                .map_err(persist_err)?
-                .rev()
-            {
-                let (_key, value) = entry.map_err(persist_err)?;
-                #[cfg(test)]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                if let Some(stored) = materialize_if_visible(value.value())? {
-                    out.push(stored);
-                    if limit.is_some_and(|limit| out.len() == limit) {
-                        break;
-                    }
-                }
+        match plan.index {
+            OrderedIndex::Global => {
+                let index = read_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    since,
+                    until,
+                    limit,
+                    &mut materialize_if_visible,
+                )
             }
-            return Ok(out);
+            OrderedIndex::Author => {
+                let index = read_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    since,
+                    until,
+                    limit,
+                    &mut materialize_if_visible,
+                )
+            }
+            OrderedIndex::Kind => {
+                let index = read_txn.open_table(BY_KIND).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    since,
+                    until,
+                    limit,
+                    &mut materialize_if_visible,
+                )
+            }
+            OrderedIndex::AuthorKind => {
+                let index = read_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    since,
+                    until,
+                    limit,
+                    &mut materialize_if_visible,
+                )
+            }
+            OrderedIndex::Tag(_) => {
+                let index = read_txn.open_table(BY_TAG).map_err(persist_err)?;
+                self.scan_variable_ordered(
+                    &index,
+                    &plan.prefixes,
+                    since,
+                    until,
+                    limit,
+                    &mut materialize_if_visible,
+                )
+            }
         }
-
-        let mut cursors: Vec<_> = plan
-            .prefixes
-            .iter()
-            .map(|prefix| OrderedCursor::new(&index, prefix, since, until))
-            .collect::<Result<_, _>>()?;
-        let mut heap = BinaryHeap::new();
-        for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
-            if let Some(head) = cursor.next_head(cursor_index)? {
-                #[cfg(test)]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                heap.push(head);
-            }
-        }
-
-        let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-        let mut last_event_key = None;
-        while let Some(head) = heap.pop() {
-            let is_new = last_event_key.replace(head.event_key) != Some(head.event_key);
-            if is_new {
-                if let Some(stored) = materialize_if_visible(head.event_key)? {
-                    out.push(stored);
-                    if limit.is_some_and(|limit| out.len() == limit) {
-                        // Do not even touch the next ordered index key after
-                        // the visible limit is satisfied.
-                        break;
-                    }
-                }
-            }
-            if let Some(next) = cursors[head.cursor].next_head(head.cursor)? {
-                #[cfg(test)]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                heap.push(next);
-            }
-        }
-        Ok(out)
     }
 }
 
@@ -3415,7 +3776,7 @@ struct InsertWriteTables<'txn> {
     addr_index: redb::Table<'txn, &'static str, EventKey>,
     tombstones: redb::Table<'txn, &'static str, &'static str>,
     addr_tombstones: redb::Table<'txn, &'static str, &'static str>,
-    expiration_index: redb::Table<'txn, &'static str, EventKey>,
+    expiration_index: redb::Table<'txn, &'static [u8; 40], EventKey>,
     indexes: QueryIndexWriteTables<'txn>,
     outbox_intents: redb::Table<'txn, &'static str, &'static str>,
     outbox_receipts: redb::Table<'txn, &'static str, &'static str>,
@@ -3560,7 +3921,7 @@ fn insert_with_tables(
                     if let Some(ts) = event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &event.id);
                         expiration_index
-                            .insert(exp_key.as_str(), event_key)
+                            .insert(&exp_key, event_key)
                             .map_err(persist_err)?;
                     }
                     InsertOutcome::Inserted
@@ -3583,7 +3944,7 @@ fn insert_with_tables(
                             if let Some(ts) = event.tags.expiration().copied() {
                                 let exp_key = expiration_key(ts, &event.id);
                                 expiration_index
-                                    .insert(exp_key.as_str(), event_key)
+                                    .insert(&exp_key, event_key)
                                     .map_err(persist_err)?;
                             }
                             InsertOutcome::Inserted
@@ -3613,7 +3974,7 @@ fn insert_with_tables(
                                 if let Some(ts) = event.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &event.id);
                                     expiration_index
-                                        .insert(exp_key.as_str(), event_key)
+                                        .insert(&exp_key, event_key)
                                         .map_err(persist_err)?;
                                 }
                                 InsertOutcome::Superseded {
@@ -3664,7 +4025,7 @@ impl EventStore for RedbStore {
         let outcome = {
             let mut tables = InsertWriteTables::open(&write_txn)?;
             let outcome = insert_with_tables(&mut tables, event, from)?;
-            tables.canonical.flush_counts()?;
+            tables.canonical.flush_pending()?;
             outcome
         };
         #[cfg(test)]
@@ -3687,7 +4048,7 @@ impl EventStore for RedbStore {
             for (event, from) in events {
                 outcomes.push(insert_with_tables(&mut tables, event, from)?);
             }
-            tables.canonical.flush_counts()?;
+            tables.canonical.flush_pending()?;
         }
         #[cfg(test)]
         self.crash_if(RedbCrashPoint::ObservationBeforeCommit);
@@ -3726,7 +4087,7 @@ impl EventStore for RedbStore {
             let mut out = Vec::new();
             for id in ids {
                 let Some(event_key) = event_ids
-                    .get(id.as_bytes().as_slice())
+                    .get(id.as_bytes())
                     .map_err(persist_err)?
                     .map(|guard| guard.value())
                 else {
@@ -3821,7 +4182,7 @@ impl EventStore for RedbStore {
                 id,
                 |_| true,
             )?;
-            canonical.flush_counts()?;
+            canonical.flush_pending()?;
             removed
         };
         write_txn.commit().map_err(persist_err)?;
@@ -3844,7 +4205,7 @@ impl EventStore for RedbStore {
             // closure so `?` reaches this fn, not the closure).
             let mut due_keys: Vec<EventKey> = Vec::new();
             for entry in expiration_index
-                .range::<&str>(..=upper.as_str())
+                .range::<&[u8; 40]>(..=&upper)
                 .map_err(persist_err)?
             {
                 let (_key, value) = entry.map_err(persist_err)?;
@@ -3867,7 +4228,7 @@ impl EventStore for RedbStore {
                     removed.push(row);
                 }
             }
-            canonical.flush_counts()?;
+            canonical.flush_pending()?;
             removed
         };
         write_txn.commit().map_err(persist_err)?;
@@ -3882,16 +4243,11 @@ impl EventStore for RedbStore {
         let (key, _value) = expiration_index
             .first()
             .expect("redb: first expiration_index")?;
-        let ts_str = key
-            .value()
-            .split(':')
-            .next()
-            .expect("expiration_index key always has a ts prefix");
-        Some(Timestamp::from(
-            ts_str
-                .parse::<u64>()
-                .expect("redb: parse expiration_index ts"),
-        ))
+        Some(Timestamp::from(u64::from_be_bytes(
+            key.value()[..8]
+                .try_into()
+                .expect("expiration index timestamp is eight bytes"),
+        )))
     }
 
     fn record_coverage(
@@ -4096,7 +4452,7 @@ impl EventStore for RedbStore {
                 coverage.remove(row_key.as_str()).map_err(persist_err)?;
                 report.legacy_coverage_rows_purged += 1;
             }
-            canonical.flush_counts()?;
+            canonical.flush_pending()?;
         }
         write_txn.commit().map_err(persist_err)?;
 
@@ -4320,7 +4676,7 @@ impl EventStore for RedbStore {
                         if let Some(ts) = frozen.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &frozen.id);
                             expiration_index
-                                .insert(exp_key.as_str(), event_key)
+                                .insert(&exp_key, event_key)
                                 .map_err(persist_err)?;
                         }
                         // Architecture review correction: a
@@ -4398,7 +4754,7 @@ impl EventStore for RedbStore {
                                 if let Some(ts) = frozen.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &frozen.id);
                                     expiration_index
-                                        .insert(exp_key.as_str(), event_key)
+                                        .insert(&exp_key, event_key)
                                         .map_err(persist_err)?;
                                 }
                                 (
@@ -4442,7 +4798,7 @@ impl EventStore for RedbStore {
                                     if let Some(ts) = frozen.tags.expiration().copied() {
                                         let exp_key = expiration_key(ts, &frozen.id);
                                         expiration_index
-                                            .insert(exp_key.as_str(), event_key)
+                                            .insert(&exp_key, event_key)
                                             .map_err(persist_err)?;
                                     }
                                     (
@@ -4523,7 +4879,7 @@ impl EventStore for RedbStore {
                     .map_err(persist_err)?;
             }
 
-            canonical.flush_counts()?;
+            canonical.flush_pending()?;
             result
         };
         #[cfg(test)]
@@ -4780,7 +5136,7 @@ impl EventStore for RedbStore {
                     }
                 }
             };
-            canonical.flush_counts()?;
+            canonical.flush_pending()?;
             outcome
         };
         #[cfg(test)]
@@ -5074,7 +5430,7 @@ impl EventStore for RedbStore {
                     }
                 }
             };
-            canonical.flush_counts()?;
+            canonical.flush_pending()?;
             outcome
         };
         #[cfg(test)]
@@ -6457,6 +6813,7 @@ impl EventStore for RedbStore {
             outbox_receipts
                 .insert(receipt_key(receipt_id).as_str(), encoded.as_str())
                 .map_err(persist_err)?;
+            increment_pending_ephemeral_in_txn(&mut outbox_meta)?;
             receipt_id
         };
         write_txn.commit().map_err(persist_err)?;
@@ -6480,22 +6837,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_event_epoch_is_rejected_before_any_v5_table_is_created() {
-        const LEGACY_EVENTS_V4: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v4");
+    fn v5_event_epoch_is_rejected_before_any_v6_table_is_created() {
+        const LEGACY_EVENTS_V5: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v5");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-epoch.redb");
         let db = Database::create(&path).unwrap();
         let write_txn = db.begin_write().unwrap();
-        write_txn.open_table(LEGACY_EVENTS_V4).unwrap();
+        write_txn.open_table(LEGACY_EVENTS_V5).unwrap();
         write_txn.commit().unwrap();
         drop(db);
 
         let error = match RedbStore::open(&path) {
-            Ok(_) => panic!("legacy event epoch must not open as an empty v5 store"),
+            Ok(_) => panic!("v5 event epoch must not open as an empty v6 store"),
             Err(error) => error,
         };
-        assert!(matches!(error, redb::Error::UpgradeRequired(5)));
+        assert!(matches!(error, redb::Error::UpgradeRequired(6)));
 
         let db = Database::create(&path).unwrap();
         let read_txn = db.begin_read().unwrap();
@@ -6504,28 +6861,28 @@ mod tests {
             .unwrap()
             .map(|table| table.name().to_owned())
             .collect();
-        assert_eq!(table_names, BTreeSet::from(["events_v4".to_owned()]));
+        assert_eq!(table_names, BTreeSet::from(["events_v5".to_owned()]));
         assert!(!table_names.contains(EVENTS.name()));
     }
 
     #[test]
-    fn legacy_displaced_epoch_is_rejected_before_any_v5_table_is_created() {
-        const LEGACY_DISPLACED_V4: TableDefinition<&str, &[u8]> =
-            TableDefinition::new("outbox_displaced_v4");
+    fn v5_displaced_epoch_is_rejected_before_any_v6_table_is_created() {
+        const LEGACY_DISPLACED_V5: TableDefinition<&str, &[u8]> =
+            TableDefinition::new("outbox_displaced_v5");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-displaced-epoch.redb");
         let db = Database::create(&path).unwrap();
         let write_txn = db.begin_write().unwrap();
-        write_txn.open_table(LEGACY_DISPLACED_V4).unwrap();
+        write_txn.open_table(LEGACY_DISPLACED_V5).unwrap();
         write_txn.commit().unwrap();
         drop(db);
 
         let error = match RedbStore::open(&path) {
-            Ok(_) => panic!("legacy displaced epoch must not open as an empty v5 store"),
+            Ok(_) => panic!("v5 displaced epoch must not open as an empty v6 store"),
             Err(error) => error,
         };
-        assert!(matches!(error, redb::Error::UpgradeRequired(5)));
+        assert!(matches!(error, redb::Error::UpgradeRequired(6)));
 
         let db = Database::create(&path).unwrap();
         let read_txn = db.begin_read().unwrap();
@@ -6536,9 +6893,106 @@ mod tests {
             .collect();
         assert_eq!(
             table_names,
-            BTreeSet::from(["outbox_displaced_v4".to_owned()])
+            BTreeSet::from(["outbox_displaced_v5".to_owned()])
         );
         assert!(!table_names.contains(OUTBOX_DISPLACED.name()));
+    }
+
+    #[test]
+    fn healthy_v6_reopen_starts_no_application_write_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("healthy-reopen.redb");
+
+        let fresh = RedbStore::open(&path).unwrap();
+        assert_eq!(
+            fresh.open_write_transactions(),
+            1,
+            "fresh schema creation writes once"
+        );
+        drop(fresh);
+
+        let reopened = RedbStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.open_write_transactions(),
+            0,
+            "a healthy schema-marker reopen must remain read-only"
+        );
+        let read_txn = reopened.db.begin_read().unwrap();
+        let schema_meta = read_txn.open_table(SCHEMA_META).unwrap();
+        assert_eq!(
+            schema_meta
+                .get(SCHEMA_VERSION_KEY)
+                .unwrap()
+                .unwrap()
+                .value(),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn pending_ephemeral_count_gates_one_recovery_write_then_returns_to_fast_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ephemeral-recovery.redb");
+        let keys = nostr::Keys::generate();
+        let frozen_id = EventId::from_byte_array([7; 32]);
+
+        let mut store = RedbStore::open(&path).unwrap();
+        let receipt_id = store
+            .accept_ephemeral(frozen_id, keys.public_key())
+            .unwrap();
+        drop(store);
+
+        let recovered = RedbStore::open(&path).unwrap();
+        assert_eq!(recovered.open_write_transactions(), 1);
+        let receipt = recovered
+            .reattach_receipt(receipt_id)
+            .unwrap()
+            .expect("retained ephemeral receipt");
+        assert_eq!(receipt.state, ReceiptState::Abandoned);
+        drop(recovered);
+
+        let healthy = RedbStore::open(&path).unwrap();
+        assert_eq!(healthy.open_write_transactions(), 0);
+    }
+
+    #[test]
+    fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allocator-flush.redb");
+        let store = RedbStore::open(&path).unwrap();
+        let write_txn = store.db.begin_write().unwrap();
+        {
+            let mut canonical = CanonicalWriteTables::open(&write_txn).unwrap();
+            for expected in 1..=128 {
+                assert_eq!(canonical.allocate_key().unwrap(), expected);
+            }
+            for expected in 1..=16 {
+                assert_eq!(canonical.allocate_relay_key().unwrap(), expected);
+            }
+            assert!(canonical.store_meta.get(NEXT_EVENT_KEY).unwrap().is_none());
+            assert!(canonical.relay_meta.get(NEXT_RELAY_KEY).unwrap().is_none());
+
+            canonical.flush_pending().unwrap();
+            assert_eq!(
+                canonical
+                    .store_meta
+                    .get(NEXT_EVENT_KEY)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                129
+            );
+            assert_eq!(
+                canonical
+                    .relay_meta
+                    .get(NEXT_RELAY_KEY)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                17
+            );
+        }
+        write_txn.commit().unwrap();
     }
 
     fn accepted_signed(
@@ -6822,7 +7276,7 @@ mod tests {
         let events = read_txn.open_table(EVENTS).unwrap();
         let local = read_txn.open_table(EVENT_LOCAL).unwrap();
         let event_key = event_ids
-            .get(id.as_bytes().as_slice())
+            .get(id.as_bytes())
             .unwrap()
             .expect("raw id mapping")
             .value();
@@ -7074,7 +7528,7 @@ mod tests {
                 0,
                 "the durable hot row stays untouched until the batch flush"
             );
-            canonical.flush_counts().unwrap();
+            canonical.flush_pending().unwrap();
             assert!(canonical.relay_ref_counts.is_empty());
             assert_eq!(
                 canonical
@@ -7546,6 +8000,70 @@ mod tests {
     }
 
     #[test]
+    fn fixed_ordered_indexes_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fixed-index-tie-break.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://groups.example").unwrap();
+        let created_at = Timestamp::from(1_000u64);
+        let kind = Kind::from(9u16);
+        let mut expected = Vec::new();
+
+        for i in 0..8u64 {
+            let event = room_event(&keys, "target", created_at.as_secs(), &format!("event-{i}"));
+            expected.push(event.id);
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(2_000 + i)),
+                )
+                .unwrap();
+        }
+        expected.sort();
+
+        let filters = [
+            (
+                Filter::new().since(created_at).until(created_at),
+                OrderedIndex::Global,
+            ),
+            (
+                Filter::new()
+                    .author(keys.public_key())
+                    .since(created_at)
+                    .until(created_at),
+                OrderedIndex::Author,
+            ),
+            (
+                Filter::new().kind(kind).since(created_at).until(created_at),
+                OrderedIndex::Kind,
+            ),
+            (
+                Filter::new()
+                    .author(keys.public_key())
+                    .kind(kind)
+                    .since(created_at)
+                    .until(created_at),
+                OrderedIndex::AuthorKind,
+            ),
+        ];
+
+        for (filter, expected_index) in filters {
+            let read_txn = store.db.begin_read().unwrap();
+            let plan = plan_ordered_query(&read_txn, &filter).unwrap();
+            assert_eq!(plan.index, expected_index);
+            drop(read_txn);
+
+            let rows = store.query_newest(&filter, expected.len()).unwrap();
+            assert_eq!(
+                rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+                expected,
+                "{expected_index:?} did not preserve canonical equal-time ordering"
+            );
+        }
+    }
+
+    #[test]
     fn cardinality_planner_selects_smallest_real_tag_bucket_for_complete_query() {
         use nostr::{Alphabet, EventBuilder, Tag};
 
@@ -7679,7 +8197,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_cardinality_epoch_rebuilds_atomically_from_ordered_indexes() {
+    fn missing_cardinality_epoch_rebuilds_atomically_from_fixed_ordered_indexes() {
         use nostr::EventBuilder;
 
         let dir = tempfile::tempdir().unwrap();
@@ -7715,6 +8233,11 @@ mod tests {
         drop(db);
 
         let reopened = RedbStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.open_write_transactions(),
+            1,
+            "the unhealthy sidecar is rebuilt in one write transaction"
+        );
         assert_eq!(reopened.query(&Filter::new()).unwrap().len(), 7);
         assert_canonical_integrity(&reopened.db);
     }
