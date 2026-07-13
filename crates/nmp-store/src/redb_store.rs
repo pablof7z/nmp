@@ -34,7 +34,7 @@ use redb::{
 use serde::{Deserialize, Serialize};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
-use crate::binary_event::{self, IndexedMatch, StoredEventView};
+use crate::binary_event::{self, decode_hex_32, IndexedMatch, PreparedFilter, StoredEventView};
 use crate::coverage::{
     coverage_key as compute_coverage_key, merge_interval, shape_matches, shrink_after_eviction,
     window_erase, ShapeRecord,
@@ -65,32 +65,34 @@ fn persist_err(e: impl std::fmt::Display) -> PersistenceError {
 type EventKey = u64;
 type RelayKey = u32;
 
-/// Breaking v4 event schema. Compatibility is intentionally not carried:
+/// Breaking v5 event schema. Compatibility is intentionally not carried:
 /// immutable notes, local state, interned relay observations, raw-id lookup,
 /// and compact primary keys are independent tables from the first byte.
-const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events_v4");
-const EVENT_IDS: TableDefinition<&[u8], EventKey> = TableDefinition::new("event_ids_v4");
-const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> = TableDefinition::new("event_local_v4");
+const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events_v5");
+const EVENT_IDS: TableDefinition<&[u8], EventKey> = TableDefinition::new("event_ids_v5");
+const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> = TableDefinition::new("event_local_v5");
 const EVENT_STORE_META: TableDefinition<&str, EventKey> =
-    TableDefinition::new("event_store_meta_v4");
+    TableDefinition::new("event_store_meta_v5");
 const NEXT_EVENT_KEY: &str = "next_event_key";
-const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays_v4");
-const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys_v4");
-const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs_v4");
-const RELAY_META: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_meta_v4");
+const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays_v5");
+const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys_v5");
+const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs_v5");
+const RELAY_META: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_meta_v5");
 const NEXT_RELAY_KEY: &str = "next_relay_key";
 /// Fixed-width key: `event_key:u64-be | relay_key:u32-be`; value is the
 /// greatest observation timestamp in seconds.
 const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
-    TableDefinition::new("event_observations_v4");
-const LEGACY_EVENT_TABLES: [&str; 5] = [
+    TableDefinition::new("event_observations_v5");
+const LEGACY_EVENT_TABLES: [&str; 7] = [
     "events",
     "events_v2",
     "events_v3",
+    "events_v4",
     "outbox_displaced_v2",
     "outbox_displaced_v3",
+    "outbox_displaced_v4",
 ];
-const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index_v4");
+const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index_v5");
 const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
 /// Permanent kind:5 tombstones for individual event ids
 /// (retraction-and-negative-deltas.md §2/§7). Key: `"{id_hex}:{author_hex}"`
@@ -113,15 +115,15 @@ const ADDR_TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("addr_
 /// byte-lexicographic order matches numeric deadline order); value: the
 /// canonical event's compact surrogate key.
 const EXPIRATION_INDEX: TableDefinition<&str, EventKey> =
-    TableDefinition::new("expiration_index_v4");
+    TableDefinition::new("expiration_index_v5");
 /// Binary ordered indexes all end in the same sortable suffix:
 /// `created_at:u64-be | !event_id:[u8;32]`. Reverse scans therefore yield
 /// `created_at DESC, event_id ASC` and can stop exactly at the visible limit.
-const BY_CREATED_AT: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_created_at_v3");
-const BY_AUTHOR: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_author_time_v3");
-const BY_KIND: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_kind_time_v3");
+const BY_CREATED_AT: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_created_at_v5");
+const BY_AUTHOR: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_author_time_v5");
+const BY_KIND: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_kind_time_v5");
 const BY_AUTHOR_KIND: TableDefinition<&[u8], EventKey> =
-    TableDefinition::new("by_author_kind_time_v3");
+    TableDefinition::new("by_author_kind_time_v5");
 /// NIP-01 single-letter tag index, borrowing nostrdb's clustered
 /// `(tag,value,created_at)` layout. The binary key is:
 ///
@@ -134,7 +136,7 @@ const BY_AUTHOR_KIND: TableDefinition<&[u8], EventKey> =
 /// parsing hex.
 /// Values are compact event keys, so a hit dereferences the immutable note
 /// directly without rebuilding or hex-encoding its NIP-01 id.
-const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v3");
+const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v5");
 /// Exact live-row counts for every ordered-index prefix. Keys are namespaced
 /// binary prefixes (global, author, kind, author+kind, or tag/value); values
 /// count physical index rows in that bucket. Mutations accumulate deltas in
@@ -164,7 +166,7 @@ const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox
 /// `NMPE` value. See [`encode_stored_event`]/[`decode_stored_event`]. Deleted
 /// durably by `promote_signed` (R6) or `compensate_write`; never by
 /// `recover_outbox` (read-only).
-const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> = TableDefinition::new("outbox_displaced_v4");
+const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> = TableDefinition::new("outbox_displaced_v5");
 /// Per-`(intent, relay, ordinal)` durable attempt evidence
 /// (crashsafe-accepted-2-3-plan.md §5) — schema created here so the table
 /// exists for the dispatch-time attempt writer to come (U3/U4: "Persist
@@ -1566,27 +1568,6 @@ fn tag_index_prefix(tag: SingleLetterTag, value: &str) -> Vec<u8> {
     key
 }
 
-fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
-    fn nibble(byte: u8) -> Option<u8> {
-        match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            _ => None,
-        }
-    }
-
-    let bytes = value.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut raw = [0u8; 32];
-    for (index, byte) in raw.iter_mut().enumerate() {
-        let pair = index * 2;
-        *byte = (nibble(bytes[pair])? << 4) | nibble(bytes[pair + 1])?;
-    }
-    Some(raw)
-}
-
 fn tag_index_key(
     tag: SingleLetterTag,
     value: &str,
@@ -1697,7 +1678,7 @@ fn ordered_index_created_at(key: &[u8]) -> u64 {
     )
 }
 
-/// Test-only raw-table audit for v4 event/relay surrogate integrity. Every
+/// Test-only raw-table audit for v5 event/relay surrogate integrity. Every
 /// governed crash/reopen proof calls this directly, without going through
 /// query paths that could hide a missing or orphan pointer.
 #[cfg(test)]
@@ -3063,8 +3044,8 @@ impl RedbStore {
     /// all tables exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
-        // Schema v4 deliberately carries no event-row migration. Refuse any
-        // older NMP event epoch before creating a single v4 table: otherwise
+        // Schema v5 deliberately carries no event-row migration. Refuse any
+        // older NMP event epoch before creating a single v5 table: otherwise
         // canonical events would appear empty while unversioned durable
         // outbox/coverage/tombstone facts from the old epoch remained live.
         // A caller opting into this breaking release must recreate the whole
@@ -3075,7 +3056,7 @@ impl RedbStore {
                 .list_tables()?
                 .any(|table| LEGACY_EVENT_TABLES.contains(&table.name()));
             if legacy_epoch {
-                return Err(redb::Error::UpgradeRequired(4));
+                return Err(redb::Error::UpgradeRequired(5));
             }
         }
         let write_txn = db.begin_write()?;
@@ -3332,6 +3313,7 @@ impl RedbStore {
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
         let mut relay_cache = HashMap::new();
+        let prepared_filter = PreparedFilter::new(filter);
         let mut materialize_if_visible =
             |event_key: EventKey| -> Result<Option<StoredEvent>, PersistenceError> {
                 #[cfg(test)]
@@ -3343,7 +3325,8 @@ impl RedbStore {
                 };
                 let view = StoredEventView::from_trusted(value.value())
                     .expect("redb: decode portable stored event view");
-                if !view.matches_filter_after_index(filter, plan.index.matched()) {
+                if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
+                {
                     return Ok(None);
                 }
                 let local_value = local.get(event_key).map_err(persist_err)?;
@@ -3739,6 +3722,7 @@ impl EventStore for RedbStore {
             let outbox_suppress_by_addr = read_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ADDR)
                 .map_err(persist_err)?;
+            let prepared_filter = PreparedFilter::new(filter);
             let mut out = Vec::new();
             for id in ids {
                 let Some(event_key) = event_ids
@@ -3754,7 +3738,7 @@ impl EventStore for RedbStore {
                     .expect("event_ids must always point at a stored event");
                 let view = StoredEventView::from_trusted(value.value())
                     .expect("redb: decode portable stored event view");
-                if !view.matches_filter(filter) {
+                if !view.matches_prepared_filter_after_index(&prepared_filter, IndexedMatch::None) {
                     continue;
                 }
                 let local_value = local.get(event_key).map_err(persist_err)?;
@@ -6496,22 +6480,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_event_epoch_is_rejected_before_any_v4_table_is_created() {
-        const LEGACY_EVENTS_V2: TableDefinition<&str, &[u8]> = TableDefinition::new("events_v2");
+    fn legacy_event_epoch_is_rejected_before_any_v5_table_is_created() {
+        const LEGACY_EVENTS_V4: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v4");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-epoch.redb");
         let db = Database::create(&path).unwrap();
         let write_txn = db.begin_write().unwrap();
-        write_txn.open_table(LEGACY_EVENTS_V2).unwrap();
+        write_txn.open_table(LEGACY_EVENTS_V4).unwrap();
         write_txn.commit().unwrap();
         drop(db);
 
         let error = match RedbStore::open(&path) {
-            Ok(_) => panic!("legacy event epoch must not open as an empty v4 store"),
+            Ok(_) => panic!("legacy event epoch must not open as an empty v5 store"),
             Err(error) => error,
         };
-        assert!(matches!(error, redb::Error::UpgradeRequired(4)));
+        assert!(matches!(error, redb::Error::UpgradeRequired(5)));
 
         let db = Database::create(&path).unwrap();
         let read_txn = db.begin_read().unwrap();
@@ -6520,8 +6504,41 @@ mod tests {
             .unwrap()
             .map(|table| table.name().to_owned())
             .collect();
-        assert_eq!(table_names, BTreeSet::from(["events_v2".to_owned()]));
+        assert_eq!(table_names, BTreeSet::from(["events_v4".to_owned()]));
         assert!(!table_names.contains(EVENTS.name()));
+    }
+
+    #[test]
+    fn legacy_displaced_epoch_is_rejected_before_any_v5_table_is_created() {
+        const LEGACY_DISPLACED_V4: TableDefinition<&str, &[u8]> =
+            TableDefinition::new("outbox_displaced_v4");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-displaced-epoch.redb");
+        let db = Database::create(&path).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        write_txn.open_table(LEGACY_DISPLACED_V4).unwrap();
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let error = match RedbStore::open(&path) {
+            Ok(_) => panic!("legacy displaced epoch must not open as an empty v5 store"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, redb::Error::UpgradeRequired(5)));
+
+        let db = Database::create(&path).unwrap();
+        let read_txn = db.begin_read().unwrap();
+        let table_names: BTreeSet<_> = read_txn
+            .list_tables()
+            .unwrap()
+            .map(|table| table.name().to_owned())
+            .collect();
+        assert_eq!(
+            table_names,
+            BTreeSet::from(["outbox_displaced_v4".to_owned()])
+        );
+        assert!(!table_names.contains(OUTBOX_DISPLACED.name()));
     }
 
     fn accepted_signed(
