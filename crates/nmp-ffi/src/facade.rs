@@ -148,7 +148,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
 /// `nmp-transport`/`nmp-resolver` mechanism types (#52).
 #[derive(uniffi::Object)]
 pub struct NmpEngine {
-    engine: Arc<nmp::Engine>,
+    pub(crate) engine: Arc<nmp::Engine>,
 }
 
 #[uniffi::export]

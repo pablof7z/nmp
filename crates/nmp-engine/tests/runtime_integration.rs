@@ -204,7 +204,9 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         RelayAdmissionPolicy::default(),
     );
 
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
     // $myFollows shape: kind:1 authored by whoever `a`'s kind:3 contact
@@ -882,8 +884,9 @@ fn boot_catches_up_past_due_expiry() {
 /// `Handle`'s public surface is the original verbs plus diagnostics and the
 /// two stable-receipt operations (`publish_tracked`/`reattach_receipt`) -- no
 /// `relays:` parameter, no open-REQ method anywhere on it
-/// (ledger #2/#3 preserved at the top edge; `add_signer` is M4's deliberate
-/// widening, closing the multi-account gap; `observe_diagnostics` is M5's --
+/// (ledger #2/#3 preserved at the top edge; `add_signer`/`remove_signer` are
+/// M4's deliberate lifecycle widening, closing the multi-account and remote
+/// signer detach gaps; `observe_diagnostics` is M5's --
 /// read-only, off the data path, never influences routing/delivery). Asserted
 /// by reading this crate's own source rather than by reflection (Rust has
 /// none) -- the same "grep-guard" idiom the plan itself names.
@@ -916,6 +919,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "publish",
         "publish_tracked",
         "reattach_receipt",
+        "remove_signer",
         "set_active_account",
         "shutdown",
         "subscribe",
@@ -995,7 +999,9 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         second.recv_timeout(Duration::from_secs(1)).unwrap(),
         WriteStatus::AwaitingCapability
     );
-    handle.add_signer(LocalKeySigner::new(keys.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(keys.clone()))
+        .expect("local signer has a public key");
     assert!(wait_for_status(
         &first,
         Duration::from_secs(2),
@@ -1075,7 +1081,9 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
         WriteStatus::AwaitingCapability
     );
-    handle.add_signer(LocalKeySigner::new(keys));
+    handle
+        .add_signer(LocalKeySigner::new(keys))
+        .expect("local signer has a public key");
     assert!(wait_for_status(
         &statuses,
         Duration::from_secs(2),

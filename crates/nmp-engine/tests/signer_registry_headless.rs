@@ -25,9 +25,21 @@ use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
-use nmp_signer::LocalKeySigner;
+use nmp_signer::{LocalKeySigner, SignerError, SignerOp, SigningCapability};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{EventId, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
+
+struct PubkeylessSigner;
+
+impl SigningCapability for PubkeylessSigner {
+    fn public_key(&self) -> Option<nostr::PublicKey> {
+        None
+    }
+
+    fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<nostr::Event> {
+        SignerOp::err(SignerError::Unavailable)
+    }
+}
 
 /// Same accumulate-deltas-into-a-snapshot idiom as the other runtime tests
 /// (`nmp_engine::core::RowDelta`'s doc: the wire is deltas, never snapshots).
@@ -150,12 +162,14 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         RelayAdmissionPolicy::default(),
     );
 
-    let pk_a = handle
+    let registration_a = handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("LocalKeySigner always reports a public key");
-    let pk_b = handle
+    let registration_b = handle
         .add_signer(LocalKeySigner::new(b.clone()))
         .expect("LocalKeySigner always reports a public key");
+    let pk_a = registration_a.public_key();
+    let pk_b = registration_b.public_key();
     assert_eq!(pk_a, a.public_key());
     assert_eq!(pk_b, b.public_key());
 
@@ -272,7 +286,9 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
     );
 
     // Register a signer but NEVER activate it.
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
 
     let unsigned = UnsignedEvent::new(
         a.public_key(),
@@ -308,8 +324,12 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
         Default::default(),
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(a.clone()));
-    handle.add_signer(LocalKeySigner::new(b.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
+    handle
+        .add_signer(LocalKeySigner::new(b.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
     let receipt = handle
@@ -367,7 +387,9 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
         |status| { matches!(status, WriteStatus::AwaitingCapability) }
     ));
 
-    handle.add_signer(LocalKeySigner::new(a));
+    handle
+        .add_signer(LocalKeySigner::new(a))
+        .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(status, WriteStatus::Signed(_))
@@ -390,7 +412,9 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         Default::default(),
         RelayAdmissionPolicy::default(),
     );
-    handle.add_signer(LocalKeySigner::new(a.clone()));
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
     handle.set_active_account(Some(b.public_key()));
 
     let receipt = handle
@@ -413,7 +437,9 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
     ));
 
     handle.set_active_account(Some(a.public_key()));
-    handle.add_signer(LocalKeySigner::new(b));
+    handle
+        .add_signer(LocalKeySigner::new(b))
+        .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(status, WriteStatus::Signed(_))
@@ -421,6 +447,77 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         "the intent accepted while B was active must stay pinned to B after switching to A"
     );
 
+    handle.shutdown();
+    engine_thread.join();
+}
+
+#[test]
+fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
+    let keys = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    );
+
+    // Exact replacement-race order: install A, install B for the same key,
+    // detach stale A, then prove B still signs accepted work.
+    let registration_a = handle
+        .add_signer(LocalKeySigner::new(keys.clone()))
+        .expect("local signer A has a public key");
+    let registration_b = handle
+        .add_signer(LocalKeySigner::new(keys.clone()))
+        .expect("local signer B has a public key");
+    assert_eq!(registration_a.public_key(), registration_b.public_key());
+    assert!(
+        !handle.remove_signer(registration_a),
+        "stale registration A must not detach replacement B"
+    );
+
+    handle.set_active_account(Some(keys.public_key()));
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::now(),
+                Kind::TextNote,
+                vec![],
+                "replacement remains usable",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("receipt id allocation");
+    assert!(wait_for_status(
+        &receipt,
+        Duration::from_secs(5),
+        |status| matches!(status, WriteStatus::Signed(_))
+    ));
+
+    assert!(handle.remove_signer(registration_b.clone()));
+    assert!(
+        !handle.remove_signer(registration_b),
+        "detaching one registration must be idempotent"
+    );
+    handle.shutdown();
+    engine_thread.join();
+}
+
+#[test]
+fn pubkeyless_capability_is_a_typed_registration_error() {
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    );
+    assert_eq!(
+        handle.add_signer(PubkeylessSigner),
+        Err(nmp_engine::runtime::AddSignerError::MissingPublicKey)
+    );
     handle.shutdown();
     engine_thread.join();
 }

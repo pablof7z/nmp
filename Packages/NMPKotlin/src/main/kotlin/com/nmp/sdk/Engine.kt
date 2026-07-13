@@ -40,7 +40,7 @@ data class NMPConfig(
  * concepts -- no scene-phase hook, no required provider/environment
  * wrapper. `NMPEngine(NMPConfig(...))` is the entire adoption cost. */
 class NMPEngine(config: NMPConfig) : AutoCloseable {
-    private val ffi: NmpEngine = nmpRethrowing { NmpEngine(config.toFfi()) }
+    internal val ffi: NmpEngine = nmpRethrowing { NmpEngine(config.toFfi()) }
 
     // MARK: - Identity (P3; multi-account)
 

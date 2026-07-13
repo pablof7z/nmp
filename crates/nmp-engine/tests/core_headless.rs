@@ -2796,6 +2796,90 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
 }
 
 #[test]
+fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
+    for error in [
+        nmp_signer::SignerError::Unavailable,
+        nmp_signer::SignerError::Timeout,
+        nmp_signer::SignerError::Disconnected,
+    ] {
+        let a = Keys::generate();
+        let mut core = new_core(FixtureDirectory::new());
+        activate(&mut core, &a);
+        let sink = CapturingReceiptSink::default();
+        let published = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(&a, 1, "survives signer loss")),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(sink.clone()),
+        ));
+        let (id, generation, frozen) = find_sign_request(&published);
+
+        let waiting = core.handle(EngineMsg::SignerCompleted(id, generation, Err(error)));
+        assert!(waiting.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability) if *rid == id
+        )));
+        assert!(waiting.iter().any(|effect| matches!(
+            effect,
+            Effect::RearmSignerIfAvailable(pubkey) if *pubkey == a.public_key()
+        )));
+        assert_eq!(
+            sink.0.lock().unwrap().last(),
+            Some(&WriteStatus::AwaitingCapability)
+        );
+
+        let rearmed = core.handle(EngineMsg::SignerAttached(a.public_key()));
+        let (rearmed_id, next_generation, rearmed_frozen) = find_sign_request(&rearmed);
+        assert_eq!(rearmed_id, id);
+        assert!(next_generation > generation);
+        assert_eq!(rearmed_frozen.pubkey, frozen.pubkey);
+        assert_eq!(rearmed_frozen.created_at, frozen.created_at);
+        assert_eq!(rearmed_frozen.kind, frozen.kind);
+        assert_eq!(rearmed_frozen.tags, frozen.tags);
+        assert_eq!(rearmed_frozen.content, frozen.content);
+        assert_eq!(
+            rearmed_frozen.id,
+            Some(frozen.sign_with_keys(&a).unwrap().id),
+            "reattachment must use the canonical id frozen at acceptance",
+        );
+    }
+}
+
+#[test]
+fn terminal_signer_errors_compensate_the_write() {
+    for error in [
+        nmp_signer::SignerError::Rejected("user denied".to_string()),
+        nmp_signer::SignerError::InvalidResponse("body mismatch".to_string()),
+    ] {
+        let a = Keys::generate();
+        let mut core = new_core(FixtureDirectory::new());
+        activate(&mut core, &a);
+        let sink = CapturingReceiptSink::default();
+        let published = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(&a, 1, "terminal signer answer")),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(sink.clone()),
+        ));
+        let (id, generation, _) = find_sign_request(&published);
+
+        let failed = core.handle(EngineMsg::SignerCompleted(id, generation, Err(error)));
+        assert!(failed.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id
+        )));
+        assert!(core
+            .handle(EngineMsg::SignerAttached(a.public_key()))
+            .iter()
+            .all(|effect| !matches!(effect, Effect::RequestSign(..))));
+    }
+}
+
+#[test]
 fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     let a = Keys::generate();
     let mut core = EngineCore::new(
@@ -2823,7 +2907,9 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     let failed_compensation = core.handle(EngineMsg::SignerCompleted(
         id,
         generation,
-        Err(nmp_signer::SignerError::Unavailable),
+        Err(nmp_signer::SignerError::Rejected(
+            "terminal signer decision".to_string(),
+        )),
     ));
     assert!(failed_compensation.is_empty(), "no terminal fact committed");
     assert_eq!(sink.0.lock().unwrap().as_slice(), [WriteStatus::Accepted]);

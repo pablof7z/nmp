@@ -61,6 +61,7 @@ mod diagnostics_channel;
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -226,13 +227,15 @@ enum Cmd {
         reply: Sender<ReattachOutcome>,
     },
     /// Register a new signing capability (M4 §5: `SignerRegistry`). The
-    /// reply carries the pubkey the engine thread's registry keyed it under
-    /// (`None` if `signer.public_key()` itself returned `None` — there is no
-    /// key to register it against, so it is dropped rather than stored
-    /// unreachably).
+    /// reply carries the pubkey the engine thread's registry keyed it under,
+    /// or a typed error if the capability has no stable identity.
     AddSigner {
         signer: Box<dyn SigningCapability + Send>,
-        reply: Sender<Option<PublicKey>>,
+        reply: Sender<Result<SignerRegistration, AddSignerError>>,
+    },
+    RemoveSigner {
+        registration: SignerRegistration,
+        reply: Sender<bool>,
     },
     /// Register a new diagnostics observer (M5 plan §1.2 step 4). The reply
     /// carries the id (used only by `Cmd::UnobserveDiagnostics` to withdraw
@@ -257,25 +260,56 @@ enum Cmd {
 /// already-accepted work.
 #[derive(Default)]
 struct SignerRegistry {
-    signers: HashMap<PublicKey, Box<dyn SigningCapability + Send>>,
+    signers: HashMap<PublicKey, RegisteredSigner>,
+}
+
+struct RegisteredSigner {
+    identity: Arc<()>,
+    signer: Box<dyn SigningCapability + Send>,
 }
 
 impl SignerRegistry {
     /// Register `signer` under its own `public_key()`, replacing any prior
-    /// capability already registered for that key. Returns the key it was
-    /// registered under (`None` if the capability reports no key at all).
-    fn add(&mut self, signer: Box<dyn SigningCapability + Send>) -> Option<PublicKey> {
-        let pk = signer.public_key();
-        if let Some(pk) = pk {
-            self.signers.insert(pk, signer);
+    /// capability already registered for that key.
+    fn add(
+        &mut self,
+        signer: Box<dyn SigningCapability + Send>,
+    ) -> Result<SignerRegistration, AddSignerError> {
+        let pk = signer
+            .public_key()
+            .ok_or(AddSignerError::MissingPublicKey)?;
+        let identity = Arc::new(());
+        self.signers.insert(
+            pk,
+            RegisteredSigner {
+                identity: Arc::clone(&identity),
+                signer,
+            },
+        );
+        Ok(SignerRegistration {
+            public_key: pk,
+            identity,
+        })
+    }
+
+    /// Remove only the capability installed by this exact registration.
+    /// A stale remote session can therefore never detach a newer replacement
+    /// for the same account.
+    fn remove(&mut self, registration: &SignerRegistration) -> bool {
+        let is_current = self
+            .signers
+            .get(&registration.public_key)
+            .is_some_and(|current| Arc::ptr_eq(&current.identity, &registration.identity));
+        if is_current {
+            self.signers.remove(&registration.public_key);
         }
-        pk
+        is_current
     }
 
     /// Resolve the signer frozen into this exact accepted template. An
     /// account switch cannot redirect already-accepted work.
     fn signer_for(&self, pk: PublicKey) -> Option<&(dyn SigningCapability + Send)> {
-        self.signers.get(&pk).map(AsRef::as_ref)
+        self.signers.get(&pk).map(|entry| entry.signer.as_ref())
     }
 }
 
@@ -749,10 +783,10 @@ fn engine_loop<S, D>(
                 let _ = applied.send(());
             }
             Cmd::AddSigner { signer, reply } => {
-                let pk = registry.add(signer);
-                let _ = reply.send(pk);
-                if let Some(pk) = pk {
-                    let effects = core.handle(EngineMsg::SignerAttached(pk));
+                let result = registry.add(signer);
+                let _ = reply.send(result.clone());
+                if let Ok(registration) = result {
+                    let effects = core.handle(EngineMsg::SignerAttached(registration.public_key()));
                     dispatch_effects(
                         effects,
                         &pool,
@@ -763,6 +797,12 @@ fn engine_loop<S, D>(
                         self_inbox,
                     );
                 }
+            }
+            Cmd::RemoveSigner {
+                registration,
+                reply,
+            } => {
+                let _ = reply.send(registry.remove(&registration));
             }
             Cmd::ObserveDiagnostics { reply } => {
                 let id = next_diag_id;
@@ -971,18 +1011,17 @@ fn dispatch_effect(
                         id, generation, result,
                     )));
                 }
-                SignerOp::Pending(rx) => {
+                SignerOp::Pending(pending) => {
                     // A single blocking recv on a fresh thread, then exactly
                     // one forwarded message -- D8-compliant (no poll loop),
                     // and keeps the engine thread itself from ever blocking
                     // on a remote signer round-trip.
                     let inbox = self_inbox.clone();
                     thread::spawn(move || {
-                        if let Ok(result) = rx.recv() {
-                            let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
-                                id, generation, result,
-                            )));
-                        }
+                        let result = pending.recv();
+                        let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
+                            id, generation, result,
+                        )));
                     });
                 }
             },
@@ -990,6 +1029,14 @@ fn dispatch_effect(
                 let _ = self_inbox.send(Cmd::Engine(EngineMsg::SignerUnavailable(id, generation)));
             }
         },
+        Effect::RearmSignerIfAvailable(pubkey) => {
+            if registry
+                .signer_for(pubkey)
+                .is_some_and(SigningCapability::is_available)
+            {
+                let _ = self_inbox.send(Cmd::Engine(EngineMsg::SignerAttached(pubkey)));
+            }
+        }
         Effect::RequestDecrypt(..) => {
             // No `EngineMsg` feedback path exists yet to carry a decrypted
             // result back into `EngineCore` (B never wired one -- see the
@@ -1203,7 +1250,8 @@ impl DiagnosticsHandle {
 ///
 /// - `subscribe(LiveQuery) -> (QueryHandle, Receiver<RowsMsg>)`
 /// - `unsubscribe(QueryHandle)`
-/// - `add_signer(impl SigningCapability) -> Option<PublicKey>`
+/// - `add_signer(impl SigningCapability) -> Result<SignerRegistration, AddSignerError>`
+/// - `remove_signer(SignerRegistration) -> bool`
 /// - `set_active_account(Option<PublicKey>)`
 /// - `publish(WriteIntent) -> Receiver<WriteStatus>`
 /// - `observe_diagnostics() -> (DiagnosticsHandle, LatestReceiver<DiagnosticsSnapshot>)`
@@ -1215,6 +1263,53 @@ impl DiagnosticsHandle {
 pub struct Handle {
     inbox: Sender<Cmd>,
 }
+
+/// Opaque ownership proof for one exact signer-registry installation.
+/// Replacing a signer for the same public key creates a distinct value, so
+/// cleanup from the older provider cannot detach the replacement.
+#[derive(Clone)]
+pub struct SignerRegistration {
+    public_key: PublicKey,
+    identity: Arc<()>,
+}
+
+impl SignerRegistration {
+    #[must_use]
+    pub fn public_key(&self) -> PublicKey {
+        self.public_key
+    }
+}
+
+impl std::fmt::Debug for SignerRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignerRegistration")
+            .field("public_key", &self.public_key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for SignerRegistration {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key == other.public_key && Arc::ptr_eq(&self.identity, &other.identity)
+    }
+}
+
+impl Eq for SignerRegistration {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddSignerError {
+    MissingPublicKey,
+}
+
+impl std::fmt::Display for AddSignerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingPublicKey => f.write_str("signing capability has no public key"),
+        }
+    }
+}
+
+impl std::error::Error for AddSignerError {}
 
 impl Handle {
     /// Open a live subscription. Blocks (briefly — one engine-thread round
@@ -1253,12 +1348,13 @@ impl Handle {
     /// (M4 §5: `SignerRegistry`). Registering a signer does NOT make it
     /// active — call [`Self::set_active_account`] to actually switch reads
     /// and writes onto it. Blocks briefly (one engine-thread round trip,
-    /// same discipline as [`Self::subscribe`]) and returns the key it was
-    /// registered under, or `None` if the capability reported no key at all.
+    /// same discipline as [`Self::subscribe`]) and returns an opaque scoped
+    /// registration. The registration exposes the key and is the only value
+    /// that may later detach this exact installation.
     ///
     /// # Panics
     /// If the engine thread has already shut down.
-    pub fn add_signer<Sig>(&self, signer: Sig) -> Option<PublicKey>
+    pub fn add_signer<Sig>(&self, signer: Sig) -> Result<SignerRegistration, AddSignerError>
     where
         Sig: SigningCapability + Send + 'static,
     {
@@ -1272,6 +1368,23 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine thread dropped the add_signer reply")
+    }
+
+    /// Detach this exact signer installation if it is still current.
+    /// Accepted writes keep their frozen identity and remain waiting; they
+    /// are never retargeted. A stale registration returns `false` and cannot
+    /// remove a newer provider for the same public key.
+    pub fn remove_signer(&self, registration: SignerRegistration) -> bool {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::RemoveSigner {
+                registration,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: remove_signer() called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine thread dropped the remove_signer reply")
     }
 
     /// Re-root every reactive query and default unsigned-publish authority

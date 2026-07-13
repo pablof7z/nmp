@@ -544,7 +544,9 @@ impl NmpWorld {
 
         if let Some(active) = self.active_person.clone() {
             let keys = self.person(&active);
-            handle.add_signer(LocalKeySigner::new(keys.clone()));
+            handle
+                .add_signer(LocalKeySigner::new(keys.clone()))
+                .expect("local signer has a public key");
             handle.set_active_account(Some(keys.public_key()));
         }
 
@@ -649,7 +651,9 @@ impl NmpWorld {
     pub async fn switch_account(&mut self, person: &str) {
         self.ensure_started().await;
         let keys = self.person(person);
-        self.handle().add_signer(LocalKeySigner::new(keys.clone()));
+        self.handle()
+            .add_signer(LocalKeySigner::new(keys.clone()))
+            .expect("BDD local signer always exposes its public key");
         self.handle().set_active_account(Some(keys.public_key()));
         self.active_person = Some(person.to_string());
     }
@@ -678,7 +682,9 @@ impl NmpWorld {
                 .seed_contact_list(&keys, &follow_pks, created_at)
                 .await;
         }
-        self.handle().add_signer(LocalKeySigner::new(keys.clone()));
+        self.handle()
+            .add_signer(LocalKeySigner::new(keys.clone()))
+            .expect("BDD local signer always exposes its public key");
         self.handle().set_active_account(Some(keys.public_key()));
         self.active_person = Some(name);
     }

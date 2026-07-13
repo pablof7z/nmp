@@ -10,6 +10,13 @@ use crate::op::SignerOp;
 /// `LocalKeySigner` impl.
 pub trait SigningCapability {
     fn public_key(&self) -> Option<PublicKey>;
+    /// Current transport/capability availability. Local signers use the
+    /// default `true`; remote signers report their live connection state.
+    /// This is only an event-race repair hint after a retryable completion,
+    /// never permission to select a different identity.
+    fn is_available(&self) -> bool {
+        true
+    }
     fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<SignedEvent>;
 }
 

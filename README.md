@@ -129,7 +129,7 @@ The [bug-class ledger](docs/bug-class-ledger.md) records the mechanism and real 
 
 ## Current status
 
-This README describes the v2 north star. NMP is still pre-v2: the core store, resolver, router, transport, engine, Rust facade, Swift package, Kotlin/JVM package, and falsifier apps exist, while several promoted guarantees remain active work. Public names and shapes are intentionally provisional; the ownership boundary and behavioral invariants are the stable frame.
+This README describes the v2 north star. NMP is still pre-v2: the core store, resolver, router, transport, engine, Rust facade, Swift package, Kotlin/JVM package, NIP-46 remote-signer path, and falsifier apps exist, while several promoted guarantees remain active work. Public names and shapes are intentionally provisional; the ownership boundary and behavioral invariants are the stable frame.
 
 - [`docs/known-gaps.md`](docs/known-gaps.md) is the honest built-versus-missing record.
 - [`docs/bug-class-ledger.md`](docs/bug-class-ledger.md) distinguishes target, partial, and structurally proven guarantees.
