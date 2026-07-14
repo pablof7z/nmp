@@ -370,7 +370,7 @@ pub enum EngineMsg {
     Publish(WriteIntent, Box<dyn ReceiptSink>),
     RelayConnected(TransportRelayHandle, RelayUrl),
     RelayDisconnected(TransportRelayHandle),
-    RelayHealth(u32, RelayHealth),
+    RelayHealth(TransportRelayHandle, RelayHealth),
     RelayFrame(TransportRelayHandle, RelayFrame),
     RelayFrames(Vec<(TransportRelayHandle, RelayFrame)>),
     SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
@@ -1702,7 +1702,7 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::Publish(intent, sink) => self.on_publish(intent, sink),
             EngineMsg::RelayConnected(handle, url) => self.on_relay_connected(handle, url),
             EngineMsg::RelayDisconnected(handle) => self.on_relay_disconnected(handle),
-            EngineMsg::RelayHealth(slot, health) => self.on_relay_health(slot, health),
+            EngineMsg::RelayHealth(handle, health) => self.on_relay_health(handle, health),
             EngineMsg::RelayFrame(handle, frame) => self.on_relay_frame(handle, frame),
             EngineMsg::RelayFrames(frames) => self.on_relay_frames(frames),
             EngineMsg::SignerCompleted(id, generation, result) => {
@@ -1725,12 +1725,23 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    fn on_relay_health(&mut self, slot: u32, health: RelayHealth) -> Vec<Effect> {
+    fn on_relay_health(
+        &mut self,
+        handle: TransportRelayHandle,
+        health: RelayHealth,
+    ) -> Vec<Effect> {
+        if self
+            .slot_to_relay
+            .get(&handle.slot)
+            .is_some_and(|(current, _)| *current != handle)
+        {
+            return Vec::new();
+        }
         self.transport_degraded = health.last_error.or_else(|| {
             (health.invalid_signature_count > 0).then(|| {
                 format!(
-                    "relay slot {slot} rejected {} invalid signature frame(s)",
-                    health.invalid_signature_count
+                    "relay slot {} rejected {} invalid signature frame(s)",
+                    handle.slot, health.invalid_signature_count
                 )
             })
         });
@@ -2771,6 +2782,13 @@ impl<S: EventStore> EngineCore<S> {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
 
     fn on_relay_connected(&mut self, handle: TransportRelayHandle, url: RelayUrl) -> Vec<Effect> {
+        if self
+            .slot_to_relay
+            .get(&handle.slot)
+            .is_some_and(|(current, _)| current.generation > handle.generation)
+        {
+            return Vec::new();
+        }
         self.slot_to_relay
             .insert(handle.slot, (handle, url.clone()));
         // A connection can also exist solely for a compiled/persisted write
@@ -4888,7 +4906,13 @@ mod relay_health_tests {
             ..RelayHealth::default()
         };
 
-        let effects = core.handle(EngineMsg::RelayHealth(7, health));
+        let effects = core.handle(EngineMsg::RelayHealth(
+            TransportRelayHandle {
+                slot: 7,
+                generation: 1,
+            },
+            health,
+        ));
         assert!(effects.iter().any(|effect| {
             matches!(effect, Effect::EmitDiagnostics(snapshot)
                 if snapshot.transport_degraded.as_deref()

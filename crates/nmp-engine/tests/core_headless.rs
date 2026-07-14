@@ -2280,6 +2280,25 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     let _ = core.handle(EngineMsg::RelayConnected(old, relay.clone()));
     let _ = core.handle(EngineMsg::RelayConnected(reopened, relay.clone()));
 
+    let stale_connect = core.handle(EngineMsg::RelayConnected(old, relay.clone()));
+    assert!(
+        stale_connect.is_empty(),
+        "an old-generation connect must not replace the reopened handle"
+    );
+
+    let stale_health = core.handle(EngineMsg::RelayHealth(
+        old,
+        nmp_transport::RelayHealth {
+            last_error: Some("stale generation failed".to_string()),
+            ..nmp_transport::RelayHealth::default()
+        },
+    ));
+    assert!(
+        stale_health.is_empty(),
+        "old-generation health must not mutate reopened diagnostics"
+    );
+    assert!(core.diagnostics_snapshot().transport_degraded.is_none());
+
     let stale = core.handle(EngineMsg::RelayDisconnected(old));
     assert!(
         stale.is_empty(),
