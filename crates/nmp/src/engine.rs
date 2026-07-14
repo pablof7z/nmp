@@ -40,11 +40,6 @@ use crate::config::{build_admission_policy, build_directory, EngineConfig};
 use crate::error::EngineError;
 use crate::subscription::{DiagnosticsSubscription, Subscription};
 
-/// The router compiler's per-tick atom-count cap. Both `nmp-ffi` and
-/// `nmp-demo` hardcoded their own copy of this constant before #52; the
-/// facade now owns the one value.
-const ROUTER_CAP: usize = 10;
-
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`
 /// isn't), so it lives behind `Engine`'s own mutex rather than a
@@ -88,8 +83,9 @@ impl Engine {
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         let directory = build_directory(&config)?;
         let admission = build_admission_policy(&config);
-        // Issue #121: the operator's relay-count ceiling rides the transport
-        // pool (the worker-exhaustion backstop); `0` leaves it uncapped.
+        // #20: one effective ceiling is threaded to both the whole-demand
+        // compiler and transport. EngineThread normalizes legacy zero to the
+        // finite default and resolves any mechanism-level mismatch downward.
         let pool_config = PoolConfig {
             max_relays: config.max_relays,
             ..PoolConfig::default()
@@ -100,11 +96,11 @@ impl Engine {
                 let store = RedbStore::open(path).map_err(|e| EngineError::StoreOpenFailed {
                     reason: e.to_string(),
                 })?;
-                EngineThread::spawn(store, directory, ROUTER_CAP, pool_config, admission)
+                EngineThread::spawn(store, directory, config.max_relays, pool_config, admission)
             }
             None => {
                 let store = MemoryStore::new();
-                EngineThread::spawn(store, directory, ROUTER_CAP, pool_config, admission)
+                EngineThread::spawn(store, directory, config.max_relays, pool_config, admission)
             }
         };
 

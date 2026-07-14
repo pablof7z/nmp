@@ -982,6 +982,42 @@ impl<S: EventStore> EngineCore<S> {
         Ok(lanes)
     }
 
+    /// Exact relay-worker demand owned by the reducer right now: current
+    /// read-plan URLs plus every nonterminal write lane and every correlated
+    /// ephemeral handoff. The runtime uses this set to release obsolete pool
+    /// workers before dispatching replacement wire work, so a finite cap
+    /// bounds live work without turning historical read connections into
+    /// permanent slot owners.
+    ///
+    /// A store read failure returns `None`. In that case the runtime retains
+    /// every worker rather than risking eviction of a durable lane whose
+    /// persisted state could not be inspected.
+    pub(crate) fn required_relay_workers(&self) -> Option<BTreeSet<RelayUrl>> {
+        let mut required: BTreeSet<RelayUrl> = self.router.plan().reqs.keys().cloned().collect();
+
+        required.extend(
+            self.attempt_correlations
+                .values()
+                .map(|target| target.relay.clone()),
+        );
+
+        for pending in self.pending.values() {
+            required.extend(pending.pending_relays.iter().cloned());
+            required.extend(pending.unstarted_relays.iter().cloned());
+            required.extend(pending.route_blocked_relays.iter().cloned());
+
+            let Some(intent_id) = pending.intent_id else {
+                continue;
+            };
+            let lanes = self.resolver.store().recover_outbox_lanes(intent_id).ok()?;
+            required.extend(lanes.into_iter().filter_map(|lane| {
+                (!matches!(lane.state, LaneState::Terminal { .. })).then_some(lane.key.relay)
+            }));
+        }
+
+        Some(required)
+    }
+
     /// The only path that allocates durable attempt ordinals. Eligibility is
     /// persisted first; this reducer then applies stable ordering and the
     /// ratified 32-global/1-per-relay caps before committing Started.
@@ -2728,6 +2764,11 @@ impl<S: EventStore> EngineCore<S> {
 
     fn on_relay_connected(&mut self, handle: TransportRelayHandle, url: RelayUrl) -> Vec<Effect> {
         self.slot_to_url.insert(handle.slot, url.clone());
+        // A connection can also exist solely for a compiled/persisted write
+        // route. It is live for the durable write scheduler and ACK
+        // attribution, but it must never receive read replay/probing unless
+        // the CURRENT read plan admits that exact URL.
+        let planned_read_reqs = self.router.plan().reqs.get(&url).cloned();
         // Feeds `AcquisitionEvidence.sources[_].status` (`evidence.rs`):
         // this relay is now `Requesting`, never again `Connecting` for the
         // lifetime of this `EngineCore` (`ever_connected_relays` is
@@ -2740,29 +2781,27 @@ impl<S: EventStore> EngineCore<S> {
         // §2: "a replayed sub on the new generation gets fresh snapshots").
         self.attribution.clear_relay(&url);
         let mut effects = Vec::new();
-        if let Some(reqs) = self.router.plan().reqs.get(&url).cloned() {
+        if let Some(reqs) = planned_read_reqs.as_ref() {
+            for req in reqs {
+                self.attribution
+                    .record_send(&url, &req.sub_id, &req.filter, req.absorbed.clone());
+            }
             if !reqs.is_empty() {
-                for req in &reqs {
-                    self.attribution.record_send(
-                        &url,
-                        &req.sub_id,
-                        &req.filter,
-                        req.absorbed.clone(),
-                    );
-                }
-                effects.push(Effect::Replay(url.clone(), reqs));
+                effects.push(Effect::Replay(url.clone(), reqs.clone()));
             }
         }
         // Capability probe (plan §6 E): idempotent -- a relay whose verdict
         // is already cached (`Supported`/`Unsupported`) from an earlier
         // connection on this same `Prober` is never re-probed.
-        if let Some(probe) = self.prober.begin_probe(&url) {
-            effects.push(Effect::StartProbe(
-                url.clone(),
-                probe.sub_id,
-                probe.filter,
-                probe.initial_message_hex,
-            ));
+        if planned_read_reqs.is_some() {
+            if let Some(probe) = self.prober.begin_probe(&url) {
+                effects.push(Effect::StartProbe(
+                    url.clone(),
+                    probe.sub_id,
+                    probe.filter,
+                    probe.initial_message_hex,
+                ));
+            }
         }
         // A relay coming online can flip a handle's `AcquisitionEvidence`
         // (`Connecting` -> `Requesting`) with no coverage/row change at all

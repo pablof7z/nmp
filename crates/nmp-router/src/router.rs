@@ -15,8 +15,8 @@ use crate::coalesce::RuleRegistry;
 use crate::diag::{self, Diagnostics};
 use crate::facts::{DiscoveryKinds, PubkeyHex, RelayDirectory, RelayUrl};
 use crate::plan::{diff_plans, RelayPlan, SubId, WireDelta, WireReq};
-use crate::route::{self, AtomClass, RouteProvenance, Skeleton};
-use crate::solver::{self, CoverageInput, Shortfall};
+use crate::route::{self, AtomClass, RouteKind, RouteProvenance, Skeleton};
+use crate::solver::{self, CoverageInput, Shortfall, ShortfallReason};
 
 /// The equal-context-only coalescing gate (Fable D, "locus fixed"): two
 /// atoms only ever share wire work if their FULL context matches. Bagged
@@ -29,6 +29,106 @@ type ContextKey = (SourceAuthority, AccessContext);
 /// triple -- selection-only, exactly what `coalesce.rs::coalesce_with`
 /// (unchanged, context-free) has always taken.
 type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+
+/// Apply the ONE whole-demand relay ceiling after every routing lane has
+/// materialized. The previous implementation handed the full `cap` to each
+/// outbox skeleton independently and then added indexer/app/fallback/pinned
+/// relays outside those solves, so the assembled plan could exceed `cap` by
+/// an arbitrary factor.
+///
+/// Selection is deterministic and coverage-biased: the relay carrying the
+/// most typed route facts wins, with the canonical relay URL as the stable
+/// tie-break. Refused relays are removed from the only bag that can become a
+/// [`RelayPlan`], and every absorbed atom they would have served is retained
+/// as explicit local-limit evidence. This is intentionally conservative: if
+/// a cap removes an additive or redundant planned source, the demand still
+/// reports that local limit instead of pretending the smaller plan was the
+/// complete requested acquisition.
+fn apply_global_relay_cap(
+    bag: &mut BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>>,
+    cap: usize,
+    uncovered_authors: &mut BTreeMap<PubkeyHex, Shortfall>,
+) -> (BTreeSet<CoverageKey>, BTreeSet<RelayUrl>) {
+    if bag.len() <= cap {
+        return (BTreeSet::new(), BTreeSet::new());
+    }
+
+    let mut ranked: Vec<(RelayUrl, usize)> = bag
+        .iter()
+        .map(|(relay, by_context)| {
+            let route_facts = by_context
+                .values()
+                .flatten()
+                .map(|(_, provenance, absorbed)| provenance.len().max(absorbed.len()).max(1))
+                .sum();
+            (relay.clone(), route_facts)
+        })
+        .collect();
+    ranked.sort_by(|(a_url, a_score), (b_url, b_score)| {
+        b_score.cmp(a_score).then_with(|| a_url.cmp(b_url))
+    });
+
+    let selected: BTreeSet<RelayUrl> = ranked
+        .iter()
+        .take(cap)
+        .map(|(relay, _)| relay.clone())
+        .collect();
+    let refused: BTreeSet<RelayUrl> = bag
+        .keys()
+        .filter(|relay| !selected.contains(*relay))
+        .cloned()
+        .collect();
+
+    let mut limited = BTreeSet::new();
+    let mut cap_limited_authors = BTreeSet::new();
+    for relay in &refused {
+        if let Some(by_context) = bag.get(relay) {
+            for (_, provenance, absorbed) in by_context.values().flatten() {
+                limited.extend(absorbed.iter().copied());
+                for route in provenance {
+                    if route.route_kind == RouteKind::OutboxSolved {
+                        cap_limited_authors.extend(route.covers_authors.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+
+    // Preserve the router diagnostic's historical per-author floor while
+    // moving cap enforcement to the assembled plan. Intrinsic no-candidate /
+    // fewer-than-k evidence from the uncapped solve remains more specific
+    // and is never overwritten by this cap-derived fact.
+    for author in cap_limited_authors {
+        if uncovered_authors.contains_key(&author) {
+            continue;
+        }
+        let achieved: BTreeSet<RelayUrl> = selected
+            .iter()
+            .filter(|relay| {
+                bag.get(*relay).is_some_and(|by_context| {
+                    by_context.values().flatten().any(|(_, provenance, _)| {
+                        provenance.iter().any(|route| {
+                            route.route_kind == RouteKind::OutboxSolved
+                                && route.covers_authors.contains(&author)
+                        })
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        uncovered_authors.insert(
+            author,
+            Shortfall {
+                requested_k: 2,
+                achieved: achieved.len(),
+                reason: ShortfallReason::CapExhausted,
+            },
+        );
+    }
+
+    bag.retain(|relay, _| selected.contains(relay));
+    (limited, refused)
+}
 
 /// Push `(filter, provenance, coverage_key(atom))` into `bag[relay][ctx]`
 /// for every `(relay, provenance)` pair in `routes` — the shared
@@ -141,7 +241,11 @@ impl Router {
             let coverage = solver::solve(&CoverageInput {
                 candidates: candidates.clone(),
                 k: 2,
-                cap,
+                // Per-skeleton limiting is the defect #20 removes. Build
+                // each skeleton's honest k-cover first; the ONE assembled-
+                // plan ceiling below accounts for every skeleton and every
+                // additive/pinned lane together.
+                cap: usize::MAX,
             });
             uncovered_authors.extend(coverage.shortfall.clone());
 
@@ -236,7 +340,14 @@ impl Router {
             }
         }
 
-        // Step 4 + 5: per relay, PER CONTEXT PARTITION, dedup + widen-only
+        // Step 4: enforce the ONE whole-demand ceiling over the fully
+        // materialized bag. Nothing removed here can reach coalescing, the
+        // plan, or the wire; its contextual coverage keys remain as exact
+        // local-limit evidence.
+        let (limited, refused_relays) =
+            apply_global_relay_cap(&mut bag, cap, &mut uncovered_authors);
+
+        // Step 5 + 6: per relay, PER CONTEXT PARTITION, dedup + widen-only
         // coalesce (`coalesce.rs` stays pure selection-only, Fable D "locus
         // fixed" -- partitioning by `ContextKey` here is what makes
         // coalescing equal-context-only, never a change to the rule
@@ -262,9 +373,13 @@ impl Router {
             reqs.insert(relay, relay_reqs);
         }
 
-        let next_plan = RelayPlan { reqs };
+        let next_plan = RelayPlan {
+            reqs,
+            limited,
+            refused_relays,
+        };
 
-        // Step 6: diff vs previous plan.
+        // Step 7: diff vs previous plan.
         let delta = diff_plans(&self.prev_plan, &next_plan);
 
         self.last_diag = diag::build(
@@ -775,5 +890,107 @@ mod tests {
             .iter()
             .flat_map(|r| r.provenance.iter())
             .all(|p| p.lane == Lane::ExplicitPinned));
+    }
+
+    /// #20 structural falsifier: two different skeletons used to spend the
+    /// full cap independently (`2 + 2` relays under a cap of `2`). The
+    /// assembled plan now has one ceiling, is deterministic, and records the
+    /// refused half as local-limit evidence instead of silently truncating.
+    #[test]
+    fn whole_demand_cap_is_shared_across_skeletons_and_deterministic() {
+        let a = pk('a');
+        let b = pk('b');
+        let dir = FixtureDirectory::new()
+            .with_write(a.clone(), [test_relay(0), test_relay(1)])
+            .with_write(b.clone(), [test_relay(2), test_relay(3)]);
+        let demand = BTreeSet::from([outbox(1, &[a.as_str()]), outbox(2, &[b.as_str()])]);
+
+        let mut first = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        first.compile(&demand, &dir, 2);
+        let first_relays: BTreeSet<_> = first.plan().reqs.keys().cloned().collect();
+
+        let mut second = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        second.compile(&demand, &dir, 2);
+
+        assert_eq!(first.plan().reqs.len(), 2);
+        assert_eq!(first.plan().refused_relays.len(), 2);
+        assert!(!first.plan().limited.is_empty());
+        assert_eq!(
+            first_relays,
+            second.plan().reqs.keys().cloned().collect(),
+            "whole-demand selection and tie-breaking must be reproducible"
+        );
+        assert_eq!(
+            first.plan().limited,
+            second.plan().limited,
+            "the explicit shortfall evidence must be deterministic too"
+        );
+        assert_eq!(first.diagnostics().relays_refused_by_cap, 2);
+        assert!(first
+            .diagnostics()
+            .uncovered_authors
+            .values()
+            .any(|shortfall| shortfall.reason == ShortfallReason::CapExhausted));
+    }
+
+    /// The ceiling is over the FINAL plan, not merely the author-outbox
+    /// solver. Operator app lanes and explicit pinned authority consume the
+    /// same finite budget and any omitted route stays visible as a limit.
+    #[test]
+    fn additive_and_explicit_pinned_routes_share_the_same_global_cap() {
+        let a = pk('a');
+        let app = test_relay(10);
+        let explicit_a = test_relay(20);
+        let explicit_b = test_relay(21);
+        let dir = FixtureDirectory::new()
+            .with_write(a.clone(), [test_relay(0), test_relay(1)])
+            .with_app([app]);
+        let demand = BTreeSet::from([
+            outbox(1, &[a.as_str()]),
+            as_atom(
+                cf(9, &[]),
+                SourceAuthority::Pinned(BTreeSet::from([explicit_a, explicit_b])),
+            ),
+        ]);
+        let mut router = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        router.compile(&demand, &dir, 2);
+
+        assert_eq!(router.plan().reqs.len(), 2);
+        assert_eq!(router.plan().refused_relays.len(), 3);
+        assert!(!router.plan().limited.is_empty());
+        assert_eq!(router.diagnostics().relays_refused_by_cap, 3);
+    }
+
+    /// A zero budget is not an uncapped escape hatch at the router seam: it
+    /// produces an empty executable plan plus explicit evidence for every
+    /// otherwise-routable atom.
+    #[test]
+    fn zero_budget_refuses_every_route_with_explicit_limit_evidence() {
+        let a = pk('a');
+        let dir = FixtureDirectory::new().with_write(a.clone(), [test_relay(0), test_relay(1)]);
+        let mut router = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        router.compile(&BTreeSet::from([outbox(1, &[a.as_str()])]), &dir, 0);
+
+        assert!(router.plan().reqs.is_empty());
+        assert_eq!(router.plan().refused_relays.len(), 2);
+        assert!(!router.plan().limited.is_empty());
+        assert_eq!(
+            router.diagnostics().uncovered_authors[&a].reason,
+            ShortfallReason::CapExhausted
+        );
     }
 }

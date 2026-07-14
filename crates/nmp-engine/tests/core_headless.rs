@@ -4322,6 +4322,28 @@ fn unprobed_relay_never_routes_to_negentropy() {
     req_for(&effects, &relay0); // panics if there is no plain REQ.
 }
 
+/// #20 structural bypass falsifier: a transport connection notification is
+/// not authority to create read work. Only a URL present in the current
+/// compiled plan may be replayed or capability-probed.
+#[test]
+fn connected_relay_outside_the_compiled_plan_emits_no_read_wire_effect() {
+    let mut core = new_core(FixtureDirectory::new());
+    let unplanned = RelayUrl::parse("wss://unplanned.example.com").unwrap();
+
+    let effects = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 7,
+            generation: 1,
+        },
+        unplanned,
+    ));
+
+    assert!(
+        effects.is_empty(),
+        "an unplanned connection must not mint replay/probe authority: {effects:?}"
+    );
+}
+
 /// Test 3 (ledger #8) second half + test 10's routing half: drives the
 /// Prober FSM to a real `Supported` verdict via a scripted NEG-MSG (exactly
 /// what a real relay's probe response looks like from `EngineCore`'s point

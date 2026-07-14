@@ -13,6 +13,7 @@
 //! thread. See those modules' docs for the generation-safety scheme and the
 //! harvest-vs-rewrite breakdown.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +29,40 @@ mod verify;
 mod worker;
 
 use inner::PoolInner;
+
+/// Safe default for the single engine/transport relay ceiling. Zero is
+/// normalized to this value as well, so legacy/default construction cannot
+/// silently re-enable unbounded worker growth.
+pub const DEFAULT_MAX_RELAYS: usize = 10;
+
+/// A typed refusal to create or recover a relay worker.
+///
+/// Callers must handle this result before they receive a [`RelayHandle`], so
+/// a relay-cap refusal cannot be mistaken for a live generation and silently
+/// fed into [`Pool::send`] as an opaque sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayOpenError {
+    /// Opening another live worker would exceed the pool-wide ceiling.
+    AtCapacity { max_relays: usize },
+    /// The pool has entered terminal shutdown and cannot reopen workers.
+    ShuttingDown,
+    /// Pool state was poisoned; fail closed instead of returning a handle.
+    Unavailable,
+}
+
+impl std::fmt::Display for RelayOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AtCapacity { max_relays } => {
+                write!(f, "relay pool capacity {max_relays} exhausted")
+            }
+            Self::ShuttingDown => f.write_str("relay pool is shutting down"),
+            Self::Unavailable => f.write_str("relay pool state is unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for RelayOpenError {}
 
 /// A frame handed to the pool for sending. Substrate-grade: no "kind"/
 /// "pubkey" here — the pool moves bytes, it never interprets Nostr
@@ -240,6 +275,9 @@ impl PoolEventSink for std::sync::mpsc::SyncSender<PoolEvent> {
 /// harvested constants).
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
+    /// Maximum distinct live relay workers. This is the transport half of
+    /// the engine's one whole-demand relay ceiling; zero is normalized to
+    /// [`DEFAULT_MAX_RELAYS`] and never disables admission.
     pub max_relays: usize,
     /// Maximum worker events waiting for the translator. A full queue blocks
     /// the socket worker, propagating pressure back to TCP reads.
@@ -287,7 +325,7 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_relays: 0,
+            max_relays: DEFAULT_MAX_RELAYS,
             ingest_queue_capacity: 1_024,
             event_sink_queue_capacity: 1_024,
             verifier_workers: 0,
@@ -327,11 +365,29 @@ impl Pool {
     /// Ensure a worker is dialing/connected for `url`. Idempotent for a
     /// live slot (returns the current handle unchanged). If the URL was
     /// previously closed via [`Self::close`], the slot reopens with a fresh
-    /// generation — the prior handle is now stale.
-    pub fn ensure_open(&self, url: &RelayUrl) -> RelayHandle {
+    /// generation — the prior handle is now stale. Every refusal is returned
+    /// as a typed error; this API never manufactures an invalid handle.
+    pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
         match self.inner.lock() {
-            Ok(mut guard) => guard.ensure_open(url),
-            Err(_) => dead_handle(),
+            Ok(mut guard) => {
+                let handle = guard.ensure_open(url);
+                if handle.slot == u32::MAX {
+                    Err(guard.open_refusal())
+                } else {
+                    Ok(handle)
+                }
+            }
+            Err(_) => Err(RelayOpenError::Unavailable),
+        }
+    }
+
+    /// Return the current live generation for `url` without opening or
+    /// reopening a worker. Used for best-effort close-only wire deltas: a
+    /// withdrawn read relay must never be re-created merely to send `CLOSE`.
+    pub fn live_handle(&self, url: &RelayUrl) -> Option<RelayHandle> {
+        match self.inner.lock() {
+            Ok(guard) => guard.live_handle(url),
+            Err(_) => None,
         }
     }
 
@@ -411,6 +467,23 @@ impl Pool {
         }
     }
 
+    /// Close every live worker whose URL is absent from `required` and
+    /// return each synchronous disconnect fact. This is the release half of
+    /// the finite admission contract: a caller that owns the exact current
+    /// relay-demand set can free obsolete slots before opening replacement
+    /// relays, while retaining every read or write lane that is still live.
+    ///
+    /// The pool does not infer demand from traffic. The engine supplies the
+    /// authoritative union of its current read plan and nonterminal write
+    /// lanes, so transport cannot accidentally evict an in-flight write or
+    /// keep historical read workers forever.
+    pub fn close_unrequired(&self, required: &BTreeSet<RelayUrl>) -> Vec<PoolEvent> {
+        match self.inner.lock() {
+            Ok(mut guard) => guard.close_unrequired(required),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Register a reconnect preamble for the worker at handle `h`.
     ///
     /// On every subsequent (re)connect the worker injects these frames at
@@ -437,8 +510,7 @@ impl Pool {
 
     /// Monotonic count of [`Self::ensure_open`] calls this pool refused
     /// because opening the relay would have exceeded [`PoolConfig::max_relays`]
-    /// live workers (issue #121). Always `0` unless an operator configured a
-    /// non-zero cap. The engine folds this into its diagnostics rejection
+    /// live workers. The engine folds this into its diagnostics rejection
     /// counter — see `nmp-engine`'s relay admission. A poisoned lock reports
     /// `0` (nothing to report through a broken pool), matching every other
     /// read on this facade.
@@ -450,8 +522,8 @@ impl Pool {
             .unwrap_or(0)
     }
 
-    /// Tear down every worker. Subsequent [`Self::ensure_open`] calls
-    /// return a sentinel dead handle; subsequent `send` calls are
+    /// Tear down every worker. Subsequent [`Self::ensure_open`] calls return
+    /// [`RelayOpenError::ShuttingDown`]; subsequent `send` calls are
     /// structural no-ops. Joins the translator thread before returning.
     pub fn shutdown(&self) {
         let handle = match self.inner.lock() {
@@ -461,15 +533,5 @@ impl Pool {
         if let Some(handle) = handle {
             let _ = handle.join();
         }
-    }
-}
-
-/// Sentinel handle returned when the pool's lock is poisoned or the pool
-/// has already been shut down — matches every other stale-handle path
-/// (`send`/`close`/`health` on it are all structural no-ops).
-fn dead_handle() -> RelayHandle {
-    RelayHandle {
-        slot: u32::MAX,
-        generation: 0,
     }
 }

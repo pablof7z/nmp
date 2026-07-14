@@ -155,7 +155,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     // under CI load can alone eat close to that whole budget before this
     // bound would even be exercised -- 15s is the smallest round number
     // that still comfortably clears one full stalled attempt plus margin.
-    let h1 = pool.ensure_open(&url);
+    let h1 = pool.ensure_open(&url).expect("relay admitted");
     let connected1 = recv_matching(&rx, Duration::from_secs(15), is_connected);
     let PoolEvent::Connected {
         handle: observed1, ..
@@ -315,7 +315,7 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
 
     // 15s, not 5s -- see test 7's identical `connected1` wait above for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).
-    let h1 = pool.ensure_open(&url);
+    let h1 = pool.ensure_open(&url).expect("relay admitted");
     let connected1 = recv_matching(&rx, Duration::from_secs(15), is_connected);
     let PoolEvent::Connected {
         handle: observed1, ..
@@ -466,7 +466,7 @@ async fn durable_event_resolves_written_exactly_once() {
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(PoolConfig::default(), tx);
-    let h = pool.ensure_open(&url);
+    let h = pool.ensure_open(&url).expect("relay admitted");
     // 15s, not 5s -- see test 7's identical `connected1` wait for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).
     recv_matching(&rx, Duration::from_secs(15), is_connected);

@@ -40,5 +40,5 @@ pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
 pub use pool::{
     AttemptCorrelation, DisconnectReason, DurableSendOutcome, HandoffResult, Pool, PoolConfig,
-    PoolEvent, PoolEventSink, RelayFrame, WireFrame,
+    PoolEvent, PoolEventSink, RelayFrame, RelayOpenError, WireFrame, DEFAULT_MAX_RELAYS,
 };

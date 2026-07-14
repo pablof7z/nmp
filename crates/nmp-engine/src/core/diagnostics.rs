@@ -84,13 +84,12 @@ pub struct DiagnosticsSnapshot {
     /// which is both read and write). This is a rejection-EVENT tally for a
     /// diagnostics screen, not a distinct-host count.
     pub discovered_private_relays_rejected: u64,
-    /// Relay dials the transport pool refused because the configured
-    /// `max_relays` live-worker ceiling was already reached (issue #121, the
-    /// worker-exhaustion half). Owned by the pool
-    /// (`nmp_transport::Pool::admission_rejections`) and folded into this
-    /// snapshot by the runtime when it fans a `DiagnosticsSnapshot` out —
-    /// `EngineCore` itself cannot see the pool's slot table, so this stays
-    /// `0` in the core-built snapshot and is set at the runtime edge.
+    /// Relay candidates refused by the single whole-demand ceiling, plus
+    /// any defense-in-depth dial refusal at the transport boundary. The
+    /// router contributes the deterministic plan-time count; the runtime
+    /// adds `nmp_transport::Pool::admission_rejections()` before delivery.
+    /// A refused router candidate is absent from the executable plan and its
+    /// affected query atom carries `ShortfallFact::LocalLimit`.
     pub relays_rejected_over_cap: u64,
     /// `Some(message)` once an ingest/read [`nmp_store::EventStore`] door has
     /// returned a [`nmp_store::PersistenceError`] (issue #122): the local
@@ -161,9 +160,7 @@ pub(crate) fn build(
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
         discovered_private_relays_rejected,
-        // Set at the runtime edge from the pool's own count — the core-built
-        // snapshot has no view of the pool's slot table (see the field doc).
-        relays_rejected_over_cap: 0,
+        relays_rejected_over_cap: u64::try_from(diag.relays_refused_by_cap).unwrap_or(u64::MAX),
         // Filled in by `EngineCore::diagnostics_snapshot` (which owns the
         // degrade flag); `build` itself is a pure projection of router/store
         // facts and has no notion of persistence health.
