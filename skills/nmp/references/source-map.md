@@ -47,6 +47,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 ## FFI and native wrappers
 
 - Source: `crates/nmp-ffi/src/facade.rs`
+- Source: `crates/nmp-ffi/src/types.rs`
 - Source: `crates/nmp-ffi/src/convert.rs`
 - Source: `crates/nmp-ffi/src/nip02.rs`
 - Source: `crates/nmp-ffi/src/signer.rs`
