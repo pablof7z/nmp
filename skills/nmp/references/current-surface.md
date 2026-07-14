@@ -1,6 +1,6 @@
 # Current surface and gaps
 
-Verified-Revision: `35b9ed23875202bf64289f92adad41f828849293`
+Verified-Revision: `c071cb16485d51bb9b487a51bf07aa199dba4a41`
 
 Verified on 2026-07-14. This pins the declared product/source authorities, not the skill package commit. Recheck the [source map](source-map.md) when any declared authority changes; the validator accepts newer skill-only commits when those sources have not drifted.
 
