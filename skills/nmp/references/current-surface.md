@@ -1,6 +1,6 @@
 # Current surface and gaps
 
-Verified-Revision: `5a508eaf5ad9d75e08645b41975e3312cf96aad7`
+Verified-Revision: `618573a63a6dbae6aa259e8327e32fd9157bd338`
 
 Verified on 2026-07-14. Recheck the [source map](source-map.md) when any declared authority changes.
 
