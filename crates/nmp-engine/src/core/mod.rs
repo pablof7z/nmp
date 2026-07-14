@@ -8045,7 +8045,12 @@ mod history_mutation_tests {
         assert_eq!(
             ordered_ids(&core, id)
                 .iter()
-                .map(|event_id| core.histories[&id].last_rows[event_id].created_at)
+                .map(|event_id| {
+                    core.histories[&id].last_rows[event_id]
+                        .event
+                        .created_at
+                        .as_secs()
+                })
                 .collect::<Vec<_>>(),
             vec![400, 300]
         );
@@ -8055,7 +8060,12 @@ mod history_mutation_tests {
         assert_eq!(
             ordered_ids(&core, id)
                 .iter()
-                .map(|event_id| core.histories[&id].last_rows[event_id].created_at)
+                .map(|event_id| {
+                    core.histories[&id].last_rows[event_id]
+                        .event
+                        .created_at
+                        .as_secs()
+                })
                 .collect::<Vec<_>>(),
             vec![400, 300, 200, 100]
         );
