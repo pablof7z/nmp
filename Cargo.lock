@@ -1379,6 +1379,7 @@ dependencies = [
  "nmp-router",
  "nmp-signer",
  "nmp-store",
+ "nmp-test-support",
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",

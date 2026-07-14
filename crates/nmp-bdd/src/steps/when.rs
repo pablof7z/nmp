@@ -50,7 +50,7 @@ async fn person_posts_note(w: &mut NmpWorld, person: String, text: String) {
 
 #[when(regex = r#"^relay "([^"]+)" drops the connection$"#)]
 async fn relay_drops(w: &mut NmpWorld, name: String) {
-    w.drop_relay_connection(&name);
+    w.drop_relay_connection(&name).await;
 }
 
 #[when(regex = r#"^relay "([^"]+)" comes back$"#)]

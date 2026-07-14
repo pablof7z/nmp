@@ -710,8 +710,12 @@ impl NmpWorld {
     }
 
     /// `When relay <name> drops the connection`.
-    pub fn drop_relay_connection(&mut self, name: &str) {
-        self.relays[name].shutdown();
+    pub async fn drop_relay_connection(&mut self, name: &str) {
+        self.relays
+            .get_mut(name)
+            .unwrap_or_else(|| panic!("nmp-bdd: relay {name:?} must exist before it can drop"))
+            .disconnect()
+            .await;
     }
 
     /// `When relay <name> comes back` -- rebinds a fresh `LocalRelay` on the
@@ -732,9 +736,9 @@ impl NmpWorld {
     pub async fn relay_comes_back(&mut self, name: &str) {
         let port = self.relays[name].port();
         let config = self.relay_configs.get(name).cloned().unwrap_or_default();
-        // Give the OS a moment to release the port -- identical wait to
-        // `runtime_integration.rs`'s own reconnect half.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // `drop_relay_connection` awaits `ConnectionOwner::shutdown`, so the
+        // public listener and established client stream are already gone and
+        // this exact address is immediately safe to rebind.
         let fresh = ScriptedRelay::start_on_port(port, &config).await;
         assert!(
             fresh.wait_contacted(RECONNECT).await,
