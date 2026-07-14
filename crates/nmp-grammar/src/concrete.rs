@@ -7,6 +7,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::descriptor::{AccessContext, SourceAuthority};
 use crate::indexed_tag_name::IndexedTagName;
 
+/// A relay fact carried by a projected value through a `Derived` graph.
+/// This is routing input, not selection: it never changes
+/// [`ConcreteFilter::to_nostr`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RoutingEvidence {
+    pub relay: nostr::RelayUrl,
+    pub origin: RoutingEvidenceKind,
+}
+
+/// Why a projected value may be requested from a relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RoutingEvidenceKind {
+    /// An explicit relay hint in an `e`, `a`, or `p` tag.
+    Hint,
+    /// The relay from which the source event carrying the value was seen.
+    SourceProvenance,
+}
+
 /// A fully-resolved filter — NO bindings. The unit of the demand set and
 /// refcount/dedup key.
 ///
@@ -189,15 +207,37 @@ pub struct ContextualAtom {
     pub filter: ConcreteFilter,
     pub source: SourceAuthority,
     pub access: AccessContext,
+    /// Runtime routing facts projected with this atom. These facts are part
+    /// of live atom identity so provenance growth produces an exact
+    /// close/open delta, but `nmp-store::coverage_key` deliberately erases
+    /// them: route choice must not fragment selection coverage.
+    pub routing_evidence: BTreeSet<RoutingEvidence>,
 }
 
 impl ContextualAtom {
-    /// Canonical, stable, collision-resistant hash — built from the
-    /// filter's OWN already-collision-resistant 32-byte digest plus one
-    /// discriminant byte per context axis (plus the pinned relay set's own
-    /// bytes under `Pinned`, #107), via [`fold_context`].
+    /// Canonical, stable, collision-resistant live-atom hash — built from
+    /// the filter/context digest plus the canonically ordered routing facts.
+    /// An empty evidence set preserves the pre-#11 hash bytes exactly.
+    /// Durable coverage deliberately erases routing evidence before calling
+    /// this method; see `nmp_store::coverage_key`.
     pub fn hash(&self) -> DescriptorHash {
-        fold_context(self.filter.hash(), &self.source, self.access)
+        let contextual = fold_context(self.filter.hash(), &self.source, self.access);
+        if self.routing_evidence.is_empty() {
+            return contextual;
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(contextual.as_bytes());
+        bytes.push(3);
+        for evidence in &self.routing_evidence {
+            bytes.push(match evidence.origin {
+                RoutingEvidenceKind::Hint => 0,
+                RoutingEvidenceKind::SourceProvenance => 1,
+            });
+            let relay = evidence.relay.as_str().as_bytes();
+            bytes.extend_from_slice(&(relay.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(relay);
+        }
+        DescriptorHash(*blake3::hash(&bytes).as_bytes())
     }
 }
 
@@ -359,11 +399,13 @@ mod tests {
             filter: filter.clone(),
             source: crate::descriptor::SourceAuthority::AuthorOutboxes,
             access: crate::descriptor::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         let public = ContextualAtom {
             filter,
             source: crate::descriptor::SourceAuthority::Public,
             access: crate::descriptor::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
             outbox.hash(),
@@ -385,11 +427,13 @@ mod tests {
             filter: filter.clone(),
             source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r1])),
             access: crate::descriptor::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         let pinned_r2 = ContextualAtom {
             filter,
             source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r2])),
             access: crate::descriptor::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
             pinned_r1.hash(),
@@ -414,13 +458,31 @@ mod tests {
                 r2.clone(),
             ])),
             access: crate::descriptor::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         let b = ContextualAtom {
             filter,
             source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r2, r1])),
             access: crate::descriptor::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         assert_eq!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn routing_evidence_changes_live_atom_hash() {
+        let mut hinted = ContextualAtom {
+            filter: cf(vec!["aa"], vec![]),
+            source: crate::descriptor::SourceAuthority::Public,
+            access: crate::descriptor::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let plain = hinted.clone();
+        hinted.routing_evidence.insert(RoutingEvidence {
+            relay: nostr::RelayUrl::parse("wss://hint.example").unwrap(),
+            origin: RoutingEvidenceKind::Hint,
+        });
+        assert_ne!(plain.hash(), hinted.hash());
     }
 
     #[test]

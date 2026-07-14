@@ -31,6 +31,7 @@ fn outbox(kind: u16, authors: &[&str]) -> ContextualAtom {
         filter: cf_kind_authors(kind, authors),
         source: SourceAuthority::AuthorOutboxes,
         access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
     }
 }
 
@@ -41,6 +42,7 @@ fn pinned(filter: ConcreteFilter) -> ContextualAtom {
         filter,
         source: SourceAuthority::Public,
         access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
     }
 }
 

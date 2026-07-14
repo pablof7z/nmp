@@ -36,7 +36,10 @@ mod route;
 mod router;
 mod solver;
 
-pub use coalesce::{AuthorUnion, DiscardSecondOperand, KindUnion, MergeRule, RuleRegistry};
+pub use coalesce::{
+    AuthorUnion, DiscardSecondOperand, IdUnion, KindUnion, MergeRule, RuleRegistry,
+    MAX_IDS_PER_FILTER,
+};
 pub use deliver::deliver;
 pub use diag::{Diagnostics, RelayDiagnostics};
 pub use facts::{

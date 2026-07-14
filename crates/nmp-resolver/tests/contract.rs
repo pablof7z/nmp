@@ -9,13 +9,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, DemandOp, Derived, Filter,
-    IdentityField, IndexedTagName, Selector, SetAlgebra, SetOp, SourceAuthority,
+    IdentityField, IndexedTagName, RoutingEvidence, RoutingEvidenceKind, Selector, SetAlgebra,
+    SetOp, SourceAuthority,
 };
 use nmp_resolver::testkit::{
     addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
 };
-use nmp_resolver::LiveQuery;
-use nostr::{EventBuilder, Keys, Kind};
+use nmp_resolver::{Engine, LiveQuery};
+use nmp_store::{MemoryStore, RelayObserved};
+use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 // ---- ConcreteFilter builders (test-local; mirrors nmp-grammar's own test
 // helpers, kept separate since these assert resolver *output*, not grammar
@@ -64,6 +66,7 @@ fn atom(filter: ConcreteFilter, source: SourceAuthority) -> ContextualAtom {
         filter,
         source,
         access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
     }
 }
 
@@ -79,6 +82,14 @@ fn outbox_atom(filter: ConcreteFilter) -> ContextualAtom {
 /// atoms, which bind only tags) -- `Public`.
 fn public_atom(filter: ConcreteFilter) -> ContextualAtom {
     atom(filter, SourceAuthority::Public)
+}
+
+fn with_fixture_provenance(mut atom: ContextualAtom) -> ContextualAtom {
+    atom.routing_evidence.insert(RoutingEvidence {
+        relay: nostr::RelayUrl::parse("wss://resolver-ingest.fixture.invalid").unwrap(),
+        origin: RoutingEvidenceKind::SourceProvenance,
+    });
+    atom
 }
 
 // ---- LiveQuery shape builders --------------------------------------------
@@ -197,6 +208,26 @@ fn bookmarks_filter() -> Filter {
     );
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
+        tags,
+        ..Filter::default()
+    }
+}
+
+fn projected_tag_filter(inner_kind: u16, projected: &str, outer_tag: char) -> Filter {
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        IndexedTagName::new(outer_tag).unwrap(),
+        Binding::Derived(Box::new(Derived {
+            inner: Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([inner_kind])),
+                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                ..Filter::default()
+            }),
+            project: Selector::Tag(projected.to_string()),
+        })),
+    );
+    Filter {
+        kinds: Some(BTreeSet::from([1])),
         tags,
         ..Filter::default()
     }
@@ -331,8 +362,8 @@ fn depth1_myfollows_surgical_delta() {
     assert_eq!(
         delta.ops,
         vec![
-            DemandOp::Close(outbox_atom(atom_c.clone())),
-            DemandOp::Open(outbox_atom(atom_d.clone()))
+            DemandOp::Close(with_fixture_provenance(outbox_atom(atom_c.clone()))),
+            DemandOp::Open(with_fixture_provenance(outbox_atom(atom_d.clone())))
         ]
     );
     let after = h.metrics();
@@ -443,8 +474,8 @@ fn identity_reroot_closes_old_before_new() {
         closes,
         BTreeSet::from([
             outbox_atom(old_inner.clone()),
-            outbox_atom(old_a.clone()),
-            outbox_atom(old_b.clone())
+            with_fixture_provenance(outbox_atom(old_a.clone())),
+            with_fixture_provenance(outbox_atom(old_b.clone()))
         ]),
         "all old atoms closed"
     );
@@ -478,7 +509,10 @@ fn identity_reroot_closes_old_before_new() {
     let opened: BTreeSet<ContextualAtom> = delta2.opened().into_iter().cloned().collect();
     assert_eq!(
         opened,
-        BTreeSet::from([outbox_atom(atom_e), outbox_atom(atom_f)])
+        BTreeSet::from([
+            with_fixture_provenance(outbox_atom(atom_e)),
+            with_fixture_provenance(outbox_atom(atom_f)),
+        ])
     );
 }
 
@@ -668,7 +702,9 @@ fn follows_minus_mutes_surgical() {
 
     assert_eq!(
         delta.ops,
-        vec![DemandOp::Close(outbox_atom(atom_a.clone()))]
+        vec![DemandOp::Close(with_fixture_provenance(outbox_atom(
+            atom_a.clone()
+        )))]
     );
     let after = h.metrics();
     assert_eq!(after.atoms_opened - before.atoms_opened, 0);
@@ -722,7 +758,12 @@ fn address_coord_fans_out_per_coordinate() {
     let delta = h.deliver(vec![addressable(&a, 30_003, "g3", 100)]);
     let atom_g3 = cf_coord(30_003, &a_hex, "g3");
 
-    assert_eq!(delta.ops, vec![DemandOp::Open(outbox_atom(atom_g3))]);
+    assert_eq!(
+        delta.ops,
+        vec![DemandOp::Open(with_fixture_provenance(outbox_atom(
+            atom_g3
+        )))]
+    );
     let after = h.metrics();
     assert_eq!(after.atoms_opened - before.atoms_opened, 1);
     assert_eq!(after.atoms_closed - before.atoms_closed, 0);
@@ -746,10 +787,104 @@ fn arbitrary_depth1_shape_needs_no_engine_change() {
     let opened: BTreeSet<ContextualAtom> = delta.opened().into_iter().cloned().collect();
     assert_eq!(
         opened,
-        BTreeSet::from([public_atom(atom_e1.clone()), public_atom(atom_e2.clone())])
+        BTreeSet::from([
+            with_fixture_provenance(public_atom(atom_e1.clone())),
+            with_fixture_provenance(public_atom(atom_e2.clone())),
+        ])
     );
     assert!(h.demand().contains(&atom_e1));
     assert!(h.demand().contains(&atom_e2));
+}
+
+#[test]
+fn tag_e_explicit_hint_reaches_the_projected_atom() {
+    let mut h = Harness::new();
+    let author = Keys::generate();
+    let target = dummy_event_id("hinted-bookmark");
+    let hint = nostr::RelayUrl::parse("wss://hint.example").unwrap();
+    h.set_active(Some(author.public_key()));
+    let (_handle, _open) = h.subscribe(LiveQuery::from_filter(bookmarks_filter()));
+    let event = EventBuilder::new(Kind::from(10_003u16), "")
+        .tags([Tag::parse(["e", &target.to_hex(), hint.as_str()]).unwrap()])
+        .custom_created_at(Timestamp::from(100))
+        .sign_with_keys(&author)
+        .unwrap();
+
+    let delta = h.deliver(vec![event]);
+
+    let expected = ContextualAtom {
+        routing_evidence: BTreeSet::from([RoutingEvidence {
+            relay: hint,
+            origin: RoutingEvidenceKind::Hint,
+        }]),
+        ..public_atom(cf_kinds_tag(&[1], 'e', &[&target.to_hex()]))
+    };
+    assert_eq!(delta.opened(), vec![&expected]);
+}
+
+#[test]
+fn different_selectors_share_identical_inner_wire_atom() {
+    let mut h = Harness::new();
+    let author = Keys::generate();
+    h.set_active(Some(author.public_key()));
+    let (_e_handle, first) = h.subscribe(LiveQuery::from_filter(projected_tag_filter(
+        10_003, "e", 'e',
+    )));
+    let (_a_handle, second) = h.subscribe(LiveQuery::from_filter(projected_tag_filter(
+        10_003, "a", 'a',
+    )));
+    let inner = cf_kinds_authors(&[10_003], &[&author.public_key().to_hex()]);
+
+    assert!(first.opened().iter().any(|atom| atom.filter == inner));
+    assert!(second.opened().iter().all(|atom| atom.filter != inner));
+    assert_eq!(
+        h.demand_with_context()
+            .iter()
+            .filter(|atom| atom.filter == inner)
+            .count(),
+        1,
+        "duplicate computation is allowed; the shared atom must appear once on the wire"
+    );
+}
+
+#[test]
+fn duplicate_source_observation_grows_projected_routing_evidence() {
+    let mut engine = Engine::new(MemoryStore::new());
+    let author = Keys::generate();
+    let target = dummy_event_id("provenance-growth");
+    engine.set_active_pubkey(Some(author.public_key())).unwrap();
+    let (_handle, _open) = engine
+        .subscribe(LiveQuery::from_filter(bookmarks_filter()))
+        .unwrap();
+    let event = kind10003_bookmarks(&author, &[target], 100);
+    let first = nostr::RelayUrl::parse("wss://first.example").unwrap();
+    let second = nostr::RelayUrl::parse("wss://second.example").unwrap();
+    engine
+        .ingest_observed(vec![(
+            event.clone(),
+            RelayObserved::new(first.clone(), Timestamp::from(100)),
+        )])
+        .unwrap();
+
+    let result = engine
+        .ingest_observed_detailed(vec![(
+            event,
+            RelayObserved::new(second.clone(), Timestamp::from(101)),
+        )])
+        .unwrap();
+    assert_eq!(result.row_changes.provenance_grew.len(), 1);
+    let delta = result.delta;
+
+    assert_eq!(delta.closed().len(), 1);
+    assert_eq!(delta.opened().len(), 1);
+    let evidence = &delta.opened()[0].routing_evidence;
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|fact| fact.relay.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first, second])
+    );
 }
 
 // ---- 13/14. Retraction seam (#34,

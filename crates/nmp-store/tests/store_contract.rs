@@ -96,6 +96,7 @@ fn atom(filter: &ConcreteFilter) -> ContextualAtom {
         filter: filter.clone(),
         source: SourceAuthority::AuthorOutboxes,
         access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
     }
 }
 

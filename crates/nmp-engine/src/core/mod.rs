@@ -42,9 +42,9 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Durability, Filter,
-    HostAuthority, NarrowOnly, PrivateRoute, SourceAuthority, WriteIntent, WritePayload,
-    WriteRouting,
+    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash, Durability,
+    Filter, HostAuthority, NarrowOnly, PrivateRoute, RoutingEvidence, SourceAuthority, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery,
@@ -663,15 +663,21 @@ pub struct EngineCore<S: EventStore> {
     /// allowlist via [`Self::with_relay_admission`].
     admission: RelayAdmissionPolicy,
     /// Monotonic count of DISCOVERED relay-lane rejections by `admission`
-    /// before they could become directory lanes (issue #121). Counted PER
-    /// LANE: `ingest_relay_list_winner` filters the write set and the read
-    /// set of one kind:10002 separately (§2.4), so one hostile event naming
-    /// `N` rejected hosts bumps this by up to `2N`. Surfaced in
+    /// before they could become router candidates (issues #121/#11).
+    /// Kind:10002 is counted PER LANE: write and read sets are filtered
+    /// separately, so one hostile event naming `N` rejected hosts bumps this
+    /// by up to `2N`. Selector-projected facts count once when a rejected
+    /// `(selection, evidence)` first enters current demand, not again on an
+    /// unchanged recompile. Surfaced in
     /// [`DiagnosticsSnapshot::discovered_private_relays_rejected`]; the
     /// separate worker-exhaustion cap count lives in the pool
     /// (`nmp_transport::Pool::admission_rejections`) and is folded in by the
     /// runtime.
     discovered_private_relays_rejected: u64,
+    /// Rejected selector-projected routing facts present at the previous
+    /// recompile. Diffing this set prevents an unchanged demand from
+    /// inflating the monotonic rejection counter on every reducer pass.
+    rejected_projected_evidence: BTreeSet<(DescriptorHash, RoutingEvidence)>,
     /// Read-only degrade flag (issue #122): set once the first time an
     /// ingest/read [`EventStore`] door returns [`PersistenceError`] (disk
     /// full, I/O error). The reducer NEVER panics on such a failure — it
@@ -752,6 +758,7 @@ impl<S: EventStore> EngineCore<S> {
             attempt_correlations: HashMap::new(),
             admission: RelayAdmissionPolicy::default(),
             discovered_private_relays_rejected: 0,
+            rejected_projected_evidence: BTreeSet::new(),
             store_degraded: None,
             transport_degraded: None,
             retry_scheduler_blocked: false,
@@ -3075,9 +3082,10 @@ impl<S: EventStore> EngineCore<S> {
         self.sync_discovery(effects);
         let demand = self.resolver.active_demand();
         self.attribution.observe_demand(demand.iter());
-        let wire_delta: WireDelta = self
-            .router
-            .compile(&demand, self.directory.as_ref(), self.cap);
+        let admitted_demand = self.admit_projected_routing_evidence(&demand);
+        let wire_delta: WireDelta =
+            self.router
+                .compile(&admitted_demand, self.directory.as_ref(), self.cap);
         // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
         // for the full current demand, regardless of whether anything
         // actually changed on the wire (see `Router::compile`'s own body) —
@@ -3142,6 +3150,39 @@ impl<S: EventStore> EngineCore<S> {
         if !kept.is_empty() {
             effects.push(Effect::Wire(WireDelta { ops: kept }));
         }
+    }
+
+    /// Gate every network-sourced selector hint/provenance URL before it
+    /// can become a router candidate. Operator-configured lanes remain
+    /// trusted and bypass this path, matching kind:10002 admission policy.
+    fn admit_projected_routing_evidence(
+        &mut self,
+        demand: &BTreeSet<ContextualAtom>,
+    ) -> BTreeSet<ContextualAtom> {
+        let mut rejected_now = BTreeSet::new();
+        let admitted = demand
+            .iter()
+            .cloned()
+            .map(|mut atom| {
+                let atom_selection = atom.filter.hash();
+                atom.routing_evidence.retain(|evidence| {
+                    let admitted = self.admission.admits_discovered(&evidence.relay);
+                    if !admitted {
+                        rejected_now.insert((atom_selection, evidence.clone()));
+                    }
+                    admitted
+                });
+                atom
+            })
+            .collect();
+        let newly_rejected = rejected_now
+            .difference(&self.rejected_projected_evidence)
+            .count() as u64;
+        self.discovered_private_relays_rejected = self
+            .discovered_private_relays_rejected
+            .saturating_add(newly_rejected);
+        self.rejected_projected_evidence = rejected_now;
+        admitted
     }
 
     /// The self-bootstrapping outbox (M5, `docs/known-gaps.md`'s
@@ -6321,5 +6362,53 @@ mod affected_handle_invalidation_tests {
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn projected_private_relay_evidence_is_gated_without_counter_inflation() {
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let private = RelayUrl::parse("ws://127.0.0.1:7777").unwrap();
+        let atom = ContextualAtom {
+            filter: ConcreteFilter {
+                ids: Some(BTreeSet::from(["11".repeat(32)])),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::from([RoutingEvidence {
+                relay: private,
+                origin: nmp_grammar::RoutingEvidenceKind::Hint,
+            }]),
+        };
+        let demand = BTreeSet::from([atom]);
+
+        let admitted = core.admit_projected_routing_evidence(&demand);
+        assert!(admitted.iter().next().unwrap().routing_evidence.is_empty());
+        assert_eq!(core.discovered_private_relays_rejected, 1);
+        core.admit_projected_routing_evidence(&demand);
+        assert_eq!(
+            core.discovered_private_relays_rejected, 1,
+            "an unchanged recompile must not recount one rejected fact"
+        );
+    }
+
+    #[test]
+    fn operator_allowlist_admits_projected_local_evidence() {
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20)
+            .with_relay_admission(RelayAdmissionPolicy::new(["127.0.0.1".to_string()]));
+        let atom = ContextualAtom {
+            filter: ConcreteFilter::default(),
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::from([RoutingEvidence {
+                relay: RelayUrl::parse("ws://127.0.0.1:7777").unwrap(),
+                origin: nmp_grammar::RoutingEvidenceKind::SourceProvenance,
+            }]),
+        };
+
+        let admitted = core.admit_projected_routing_evidence(&BTreeSet::from([atom]));
+
+        assert_eq!(admitted.iter().next().unwrap().routing_evidence.len(), 1);
+        assert_eq!(core.discovered_private_relays_rejected, 0);
     }
 }
