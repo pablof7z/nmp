@@ -211,7 +211,8 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
     handle
         .add_signer(LocalKeySigner::new(a.clone()))
@@ -234,7 +235,9 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         ..Filter::default()
     });
 
-    let (_query_handle, rows_rx) = handle.subscribe(my_follows);
+    let (_query_handle, rows_rx) = handle
+        .subscribe(my_follows)
+        .expect("test subscription construction");
 
     // b's post must NOT be visible yet -- a hasn't followed b.
     assert!(
@@ -375,7 +378,8 @@ fn no_deadlines_blocks_indefinitely() {
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
     // Let the engine thread settle onto its idle `recv()` before sampling.
     std::thread::sleep(Duration::from_millis(100));
@@ -595,9 +599,12 @@ fn neg_liveness_deadline_does_not_busy_spin() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
-    let (_qh_a, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+    let (_qh_a, rows_rx) = handle
+        .subscribe(literal_kind1(&a.public_key().to_hex()))
+        .expect("test subscription construction");
 
     // The seed's `Added` then `Removed` (with zero further commands sent --
     // same proof shape as `expiring_event_retracts_with_no_further_input`)
@@ -628,7 +635,9 @@ fn neg_liveness_deadline_does_not_busy_spin() {
     // (kind:1) skeleton under the sub-id the capability probe already
     // proved `Supported` -- same probe-then-widen dance the headless tests
     // use, just driven over the real wire this time.
-    let (_qh_b, _rows_rx_b) = handle.subscribe(literal_kind1(&b.public_key().to_hex()));
+    let (_qh_b, _rows_rx_b) = handle
+        .subscribe(literal_kind1(&b.public_key().to_hex()))
+        .expect("test subscription construction");
     wait_for_frame_containing(&frames_rx, Duration::from_secs(10), "\"NEG-OPEN\"");
     // The first `NEG-OPEN` (the capability probe) already arrived before
     // this subscribe -- the second is the real, now-open session this test
@@ -702,9 +711,12 @@ async fn expiring_event_retracts_with_no_further_input() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
-    let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+    let (_qh, rows_rx) = handle
+        .subscribe(literal_kind1(&a.public_key().to_hex()))
+        .expect("test subscription construction");
 
     let expiring: RelayEvent = RelayEventBuilder::text_note("expires soon, over a real relay")
         .tag(RelayTag::expiration(RelayTimestamp::now() + 2))
@@ -767,9 +779,12 @@ async fn earlier_expiration_from_ingest_rearms() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
-    let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+    let (_qh, rows_rx) = handle
+        .subscribe(literal_kind1(&a.public_key().to_hex()))
+        .expect("test subscription construction");
 
     let far: RelayEvent = RelayEventBuilder::text_note("expires in about an hour")
         .tag(RelayTag::expiration(RelayTimestamp::now() + 3_600))
@@ -881,9 +896,12 @@ fn boot_catches_up_past_due_expiry() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
-    let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+    let (_qh, rows_rx) = handle
+        .subscribe(literal_kind1(&a.public_key().to_hex()))
+        .expect("test subscription construction");
 
     assert!(
         wait_for_rows(&rows_rx, Duration::from_secs(10), |rows| {
@@ -978,7 +996,8 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle.set_active_account(Some(keys.public_key()));
     let tracked = handle
         .publish_tracked(WriteIntent {
@@ -1088,7 +1107,8 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     // This is literally the first command sent to the new engine thread.
     let statuses = expect_attached(handle.reattach_receipt(receipt));
     assert_eq!(

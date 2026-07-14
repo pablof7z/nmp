@@ -142,7 +142,8 @@ async fn pinned_host_send_reaches_only_the_host_and_round_trips_unchanged() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(author.clone()))
         .expect("local signer has a public key");
@@ -192,7 +193,9 @@ async fn pinned_host_send_reaches_only_the_host_and_round_trips_unchanged() {
     // Falsifier 8 (read-back loop): the production `group_content_demand`
     // read, pinned to the SAME host, must see the just-acked event.
     let demand = nmp_nip29::group_content_demand(url_host.clone(), "group-a");
-    let (_qh, rows_rx) = handle.subscribe(LiveQuery(demand));
+    let (_qh, rows_rx) = handle
+        .subscribe(LiveQuery(demand))
+        .expect("test subscription construction");
 
     let rows = wait_for_rows(&rows_rx, Duration::from_secs(10), |rows| !rows.is_empty())
         .expect("the group send must reappear via a live group_content_demand read");
@@ -259,7 +262,8 @@ async fn pinned_host_rejection_surfaces_as_a_typed_status_never_silence() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(author.clone()))
         .expect("local signer has a public key");

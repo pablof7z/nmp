@@ -248,7 +248,8 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
             10,
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
-        );
+        )
+        .expect("test engine thread construction");
         handle.set_active_account(Some(user.public_key()));
         let receipt = handle
             .publish_tracked(WriteIntent {
@@ -282,7 +283,8 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
         ReceiptReattachment::Attached(statuses) => statuses,
         _ => panic!("durable receipt must reattach after restart"),
@@ -371,15 +373,18 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle.set_active_account(Some(user.public_key()));
-    let (query_handle, rows) = handle.subscribe(LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([Kind::Metadata.as_u16()])),
-        authors: Some(Binding::Literal(BTreeSet::from([user
-            .public_key()
-            .to_hex()]))),
-        ..Filter::default()
-    }));
+    let (query_handle, rows) = handle
+        .subscribe(LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([Kind::Metadata.as_u16()])),
+            authors: Some(Binding::Literal(BTreeSet::from([user
+                .public_key()
+                .to_hex()]))),
+            ..Filter::default()
+        }))
+        .expect("test subscription construction");
     let mut current_rows = BTreeSet::new();
     wait_for_exact_rows(&rows, &mut current_rows, predecessor.id, replacement_id);
     let bunker_uri = format!(

@@ -540,7 +540,8 @@ impl NmpWorld {
                 "[::1]".to_string(),
                 "::1".to_string(),
             ]),
-        );
+        )
+        .expect("BDD engine thread construction");
 
         if let Some(active) = self.active_person.clone() {
             let keys = self.person(&active);
@@ -569,7 +570,10 @@ impl NmpWorld {
     /// `my feed of my follows' notes is open`.
     pub async fn open_my_follows_feed(&mut self) {
         self.ensure_started().await;
-        let (handle_id, rx) = self.handle().subscribe(my_follows_query());
+        let (handle_id, rx) = self
+            .handle()
+            .subscribe(my_follows_query())
+            .expect("BDD subscription construction");
         self.feed = Some(FeedState {
             _handle: handle_id,
             rx,

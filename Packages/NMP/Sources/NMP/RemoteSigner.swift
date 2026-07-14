@@ -196,13 +196,15 @@ extension NMPEngine {
     public func connectNip46(
         bunkerURI: String,
         timeout: Duration = .seconds(60)
-    ) -> NMPNip46Connection {
+    ) throws -> NMPNip46Connection {
         let observer = NIP46Observer()
-        let ffiConnection = ffi.connectNip46Bunker(
-            bunkerUri: bunkerURI,
-            timeoutMillis: timeout.milliseconds,
-            observer: observer
-        )
+        let ffiConnection = try nmpRethrowing {
+            try ffi.connectNip46Bunker(
+                bunkerUri: bunkerURI,
+                timeoutMillis: timeout.milliseconds,
+                observer: observer
+            )
+        }
         return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
     }
 

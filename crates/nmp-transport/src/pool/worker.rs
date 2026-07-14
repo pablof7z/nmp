@@ -28,7 +28,7 @@ use std::io;
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
@@ -41,7 +41,9 @@ use crate::keepalive::{KeepaliveAction, KeepaliveState};
 
 use super::connect::{open_relay_socket, RelaySocket};
 use super::frame::classify_message;
+use super::spawn::ThreadSpawner;
 use super::{AttemptCorrelation, HandoffResult, RelayFrame};
+use super::{ThreadRole, ThreadSpawnError};
 
 const SOCKET: Token = Token(0);
 const CONTROL: Token = Token(1);
@@ -75,6 +77,11 @@ pub(super) enum WorkerCommand {
 /// What happened, tagged with the worker's packed `(worker_id, attempt)`
 /// generation at the time it happened.
 pub(super) enum WorkerEventKind {
+    /// Emitted by the pool's single retirement reaper only after the relay
+    /// OS thread has exited and its join completed.
+    Retired {
+        worker_id: u32,
+    },
     Connected,
     /// `permanent` mirrors [`backoff::is_permanent_error`] (HTTP 401/403):
     /// the pool must not keep auto-reconnecting on its own. `retry_in` is
@@ -135,6 +142,7 @@ pub(super) fn worker_id_of(generation: u64) -> u32 {
 pub(super) struct WorkerHandle {
     command_tx: Sender<WorkerCommand>,
     waker: Arc<Mutex<Option<Waker>>>,
+    join: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
@@ -152,6 +160,13 @@ impl WorkerHandle {
         }
         true
     }
+
+    pub(super) fn retire(mut self) -> JoinHandle<()> {
+        let _ = self.push(WorkerCommand::Shutdown);
+        self.join
+            .take()
+            .expect("a live relay worker owns exactly one join handle")
+    }
 }
 
 /// Spawn the worker thread for one relay slot.
@@ -165,31 +180,38 @@ pub(super) fn spawn(
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
-) -> WorkerHandle {
+    spawner: &dyn ThreadSpawner,
+) -> Result<WorkerHandle, ThreadSpawnError> {
     let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
     let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
     let waker_for_thread = Arc::clone(&waker_slot);
-    thread::Builder::new()
-        .name(format!("nmp-transport-relay-{slot}"))
-        .spawn(move || {
-            run_worker(
-                slot,
-                worker_id,
-                url,
-                event_tx,
-                command_rx,
-                waker_for_thread,
-                keepalive_idle,
-                keepalive_pong_timeout,
-                reconnect_delay_initial,
-                reconnect_jitter_max,
-            );
-        })
-        .expect("relay worker thread spawn must succeed");
-    WorkerHandle {
+    let join = spawner
+        .spawn(
+            thread::Builder::new().name(format!("nmp-transport-relay-{slot}")),
+            Box::new(move || {
+                run_worker(
+                    slot,
+                    worker_id,
+                    url,
+                    event_tx,
+                    command_rx,
+                    waker_for_thread,
+                    keepalive_idle,
+                    keepalive_pong_timeout,
+                    reconnect_delay_initial,
+                    reconnect_jitter_max,
+                );
+            }),
+        )
+        .map_err(|error| ThreadSpawnError {
+            role: ThreadRole::RelayWorker,
+            reason: error.to_string(),
+        })?;
+    Ok(WorkerHandle {
         command_tx,
         waker: waker_slot,
-    }
+        join: Some(join),
+    })
 }
 
 enum ConnectedOutcome {
