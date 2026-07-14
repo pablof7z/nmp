@@ -5,14 +5,17 @@ two-noun surface (`observe(filter): Flow<RowBatch>`, `publish(intent):
 Flow<WriteStatus>`, `observeDiagnostics(): Flow<DiagnosticsSnapshot>`) ports
 cleanly onto Kotlin's `Flow`, using the SAME canonical Rust facade
 (`crates/nmp-ffi`) Swift already ships against. This is **not** the M6
-Android app -- there is no Compose UI, no Gradle Android plugin, no AAR, no
-cargo-ndk cross-compilation here. It targets desktop JVM only, the cheapest
+Android app -- the root SDK has no Compose dependency, Gradle Android plugin,
+AAR, or cargo-ndk cross-compilation. The optional `:ui` child now contains the
+narrow controlled relay identity family from #198, using desktop-JVM Compose
+only; it is not an Android runtime or packaging claim. Both projects target
+desktop JVM, the cheapest
 environment that can prove or falsify the Flow mapping before the M5
 human library-vs-framework verdict gates building the real app. See
 `docs/builder/30-platform-guides.md`'s "Android / Kotlin" section for the
 idiom this module now BUILDS (it was PLANNED-shape only until this PR).
 
-`com.nmp.sdk` is the only package a consuming app imports:
+`com.nmp.sdk` is the core package a consuming app imports:
 
 ```kotlin
 import com.nmp.sdk.*
@@ -26,6 +29,12 @@ NMPEngine(NMPConfig(indexerRelays = listOf("wss://purplepag.es"))).use { nmp ->
 ```
 
 See `src/main/kotlin/com/nmp/sdk/Engine.kt` for the full public surface.
+
+Apps that opt into the separate `:ui` artifact may also import `com.nmp.ui`.
+Its relay views accept caller-owned `NmpRelayInformationState`, query-scoped
+`NmpRelayRuntimePresentation`, and an optional already-resolved Compose
+`Painter`; they own no engine, HTTP, cache, polling, timer, or image loader.
+See `docs/builder/36-relay-ui.md`.
 
 Remote-signer discovery is already projected as pure JVM values so an Android
 host can execute the OS-specific steps without moving policy out of Rust:
@@ -112,6 +121,8 @@ Once that's done, the ordinary commands work from this directory:
 ```sh
 ./gradlew build
 ./gradlew test
+# or exercise only the optional Compose child after core artifacts exist
+./gradlew :ui:test
 ```
 
 Re-run `scripts/build-kotlin-jvm.sh` after any change to `nmp-ffi`'s public
