@@ -2236,12 +2236,12 @@ impl<S: EventStore> EngineCore<S> {
                     Ok((handle, _)) => opened.push(handle),
                     Err(error) => {
                         self.degrade_store(error, &mut effects);
-                        let mut rollback = self.on_rollback_history_load(id);
-                        rollback.push(Effect::HistoryLoadResult(
+                        effects.extend(self.on_rollback_history_load(id));
+                        effects.push(Effect::HistoryLoadResult(
                             id,
                             Err(HistoryLoadError::StoreUnavailable),
                         ));
-                        return rollback;
+                        return effects;
                     }
                 }
             }
@@ -2254,12 +2254,12 @@ impl<S: EventStore> EngineCore<S> {
                         let _ = self.resolver.unsubscribe(handle.id());
                     }
                     self.degrade_store(error, &mut effects);
-                    let mut rollback = self.on_rollback_history_load(id);
-                    rollback.push(Effect::HistoryLoadResult(
+                    effects.extend(self.on_rollback_history_load(id));
+                    effects.push(Effect::HistoryLoadResult(
                         id,
                         Err(HistoryLoadError::StoreUnavailable),
                     ));
-                    return rollback;
+                    return effects;
                 }
             }
         }
@@ -2321,12 +2321,12 @@ impl<S: EventStore> EngineCore<S> {
                     state.projection_complete = false;
                 }
                 self.degrade_store(error, &mut effects);
-                let mut rollback = self.on_rollback_history_load(id);
-                rollback.push(Effect::HistoryLoadResult(
+                effects.extend(self.on_rollback_history_load(id));
+                effects.push(Effect::HistoryLoadResult(
                     id,
                     Err(HistoryLoadError::StoreUnavailable),
                 ));
-                return rollback;
+                return effects;
             }
         };
         debug_assert!(added <= query.page_size());
@@ -6322,6 +6322,9 @@ mod relay_health_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod history_load_failure_tests;
 
 #[cfg(test)]
 mod affected_handle_invalidation_tests {
