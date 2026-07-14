@@ -8,13 +8,15 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 #[doc(hidden)]
 pub type PendingCancel = Box<dyn FnOnce() + Send + 'static>;
 
+type PendingSignerSlot<T> = Mutex<Option<Sender<Result<T, SignerError>>>>;
+
 /// NMP-owned completion door for one asynchronous signer operation.
 ///
 /// Clones share one terminal slot: the first call to [`Self::resolve`] owns
 /// the result, and every later call receives a typed `AlreadyResolved` error.
 /// No channel implementation type crosses the public signer boundary.
 pub struct PendingSignerSender<T: Send + 'static> {
-    sender: Arc<Mutex<Option<Sender<Result<T, SignerError>>>>>,
+    sender: Arc<PendingSignerSlot<T>>,
 }
 
 impl<T: Send + 'static> Clone for PendingSignerSender<T> {
