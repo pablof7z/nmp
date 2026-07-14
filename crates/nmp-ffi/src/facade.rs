@@ -29,14 +29,18 @@ use std::thread;
 
 use crate::convert::{
     demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey,
-    row_delta_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
+    row_delta_to_ffi, sign_event_request_from_ffi, signed_event_to_ffi, write_intent_from_ffi,
+    write_status_to_ffi, FfiError, WriteStatusRef,
 };
 use crate::nip02::{
     action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
     FollowObserver, NmpFollowHandle,
 };
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
-use crate::types::{FfiDemand, FfiFilter, FfiReceiptReattachment, FfiWriteIntent};
+use crate::types::{
+    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiSignEventRequest, FfiSignedEvent,
+    FfiWriteIntent,
+};
 use nmp::ReceiptReattachment;
 
 fn spawn_native_bridge(
@@ -381,6 +385,12 @@ impl NmpEngine {
     /// callers receive only the public key needed for presentation.
     pub fn active_account(&self) -> Result<Option<String>, FfiError> {
         Ok(self.engine.active_account()?.map(|pubkey| pubkey.to_hex()))
+    }
+
+    /// Sign exactly one event with the active NMP signer without publishing.
+    pub fn sign_event(&self, request: FfiSignEventRequest) -> Result<FfiSignedEvent, FfiError> {
+        let request = sign_event_request_from_ffi(request)?;
+        Ok(signed_event_to_ffi(self.engine.sign_event(request)?))
     }
 
     pub fn native_task_census(&self) -> FfiNativeTaskCensus {

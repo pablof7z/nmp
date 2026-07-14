@@ -33,6 +33,9 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
     data class InvalidSigner(val reason: String) : NMPError("invalid signer: $reason")
+    data class SigningFailed(val reason: String) : NMPError("signing failed: $reason")
+    data class InvalidSignedEvent(val reason: String) :
+        NMPError("signer returned an invalid event: $reason")
     object ReceiptCorrelationIdExhausted :
         NMPError("receipt correlation id namespace exhausted")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
@@ -81,6 +84,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
                 is FfiException.InvalidSecretKey -> InvalidSecretKey
                 is FfiException.InvalidSigner -> InvalidSigner(ffi.reason)
+                is FfiException.SigningFailed -> SigningFailed(ffi.reason)
+                is FfiException.InvalidSignedEvent -> InvalidSignedEvent(ffi.reason)
                 is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)

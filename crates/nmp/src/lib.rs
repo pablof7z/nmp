@@ -52,9 +52,9 @@ mod error;
 mod subscription;
 
 pub use config::EngineConfig;
-pub use engine::Engine;
 #[doc(hidden)]
 pub use engine::NativeTaskCancel;
+pub use engine::{Engine, SignEventRequest};
 pub use error::EngineError;
 #[doc(hidden)]
 pub use nmp_executor::{
