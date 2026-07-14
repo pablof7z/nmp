@@ -1202,6 +1202,83 @@ pub trait EventStore {
         Ok(rows)
     }
 
+    /// Return one canonical newest-first page from the UNION of `filters`,
+    /// strictly after `before` in that order.
+    ///
+    /// A row matching more than one filter appears once. The global `limit`
+    /// applies only after that de-duplication and merge, so callers can repair
+    /// one bounded projection with one logical store read even when its
+    /// resolved selection has multiple concrete roots. Persistent backends
+    /// may evaluate each root with an ordered bounded scan: no row ranked
+    /// below the first `limit` matches of its own root can enter the global
+    /// first `limit` of the union.
+    /// This remains selection-only; callers own presentation ordering.
+    fn query_newest_before_any(
+        &self,
+        filters: &[Filter],
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            for row in self.query(filter)? {
+                if before.admits(&row.event) {
+                    by_id.entry(row.event.id).or_insert(row);
+                }
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Strict-provenance counterpart of
+    /// [`EventStore::query_newest_before_any`]. The page bound counts only
+    /// de-duplicated union rows observed by at least one eligible relay.
+    fn query_newest_before_any_observed_by(
+        &self,
+        filters: &[Filter],
+        relays: &BTreeSet<RelayUrl>,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() || relays.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            for row in self.query(filter)? {
+                if before.admits(&row.event)
+                    && row
+                        .provenance
+                        .seen
+                        .keys()
+                        .any(|relay| relays.contains(relay))
+                {
+                    by_id.entry(row.event.id).or_insert(row);
+                }
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     /// Remove `id` from the store — clearing both the id index and, if `id`
     /// is the current replaceable/addressable winner for its address, the
     /// address index too — and hand back the removed row whole, or `None`

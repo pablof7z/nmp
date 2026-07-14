@@ -795,6 +795,8 @@ pub struct EngineCore<S: EventStore> {
     history_store_queries: Cell<u64>,
     #[cfg(test)]
     history_rows_examined: Cell<u64>,
+    #[cfg(test)]
+    history_affected_row_queries: Cell<u64>,
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
@@ -858,6 +860,8 @@ impl<S: EventStore> EngineCore<S> {
             history_store_queries: Cell::new(0),
             #[cfg(test)]
             history_rows_examined: Cell::new(0),
+            #[cfg(test)]
+            history_affected_row_queries: Cell::new(0),
         }
     }
 
@@ -4740,10 +4744,11 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    /// Apply one committed store batch to a stable, ordinary history
-    /// window. Only touched rows plus the exact missing lower segment are
-    /// visited: the canonical order index identifies eviction/backfill
-    /// boundaries without sorting or replaying the retained window.
+    /// Apply one committed store batch to any stable bounded history window,
+    /// including Strict, derived, and multi-root selections. Only touched
+    /// rows plus the exact newly exposed lower segment are visited: the
+    /// canonical order index identifies eviction/backfill boundaries without
+    /// sorting or replaying the retained window.
     fn try_apply_committed_history_row_changes(
         &mut self,
         id: HistorySessionId,
@@ -4757,24 +4762,89 @@ impl<S: EventStore> EngineCore<S> {
             return false;
         };
         let root_atoms = self.resolver.root_atoms(primary);
-        if root_atoms.len() != 1
-            || self.resolver.subtree_atoms(primary).len() != 1
-            || state.query.live_query().0.cache == CacheMode::Strict
-            || state.last_evidence.is_none()
+        if state.last_evidence.is_none()
             || !state.projection_complete
             || state.pending_load.is_some()
         {
             return false;
         }
-        let mut filter = root_atoms
-            .first()
-            .expect("one-root history has one concrete atom")
-            .to_nostr();
-        filter.limit = None;
-        let matches = |event: &nostr::Event| filter.match_event(event, MatchEventOptions::new());
+        if root_atoms.is_empty() {
+            return state.last_rows.is_empty();
+        }
+        let filters: Vec<_> = root_atoms
+            .into_iter()
+            .map(|mut atom| {
+                atom.limit = None;
+                atom.to_nostr()
+            })
+            .collect();
+        let matches = |event: &nostr::Event| {
+            filters
+                .iter()
+                .any(|filter| filter.match_event(event, MatchEventOptions::new()))
+        };
+        let pinned_relays = match (
+            state.query.live_query().0.cache,
+            &state.query.live_query().0.source,
+        ) {
+            (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays.clone()),
+            _ => None,
+        };
+        let eligible = |sources: &BTreeSet<RelayUrl>| {
+            pinned_relays
+                .as_ref()
+                .is_none_or(|relays| sources.iter().any(|relay| relays.contains(relay)))
+        };
         let target_rows = state.target_rows;
+        let original_boundary =
+            state
+                .order
+                .iter()
+                .next_back()
+                .map(|(Reverse(created_at), event_id)| {
+                    nmp_store::EventCursor::new(Timestamp::from(*created_at), *event_id)
+                });
         let mut before = BTreeMap::<EventId, Option<Row>>::new();
-        let mut added_payload = BTreeMap::<EventId, Row>::new();
+        let mut visible_removals = 0usize;
+        let mut strict_promotions = BTreeMap::<EventId, Row>::new();
+        if pinned_relays.is_some() {
+            for changed in &changes.provenance_grew {
+                if !matches(&changed.event)
+                    || !eligible(&changed.observed_relays)
+                    || state.last_rows.contains_key(&changed.event.id)
+                {
+                    continue;
+                }
+                #[cfg(test)]
+                self.history_affected_row_queries
+                    .set(self.history_affected_row_queries.get().saturating_add(1));
+                let current = match self
+                    .resolver
+                    .store()
+                    .query(&nostr::Filter::new().id(changed.event.id))
+                {
+                    Ok(mut rows) => rows.pop().map(|stored| Row {
+                        event: stored.event,
+                        sources: stored.provenance.seen.into_keys().collect(),
+                    }),
+                    Err(error) => {
+                        self.histories
+                            .get_mut(&id)
+                            .expect("history remained live after affected-row read failure")
+                            .projection_complete = false;
+                        self.degrade_store(error, effects);
+                        return true;
+                    }
+                };
+                strict_promotions.insert(
+                    changed.event.id,
+                    current.unwrap_or_else(|| Row {
+                        event: changed.event.clone(),
+                        sources: changed.observed_relays.clone(),
+                    }),
+                );
+            }
+        }
 
         {
             let state = self
@@ -4791,7 +4861,7 @@ impl<S: EventStore> EngineCore<S> {
                 };
 
             for event in &changes.removed {
-                if !matches(event) {
+                if !state.last_rows.contains_key(&event.id) {
                     continue;
                 }
                 remember(event.id, state, &mut before);
@@ -4799,10 +4869,11 @@ impl<S: EventStore> EngineCore<S> {
                     state
                         .order
                         .remove(&(Reverse(row.event.created_at.as_secs()), event.id));
+                    visible_removals = visible_removals.saturating_add(1);
                 }
             }
             for row in &changes.inserted {
-                if !matches(&row.event) {
+                if !matches(&row.event) || !eligible(&row.observed_relays) {
                     continue;
                 }
                 let event_id = row.event.id;
@@ -4820,58 +4891,61 @@ impl<S: EventStore> EngineCore<S> {
                     .order
                     .insert((Reverse(remembered.event.created_at.as_secs()), event_id));
                 state.last_rows.insert(event_id, remembered);
-                added_payload.insert(
-                    event_id,
-                    Row {
-                        event: row.event.clone(),
-                        sources: row.observed_relays.clone(),
-                    },
-                );
             }
             for row in &changes.provenance_grew {
-                if !matches(&row.event) || !state.last_rows.contains_key(&row.event.id) {
+                if !matches(&row.event) {
                     continue;
                 }
-                remember(row.event.id, state, &mut before);
-                state
-                    .last_rows
-                    .get_mut(&row.event.id)
-                    .expect("provenance target was checked above")
-                    .sources
-                    .extend(row.observed_relays.iter().cloned());
-            }
-
-            while state.last_rows.len() > target_rows {
-                let Some((_, event_id)) = state.order.iter().next_back().copied() else {
-                    break;
-                };
-                remember(event_id, state, &mut before);
-                let row = state
-                    .last_rows
-                    .remove(&event_id)
-                    .expect("history order and membership stay identical");
-                state
-                    .order
-                    .remove(&(Reverse(row.event.created_at.as_secs()), event_id));
+                if state.last_rows.contains_key(&row.event.id) {
+                    remember(row.event.id, state, &mut before);
+                    state
+                        .last_rows
+                        .get_mut(&row.event.id)
+                        .expect("provenance target was checked above")
+                        .sources
+                        .extend(row.observed_relays.iter().cloned());
+                } else if pinned_relays.is_some() && eligible(&row.observed_relays) {
+                    // An event already cached from an ineligible relay can
+                    // enter a Strict projection when this committed duplicate
+                    // is its first eligible observation. Treat that transition
+                    // as an affected-row insertion, then let the same bounded
+                    // order rebalance decide whether it belongs in top-N.
+                    remember(row.event.id, state, &mut before);
+                    let projected = strict_promotions
+                        .remove(&row.event.id)
+                        .expect("eligible Strict promotion was prefetched");
+                    state.order.insert((
+                        Reverse(projected.event.created_at.as_secs()),
+                        projected.event.id,
+                    ));
+                    state.last_rows.insert(projected.event.id, projected);
+                }
             }
         }
 
-        let missing = target_rows.saturating_sub(self.histories[&id].last_rows.len());
-        if missing > 0 {
-            let boundary = self.histories[&id].order.iter().next_back().map(
-                |(Reverse(created_at), event_id)| {
-                    nmp_store::EventCursor::new(Timestamp::from(*created_at), *event_id)
-                },
-            );
+        // Any visible removal can expose a better row below the PRE-mutation
+        // boundary, even when a simultaneous older insertion/restoration has
+        // already brought the working set back to `target_rows`. Reconcile
+        // exactly once, merge that bounded tail with every committed affected
+        // row above, and only then truncate canonically.
+        if visible_removals > 0 {
+            let boundary =
+                original_boundary.expect("a visible removal implies a prior canonical boundary");
             #[cfg(test)]
             self.history_store_queries
                 .set(self.history_store_queries.get().saturating_add(1));
-            let queried = match boundary {
-                Some(boundary) => self
-                    .resolver
-                    .store()
-                    .query_newest_before(&filter, boundary, missing),
-                None => self.resolver.store().query_newest(&filter, missing),
+            let queried = match pinned_relays.as_ref() {
+                Some(relays) => self.resolver.store().query_newest_before_any_observed_by(
+                    &filters,
+                    relays,
+                    boundary,
+                    visible_removals,
+                ),
+                None => self.resolver.store().query_newest_before_any(
+                    &filters,
+                    boundary,
+                    visible_removals,
+                ),
             };
             let rows = match queried {
                 Ok(rows) => rows,
@@ -4908,8 +4982,11 @@ impl<S: EventStore> EngineCore<S> {
                 .histories
                 .get_mut(&id)
                 .expect("history remained live during exact backfill");
-            for stored in rows.into_iter().take(missing) {
+            for stored in rows {
                 let event_id = stored.event.id;
+                if state.last_rows.contains_key(&event_id) {
+                    continue;
+                }
                 before
                     .entry(event_id)
                     .or_insert_with(|| state.last_rows.get(&event_id).cloned());
@@ -4923,7 +5000,34 @@ impl<S: EventStore> EngineCore<S> {
                     .order
                     .insert((Reverse(remembered.event.created_at.as_secs()), event_id));
                 state.last_rows.insert(event_id, remembered);
-                added_payload.insert(event_id, row);
+            }
+        }
+
+        {
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("history remained live during canonical truncation");
+            let remember =
+                |event_id: EventId,
+                 state: &HistoryState,
+                 before: &mut BTreeMap<EventId, Option<Row>>| {
+                    before
+                        .entry(event_id)
+                        .or_insert_with(|| state.last_rows.get(&event_id).cloned());
+                };
+            while state.last_rows.len() > target_rows {
+                let Some((_, event_id)) = state.order.iter().next_back().copied() else {
+                    break;
+                };
+                remember(event_id, state, &mut before);
+                let row = state
+                    .last_rows
+                    .remove(&event_id)
+                    .expect("history order and membership stay identical");
+                state
+                    .order
+                    .remove(&(Reverse(row.event.created_at.as_secs()), event_id));
             }
         }
 
@@ -4934,11 +5038,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut deltas = Vec::new();
         for (event_id, prior) in &before {
             match (prior, state.last_rows.get(event_id)) {
-                (None, Some(_)) => deltas.push(RowDelta::Added(
-                    added_payload
-                        .remove(event_id)
-                        .expect("new history member has its committed/store payload"),
-                )),
+                (None, Some(current)) => deltas.push(RowDelta::Added(current.clone())),
                 (Some(_), None) => deltas.push(RowDelta::Removed(*event_id)),
                 (Some(prior), Some(current)) if prior.sources != current.sources => {
                     deltas.push(RowDelta::SourcesGrew {
@@ -7752,7 +7852,7 @@ mod affected_handle_invalidation_tests {
 mod history_mutation_tests {
     use std::sync::{Arc, Mutex};
 
-    use nmp_grammar::IndexedTagName;
+    use nmp_grammar::{Derived, IdentityField, IndexedTagName, Selector};
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -7774,6 +7874,15 @@ mod history_mutation_tests {
     impl RowSink for CapturingRowSink {
         fn on_rows(&self, rows: Vec<RowDelta>) {
             self.0.lock().unwrap().push(rows);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
+
+    impl ReceiptSink for CapturingReceiptSink {
+        fn on_status(&self, status: WriteStatus) {
+            self.0.lock().unwrap().push(status);
         }
     }
 
@@ -7855,7 +7964,7 @@ mod history_mutation_tests {
         (core, id, sink)
     }
 
-    fn ordered_ids(core: &EngineCore<MemoryStore>, id: HistorySessionId) -> Vec<EventId> {
+    fn ordered_ids<S: EventStore>(core: &EngineCore<S>, id: HistorySessionId) -> Vec<EventId> {
         core.histories[&id]
             .order
             .iter()
@@ -7863,8 +7972,8 @@ mod history_mutation_tests {
             .collect()
     }
 
-    fn ingest(
-        core: &mut EngineCore<MemoryStore>,
+    fn ingest<S: EventStore>(
+        core: &mut EngineCore<S>,
         event: SignedEvent,
         relay: RelayUrl,
         observed_at: u64,
@@ -8072,6 +8181,126 @@ mod history_mutation_tests {
     }
 
     #[test]
+    fn strict_and_agnostic_live_mutations_stay_distinct_and_match_their_oracles() {
+        let keys = Keys::generate();
+        let wanted = RelayUrl::parse("wss://history-live-wanted.example").unwrap();
+        let other = RelayUrl::parse("wss://history-live-other.example").unwrap();
+        let other_newest = room_event(&keys, 47, 0, 400);
+        let wanted_a = room_event(&keys, 47, 1, 300);
+        let wanted_b = room_event(&keys, 47, 2, 200);
+        let wanted_c = room_event(&keys, 47, 3, 100);
+        let mut store = MemoryStore::new();
+        for (event, source) in [
+            (other_newest.clone(), other.clone()),
+            (wanted_a.clone(), wanted.clone()),
+            (wanted_b.clone(), wanted.clone()),
+            (wanted_c.clone(), wanted.clone()),
+        ] {
+            store
+                .insert(event, RelayObserved::new(source, Timestamp::from(1_000u64)))
+                .unwrap();
+        }
+        let selection = history_query(47, BTreeSet::from([9]))
+            .live_query()
+            .0
+            .selection
+            .clone();
+        let strict_query = HistoryQuery::new(
+            LiveQuery(nmp_grammar::Demand {
+                selection,
+                source: SourceAuthority::Pinned(BTreeSet::from([wanted.clone()])),
+                access: AccessContext::Public,
+                cache: CacheMode::Strict,
+            }),
+            3,
+            3,
+        )
+        .unwrap();
+        let agnostic_query = HistoryQuery::new(
+            history_query(47, BTreeSet::from([9])).live_query().clone(),
+            3,
+            3,
+        )
+        .unwrap();
+        let strict_sink = CapturingHistorySink::default();
+        let agnostic_sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let strict_id = core
+            .handle(EngineMsg::SubscribeHistory(
+                strict_query,
+                Box::new(strict_sink.clone()),
+            ))
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let agnostic_id = core
+            .handle(EngineMsg::SubscribeHistory(
+                agnostic_query,
+                Box::new(agnostic_sink.clone()),
+            ))
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            ordered_ids(&core, strict_id),
+            vec![wanted_a.id, wanted_b.id, wanted_c.id]
+        );
+        assert_eq!(
+            ordered_ids(&core, agnostic_id),
+            vec![other_newest.id, wanted_a.id, wanted_b.id]
+        );
+        strict_sink.0.lock().unwrap().clear();
+        agnostic_sink.0.lock().unwrap().clear();
+
+        let new = room_event(&keys, 47, 99, 500);
+        ingest(&mut core, new.clone(), other.clone(), 2_000);
+        assert!(strict_sink.0.lock().unwrap().is_empty());
+        assert_eq!(ordered_ids(&core, strict_id)[0], wanted_a.id);
+        assert_eq!(ordered_ids(&core, agnostic_id)[0], new.id);
+
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        core.history_affected_row_queries.set(0);
+        ingest(&mut core, new.clone(), wanted.clone(), 2_001);
+        assert_eq!(core.history_store_queries.get(), 0);
+        assert_eq!(core.history_rows_examined.get(), 0);
+        assert_eq!(core.history_affected_row_queries.get(), 1);
+        assert_eq!(ordered_ids(&core, strict_id)[0], new.id);
+        let strict_new = &core.histories[&strict_id].last_rows[&new.id];
+        assert_eq!(
+            strict_new.sources,
+            BTreeSet::from([other.clone(), wanted.clone()]),
+            "a newly Strict-eligible row carries its complete canonical provenance"
+        );
+
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(new.id))
+            .custom_created_at(Timestamp::from(3_000u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        strict_sink.0.lock().unwrap().clear();
+        agnostic_sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, deletion, wanted, 3_001);
+        assert_eq!(core.history_store_queries.get(), 2);
+        assert_eq!(core.history_rows_examined.get(), 2);
+        assert_eq!(strict_sink.0.lock().unwrap().len(), 1);
+        assert_eq!(agnostic_sink.0.lock().unwrap().len(), 1);
+
+        for history_id in [strict_id, agnostic_id] {
+            let (oracle, _) = core.history_rows_and_evidence_for(history_id).unwrap();
+            assert_eq!(core.histories[&history_id].last_rows, oracle);
+        }
+    }
+
+    #[test]
     fn replacement_and_expiry_rebalance_without_full_history_replay() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://history-replace-expire.example").unwrap();
@@ -8098,7 +8327,7 @@ mod history_mutation_tests {
                 core.history_store_queries.get(),
                 core.history_rows_examined.get()
             ),
-            (0, 0)
+            (1, 1)
         );
         assert!(batch
             .deltas
@@ -8133,6 +8362,342 @@ mod history_mutation_tests {
             .deltas
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == expiring.id)));
+    }
+
+    #[test]
+    fn replaceable_compensation_cannot_let_restored_older_row_mask_hidden_tail() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-compensation.example").unwrap();
+        let x = room_event(&keys, 47, 1, 900);
+        let y = room_event(&keys, 47, 2, 800);
+        let z = room_event(&keys, 47, 3, 700);
+        let predecessor = EventBuilder::new(Kind::from(10_000u16), "prior")
+            .tag(room_tag(47))
+            .custom_created_at(Timestamp::from(100u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut store = MemoryStore::new();
+        store
+            .insert_batch(
+                [x.clone(), y.clone(), z.clone(), predecessor.clone()]
+                    .into_iter()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        core.active_pubkey = Some(keys.public_key());
+        let opened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9, 10_000])),
+            Box::new(sink.clone()),
+        ));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
+        sink.0.lock().unwrap().clear();
+
+        let accepted = core.on_publish(
+            WriteIntent {
+                payload: WritePayload::UnsignedReplaceableEdit {
+                    unsigned: UnsignedEvent::new(
+                        keys.public_key(),
+                        Timestamp::from(1_000u64),
+                        Kind::from(10_000u16),
+                        vec![room_tag(47)],
+                        "pending replacement",
+                    ),
+                    expected_base: Some(predecessor.id),
+                },
+                durability: Durability::Durable,
+                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+            },
+            Box::new(CapturingReceiptSink::default()),
+        );
+        let receipt = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                _ => None,
+            })
+            .expect("replaceable local acceptance emits a receipt");
+        let pending = *ordered_ids(&core, id).first().unwrap();
+        assert_eq!(ordered_ids(&core, id)[1..], [x.id, y.id]);
+
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        core.on_cancel_write(receipt);
+
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(
+            (
+                core.history_store_queries.get(),
+                core.history_rows_examined.get()
+            ),
+            (1, 1),
+            "one old-boundary reconciliation finds Z despite predecessor restoring count"
+        );
+        assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
+        assert!(!core.histories[&id].last_rows.contains_key(&predecessor.id));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == pending)));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == z.id)));
+        assert!(!batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == predecessor.id)));
+    }
+
+    #[test]
+    fn fixed_seed_mixed_remove_insert_batches_match_full_history_oracle() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-differential.example").unwrap();
+        let base: Vec<_> = (0..30)
+            .map(|index| room_event(&keys, 47, index, 100 + index as u64))
+            .collect();
+        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let mut seed = 0x6a09_e667_f3bc_c909u64;
+
+        for step in 0..64usize {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let visible = ordered_ids(&core, id);
+            let removed_id = visible[(seed as usize) % visible.len()];
+            let removed = core
+                .resolver
+                .store()
+                .query(&nostr::Filter::new().id(removed_id))
+                .unwrap()
+                .pop()
+                .unwrap()
+                .event;
+            core.resolver
+                .store_mut()
+                .remove(removed_id, nmp_store::RetractReason::Rejected)
+                .unwrap();
+
+            seed = seed.rotate_left(17) ^ 0xa5a5_5a5a_0123_4567;
+            let created_at = 50 + (seed % 1_500);
+            let inserted = room_event(&keys, 47, 10_000 + step, created_at);
+            core.resolver
+                .store_mut()
+                .insert(
+                    inserted.clone(),
+                    RelayObserved::new(relay.clone(), Timestamp::from(2_000 + step as u64)),
+                )
+                .unwrap();
+            let changes = CommittedRowChanges {
+                inserted: vec![nmp_resolver::CommittedCurrentRow {
+                    event: inserted,
+                    observed_relays: BTreeSet::from([relay.clone()]),
+                }],
+                removed: vec![removed],
+                provenance_grew: Vec::new(),
+            };
+
+            sink.0.lock().unwrap().clear();
+            core.history_store_queries.set(0);
+            core.history_rows_examined.set(0);
+            let mut effects = Vec::new();
+            assert!(core.try_apply_committed_history_row_changes(id, &changes, &mut effects));
+            assert!(core.history_store_queries.get() <= 1);
+            assert!(core.history_rows_examined.get() <= 1);
+            assert!(sink.0.lock().unwrap().len() <= 1);
+
+            let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+            assert_eq!(
+                core.histories[&id].last_rows, oracle,
+                "incremental history diverged from full oracle at mixed batch {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn derived_multi_root_advanced_history_mutates_with_one_bounded_reconciliation() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-multi-root.example").unwrap();
+        let addressable = |d: &str, created_at: u64, content: &str| {
+            EventBuilder::new(Kind::from(30_003u16), content)
+                .tag(Tag::identifier(d))
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let base: Vec<_> = (0..8)
+            .map(|index| addressable(&format!("g{index}"), 100 + index, "base"))
+            .collect();
+        let mut store = MemoryStore::new();
+        store
+            .insert_batch(
+                base.iter()
+                    .cloned()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let selection = nmp_grammar::Filter {
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: nmp_grammar::Demand::from_filter(nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([30_003u16])),
+                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                    ..nmp_grammar::Filter::default()
+                }),
+                project: Selector::AddressCoord,
+            }))),
+            ..nmp_grammar::Filter::default()
+        };
+        let query = HistoryQuery::new(LiveQuery::from_filter(selection), 3, 6).unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let opened = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+        let (id, continuation) = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, batch) => Some((*id, batch.continuation.clone().unwrap())),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::LoadOlder(id, continuation));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        assert_eq!(core.histories[&id].last_rows.len(), 6);
+        let primary = *core.histories[&id].handle_ids.first().unwrap();
+        assert_eq!(core.resolver.root_atoms(primary).len(), 8);
+        assert!(core.resolver.subtree_atoms(primary).len() > 8);
+
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        let replacement = addressable("g7", 1_000, "replacement");
+        ingest(&mut core, replacement.clone(), relay, 2_000);
+
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(core.history_store_queries.get(), 1);
+        assert!(core.history_rows_examined.get() <= 1);
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == replacement.id)));
+        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+        assert_eq!(core.histories[&id].last_rows, oracle);
+    }
+
+    #[test]
+    fn late_same_second_boundary_insert_after_advance_is_exact_and_read_free() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-late-tie.example").unwrap();
+        let base: Vec<_> = [600u64, 500, 400, 300, 200, 100]
+            .into_iter()
+            .enumerate()
+            .map(|(index, created_at)| room_event(&keys, 47, index, created_at))
+            .collect();
+        let old_boundary = base.last().unwrap().clone();
+        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let late = (0..1_000usize)
+            .map(|ordinal| room_event(&keys, 47, 20_000 + ordinal, 100))
+            .find(|event| event.id < old_boundary.id)
+            .expect("deterministically find an id that sorts before the old tie boundary");
+
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, late.clone(), relay, 2_000);
+
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(core.history_store_queries.get(), 0);
+        assert_eq!(core.history_rows_examined.get(), 0);
+        assert!(core.histories[&id].last_rows.contains_key(&late.id));
+        assert!(!core.histories[&id].last_rows.contains_key(&old_boundary.id));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == late.id)));
+        assert!(batch.deltas.iter().any(
+            |delta| matches!(delta, RowDelta::Removed(event_id) if *event_id == old_boundary.id)
+        ));
+        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+        assert_eq!(core.histories[&id].last_rows, oracle);
+    }
+
+    #[test]
+    fn redb_advanced_history_matches_oracle_after_insert_and_retraction() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-redb.example").unwrap();
+        let base: Vec<_> = (0..12)
+            .map(|index| room_event(&keys, 47, index, 100 + index as u64))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = nmp_store::RedbStore::open(dir.path().join("history.redb")).unwrap();
+        store
+            .insert_batch(
+                base.iter()
+                    .cloned()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let opened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9])),
+            Box::new(sink.clone()),
+        ));
+        let (id, continuation) = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, batch) => Some((*id, batch.continuation.clone().unwrap())),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::LoadOlder(id, continuation));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        sink.0.lock().unwrap().clear();
+
+        let inserted = room_event(&keys, 47, 99, 1_000);
+        ingest(&mut core, inserted, relay.clone(), 2_000);
+        sink.0.lock().unwrap().clear();
+        let removed = ordered_ids(&core, id)[2];
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(removed))
+            .custom_created_at(Timestamp::from(3_000u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, deletion, relay, 3_001);
+
+        assert_one_atomic_batch(&sink);
+        assert_eq!(core.history_store_queries.get(), 1);
+        assert_eq!(core.history_rows_examined.get(), 1);
+        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+        assert_eq!(core.histories[&id].last_rows, oracle);
     }
 
     #[test]

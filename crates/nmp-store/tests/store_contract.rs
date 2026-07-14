@@ -507,6 +507,63 @@ fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
 }
 
 #[test]
+fn union_replacement_page_is_global_deduplicated_exclusive_and_strict_eligible() {
+    for_each_backend(|store| {
+        let a = keys();
+        let b = keys();
+        let wanted = relay("wss://wanted-union.example");
+        let other = relay("wss://other-union.example");
+
+        let same_a = regular_event_at(&a, "same-a", 500);
+        let same_b = regular_event_at(&b, "same-b", 500);
+        let ineligible = regular_event_at(&a, "ineligible", 450);
+        let eligible_b = regular_event_at(&b, "eligible-b", 400);
+        let eligible_a = regular_event_at(&a, "eligible-a", 300);
+        for (event, source) in [
+            (same_a.clone(), wanted.clone()),
+            (same_b.clone(), wanted.clone()),
+            (ineligible.clone(), other),
+            (eligible_b.clone(), wanted.clone()),
+            (eligible_a, wanted.clone()),
+        ] {
+            store
+                .insert(event, RelayObserved::new(source, Timestamp::from(700u64)))
+                .unwrap();
+        }
+
+        // The broad third root deliberately overlaps both author roots. The
+        // union door must still return each canonical id exactly once.
+        let filters = vec![
+            Filter::new().kind(Kind::TextNote).author(a.public_key()),
+            Filter::new().kind(Kind::TextNote).author(b.public_key()),
+            Filter::new().kind(Kind::TextNote),
+        ];
+        let (first, second) = if same_a.id < same_b.id {
+            (same_a.id, same_b.id)
+        } else {
+            (same_b.id, same_a.id)
+        };
+        let before = EventCursor::new(Timestamp::from(500u64), first);
+
+        let agnostic = store.query_newest_before_any(&filters, before, 2).unwrap();
+        assert_eq!(
+            agnostic.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![second, ineligible.id],
+            "the cursor is id-exclusive inside the tie second and overlapping roots dedupe"
+        );
+
+        let strict = store
+            .query_newest_before_any_observed_by(&filters, &BTreeSet::from([wanted]), before, 2)
+            .unwrap();
+        assert_eq!(
+            strict.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![second, eligible_b.id],
+            "wrong-relay rows cannot consume the union page bound"
+        );
+    });
+}
+
+#[test]
 fn query_newest_before_preserves_filter_winner_and_provenance_semantics() {
     for_each_backend(|store| {
         let author = keys();

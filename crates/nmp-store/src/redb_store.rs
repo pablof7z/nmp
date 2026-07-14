@@ -4415,6 +4415,63 @@ impl EventStore for RedbStore {
         )
     }
 
+    fn query_newest_before_any(
+        &self,
+        filters: &[Filter],
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            // The first `limit` rows of the global union can contain no row
+            // ranked below `limit` inside every component that matches it.
+            // Therefore each component scan stays caller-bounded while this
+            // one logical door performs the exact de-duplicated merge.
+            for row in self.query_newest_before(filter, before, limit)? {
+                by_id.entry(row.event.id).or_insert(row);
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    fn query_newest_before_any_observed_by(
+        &self,
+        filters: &[Filter],
+        relays: &BTreeSet<RelayUrl>,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() || relays.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            for row in self.query_newest_before_observed_by(filter, relays, before, limit)? {
+                by_id.entry(row.event.id).or_insert(row);
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     fn remove(
         &mut self,
         id: EventId,
