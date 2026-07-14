@@ -105,6 +105,12 @@ struct NormDiagnostics {
     dropped_merge_rules: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HandoffBaseline {
+    discovery: u64,
+    content: u64,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ScenarioOutcome {
     rows: Vec<NormRow>,
@@ -583,17 +589,21 @@ fn event_count(relay: &NormRelayDiagnostics, kind: u16) -> u64 {
         .unwrap_or(0)
 }
 
-fn preflight_is_quiescent(
+fn handoff_is_quiescent(
     snapshot: &NormDiagnostics,
-    relay_discovery_query_count: u64,
-) -> Option<u64> {
+    relay_witness: &ScriptedRelay,
+) -> Option<HandoffBaseline> {
     let [relay] = snapshot.relays.as_slice() else {
         return None;
     };
-    let has_preflight = relay
+    let has_discovery = relay
         .filters
         .iter()
         .any(|filter| filter_names_kind(filter, DISCOVERY_TRIGGER_KIND));
+    let has_content = relay
+        .filters
+        .iter()
+        .any(|filter| filter_names_kind(filter, QUERY_KIND));
     let has_internal_discovery = relay
         .filters
         .iter()
@@ -602,18 +612,24 @@ fn preflight_is_quiescent(
         .by_lane
         .iter()
         .any(|(lane, count)| lane == "nip65_write" && *count > 0);
-    let baseline = event_count(relay, Kind::RelayList.as_u16());
-    (has_preflight
+    let baseline = HandoffBaseline {
+        discovery: relay_witness.query_count_for_kind(Kind::RelayList.as_u16()),
+        content: relay_witness.query_count_for_kind(QUERY_KIND),
+    };
+    (has_discovery
+        && has_content
         && !has_internal_discovery
         && routed_through_nip65
-        && relay_discovery_query_count >= 1
-        && baseline == relay_discovery_query_count)
+        && baseline.discovery != 0
+        && baseline.content != 0
+        && event_count(relay, Kind::RelayList.as_u16()) == baseline.discovery
+        && event_count(relay, QUERY_KIND) == baseline.content)
         .then_some(baseline)
 }
 
 fn content_phase_is_quiescent(
     snapshot: &NormDiagnostics,
-    nip65_baseline: u64,
+    baseline: HandoffBaseline,
     relay_witness: &ScriptedRelay,
 ) -> bool {
     let [relay] = snapshot.relays.as_slice() else {
@@ -636,10 +652,10 @@ fn content_phase_is_quiescent(
     has_content
         && !has_stale_filter
         && routed_through_nip65
-        && content_req_count >= 1
-        && discovery_req_count == nip65_baseline
-        && event_count(relay, QUERY_KIND) == 1
-        && event_count(relay, Kind::RelayList.as_u16()) == discovery_req_count
+        && content_req_count == baseline.content
+        && discovery_req_count == baseline.discovery
+        && event_count(relay, QUERY_KIND) == baseline.content
+        && event_count(relay, Kind::RelayList.as_u16()) == baseline.discovery
         && !relay.coverage.is_empty()
         && relay
             .coverage
@@ -649,48 +665,65 @@ fn content_phase_is_quiescent(
 
 fn assert_content_phase_diagnostics(
     snapshot: &NormDiagnostics,
-    nip65_baseline: u64,
+    baseline: HandoffBaseline,
     relay: &ScriptedRelay,
     surface: &str,
 ) {
     assert!(
-        content_phase_is_quiescent(snapshot, nip65_baseline, relay),
+        content_phase_is_quiescent(snapshot, baseline, relay),
         "{surface} diagnostics must contain only the discovered NIP-65-routed content plan, \
-         exactly one content event, and an unchanged discovery-event baseline: {snapshot:?}"
+         with content/discovery REQs and events unchanged from the drained handoff \
+         baseline {baseline:?}: {snapshot:?}"
     );
 }
 
-fn wait_for_direct_preflight_quiescence(
+fn wait_for_direct_handoff_quiescence(
     rx: &mpsc::Receiver<DiagnosticsSnapshot>,
     relay: &ScriptedRelay,
-) -> u64 {
+) -> HandoffBaseline {
     let deadline = Instant::now() + WAIT;
+    let mut last_diagnostics = None;
     loop {
-        let snapshot = recv_before(rx, deadline, "direct preflight diagnostics");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let snapshot = rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "direct handoff diagnostics did not settle within the total {WAIT:?} bound: \
+                 {error}; last snapshot: {last_diagnostics:?}; relay query counts: \
+                 discovery={}, content={}",
+                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                relay.query_count_for_kind(QUERY_KIND),
+            )
+        });
         let snapshot = normalize_direct_diagnostics(snapshot, relay.url.as_str());
-        if let Some(baseline) = preflight_is_quiescent(
-            &snapshot,
-            relay.query_count_for_kind(Kind::RelayList.as_u16()),
-        ) {
+        if let Some(baseline) = handoff_is_quiescent(&snapshot, relay) {
             return baseline;
         }
+        last_diagnostics = Some(snapshot);
     }
 }
 
-fn wait_for_ffi_preflight_quiescence(
+fn wait_for_ffi_handoff_quiescence(
     rx: &mpsc::Receiver<FfiDiagnosticsSnapshot>,
     relay: &ScriptedRelay,
-) -> u64 {
+) -> HandoffBaseline {
     let deadline = Instant::now() + WAIT;
+    let mut last_diagnostics = None;
     loop {
-        let snapshot = recv_before(rx, deadline, "FFI preflight diagnostics");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let snapshot = rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "FFI handoff diagnostics did not settle within the total {WAIT:?} bound: \
+                 {error}; last snapshot: {last_diagnostics:?}; relay query counts: \
+                 discovery={}, content={}",
+                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                relay.query_count_for_kind(QUERY_KIND),
+            )
+        });
         let snapshot = normalize_ffi_diagnostics(snapshot, relay.url.as_str());
-        if let Some(baseline) = preflight_is_quiescent(
-            &snapshot,
-            relay.query_count_for_kind(Kind::RelayList.as_u16()),
-        ) {
+        if let Some(baseline) = handoff_is_quiescent(&snapshot, relay) {
             return baseline;
         }
+        last_diagnostics = Some(snapshot);
     }
 }
 
@@ -785,8 +818,7 @@ fn stage_direct_discovery(
     engine: &Engine,
     pubkey: &str,
     relay: &ScriptedRelay,
-    diagnostics: &mpsc::Receiver<DiagnosticsSnapshot>,
-) -> (u64, ObservationCancel) {
+) -> ObservationCancel {
     let subscription = engine
         .observe(LiveQuery::from_filter(direct_filter(
             pubkey,
@@ -811,16 +843,14 @@ fn stage_direct_discovery(
             break;
         }
     }
-    let baseline = wait_for_direct_preflight_quiescence(diagnostics, relay);
-    (baseline, cancel)
+    cancel
 }
 
 fn stage_ffi_discovery(
     engine: &NmpEngine,
     pubkey: &str,
     relay: &ScriptedRelay,
-    diagnostics: &mpsc::Receiver<FfiDiagnosticsSnapshot>,
-) -> (u64, Arc<NmpQueryHandle>) {
+) -> Arc<NmpQueryHandle> {
     let (tx, rx) = mpsc::channel();
     let handle = engine
         .observe(
@@ -837,8 +867,7 @@ fn stage_ffi_discovery(
             break;
         }
     }
-    let baseline = wait_for_ffi_preflight_quiescence(diagnostics, relay);
-    (baseline, handle)
+    handle
 }
 
 impl ReceiptObserver for FfiReceipts {
@@ -1361,8 +1390,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         }
     });
 
-    let (nip65_baseline, discovery_cancel) =
-        stage_direct_discovery(&engine, &pubkey.to_hex(), &relay, &diag_rx);
+    let discovery_cancel = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay);
 
     let subscription = engine
         .observe(LiveQuery::from_filter(direct_filter(
@@ -1379,12 +1407,6 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             }
         }
     });
-    // Exact worker ownership (#235) may legitimately close this relay when
-    // demand reaches zero. Open the content query before withdrawing
-    // discovery so the exact-one assertions below prove there was no replay
-    // while the relay remained continuously owned.
-    discovery_cancel.cancel();
-
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
     let evidence = loop {
@@ -1395,6 +1417,13 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             break normalized;
         }
     };
+    // Exact worker ownership (#235) may legitimately close this relay when
+    // demand reaches zero. Keep both observations live until the two-filter
+    // plan is visible and every admitted discovery/content response has
+    // reached diagnostics. That equality barrier is the stable baseline;
+    // only then may withdrawing discovery prove the handoff caused no replay.
+    let handoff_baseline = wait_for_direct_handoff_quiescence(&diag_rx, &relay);
+    discovery_cancel.cancel();
 
     let diagnostics_deadline = Instant::now() + WAIT;
     let mut last_diagnostics = None;
@@ -1403,18 +1432,19 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         let snapshot = diag_rx.recv_timeout(remaining).unwrap_or_else(|error| {
             panic!(
                 "direct diagnostics did not settle within the total {WAIT:?} bound: {error}; \
-                 last snapshot: {last_diagnostics:?}; relay query counts: discovery={}, content={}",
+                 handoff baseline: {handoff_baseline:?}; last snapshot: {last_diagnostics:?}; \
+                 relay query counts: discovery={}, content={}",
                 relay.query_count_for_kind(Kind::RelayList.as_u16()),
                 relay.query_count_for_kind(QUERY_KIND),
             )
         });
         let normalized = normalize_direct_diagnostics(snapshot, &relay_url);
-        if content_phase_is_quiescent(&normalized, nip65_baseline, &relay) {
+        if content_phase_is_quiescent(&normalized, handoff_baseline, &relay) {
             break normalized;
         }
         last_diagnostics = Some(normalized);
     };
-    assert_content_phase_diagnostics(&diagnostics, nip65_baseline, &relay, "direct");
+    assert_content_phase_diagnostics(&diagnostics, handoff_baseline, &relay, "direct");
 
     let unsigned = UnsignedEvent::new(
         pubkey,
@@ -1499,8 +1529,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             tx: Mutex::new(diag_tx),
         }))
         .expect("FFI diagnostics must open");
-    let (nip65_baseline, discovery_handle) =
-        stage_ffi_discovery(&engine, &pubkey, &relay, &diag_rx);
+    let discovery_handle = stage_ffi_discovery(&engine, &pubkey, &relay);
     let (rows_tx, rows_rx) = mpsc::channel();
     let query_handle = engine
         .observe(
@@ -1510,9 +1539,6 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             }),
         )
         .expect("FFI query must open");
-    // Same continuous-ownership proof as the direct facade above.
-    discovery_handle.cancel();
-
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
     let evidence = loop {
@@ -1523,6 +1549,9 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             break normalized;
         }
     };
+    // Same drained, continuously-owned handoff proof as the direct facade.
+    let handoff_baseline = wait_for_ffi_handoff_quiescence(&diag_rx, &relay);
+    discovery_handle.cancel();
 
     let diagnostics_deadline = Instant::now() + WAIT;
     let mut last_diagnostics = None;
@@ -1531,18 +1560,19 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         let snapshot = diag_rx.recv_timeout(remaining).unwrap_or_else(|error| {
             panic!(
                 "FFI diagnostics did not settle within the total {WAIT:?} bound: {error}; \
-                 last snapshot: {last_diagnostics:?}; relay query counts: discovery={}, content={}",
+                 handoff baseline: {handoff_baseline:?}; last snapshot: {last_diagnostics:?}; \
+                 relay query counts: discovery={}, content={}",
                 relay.query_count_for_kind(Kind::RelayList.as_u16()),
                 relay.query_count_for_kind(QUERY_KIND),
             )
         });
         let normalized = normalize_ffi_diagnostics(snapshot, &relay_url);
-        if content_phase_is_quiescent(&normalized, nip65_baseline, &relay) {
+        if content_phase_is_quiescent(&normalized, handoff_baseline, &relay) {
             break normalized;
         }
         last_diagnostics = Some(normalized);
     };
-    assert_content_phase_diagnostics(&diagnostics, nip65_baseline, &relay, "FFI");
+    assert_content_phase_diagnostics(&diagnostics, handoff_baseline, &relay, "FFI");
 
     let (receipt_tx, receipt_rx) = mpsc::channel();
     engine
