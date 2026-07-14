@@ -28,6 +28,7 @@ nmp-router.workspace = true
 nmp-transport.workspace = true
 nmp-signer.workspace = true
 nmp-engine.workspace = true
+nmp-test-support.workspace = true
 
 cucumber = "0.21"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
