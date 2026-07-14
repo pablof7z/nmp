@@ -180,7 +180,8 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
     let registration_a = handle
         .add_signer(LocalKeySigner::new(a.clone()))
@@ -195,7 +196,9 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
 
     // ---- read root: active = a -> only a's post visible ------------------
     handle.set_active_account(Some(pk_a));
-    let (_qh, rows_rx) = handle.subscribe(reactive_kind1());
+    let (_qh, rows_rx) = handle
+        .subscribe(reactive_kind1())
+        .expect("test subscription construction");
     assert!(
         wait_for_rows(&rows_rx, Duration::from_secs(5), |rows| rows
             .contains(&a_post.id)
@@ -303,7 +306,8 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
     // Register a signer but NEVER activate it.
     handle
@@ -343,7 +347,8 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("local signer has a public key");
@@ -390,7 +395,8 @@ fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(CountingSigner {
             pubkey: a.public_key(),
@@ -452,7 +458,8 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
     // Pin the active identity before its capability exists.
     handle.set_active_account(Some(a.public_key()));
@@ -499,7 +506,8 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("local signer has a public key");
@@ -548,7 +556,8 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
 
     // Exact replacement-race order: install A, install B for the same key,
     // detach stale A, then prove B still signs accepted work.
@@ -601,7 +610,8 @@ fn pubkeyless_capability_is_a_typed_registration_error() {
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     assert_eq!(
         handle.add_signer(PubkeylessSigner),
         Err(nmp_engine::runtime::AddSignerError::MissingPublicKey)

@@ -37,6 +37,8 @@ sealed class NMPError(message: String) : Exception(message) {
         NMPError("receipt correlation id namespace exhausted")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class StoreResetFailed(val reason: String) : NMPError("store reset failed: $reason")
+    data class ThreadUnavailable(val component: String, val reason: String) :
+        NMPError("$component thread unavailable: $reason")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
     /** `decodeNostrEntity`'s input was not valid bech32, had an
@@ -80,6 +82,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
+                is FfiException.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed
                 is FfiException.InvalidNostrEntity -> InvalidNostrEntity(ffi.reason)

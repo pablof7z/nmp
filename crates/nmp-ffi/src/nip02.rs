@@ -53,6 +53,7 @@ pub enum FfiFollowActionFailure {
     InvalidGeneratedTag,
     EngineClosed,
     ReceiptUnavailable,
+    ThreadUnavailable { component: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -138,6 +139,9 @@ fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
         },
         FollowActionFailure::EngineClosed => FfiFollowActionFailure::EngineClosed,
         FollowActionFailure::ReceiptUnavailable => FfiFollowActionFailure::ReceiptUnavailable,
+        FollowActionFailure::ThreadUnavailable { component, reason } => {
+            FfiFollowActionFailure::ThreadUnavailable { component, reason }
+        }
     }
 }
 

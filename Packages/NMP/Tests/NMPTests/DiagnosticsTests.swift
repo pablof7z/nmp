@@ -10,6 +10,16 @@ import XCTest
 @testable import NMP
 
 final class DiagnosticsTests: XCTestCase {
+    /// #442: construction/shutdown is an exact join barrier. Repeating the
+    /// full native path must not accumulate verifier, relay, bridge, or
+    /// runtime threads between engine lifetimes.
+    func testRepeatedEngineConstructionAndShutdown() throws {
+        for _ in 0..<32 {
+            let engine = try NMPEngine(config: NMPConfig())
+            engine.shutdown()
+        }
+    }
+
     /// A freshly constructed engine with no subscriptions and no configured
     /// indexer relays has compiled no plan yet -- `observeDiagnostics()`
     /// must still deliver a well-formed (empty, never fabricated) snapshot

@@ -15,6 +15,7 @@ pub use edit::{
     FollowChange,
 };
 pub use service::{
-    observe_following, set_following, FollowAction, FollowActionFailure, FollowActionStatus,
-    FollowAvailability, FollowObservation, FollowRelationship, FollowSnapshot,
+    observe_following, prepare_set_following, set_following, FollowAction, FollowActionFailure,
+    FollowActionRunner, FollowActionStatus, FollowAvailability, FollowObservation,
+    FollowRelationship, FollowSnapshot,
 };

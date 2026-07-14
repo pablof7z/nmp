@@ -147,7 +147,8 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
             ..PoolConfig::default()
         },
         tx,
-    );
+    )
+    .expect("test pool construction");
 
     // Act: connect and observe the fresh (generation-1) handle. 15s, not
     // 5s: `open_relay_socket`'s `CONNECT_TIMEOUT` (10s) bounds a single dial
@@ -311,7 +312,8 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
             ..PoolConfig::default()
         },
         tx,
-    );
+    )
+    .expect("test pool construction");
 
     // 15s, not 5s -- see test 7's identical `connected1` wait above for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).
@@ -465,7 +467,7 @@ async fn durable_event_resolves_written_exactly_once() {
     let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
-    let pool = Pool::new(PoolConfig::default(), tx);
+    let pool = Pool::new(PoolConfig::default(), tx).expect("test pool construction");
     let h = pool.ensure_open(&url).expect("relay admitted");
     // 15s, not 5s -- see test 7's identical `connected1` wait for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).

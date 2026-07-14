@@ -15,7 +15,7 @@
 //! worker — the pool already knows the outcome the instant it decides to
 //! tear a slot down, so there is nothing to learn from an async ack.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -26,11 +26,44 @@ use nostr::{Event, EventId, RelayUrl};
 use crate::handle::RelayHandle;
 use crate::health::{ConnState, RelayHealth};
 
+use super::spawn::ThreadSpawner;
 use super::verify::{self, VerificationOutcome, VerifierPool};
 use super::worker::{
     pack_generation, worker_id_of, WorkerCommand, WorkerEvent, WorkerEventKind, WorkerHandle,
 };
-use super::{DisconnectReason, PoolConfig, PoolEvent, PoolEventSink, RelayOpenError};
+use super::{
+    DisconnectReason, PoolBuildError, PoolConfig, PoolEvent, PoolEventSink, RelayOpenError,
+    ThreadRole, ThreadSpawnError,
+};
+
+struct RetireRequest {
+    slot: u32,
+    generation: u64,
+    worker_id: u32,
+    join: JoinHandle<()>,
+}
+
+pub(super) struct ShutdownHandles {
+    reaper: Option<JoinHandle<()>>,
+    translator: Option<JoinHandle<()>>,
+    orphaned_workers: Vec<RetireRequest>,
+    worker_event_tx: Option<SyncSender<WorkerEvent>>,
+}
+
+impl ShutdownHandles {
+    pub(super) fn join(self) {
+        if let Some(handle) = self.reaper {
+            let _ = handle.join();
+        }
+        for request in self.orphaned_workers {
+            let _ = request.join.join();
+        }
+        drop(self.worker_event_tx);
+        if let Some(handle) = self.translator {
+            let _ = handle.join();
+        }
+    }
+}
 
 struct SlotState {
     url: RelayUrl,
@@ -64,6 +97,12 @@ pub(super) struct PoolInner {
     /// this field in `shutdown()` is what lets the channel actually close
     /// once the last worker thread's own clone is also dropped.
     worker_event_tx: Option<SyncSender<WorkerEvent>>,
+    retire_tx: Option<SyncSender<RetireRequest>>,
+    reaper: Option<JoinHandle<()>>,
+    retiring_worker_ids: HashSet<u32>,
+    orphaned_workers: Vec<RetireRequest>,
+    max_relay_threads: usize,
+    spawner: Arc<dyn ThreadSpawner>,
     config: PoolConfig,
     translator: Option<JoinHandle<()>>,
     shutdown: bool,
@@ -77,13 +116,39 @@ pub(super) struct PoolInner {
 }
 
 impl PoolInner {
-    pub(super) fn new(config: PoolConfig, sink: Arc<dyn PoolEventSink>) -> Arc<Mutex<Self>> {
+    pub(super) fn try_new(
+        config: PoolConfig,
+        sink: Arc<dyn PoolEventSink>,
+        spawner: Arc<dyn ThreadSpawner>,
+    ) -> Result<Arc<Mutex<Self>>, PoolBuildError> {
         let mut config = config;
         if config.max_relays == 0 {
             config.max_relays = super::DEFAULT_MAX_RELAYS;
         }
+        let max_relay_threads =
+            config
+                .max_relays
+                .checked_mul(2)
+                .ok_or(PoolBuildError::RelayBudgetOverflow {
+                    max_relays: config.max_relays,
+                })?;
         let (worker_event_tx, worker_event_rx) =
             mpsc::sync_channel::<WorkerEvent>(config.ingest_queue_capacity.max(1));
+        let (retire_tx, retire_rx) = mpsc::sync_channel::<RetireRequest>(config.max_relays.max(1));
+        let reaper = spawn_reaper(retire_rx, worker_event_tx.clone(), spawner.as_ref())
+            .map_err(PoolBuildError::ThreadUnavailable)?;
+        let verifier = match VerifierPool::new(
+            configured_verifier_workers(config.verifier_workers),
+            config.verifier_queue_capacity,
+            Arc::clone(&spawner),
+        ) {
+            Ok(verifier) => verifier,
+            Err(error) => {
+                drop(retire_tx);
+                let _ = reaper.join();
+                return Err(PoolBuildError::ThreadUnavailable(error));
+            }
+        };
         let translator_config = config.clone();
         let inner = Arc::new(Mutex::new(Self {
             slots: Vec::new(),
@@ -91,24 +156,62 @@ impl PoolInner {
             next_worker_id: 0,
             sink,
             worker_event_tx: Some(worker_event_tx),
+            retire_tx: Some(retire_tx),
+            reaper: Some(reaper),
+            retiring_worker_ids: HashSet::new(),
+            orphaned_workers: Vec::new(),
+            max_relay_threads,
+            spawner: Arc::clone(&spawner),
             config,
             translator: None,
             shutdown: false,
             relays_rejected_over_cap: 0,
         }));
-        let translator = spawn_translator(Arc::clone(&inner), worker_event_rx, translator_config);
+        let translator = match spawn_translator(
+            Arc::clone(&inner),
+            worker_event_rx,
+            translator_config,
+            verifier,
+            spawner.as_ref(),
+        ) {
+            Ok(translator) => translator,
+            Err(error) => {
+                let reaper = inner.lock().ok().and_then(|mut guard| {
+                    guard.worker_event_tx = None;
+                    guard.retire_tx = None;
+                    guard.reaper.take()
+                });
+                if let Some(reaper) = reaper {
+                    let _ = reaper.join();
+                }
+                return Err(PoolBuildError::ThreadUnavailable(error));
+            }
+        };
         if let Ok(mut guard) = inner.lock() {
             guard.translator = Some(translator);
         }
-        inner
+        Ok(inner)
     }
 
+    #[cfg(test)]
+    pub(super) fn new(config: PoolConfig, sink: Arc<dyn PoolEventSink>) -> Arc<Mutex<Self>> {
+        Self::try_new(config, sink, super::spawn::system_spawner())
+            .expect("test pool construction must succeed")
+    }
+
+    #[cfg(test)]
     pub(super) fn ensure_open(&mut self, url: &RelayUrl) -> RelayHandle {
+        self.try_ensure_open(url)
+            .expect("test relay worker spawn/admission must succeed")
+    }
+
+    pub(super) fn try_ensure_open(
+        &mut self,
+        url: &RelayUrl,
+    ) -> Result<RelayHandle, RelayOpenError> {
+        self.reap_orphaned_workers();
         if self.shutdown {
-            return RelayHandle {
-                slot: u32::MAX,
-                generation: 0,
-            };
+            return Err(RelayOpenError::ShuttingDown);
         }
         if let Some(&slot_id) = self.url_to_slot.get(url) {
             let state = &self.slots[slot_id as usize];
@@ -116,29 +219,31 @@ impl PoolInner {
                 // Idempotent: a live slot for this URL already exists — never
                 // counted against the cap (it is already one of the live
                 // relays the cap bounds).
-                return RelayHandle {
+                return Ok(RelayHandle {
                     slot: slot_id,
                     generation: state.generation,
-                };
+                });
             }
             // Reopening a previously-closed slot makes a worker LIVE again,
             // so it is subject to the same live-relay ceiling as a brand-new
             // relay.
-            if self.would_exceed_relay_cap() {
+            if self.live_worker_count() >= self.config.max_relays
+                || self.total_relay_thread_count() >= self.max_relay_threads
+            {
                 self.relays_rejected_over_cap += 1;
-                return RelayHandle {
-                    slot: u32::MAX,
-                    generation: 0,
-                };
+                return Err(RelayOpenError::AtCapacity {
+                    max_relays: self.config.max_relays,
+                });
             }
             return self.reopen(slot_id, url.clone());
         }
-        if self.would_exceed_relay_cap() {
+        if self.live_worker_count() >= self.config.max_relays
+            || self.total_relay_thread_count() >= self.max_relay_threads
+        {
             self.relays_rejected_over_cap += 1;
-            return RelayHandle {
-                slot: u32::MAX,
-                generation: 0,
-            };
+            return Err(RelayOpenError::AtCapacity {
+                max_relays: self.config.max_relays,
+            });
         }
         self.open_new(url.clone())
     }
@@ -153,31 +258,52 @@ impl PoolInner {
         })
     }
 
-    /// Explain the invalid handle returned by [`Self::ensure_open`]. This is
-    /// kept next to the private sentinel implementation; the public facade
-    /// converts it into a typed result before the handle can escape.
-    pub(super) fn open_refusal(&self) -> RelayOpenError {
-        if self.shutdown {
-            RelayOpenError::ShuttingDown
-        } else {
-            RelayOpenError::AtCapacity {
-                max_relays: self.config.max_relays,
-            }
-        }
-    }
-
-    /// The relay-count admission cap (issue #121): with a configured
-    /// refuse to bring a NEW live worker up once `max_relays` workers are
-    /// already live. Construction normalizes zero to
-    /// [`super::DEFAULT_MAX_RELAYS`], so there is no uncapped sentinel.
-    fn would_exceed_relay_cap(&self) -> bool {
-        self.live_worker_count() >= self.config.max_relays
-    }
-
     /// Distinct relays currently backed by a live worker (a slot whose
     /// `worker` has not been taken by `close`/`shutdown`).
     fn live_worker_count(&self) -> usize {
         self.slots.iter().filter(|s| s.worker.is_some()).count()
+    }
+
+    fn total_relay_thread_count(&self) -> usize {
+        self.live_worker_count()
+            .checked_add(self.retiring_worker_ids.len())
+            .expect("active + retiring cannot exceed checked construction envelope")
+    }
+
+    fn reap_orphaned_workers(&mut self) {
+        let mut pending = Vec::new();
+        for request in self.orphaned_workers.drain(..) {
+            if request.join.is_finished() {
+                let _ = request.join.join();
+                self.retiring_worker_ids.remove(&request.worker_id);
+            } else {
+                pending.push(request);
+            }
+        }
+        self.orphaned_workers = pending;
+    }
+
+    fn retire_worker(&mut self, slot: u32, generation: u64, worker: WorkerHandle) {
+        let worker_id = worker_id_of(generation);
+        let request = RetireRequest {
+            slot,
+            generation,
+            worker_id,
+            join: worker.retire(),
+        };
+        self.retiring_worker_ids.insert(worker_id);
+        let Some(retire_tx) = self.retire_tx.as_ref() else {
+            self.orphaned_workers.push(request);
+            return;
+        };
+        if let Err(error) = retire_tx.try_send(request) {
+            let request = match error {
+                mpsc::TrySendError::Full(request) | mpsc::TrySendError::Disconnected(request) => {
+                    request
+                }
+            };
+            self.orphaned_workers.push(request);
+        }
     }
 
     /// Read the monotonic count of relay-cap rejections (issue #121). See
@@ -186,12 +312,15 @@ impl PoolInner {
         self.relays_rejected_over_cap
     }
 
-    fn open_new(&mut self, url: RelayUrl) -> RelayHandle {
-        let slot_id = u32::try_from(self.slots.len()).expect("pool slot id overflow");
+    fn open_new(&mut self, url: RelayUrl) -> Result<RelayHandle, RelayOpenError> {
+        let slot_id = u32::try_from(self.slots.len()).map_err(|_| RelayOpenError::Unavailable)?;
         let worker_id = self.next_worker_id;
-        self.next_worker_id += 1;
+        self.next_worker_id = self
+            .next_worker_id
+            .checked_add(1)
+            .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &url);
+        let worker = self.spawn_worker(slot_id, worker_id, &url)?;
         self.slots.push(SlotState {
             url: url.clone(),
             worker: Some(worker),
@@ -202,17 +331,20 @@ impl PoolInner {
             },
         });
         self.url_to_slot.insert(url, slot_id);
-        RelayHandle {
+        Ok(RelayHandle {
             slot: slot_id,
             generation,
-        }
+        })
     }
 
-    fn reopen(&mut self, slot_id: u32, url: RelayUrl) -> RelayHandle {
+    fn reopen(&mut self, slot_id: u32, url: RelayUrl) -> Result<RelayHandle, RelayOpenError> {
         let worker_id = self.next_worker_id;
-        self.next_worker_id += 1;
+        self.next_worker_id = self
+            .next_worker_id
+            .checked_add(1)
+            .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &url);
+        let worker = self.spawn_worker(slot_id, worker_id, &url)?;
         self.slots[slot_id as usize] = SlotState {
             url,
             worker: Some(worker),
@@ -222,13 +354,18 @@ impl PoolInner {
                 ..RelayHealth::default()
             },
         };
-        RelayHandle {
+        Ok(RelayHandle {
             slot: slot_id,
             generation,
-        }
+        })
     }
 
-    fn spawn_worker(&self, slot_id: u32, worker_id: u32, url: &RelayUrl) -> WorkerHandle {
+    fn spawn_worker(
+        &self,
+        slot_id: u32,
+        worker_id: u32,
+        url: &RelayUrl,
+    ) -> Result<WorkerHandle, RelayOpenError> {
         let idle = self
             .config
             .keepalive_idle
@@ -257,7 +394,9 @@ impl PoolInner {
             pong_timeout,
             reconnect_delay_initial,
             reconnect_jitter_max,
+            self.spawner.as_ref(),
         )
+        .map_err(RelayOpenError::ThreadUnavailable)
     }
 
     pub(super) fn command_tx_for(&self, h: RelayHandle) -> Option<&WorkerHandle> {
@@ -292,8 +431,9 @@ impl PoolInner {
             return None;
         }
         let worker = state.worker.take()?;
-        worker.push(WorkerCommand::Shutdown);
+        let generation = state.generation;
         state.health.state = ConnState::Disconnected;
+        self.retire_worker(h.slot, generation, worker);
         Some(PoolEvent::Disconnected {
             handle: h,
             reason: DisconnectReason::Closed,
@@ -324,14 +464,20 @@ impl PoolInner {
     /// Tear down every open worker, hand back the translator's `JoinHandle`
     /// so the caller can join it *outside* this lock (the translator locks
     /// `PoolInner` per event; joining while holding the lock deadlocks).
-    pub(super) fn shutdown(&mut self) -> Option<JoinHandle<()>> {
+    pub(super) fn shutdown(&mut self) -> ShutdownHandles {
         self.shutdown = true;
-        for state in &mut self.slots {
-            let Some(worker) = state.worker.take() else {
-                continue;
-            };
-            worker.push(WorkerCommand::Shutdown);
-            state.health.state = ConnState::Disconnected;
+        let active: Vec<_> = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(slot, state)| {
+                let worker = state.worker.take()?;
+                state.health.state = ConnState::Disconnected;
+                Some((slot as u32, state.generation, worker))
+            })
+            .collect();
+        for (slot, generation, worker) in active {
+            self.retire_worker(slot, generation, worker);
         }
         // Drop the pool's own long-lived `Sender<WorkerEvent>` clone. Every
         // worker thread also holds a clone but each exits promptly after
@@ -342,8 +488,13 @@ impl PoolInner {
         // of blocking forever. Without this drop the channel could never
         // disconnect even after all worker threads exit, and `Pool::shutdown`
         // joining the translator handle would hang indefinitely.
-        self.worker_event_tx = None;
-        self.translator.take()
+        self.retire_tx = None;
+        ShutdownHandles {
+            reaper: self.reaper.take(),
+            translator: self.translator.take(),
+            orphaned_workers: std::mem::take(&mut self.orphaned_workers),
+            worker_event_tx: self.worker_event_tx.take(),
+        }
     }
 }
 
@@ -351,22 +502,58 @@ fn spawn_translator(
     inner: Arc<Mutex<PoolInner>>,
     worker_event_rx: std::sync::mpsc::Receiver<WorkerEvent>,
     config: PoolConfig,
-) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name("nmp-transport-pool-translator".to_string())
-        .spawn(move || translator_loop(&inner, &worker_event_rx, &config))
-        .expect("translator thread spawn must succeed")
+    verifier: VerifierPool,
+    spawner: &dyn ThreadSpawner,
+) -> Result<JoinHandle<()>, ThreadSpawnError> {
+    spawner
+        .spawn(
+            thread::Builder::new().name("nmp-transport-pool-translator".to_string()),
+            Box::new(move || translator_loop(&inner, &worker_event_rx, &config, verifier)),
+        )
+        .map_err(|error| ThreadSpawnError {
+            role: ThreadRole::PoolTranslator,
+            reason: error.to_string(),
+        })
+}
+
+fn spawn_reaper(
+    retire_rx: std::sync::mpsc::Receiver<RetireRequest>,
+    worker_event_tx: SyncSender<WorkerEvent>,
+    spawner: &dyn ThreadSpawner,
+) -> Result<JoinHandle<()>, ThreadSpawnError> {
+    spawner
+        .spawn(
+            thread::Builder::new().name("nmp-transport-relay-reaper".to_string()),
+            Box::new(move || {
+                while let Ok(request) = retire_rx.recv() {
+                    let _ = request.join.join();
+                    if worker_event_tx
+                        .send(WorkerEvent {
+                            slot: request.slot,
+                            generation: request.generation,
+                            kind: WorkerEventKind::Retired {
+                                worker_id: request.worker_id,
+                            },
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
+        )
+        .map_err(|error| ThreadSpawnError {
+            role: ThreadRole::RetirementReaper,
+            reason: error.to_string(),
+        })
 }
 
 fn translator_loop(
     inner: &Arc<Mutex<PoolInner>>,
     worker_event_rx: &std::sync::mpsc::Receiver<WorkerEvent>,
     config: &PoolConfig,
+    mut verifier: VerifierPool,
 ) {
-    let mut verifier = VerifierPool::new(
-        configured_verifier_workers(config.verifier_workers),
-        config.verifier_queue_capacity,
-    );
     let mut verified = VerifiedEventCache::new(config.verified_cache_capacity);
     let max_batch = config.max_verify_batch.max(1);
     while let Ok(event) = worker_event_rx.recv() {
@@ -466,16 +653,16 @@ fn translator_loop(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn configured_verifier_workers(configured: usize) -> usize {
+pub(super) fn configured_verifier_workers(configured: usize) -> usize {
     if configured == 0 {
-        std::thread::available_parallelism().map_or(1, usize::from)
+        super::DEFAULT_VERIFIER_WORKERS
     } else {
-        configured
+        configured.min(super::DEFAULT_VERIFIER_WORKERS)
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-fn configured_verifier_workers(_configured: usize) -> usize {
+pub(super) fn configured_verifier_workers(_configured: usize) -> usize {
     1
 }
 
@@ -649,6 +836,13 @@ fn apply_worker_event_with_verdict(
     event: WorkerEvent,
     preverified: Option<FrameVerdict>,
 ) -> Option<PoolEvent> {
+    if let WorkerEventKind::Retired { worker_id } = event.kind {
+        return inner
+            .retiring_worker_ids
+            .remove(&worker_id)
+            .then_some(PoolEvent::WorkerRetired);
+    }
+
     // `EventHandoff` (issue #93) is the one exception to every generation/
     // slot-state gate below: it is the sole, ever, resolution of a durable
     // EVENT's `AttemptCorrelation`, decided once by the worker itself. It
@@ -773,6 +967,9 @@ fn apply_worker_event_with_verdict(
         WorkerEventKind::EventHandoff { .. } => {
             unreachable!("EventHandoff already returned above, before any slot lookup")
         }
+        WorkerEventKind::Retired { .. } => {
+            unreachable!("Retired already returned above, before any slot lookup")
+        }
     }
 }
 
@@ -863,8 +1060,8 @@ mod tests {
 
     /// The relay-count admission cap (issue #121, worker-exhaustion half):
     /// with `max_relays: 2`, the pool opens two distinct relays but REFUSES
-    /// the third — returning the stale/dead sentinel (never a live slot) and
-    /// bumping the observable rejection counter — while an already-open relay
+    /// the third with a typed capacity error and bumps the observable rejection
+    /// counter, while an already-open relay
     /// stays idempotently openable. A hostile (validly-signed) kind:10002
     /// listing thousands of relays can never spawn thousands of workers.
     #[test]
@@ -883,25 +1080,17 @@ mod tests {
         let b = RelayUrl::parse("wss://relay-b.example").unwrap();
         let c = RelayUrl::parse("wss://relay-c.example").unwrap();
 
-        let ha = guard.ensure_open(&a);
-        let hb = guard.ensure_open(&b);
-        assert_ne!(ha.slot, u32::MAX, "first relay must open");
-        assert_ne!(hb.slot, u32::MAX, "second relay must open");
+        let ha = guard.try_ensure_open(&a).expect("first relay must open");
+        let hb = guard.try_ensure_open(&b).expect("second relay must open");
         assert_eq!(guard.relays_rejected_over_cap(), 0, "no rejection yet");
 
-        // The third DISTINCT relay is over the cap: refused with the dead
-        // sentinel, no slot created, counter bumped.
-        let hc = guard.ensure_open(&c);
+        // The third DISTINCT relay is over the cap: refused explicitly, no
+        // slot created, counter bumped.
         assert_eq!(
-            hc.slot,
-            u32::MAX,
-            "third relay must be refused past the cap"
+            guard.try_ensure_open(&c),
+            Err(RelayOpenError::AtCapacity { max_relays: 2 })
         );
         assert_eq!(guard.relays_rejected_over_cap(), 1);
-        assert!(
-            guard.command_tx_for(hc).is_none(),
-            "a cap-refused handle must be a structural no-op, exactly like a stale handle"
-        );
 
         // Re-opening an ALREADY-live relay is idempotent, never a rejection.
         let ha_again = guard.ensure_open(&a);
@@ -915,16 +1104,14 @@ mod tests {
             "idempotent reopen is not a rejection"
         );
 
-        // Closing one relay frees a slot in the live budget; the next new
-        // relay is admitted again.
+        // Closing one relay removes it from the active set, so one replacement
+        // may start. The retiring thread still consumes the separate bounded
+        // retirement allowance until its exact OS-thread exit is observed.
         assert!(guard.close(hb).is_some());
-        let hc2 = guard.ensure_open(&c);
-        assert_ne!(hc2.slot, u32::MAX, "a freed slot lets a new relay in again");
-        assert_eq!(
-            guard.relays_rejected_over_cap(),
-            1,
-            "the successful open is not a rejection"
-        );
+        guard
+            .try_ensure_open(&c)
+            .expect("the freed active slot admits one replacement");
+        assert_eq!(guard.relays_rejected_over_cap(), 1);
     }
 
     /// Zero is a legacy/default spelling, not an uncapped bypass. It is
@@ -942,14 +1129,17 @@ mod tests {
         let mut guard = inner.lock().unwrap();
         for i in 0..crate::DEFAULT_MAX_RELAYS {
             let url = RelayUrl::parse(&format!("wss://relay{i}.example")).unwrap();
-            assert_ne!(
-                guard.ensure_open(&url).slot,
-                u32::MAX,
-                "the finite default must admit its budget"
-            );
+            guard
+                .try_ensure_open(&url)
+                .expect("the finite default must admit its budget");
         }
         let over = RelayUrl::parse("wss://over-default.example").unwrap();
-        assert_eq!(guard.ensure_open(&over).slot, u32::MAX);
+        assert_eq!(
+            guard.try_ensure_open(&over),
+            Err(RelayOpenError::AtCapacity {
+                max_relays: crate::DEFAULT_MAX_RELAYS,
+            })
+        );
         assert_eq!(guard.relays_rejected_over_cap(), 1);
     }
 
@@ -1299,7 +1489,7 @@ mod tests {
         use crate::pool::{AttemptCorrelation, HandoffResult, Pool, WireFrame};
 
         let (tx, rx) = mpsc::channel();
-        let pool = Pool::new(PoolConfig::default(), tx);
+        let pool = Pool::new(PoolConfig::default(), tx).expect("test pool construction");
         let url = RelayUrl::parse("wss://relay.example").unwrap();
         let h1 = pool.ensure_open(&url).expect("relay admitted");
         assert!(pool.close(h1).is_some());
@@ -1323,7 +1513,8 @@ mod tests {
                 ..PoolConfig::default()
             },
             tx,
-        );
+        )
+        .expect("test pool construction");
         let admitted = RelayUrl::parse("wss://admitted.example").unwrap();
         let refused = RelayUrl::parse("wss://refused.example").unwrap();
 

@@ -424,7 +424,7 @@ impl NmpEngine {
         bunker_uri: String,
         timeout_millis: u64,
         observer: Box<dyn Nip46ConnectionObserver>,
-    ) -> Arc<Nip46Connection> {
+    ) -> Result<Arc<Nip46Connection>, FfiError> {
         let engine = Arc::clone(&self.engine);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
@@ -433,8 +433,8 @@ impl NmpEngine {
             connection.cancellation.clone(),
             bunker_uri,
             timeout_millis,
-        );
-        connection
+        )?;
+        Ok(connection)
     }
 
     pub fn connect_nip46_invitation(
@@ -461,7 +461,7 @@ impl NmpEngine {
             connection.cancellation.clone(),
             invitation,
             timeout_millis,
-        );
+        )?;
         Ok(connection)
     }
 }
@@ -471,25 +471,32 @@ fn spawn_bunker_connection(
     cancellation: nmp_signer::Nip46Cancellation,
     bunker_uri: String,
     timeout_millis: u64,
-) {
-    thread::spawn(move || {
-        let events = lifecycle_sink(connection.clone());
-        let result = nmp::Nip46Signer::connect_bunker_observed_with_cancellation(
-            &bunker_uri,
-            None,
-            nmp::Nip46ClientMetadata::default(),
-            Duration::from_millis(timeout_millis),
-            events,
-            &cancellation,
-        );
-        let Some(connection) = connection.upgrade() else {
-            return;
-        };
-        match result {
-            Ok(signer) => connection.attach(signer),
-            Err(error) => connection.fail(error.to_string()),
-        }
-    });
+) -> Result<(), FfiError> {
+    thread::Builder::new()
+        .name("nmp-ffi-nip46-bunker".to_string())
+        .spawn(move || {
+            let events = lifecycle_sink(connection.clone());
+            let result = nmp::Nip46Signer::connect_bunker_observed_with_cancellation(
+                &bunker_uri,
+                None,
+                nmp::Nip46ClientMetadata::default(),
+                Duration::from_millis(timeout_millis),
+                events,
+                &cancellation,
+            );
+            let Some(connection) = connection.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(signer) => connection.attach(signer),
+                Err(error) => connection.fail(error.to_string()),
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| FfiError::ThreadUnavailable {
+            component: "NIP-46 bunker connection".to_string(),
+            reason: error.to_string(),
+        })
 }
 
 fn spawn_invitation_connection(
@@ -497,22 +504,29 @@ fn spawn_invitation_connection(
     cancellation: nmp_signer::Nip46Cancellation,
     invitation: nmp::Nip46Invitation,
     timeout_millis: u64,
-) {
-    thread::spawn(move || {
-        let events = lifecycle_sink(connection.clone());
-        let result = invitation.connect_observed_with_cancellation(
-            Duration::from_millis(timeout_millis),
-            events,
-            &cancellation,
-        );
-        let Some(connection) = connection.upgrade() else {
-            return;
-        };
-        match result {
-            Ok(signer) => connection.attach(signer),
-            Err(error) => connection.fail(error.to_string()),
-        }
-    });
+) -> Result<(), FfiError> {
+    thread::Builder::new()
+        .name("nmp-ffi-nip46-invitation".to_string())
+        .spawn(move || {
+            let events = lifecycle_sink(connection.clone());
+            let result = invitation.connect_observed_with_cancellation(
+                Duration::from_millis(timeout_millis),
+                events,
+                &cancellation,
+            );
+            let Some(connection) = connection.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(signer) => connection.attach(signer),
+                Err(error) => connection.fail(error.to_string()),
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| FfiError::ThreadUnavailable {
+            component: "NIP-46 invitation connection".to_string(),
+            reason: error.to_string(),
+        })
 }
 
 fn lifecycle_sink(
@@ -756,7 +770,8 @@ mod tests {
             remote.public_key().to_hex(),
             url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
         );
-        spawn_bunker_connection(weak.clone(), connection.cancellation.clone(), uri, 60_000);
+        spawn_bunker_connection(weak.clone(), connection.cancellation.clone(), uri, 60_000)
+            .expect("test NIP-46 bridge spawn");
         accepted_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("the pending handshake opens its socket");

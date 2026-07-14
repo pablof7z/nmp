@@ -72,6 +72,9 @@ pub nmp::EngineError::StoreOpenFailed
 pub nmp::EngineError::StoreOpenFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreResetFailed
 pub nmp::EngineError::StoreResetFailed::reason: alloc::string::String
+pub nmp::EngineError::ThreadUnavailable
+pub nmp::EngineError::ThreadUnavailable::component: alloc::string::String
+pub nmp::EngineError::ThreadUnavailable::reason: alloc::string::String
 impl core::clone::Clone for nmp::EngineError
 pub fn nmp::EngineError::clone(&self) -> nmp::EngineError
 impl core::cmp::Eq for nmp::EngineError
@@ -20710,6 +20713,55 @@ reexport nmp::Nip46Error => nmp_signer::nip46::Nip46Error
             }
           },
           "name": "InvalidResponse",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "component",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "ThreadUnavailable",
           "visibility": "default"
         }
       ]

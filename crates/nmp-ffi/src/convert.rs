@@ -86,6 +86,12 @@ pub enum FfiError {
     StoreResetFailed {
         reason: String,
     },
+    /// One named engine/native thread could not be created. The component
+    /// and safe OS reason survive Swift/Kotlin error translation unchanged.
+    ThreadUnavailable {
+        component: String,
+        reason: String,
+    },
     /// A `FfiWritePayload::Signed`'s `sig` did not parse as a valid 64-byte
     /// hex schnorr signature.
     InvalidSignature {
@@ -136,6 +142,9 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::StoreResetFailed { reason } => Self::StoreResetFailed { reason },
+            nmp::EngineError::ThreadUnavailable { component, reason } => {
+                Self::ThreadUnavailable { component, reason }
+            }
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
@@ -163,6 +172,9 @@ impl std::fmt::Display for FfiError {
             }
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
+            Self::ThreadUnavailable { component, reason } => {
+                write!(f, "{component} thread unavailable: {reason}")
+            }
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
             Self::InvalidNostrEntity { reason } => write!(f, "invalid nostr entity: {reason}"),
@@ -1623,4 +1635,18 @@ mod tests {
             Ok(_) => panic!("must fail closed, not construct"),
         }
     }
+}
+#[test]
+fn engine_thread_refusal_preserves_component_and_reason_across_ffi() {
+    let error = FfiError::from(nmp::EngineError::ThreadUnavailable {
+        component: "signature verifier".to_string(),
+        reason: "Resource temporarily unavailable".to_string(),
+    });
+    assert_eq!(
+        error,
+        FfiError::ThreadUnavailable {
+            component: "signature verifier".to_string(),
+            reason: "Resource temporarily unavailable".to_string(),
+        }
+    );
 }

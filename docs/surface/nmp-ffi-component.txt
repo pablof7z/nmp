@@ -585,6 +585,27 @@ enum Enum {
             ),
         },
         Variant {
+            name: "ThreadUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "One named engine/native thread could not be created. The component\nand safe OS reason survive Swift/Kotlin error translation unchanged.",
+            ),
+        },
+        Variant {
             name: "InvalidSignature",
             discr: None,
             fields: [
@@ -761,6 +782,25 @@ enum Enum {
             name: "ReceiptUnavailable",
             discr: None,
             fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ThreadUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
             docstring: None,
         },
     ],
@@ -5197,11 +5237,16 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: None,
-            throws: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_connect_nip46_bunker",
             checksum: Some(
-                48474,
+                6328,
             ),
         },
         Method {

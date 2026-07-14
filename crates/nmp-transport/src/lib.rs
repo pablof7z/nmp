@@ -39,6 +39,7 @@ pub use admission::{classify_relay_host, relay_host_key, RelayHostClass};
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
 pub use pool::{
-    AttemptCorrelation, DisconnectReason, DurableSendOutcome, HandoffResult, Pool, PoolConfig,
-    PoolEvent, PoolEventSink, RelayFrame, RelayOpenError, WireFrame, DEFAULT_MAX_RELAYS,
+    AttemptCorrelation, DisconnectReason, DurableSendOutcome, HandoffResult, Pool, PoolBuildError,
+    PoolConfig, PoolEvent, PoolEventSink, RelayFrame, RelayOpenError, ThreadRole, ThreadSpawnError,
+    WireFrame, DEFAULT_MAX_RELAYS, DEFAULT_VERIFIER_WORKERS,
 };
