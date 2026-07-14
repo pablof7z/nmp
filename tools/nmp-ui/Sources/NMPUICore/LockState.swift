@@ -34,7 +34,13 @@ struct ConflictedComponent: Codable, Equatable {
 
 extension ProjectFileSystem {
     func transactionWrites(_ writes: [(String, String)], lock: LockState) throws -> [String: Data] {
-        var result = Dictionary(uniqueKeysWithValues: writes.map { ($0.0, Data($0.1.utf8)) })
+        var result: [String: Data] = [:]
+        for (path, content) in writes {
+            guard result[path] == nil else {
+                throw NMPUIError.invalidRegistry("duplicate planned destination \(path)")
+            }
+            result[path] = Data(content.utf8)
+        }
         result[Self.lockPath] = try encodedLock(lock)
         return result
     }
@@ -46,10 +52,14 @@ extension ProjectFileSystem {
     }
 
     func loadLock(registryVersion: String) throws -> LockState {
+        try loadLockSnapshot(registryVersion: registryVersion).state
+    }
+
+    func loadLockSnapshot(registryVersion: String) throws -> (state: LockState, file: FileState) {
         guard let data = try readDataIfPresent(Self.lockPath) else {
-            return .empty(registryVersion: registryVersion)
+            return (.empty(registryVersion: registryVersion), .absent)
         }
-        return try JSONDecoder().decode(LockState.self, from: data)
+        return (try JSONDecoder().decode(LockState.self, from: data), .present(data))
     }
 
     func saveLock(_ lock: LockState) throws {

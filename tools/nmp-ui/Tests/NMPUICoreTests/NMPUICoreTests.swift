@@ -198,6 +198,110 @@ final class NMPUICoreTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
     }
 
+    func testNameMaxFailureAfterParentCreationLeavesRootAndLockUntouched() throws {
+        let root = temporaryDirectory()
+        let finalComponent = String(repeating: "x", count: 256)
+        let catalog = catalog(
+            version: "v1",
+            components: [
+                component(
+                    "long-name",
+                    version: "1",
+                    source: "long.swift",
+                    destination: "New/\(finalComponent)"
+                ),
+            ],
+            templates: ["long.swift": "content\n"]
+        )
+        let installer = try NMPUIInstaller(catalog: catalog, projectRoot: root)
+
+        XCTAssertThrowsError(try installer.add("long-name"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("New").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(ProjectFileSystem.lockPath).path))
+    }
+
+    func testRegularFileCreatedAfterPlanningIsNeverOverwritten() throws {
+        let root = temporaryDirectory()
+        let target = root.appendingPathComponent("Components/Root.swift")
+        var injected = false
+        let installer = try NMPUIInstaller(
+            catalog: pairedCatalog(registry: "v1", dependency: "dep\n", root: "root\n", version: "1"),
+            projectRoot: root
+        ) { point in
+            guard point == .write("Components/Root.swift"), !injected else { return }
+            injected = true
+            try Data("unmanaged concurrent file\n".utf8).write(to: target)
+        }
+
+        XCTAssertThrowsError(try installer.add("root")) { error in
+            XCTAssertEqual(error as? NMPUIError, .collision("Components/Root.swift"))
+        }
+        XCTAssertTrue(injected)
+        XCTAssertEqual(try String(contentsOf: target), "unmanaged concurrent file\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Components/Dep.swift").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(ProjectFileSystem.lockPath).path))
+    }
+
+    func testDuplicateDestinationWithinComponentIsTypedBeforeMutation() throws {
+        let root = temporaryDirectory()
+        let duplicate = RegistryComponent(
+            name: "duplicate",
+            version: "1",
+            summary: "duplicate",
+            files: [
+                RegistryFile(source: "one.swift", destination: "Components/Same.swift"),
+                RegistryFile(source: "two.swift", destination: "Components/Same.swift"),
+            ]
+        )
+        let duplicateCatalog = catalog(
+            version: "v1",
+            components: [duplicate],
+            templates: ["one.swift": "one\n", "two.swift": "two\n"]
+        )
+
+        XCTAssertThrowsError(try NMPUIInstaller(catalog: duplicateCatalog, projectRoot: root)) { error in
+            XCTAssertEqual(
+                error as? NMPUIError,
+                .invalidRegistry("duplicate destination Components/Same.swift in component duplicate")
+            )
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
+    func testDuplicateDestinationAcrossDependencyClosureIsTypedBeforeMutation() throws {
+        let root = temporaryDirectory()
+        let duplicateCatalog = catalog(
+            version: "v1",
+            components: [
+                component(
+                    "dependency",
+                    version: "1",
+                    source: "dep.swift",
+                    destination: "Components/Shared.swift"
+                ),
+                component(
+                    "root",
+                    version: "1",
+                    source: "root.swift",
+                    destination: "Components/Shared.swift",
+                    dependencies: ["dependency"]
+                ),
+            ],
+            templates: ["dep.swift": "dep\n", "root.swift": "root\n"]
+        )
+
+        XCTAssertThrowsError(try NMPUIInstaller(catalog: duplicateCatalog, projectRoot: root)) { error in
+            XCTAssertEqual(
+                error as? NMPUIError,
+                .invalidRegistry(
+                    "destination Components/Shared.swift belongs to both dependency and root"
+                )
+            )
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
     func testDiffReportsCleanModifiedAndMissingFiles() throws {
         let root = temporaryDirectory()
         let installer = try NMPUIInstaller(catalog: .bundled(), projectRoot: root)
@@ -249,6 +353,57 @@ final class NMPUICoreTests: XCTestCase {
 
     func testLateUpdateLockFailureRestoresEveryFileAndLockAndRemovesNewFiles() throws {
         try assertUpdateRollback(at: .write(ProjectFileSystem.lockPath))
+    }
+
+    func testManagedFileEditedAfterPlanningIsRestoredAndNeverOverwritten() throws {
+        let root = temporaryDirectory()
+        let v1 = pairedCatalog(registry: "v1", dependency: "dep one\n", root: "root one\n", version: "1")
+        _ = try NMPUIInstaller(catalog: v1, projectRoot: root).add("root")
+        let dependencyURL = root.appendingPathComponent("Components/Dep.swift")
+        let rootURL = root.appendingPathComponent("Components/Root.swift")
+        let lockURL = root.appendingPathComponent(ProjectFileSystem.lockPath)
+        let lockBefore = try Data(contentsOf: lockURL)
+        var injected = false
+        let v2 = pairedCatalog(registry: "v2", dependency: "dep two\n", root: "root two\n", version: "2")
+        let installer = try NMPUIInstaller(catalog: v2, projectRoot: root) { point in
+            guard point == .write("Components/Root.swift"), !injected else { return }
+            injected = true
+            try Data("root concurrent\n".utf8).write(to: rootURL)
+        }
+
+        XCTAssertThrowsError(try installer.update("root")) { error in
+            XCTAssertEqual(error as? NMPUIError, .concurrentModification("Components/Root.swift"))
+        }
+        XCTAssertTrue(injected)
+        XCTAssertEqual(try String(contentsOf: rootURL), "root concurrent\n")
+        XCTAssertEqual(try String(contentsOf: dependencyURL), "dep one\n")
+        XCTAssertEqual(try Data(contentsOf: lockURL), lockBefore)
+    }
+
+    func testRollbackNeverOverwritesEditMadeAfterSuccessfulMutation() throws {
+        let root = temporaryDirectory()
+        let v1 = pairedCatalog(registry: "v1", dependency: "dep one\n", root: "root one\n", version: "1")
+        _ = try NMPUIInstaller(catalog: v1, projectRoot: root).add("root")
+        let dependencyURL = root.appendingPathComponent("Components/Dep.swift")
+        let rootURL = root.appendingPathComponent("Components/Root.swift")
+        let lockURL = root.appendingPathComponent(ProjectFileSystem.lockPath)
+        let lockBefore = try Data(contentsOf: lockURL)
+        let v2 = pairedCatalog(registry: "v2", dependency: "dep two\n", root: "root two\n", version: "2")
+        let installer = try NMPUIInstaller(catalog: v2, projectRoot: root) { point in
+            guard point == .write("Components/Root.swift") else { return }
+            try Data("dependency concurrent\n".utf8).write(to: dependencyURL)
+            throw InjectedFailure.mutation(point)
+        }
+
+        XCTAssertThrowsError(try installer.update("root")) { error in
+            guard case .transactionFailed(let message) = error as? NMPUIError else {
+                return XCTFail("expected transactionFailed, got \(error)")
+            }
+            XCTAssertTrue(message.contains("managed path changed concurrently: Components/Dep.swift"))
+        }
+        XCTAssertEqual(try String(contentsOf: dependencyURL), "dependency concurrent\n")
+        XCTAssertEqual(try String(contentsOf: rootURL), "root one\n")
+        XCTAssertEqual(try Data(contentsOf: lockURL), lockBefore)
     }
 
     func testDisjointLocalAndUpstreamEditsMerge() throws {
