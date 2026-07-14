@@ -25,6 +25,7 @@ use crate::health::RelayHealth;
 mod connect;
 mod frame;
 mod inner;
+mod spawn;
 mod verify;
 mod worker;
 
@@ -35,12 +36,75 @@ use inner::PoolInner;
 /// silently re-enable unbounded worker growth.
 pub const DEFAULT_MAX_RELAYS: usize = 10;
 
+/// Small fixed verifier set owned by one engine. Signature verification is
+/// CPU-bound and fed through bounded queues; copying host parallelism into
+/// every engine multiplied OS threads without imposing a process budget.
+pub const DEFAULT_VERIFIER_WORKERS: usize = 2;
+
+/// The finite thread role whose OS spawn was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadRole {
+    RelayWorker,
+    RetirementReaper,
+    PoolTranslator,
+    VerifierWorker,
+}
+
+impl std::fmt::Display for ThreadRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RelayWorker => "relay worker",
+            Self::RetirementReaper => "relay retirement reaper",
+            Self::PoolTranslator => "pool translator",
+            Self::VerifierWorker => "signature verifier",
+        })
+    }
+}
+
+/// Safe, owned description of an OS thread-spawn refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadSpawnError {
+    pub role: ThreadRole,
+    pub reason: String,
+}
+
+impl std::fmt::Display for ThreadSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} thread unavailable: {}", self.role, self.reason)
+    }
+}
+
+impl std::error::Error for ThreadSpawnError {}
+
+/// A pool cannot exist without its finite verifier/translation/retirement
+/// executors. Construction is all-or-nothing and cleans up any threads that
+/// were started before a later spawn failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PoolBuildError {
+    ThreadUnavailable(ThreadSpawnError),
+    RelayBudgetOverflow { max_relays: usize },
+}
+
+impl std::fmt::Display for PoolBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ThreadUnavailable(error) => error.fmt(f),
+            Self::RelayBudgetOverflow { max_relays } => write!(
+                f,
+                "relay worker budget {max_relays} cannot represent its finite retirement envelope"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PoolBuildError {}
+
 /// A typed refusal to create or recover a relay worker.
 ///
 /// Callers must handle this result before they receive a [`RelayHandle`], so
 /// a relay-cap refusal cannot be mistaken for a live generation and silently
 /// fed into [`Pool::send`] as an opaque sentinel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayOpenError {
     /// Opening another live worker would exceed the pool-wide ceiling.
     AtCapacity { max_relays: usize },
@@ -48,6 +112,9 @@ pub enum RelayOpenError {
     ShuttingDown,
     /// Pool state was poisoned; fail closed instead of returning a handle.
     Unavailable,
+    /// The OS refused the relay worker thread. No slot or generation was
+    /// published and the thread budget remains unchanged.
+    ThreadUnavailable(ThreadSpawnError),
 }
 
 impl std::fmt::Display for RelayOpenError {
@@ -58,6 +125,7 @@ impl std::fmt::Display for RelayOpenError {
             }
             Self::ShuttingDown => f.write_str("relay pool is shutting down"),
             Self::Unavailable => f.write_str("relay pool state is unavailable"),
+            Self::ThreadUnavailable(error) => error.fmt(f),
         }
     }
 }
@@ -240,6 +308,10 @@ pub enum PoolEvent {
         handle: RelayHandle,
         health: RelayHealth,
     },
+    /// A previously closed relay worker has actually exited and its OS
+    /// thread has been joined. The engine uses this edge to retry exact
+    /// required demand immediately, without polling a retiring budget.
+    WorkerRetired,
     /// The one, ever, typed result for a durable `EVENT` handoff submitted
     /// via [`Pool::send_durable`] (issue #93). Delivered EXACTLY once per
     /// [`AttemptCorrelation`], unconditionally — never gated on the slot's
@@ -290,8 +362,8 @@ pub struct PoolConfig {
     pub ingest_queue_capacity: usize,
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
-    /// Persistent native verification workers. Zero selects available host
-    /// parallelism; wasm always uses the deterministic sequential path.
+    /// Persistent native verification workers. Zero selects the small fixed
+    /// [`DEFAULT_VERIFIER_WORKERS`] set; it never mirrors host parallelism.
     pub verifier_workers: usize,
     /// Maximum verification tasks queued at each persistent worker.
     pub verifier_queue_capacity: usize,
@@ -361,11 +433,18 @@ impl Pool {
     /// Construct a new pool. `sink` receives every [`PoolEvent`] until the
     /// pool is shut down (or the sink itself is dropped, for the blanket
     /// `mpsc::Sender` impl).
-    #[must_use]
-    pub fn new(cfg: PoolConfig, sink: impl PoolEventSink) -> Self {
-        Self {
-            inner: PoolInner::new(cfg, Arc::new(sink)),
-        }
+    pub fn new(cfg: PoolConfig, sink: impl PoolEventSink) -> Result<Self, PoolBuildError> {
+        Self::new_with_spawner(cfg, Arc::new(sink), spawn::system_spawner())
+    }
+
+    fn new_with_spawner(
+        cfg: PoolConfig,
+        sink: Arc<dyn PoolEventSink>,
+        spawner: Arc<dyn spawn::ThreadSpawner>,
+    ) -> Result<Self, PoolBuildError> {
+        Ok(Self {
+            inner: PoolInner::try_new(cfg, sink, spawner)?,
+        })
     }
 
     /// Ensure a worker is dialing/connected for `url`. Idempotent for a
@@ -375,14 +454,7 @@ impl Pool {
     /// as a typed error; this API never manufactures an invalid handle.
     pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
         match self.inner.lock() {
-            Ok(mut guard) => {
-                let handle = guard.ensure_open(url);
-                if handle.slot == u32::MAX {
-                    Err(guard.open_refusal())
-                } else {
-                    Ok(handle)
-                }
-            }
+            Ok(mut guard) => guard.try_ensure_open(url),
             Err(_) => Err(RelayOpenError::Unavailable),
         }
     }
@@ -532,12 +604,113 @@ impl Pool {
     /// [`RelayOpenError::ShuttingDown`]; subsequent `send` calls are
     /// structural no-ops. Joins the translator thread before returning.
     pub fn shutdown(&self) {
-        let handle = match self.inner.lock() {
+        let handles = match self.inner.lock() {
             Ok(mut guard) => guard.shutdown(),
-            Err(_) => None,
+            Err(_) => return,
         };
-        if let Some(handle) = handle {
-            let _ = handle.join();
+        handles.join();
+    }
+}
+
+#[cfg(test)]
+mod thread_budget_tests {
+    use super::spawn::test_support::RefusingThreadSpawner;
+    use super::*;
+    use std::sync::{mpsc, Arc};
+
+    fn test_pool(
+        successful_spawns: usize,
+        max_relays: usize,
+    ) -> (
+        Arc<RefusingThreadSpawner>,
+        Result<Pool, PoolBuildError>,
+        mpsc::Receiver<PoolEvent>,
+    ) {
+        let spawner = Arc::new(RefusingThreadSpawner::after(successful_spawns));
+        let erased: Arc<dyn spawn::ThreadSpawner> = spawner.clone();
+        let (sink, events) = mpsc::channel();
+        let pool = Pool::new_with_spawner(
+            PoolConfig {
+                max_relays,
+                ..PoolConfig::default()
+            },
+            Arc::new(sink),
+            erased,
+        );
+        (spawner, pool, events)
+    }
+
+    #[test]
+    fn injected_construction_refusals_are_typed_and_cleanup_exactly() {
+        for (allowed, expected_role) in [
+            (0, ThreadRole::RetirementReaper),
+            (1, ThreadRole::VerifierWorker),
+            (2, ThreadRole::VerifierWorker),
+            (3, ThreadRole::PoolTranslator),
+        ] {
+            let (spawner, result, _events) = test_pool(allowed, 1);
+            let error = match result {
+                Err(PoolBuildError::ThreadUnavailable(error)) => error,
+                _ => panic!("injected spawn refusal must stay typed"),
+            };
+            assert_eq!(error.role, expected_role);
+            assert_eq!(error.reason, "injected thread pressure");
+            assert_eq!(
+                spawner.live(),
+                0,
+                "partial construction must join all threads"
+            );
         }
+    }
+
+    #[test]
+    fn relay_spawn_refusal_is_typed_without_publishing_a_slot() {
+        // reaper + two verifier workers + translator succeed; relay fails.
+        let (spawner, pool, _events) = test_pool(4, 1);
+        let pool = pool.expect("fixed engine executors fit the injected budget");
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let error = pool.ensure_open(&relay).unwrap_err();
+        assert!(matches!(
+            error,
+            RelayOpenError::ThreadUnavailable(ThreadSpawnError {
+                role: ThreadRole::RelayWorker,
+                ..
+            })
+        ));
+        assert!(pool.live_handle(&relay).is_none());
+        assert_eq!(spawner.live(), 4);
+        pool.shutdown();
+        assert_eq!(spawner.live(), 0);
+    }
+
+    #[test]
+    fn cap_sized_churn_never_exceeds_active_plus_retiring_envelope_and_joins() {
+        let (spawner, pool, _events) = test_pool(usize::MAX, 1);
+        let pool = pool.unwrap();
+        let first = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let second = RelayUrl::parse("ws://127.0.0.1:10").unwrap();
+        let first_handle = pool.ensure_open(&first).unwrap();
+        pool.close(first_handle).unwrap();
+        let second_handle = pool.ensure_open(&second).unwrap();
+        pool.close(second_handle).unwrap();
+
+        // Four fixed engine executors + at most two relay OS threads: one
+        // active allowance and one retirement allowance.
+        assert!(spawner.peak() <= 6, "relay churn escaped the 2x envelope");
+        pool.shutdown();
+        assert_eq!(spawner.live(), 0, "shutdown is an exact join barrier");
+    }
+
+    #[test]
+    fn verifier_worker_configuration_saturates_at_fixed_engine_budget() {
+        assert_eq!(
+            inner::configured_verifier_workers(0),
+            DEFAULT_VERIFIER_WORKERS
+        );
+        assert_eq!(inner::configured_verifier_workers(1), 1);
+        assert_eq!(
+            inner::configured_verifier_workers(usize::MAX),
+            DEFAULT_VERIFIER_WORKERS
+        );
     }
 }

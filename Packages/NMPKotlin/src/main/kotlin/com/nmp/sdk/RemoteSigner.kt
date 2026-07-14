@@ -190,11 +190,13 @@ fun NMPEngine.connectNip46(
     timeout: Duration = 60.seconds,
 ): NMPNip46Connection {
     val observer = NMPNip46Observer()
-    val ffiConnection = ffi.connectNip46Bunker(
-        bunkerUri,
-        timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
-        observer,
-    )
+    val ffiConnection = nmpRethrowing {
+        ffi.connectNip46Bunker(
+            bunkerUri,
+            timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
+            observer,
+        )
+    }
     return NMPNip46Connection(observer, ffiConnection)
 }
 

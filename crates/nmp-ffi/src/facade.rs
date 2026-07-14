@@ -38,6 +38,61 @@ use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
 use crate::types::{FfiDemand, FfiFilter, FfiReceiptReattachment, FfiWriteIntent};
 use nmp::ReceiptReattachment;
 
+fn spawn_native_bridge(
+    component: &'static str,
+    task: impl FnOnce() + Send + 'static,
+) -> Result<(), FfiError> {
+    spawn_native_bridge_with(component, Box::new(task), |builder, task| {
+        builder.spawn(task)
+    })
+}
+
+fn spawn_native_bridge_with(
+    component: &'static str,
+    task: Box<dyn FnOnce() + Send + 'static>,
+    spawn: impl FnOnce(
+        thread::Builder,
+        Box<dyn FnOnce() + Send + 'static>,
+    ) -> std::io::Result<thread::JoinHandle<()>>,
+) -> Result<(), FfiError> {
+    spawn(
+        thread::Builder::new().name(format!("nmp-ffi-{component}")),
+        task,
+    )
+    .map(|_| ())
+    .map_err(|error| FfiError::ThreadUnavailable {
+        component: component.to_string(),
+        reason: error.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod thread_spawn_tests {
+    use super::*;
+
+    #[test]
+    fn injected_native_bridge_refusal_is_typed_and_preserves_safe_reason() {
+        let error = spawn_native_bridge_with(
+            "row-observer",
+            Box::new(|| panic!("refused task must never run")),
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "injected thread pressure",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FfiError::ThreadUnavailable {
+                component: "row-observer".to_string(),
+                reason: "injected thread pressure".to_string(),
+            }
+        );
+    }
+}
+
 fn reattachment_to_ffi(value: &ReceiptReattachment) -> FfiReceiptReattachment {
     match value {
         ReceiptReattachment::Attached(_) => FfiReceiptReattachment::Attached,
@@ -63,12 +118,21 @@ fn start_following_action(
         }
     };
     let action = nmp_nip02::set_following(engine, target, change);
-    thread::spawn(move || {
-        while let Ok(status) = action.recv() {
-            observer.on_status(action_status_to_ffi(status));
-        }
+    let observer: Arc<dyn FollowActionObserver> = Arc::from(observer);
+    let bridge = Arc::clone(&observer);
+    if let Err(FfiError::ThreadUnavailable { component, reason }) =
+        spawn_native_bridge("follow-action-observer", move || {
+            while let Ok(status) = action.recv() {
+                bridge.on_status(action_status_to_ffi(status));
+            }
+            bridge.on_closed();
+        })
+    {
+        observer.on_status(crate::nip02::FfiFollowActionStatus::Failed {
+            failure: crate::nip02::FfiFollowActionFailure::ThreadUnavailable { component, reason },
+        });
         observer.on_closed();
-    });
+    }
 }
 
 /// Construction config for [`NmpEngine::new`]. See the module doc: the only
@@ -203,12 +267,12 @@ impl NmpEngine {
         let target = parse_pubkey(&target)?;
         let observation = nmp_nip02::observe_following(self.engine.clone(), target)?;
         let cancel = observation.cancel_handle();
-        thread::spawn(move || {
+        spawn_native_bridge("follow-observer", move || {
             while let Some(snapshot) = observation.recv() {
                 observer.on_snapshot(snapshot_to_ffi(snapshot));
             }
             observer.on_closed();
-        });
+        })?;
         Ok(follow_handle(cancel))
     }
 
@@ -222,7 +286,7 @@ impl NmpEngine {
             target,
             nmp_nip02::FollowChange::Follow,
             observer,
-        )
+        );
     }
 
     /// The inverse of [`Self::follow`], with the same acquisition,
@@ -233,7 +297,7 @@ impl NmpEngine {
             target,
             nmp_nip02::FollowChange::Unfollow,
             observer,
-        )
+        );
     }
 
     /// Open a live subscription. `observer` is driven from a dedicated drain
@@ -251,13 +315,13 @@ impl NmpEngine {
         let subscription = self.engine.observe(nmp::LiveQuery::from_filter(filter))?;
         let cancel = subscription.cancel_handle();
 
-        thread::spawn(move || {
+        spawn_native_bridge("row-observer", move || {
             while let Ok((deltas, evidence)) = subscription.recv() {
                 let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
                 observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
             }
             observer.on_closed();
-        });
+        })?;
 
         Ok(Arc::new(NmpQueryHandle { cancel }))
     }
@@ -277,13 +341,13 @@ impl NmpEngine {
         let subscription = self.engine.observe(nmp::LiveQuery(demand))?;
         let cancel = subscription.cancel_handle();
 
-        thread::spawn(move || {
+        spawn_native_bridge("demand-observer", move || {
             while let Ok((deltas, evidence)) = subscription.recv() {
                 let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
                 observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
             }
             observer.on_closed();
-        });
+        })?;
 
         Ok(Arc::new(NmpQueryHandle { cancel }))
     }
@@ -309,12 +373,12 @@ impl NmpEngine {
         let receipt_id = receipt.id.0;
         let receipt_rx = receipt.statuses;
 
-        thread::spawn(move || {
+        spawn_native_bridge("receipt-observer", move || {
             while let Ok(status) = receipt_rx.recv() {
                 observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
             }
             observer.on_closed();
-        });
+        })?;
 
         Ok(receipt_id)
     }
@@ -364,12 +428,12 @@ impl NmpEngine {
         let receipt_id = receipt.id.0;
         let receipt_rx = receipt.statuses;
 
-        thread::spawn(move || {
+        spawn_native_bridge("composed-receipt-observer", move || {
             while let Ok(status) = receipt_rx.recv() {
                 observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
             }
             observer.on_closed();
-        });
+        })?;
 
         Ok(receipt_id)
     }
@@ -385,12 +449,12 @@ impl NmpEngine {
         let ffi_result = reattachment_to_ffi(&result);
         match result {
             ReceiptReattachment::Attached(receipt_rx) => {
-                thread::spawn(move || {
+                spawn_native_bridge("reattached-receipt-observer", move || {
                     while let Ok(status) = receipt_rx.recv() {
                         observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
                     }
                     observer.on_closed();
-                });
+                })?;
             }
             ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {}
         }
@@ -412,12 +476,12 @@ impl NmpEngine {
         let subscription = self.engine.observe_diagnostics()?;
         let cancel = subscription.cancel_handle();
 
-        thread::spawn(move || {
+        spawn_native_bridge("diagnostics-observer", move || {
             while let Some(snapshot) = subscription.recv() {
                 observer.on_snapshot(diagnostics_snapshot_to_ffi(snapshot));
             }
             observer.on_closed();
-        });
+        })?;
 
         Ok(Arc::new(NmpDiagnosticsHandle { cancel }))
     }
@@ -741,7 +805,7 @@ mod tests {
     /// #99: PR #97's FFI reattach coverage stopped at `reattachment_to_ffi`,
     /// a pure enum-mapping unit test -- it never drove the real
     /// `NmpEngine::reattach_receipt` method, so a broken observer-forwarding
-    /// `thread::spawn` (facade.rs's `Attached` arm) could leave direct Rust
+    /// observer bridge spawn (facade.rs's `Attached` arm) could leave direct Rust
     /// correct while every FFI caller silently received nothing. This test
     /// publishes a real durable intent (no signer ever attaches, so it
     /// settles into a genuinely RETAINED `Accepted`+`AwaitingCapability`
@@ -797,7 +861,7 @@ mod tests {
         );
 
         // Reattach through a FRESH observer/channel -- exercises the real
-        // `thread::spawn` forwarding path in `NmpEngine::reattach_receipt`,
+        // observer forwarding path in `NmpEngine::reattach_receipt`,
         // not just the enum mapping.
         let (tx2, rx2) = mpsc::channel();
         let replay_observer = Box::new(ChannelReceiptObserver {

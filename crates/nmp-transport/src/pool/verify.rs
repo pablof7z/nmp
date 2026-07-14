@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use nostr::Event;
 
+use super::spawn::ThreadSpawner;
+use super::{ThreadRole, ThreadSpawnError};
 use crate::health::RelayHealth;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,9 +32,6 @@ use nostr::secp256k1::{Secp256k1, VerifyOnly};
 /// The bounded queues apply backpressure to the translator instead of letting
 /// a relay burst allocate an unbounded backlog. A queue belongs to one worker,
 /// so no mutex is needed around task receipt or the worker's secp context.
-#[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_QUEUE_CAPACITY: usize = 64;
-
 /// Persistent, bounded signature-verification executor.
 ///
 /// Results returned by [`VerifierPool::verify_batch`] always correspond to the
@@ -41,11 +40,13 @@ const DEFAULT_QUEUE_CAPACITY: usize = 64;
 /// thread.
 pub(super) struct VerifierPool {
     #[cfg(not(target_arch = "wasm32"))]
-    workers: Vec<Worker>,
+    workers: Vec<Option<Worker>>,
     #[cfg(not(target_arch = "wasm32"))]
     next_worker: usize,
     #[cfg(not(target_arch = "wasm32"))]
     queue_capacity: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    spawner: Arc<dyn ThreadSpawner>,
     #[cfg(target_arch = "wasm32")]
     secp: Secp256k1<VerifyOnly>,
 }
@@ -84,27 +85,39 @@ impl VerifierPool {
     /// Both values are clamped to one. They are retained in the wasm signature
     /// so callers can construct the pool without target-specific application
     /// code; wasm still executes sequentially and does not create queues.
-    pub(super) fn new(worker_count: usize, queue_capacity: usize) -> Self {
+    pub(super) fn new(
+        worker_count: usize,
+        queue_capacity: usize,
+        spawner: Arc<dyn ThreadSpawner>,
+    ) -> Result<Self, ThreadSpawnError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let worker_count = worker_count.max(1);
             let queue_capacity = queue_capacity.max(1);
-            let workers = (0..worker_count)
-                .map(|index| Worker::spawn(index, queue_capacity))
-                .collect();
-            Self {
+            let mut workers = Vec::with_capacity(worker_count);
+            for index in 0..worker_count {
+                match Worker::spawn(index, queue_capacity, spawner.as_ref()) {
+                    Ok(worker) => workers.push(Some(worker)),
+                    Err(error) => {
+                        shutdown_workers(&mut workers);
+                        return Err(error);
+                    }
+                }
+            }
+            Ok(Self {
                 workers,
                 next_worker: 0,
                 queue_capacity,
-            }
+                spawner,
+            })
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (worker_count, queue_capacity);
-            Self {
+            let _ = (worker_count, queue_capacity, spawner);
+            Ok(Self {
                 secp: Secp256k1::verification_only(),
-            }
+            })
         }
     }
 
@@ -129,16 +142,21 @@ impl VerifierPool {
                     event: Arc::clone(event),
                     results: results_tx.clone(),
                 };
-                if let Err(error) = self.workers[worker].tasks.send(task) {
+                let Some(lane) = self.workers[worker].as_ref() else {
+                    drop(task);
+                    self.try_replace_worker(worker);
+                    continue;
+                };
+                if let Err(error) = lane.tasks.send(task) {
                     // Retire and replace the failed lane immediately. The
                     // affected task remains fail-closed for this batch, but a
                     // dead worker can never poison every Nth future event.
-                    let replacement = Worker::spawn(worker, self.queue_capacity);
-                    let mut failed = std::mem::replace(&mut self.workers[worker], replacement);
+                    let mut failed = self.workers[worker].take().expect("lane checked above");
                     if let Some(join) = failed.join.take() {
                         let _ = join.join();
                     }
                     drop(error.0);
+                    self.try_replace_worker(worker);
                 }
             }
             drop(results_tx);
@@ -173,6 +191,16 @@ impl VerifierPool {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_replace_worker(&mut self, index: usize) {
+        if self.workers[index].is_some() {
+            return;
+        }
+        if let Ok(worker) = Worker::spawn(index, self.queue_capacity, self.spawner.as_ref()) {
+            self.workers[index] = Some(worker);
+        }
+    }
+
     #[cfg(all(test, not(target_arch = "wasm32")))]
     fn worker_count(&self) -> usize {
         self.workers.len()
@@ -180,7 +208,7 @@ impl VerifierPool {
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
     fn stop_worker(&mut self, index: usize) {
-        let worker = &mut self.workers[index];
+        let worker = self.workers[index].as_mut().expect("test worker exists");
         let _ = worker.tasks.send(Task::Shutdown);
         if let Some(join) = worker.join.take() {
             join.join().expect("test worker must stop cleanly");
@@ -188,33 +216,27 @@ impl VerifierPool {
     }
 }
 
-impl Default for VerifierPool {
-    fn default() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let workers = std::thread::available_parallelism().map_or(1, usize::from);
-            Self::new(workers, DEFAULT_QUEUE_CAPACITY)
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            Self::new(1, 1)
-        }
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 impl Worker {
-    fn spawn(index: usize, queue_capacity: usize) -> Self {
+    fn spawn(
+        index: usize,
+        queue_capacity: usize,
+        spawner: &dyn ThreadSpawner,
+    ) -> Result<Self, ThreadSpawnError> {
         let (tasks_tx, tasks_rx) = mpsc::sync_channel(queue_capacity);
-        let join = std::thread::Builder::new()
-            .name(format!("nmp-verify-{index}"))
-            .spawn(move || worker_loop(tasks_rx))
-            .expect("failed to start signature-verification worker");
-        Self {
+        let join = spawner
+            .spawn(
+                std::thread::Builder::new().name(format!("nmp-verify-{index}")),
+                Box::new(move || worker_loop(tasks_rx)),
+            )
+            .map_err(|error| ThreadSpawnError {
+                role: ThreadRole::VerifierWorker,
+                reason: error.to_string(),
+            })?;
+        Ok(Self {
             tasks: tasks_tx,
             join: Some(join),
-        }
+        })
     }
 }
 
@@ -245,17 +267,22 @@ fn worker_loop(tasks: Receiver<Task>) {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for VerifierPool {
     fn drop(&mut self) {
-        for worker in &self.workers {
-            // A disconnected worker has already stopped and will be joined
-            // below. A full queue drains before this bounded send completes.
-            let _ = worker.tasks.send(Task::Shutdown);
-        }
-        for worker in &mut self.workers {
-            if let Some(join) = worker.join.take() {
-                // Drop must remain non-panicking even if a worker encountered
-                // an unexpected panic while executing application work.
-                let _ = join.join();
-            }
+        shutdown_workers(&mut self.workers);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shutdown_workers(workers: &mut [Option<Worker>]) {
+    for worker in workers.iter().flatten() {
+        // A disconnected worker has already stopped and will be joined
+        // below. A full queue drains before this bounded send completes.
+        let _ = worker.tasks.send(Task::Shutdown);
+    }
+    for worker in workers.iter_mut() {
+        if let Some(join) = worker.as_mut().and_then(|worker| worker.join.take()) {
+            // Drop must remain non-panicking even if a worker encountered
+            // an unexpected panic while executing application work.
+            let _ = join.join();
         }
     }
 }
@@ -273,6 +300,7 @@ pub(super) fn record_unavailable(health: &mut RelayHealth) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::spawn::system_spawner;
     use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage};
 
     fn signed_event(keys: &Keys, content: &str) -> Event {
@@ -305,7 +333,7 @@ mod tests {
                 }
             })
             .collect();
-        let mut pool = VerifierPool::new(4, 2);
+        let mut pool = VerifierPool::new(4, 2, system_spawner()).unwrap();
 
         assert_eq!(pool.verify_batch(&events), expected);
     }
@@ -313,7 +341,7 @@ mod tests {
     #[test]
     fn persistent_pool_can_verify_multiple_bursts() {
         let keys = Keys::generate();
-        let mut pool = VerifierPool::new(3, 1);
+        let mut pool = VerifierPool::new(3, 1, system_spawner()).unwrap();
 
         for burst in 0..8 {
             let events: Vec<_> = (0..13)
@@ -331,13 +359,13 @@ mod tests {
 
     #[test]
     fn empty_batch_is_empty() {
-        let mut pool = VerifierPool::new(2, 1);
+        let mut pool = VerifierPool::new(2, 1, system_spawner()).unwrap();
         assert!(pool.verify_batch(&[]).is_empty());
     }
 
     #[test]
     fn zero_configuration_is_clamped_and_drop_joins_workers() {
-        let pool = VerifierPool::new(0, 0);
+        let pool = VerifierPool::new(0, 0, system_spawner()).unwrap();
         #[cfg(not(target_arch = "wasm32"))]
         assert_eq!(pool.worker_count(), 1);
         drop(pool);
@@ -348,7 +376,7 @@ mod tests {
     fn stopped_worker_fails_affected_batch_closed_without_panicking() {
         let keys = Keys::generate();
         let events = vec![Arc::new(signed_event(&keys, "must not escape"))];
-        let mut pool = VerifierPool::new(1, 1);
+        let mut pool = VerifierPool::new(1, 1, system_spawner()).unwrap();
         pool.stop_worker(0);
 
         assert_eq!(
@@ -425,7 +453,9 @@ mod tests {
                     .collect();
                 parse_samples.push(started.elapsed());
 
-                let mut pool = VerifierPool::default();
+                let mut pool =
+                    VerifierPool::new(super::super::DEFAULT_VERIFIER_WORKERS, 64, system_spawner())
+                        .expect("benchmark verifier construction");
                 let started = Instant::now();
                 assert!(events.iter().all(|event| event.verify_id()));
                 let valid = pool.verify_batch(black_box(&events));

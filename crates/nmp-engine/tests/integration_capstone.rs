@@ -228,9 +228,12 @@ async fn watermark_cold_start_offline() {
                 ..PoolConfig::default()
             },
             RelayAdmissionPolicy::default(),
-        );
+        )
+        .expect("test engine thread construction");
 
-        let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+        let (_qh, rows_rx) = handle
+            .subscribe(literal_kind1(&a.public_key().to_hex()))
+            .expect("test subscription construction");
 
         assert!(
             wait_for_rows(&rows_rx, Duration::from_secs(10), |rows, evidence| {
@@ -267,7 +270,8 @@ async fn watermark_cold_start_offline() {
                 ..PoolConfig::default()
             },
             RelayAdmissionPolicy::default(),
-        );
+        )
+        .expect("test engine thread construction");
 
         // THE assertion: a's shape reads back from cache, offline, as a
         // proven `reconciled_through` -- with zero network round trips
@@ -277,7 +281,9 @@ async fn watermark_cold_start_offline() {
         // (this process never once connects to the dead relay) -- proving
         // the watermark and the link status are independent facts, neither
         // shadowing the other.
-        let (_qh_a, rows_rx_a) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+        let (_qh_a, rows_rx_a) = handle
+            .subscribe(literal_kind1(&a.public_key().to_hex()))
+            .expect("test subscription construction");
         assert!(
             wait_for_rows(&rows_rx_a, Duration::from_secs(5), |rows, evidence| {
                 let ids: BTreeSet<String> = rows.iter().map(|r| r.id.to_hex()).collect();
@@ -296,7 +302,9 @@ async fn watermark_cold_start_offline() {
         // unproven `reconciled_through: None` -- "no row = not covered"
         // must survive the restart just as faithfully as the proven case
         // does.
-        let (_qh_b, rows_rx_b) = handle.subscribe(literal_kind1(&b.public_key().to_hex()));
+        let (_qh_b, rows_rx_b) = handle
+            .subscribe(literal_kind1(&b.public_key().to_hex()))
+            .expect("test subscription construction");
         assert!(
             wait_for_rows(&rows_rx_b, Duration::from_secs(5), |rows, evidence| {
                 rows.is_empty()
@@ -376,13 +384,16 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
-    let (_qh, rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+    let (_qh, rows_rx) = handle
+        .subscribe(literal_kind1(&a.public_key().to_hex()))
+        .expect("test subscription construction");
 
     let shared_post_id = shared_post.id.to_hex();
 
@@ -477,7 +488,8 @@ async fn write_ack_per_relay_over_real_relays() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("local signer has a public key");
@@ -632,13 +644,16 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("local signer has a public key");
 
     handle.set_active_account(Some(a.public_key()));
-    let (_qh, rows_rx) = handle.subscribe(LiveQuery::from_filter(follows_minus_mutes_filter()));
+    let (_qh, rows_rx) = handle
+        .subscribe(LiveQuery::from_filter(follows_minus_mutes_filter()))
+        .expect("test subscription construction");
 
     // Publish a's contact list naming BOTH b and c.
     let contact_list = UnsignedEvent::new(

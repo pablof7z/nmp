@@ -102,7 +102,8 @@ impl Engine {
                 let store = MemoryStore::new();
                 EngineThread::spawn(store, directory, config.max_relays, pool_config, admission)
             }
-        };
+        }
+        .map_err(EngineError::from_thread_error)?;
 
         Ok(Self {
             inner: Mutex::new(Some(Inner {
@@ -133,20 +134,21 @@ impl Engine {
         cap: usize,
         pool_config: PoolConfig,
         admission: nmp_engine::core::RelayAdmissionPolicy,
-    ) -> Self
+    ) -> Result<Self, EngineError>
     where
         S: nmp_store::EventStore + Send + 'static,
         D: nmp_router::RelayDirectory + Send + 'static,
     {
         let (engine_thread, handle) =
-            EngineThread::spawn(store, directory, cap, pool_config, admission);
-        Self {
+            EngineThread::spawn(store, directory, cap, pool_config, admission)
+                .map_err(EngineError::from_thread_error)?;
+        Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
                 active_pubkey: None,
             })),
-        }
+        })
     }
 
     /// Run `f` against the live `Handle` while holding `inner`'s lock for
@@ -171,9 +173,11 @@ impl Engine {
     /// itself on `Drop` (see that type's doc).
     pub fn observe(&self, query: LiveQuery) -> Result<Subscription, EngineError> {
         self.with_handle(|handle| {
-            let (query_handle, rows) = handle.subscribe(query);
-            Subscription::new(handle.clone(), query_handle, rows)
-        })
+            handle
+                .subscribe(query)
+                .map(|(query_handle, rows)| Subscription::new(handle.clone(), query_handle, rows))
+        })?
+        .map_err(EngineError::from_thread_error)
     }
 
     /// Noun 2: enqueue a write -- the call itself never blocks on routing/
