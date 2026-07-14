@@ -9,7 +9,7 @@ Use NMP as an embeddable engine with two app-facing nouns: a live query and a wr
 
 ## Establish current truth first
 
-Verified-Revision: `12bd12ca6247f416cd6c24de322bb1b1aee6366b`
+Verified-Revision: `5a508eaf5ad9d75e08645b41975e3312cf96aad7`
 
 1. Find the NMP repo root and read `README.md`, `docs/known-gaps.md`, and `docs/architecture/supported-surface.md` when present.
 2. Record `git rev-parse HEAD`. If the checkout differs from the verified revision, inspect the current facade files listed in [Source map](references/source-map.md) before naming APIs.
@@ -36,8 +36,8 @@ If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue 
 - Keep query ownership explicit. Swift observation is eager and cancelable; Kotlin `Flow` is cold and each collection subscribes unless the app shares it.
 - A publish call is not convergence. Retain and observe the receipt; persist its id when restart reattachment matters.
 - Do not expose secret keys in logs, fixtures, screenshots, or source. The bundled file account stores are explicitly insecure development conveniences, not Keychain/Keystore providers.
-- Do not promise write cancellation, app-controlled retries, typed pending-row metadata, populated AUTH phases, native `maxRelays`, or secure native signer persistence: those are not current cross-platform public capabilities.
-- Treat OS-thread refusal as a recoverable public failure without collapsing its ownership boundaries. Direct Rust returns `EngineError::ThreadUnavailable` from engine/query and NIP-02 observation setup, streams NIP-02 action-worker refusal as `FollowActionStatus::Failed(FollowActionFailure::ThreadUnavailable { .. })`, and returns `Nip46Error::ThreadUnavailable` from initial NIP-46 connection setup. Raw UniFFI exposes `FfiError::ThreadUnavailable`, and native wrappers map synchronous FFI-call refusal to `NMPError`; once a native NIP-46 handle exists, inner session/relay-worker refusal may instead arrive as streamed `failed(reason)`/`Failed` followed by closure. Never match one boundary's type at another or relabel a refusal as a timeout or panic.
+- Do not promise write cancellation, app-controlled retries, typed pending-row metadata, populated AUTH phases, native `maxRelays`, or secure native signer persistence: those are not current cross-platform public capabilities. Swift/Kotlin do expose `maxNativeTasks`; do not confuse that native-task ceiling with the Rust/raw-FFI relay ceiling.
+- Keep finite-capacity refusal distinct from OS-thread refusal. A full zero-queue native executor returns `ExecutorSaturated { component, capacity }` before the associated stream or operation transfers ownership; an OS spawn failure remains `ThreadUnavailable { component, reason }`. Direct Rust uses the owning `EngineError`, `FollowActionFailure`, or `Nip46Error` variant. Raw UniFFI uses `FfiError`, and Swift/Kotlin map synchronous setup failures to the corresponding `NMPError`. Once a native NIP-46 handle exists, an inner session/relay-worker failure may instead arrive as streamed `failed(reason)`/`Failed` followed by closure. Never match one boundary's type at another, treat saturation as a queue, or relabel either refusal as a timeout or panic.
 
 ## Completion gate
 

@@ -100,7 +100,7 @@ class SkillValidationTests(unittest.TestCase):
     def test_mismatched_verified_revisions_are_rejected(self) -> None:
         self.replace(
             "SKILL.md",
-            "12bd12ca6247f416cd6c24de322bb1b1aee6366b",
+            "5a508eaf5ad9d75e08645b41975e3312cf96aad7",
             "0000000000000000000000000000000000000000",
         )
         self.assert_rejected(self.run_validator(), "Verified-Revision pins do not match")
