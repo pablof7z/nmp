@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Canonical contributor guide for the NMP repo. Every rule here applies to agents and humans alike. Terse on purpose — the durable understanding lives in `docs/`, the tactical state lives in GitHub Issues.
+Canonical contributor guide for the NMP repo. Every rule here applies to agents and humans alike. Terse on purpose — the durable understanding lives in `docs/`, the tactical state lives in GitHub Issues. Execution plans are temporal work artifacts, not architecture authority; move durable decisions into the current owning document and let git preserve the plan's history.
 
 ## Cold-start reading order
 

@@ -141,6 +141,7 @@ This README describes the v2 north star. NMP is still pre-v2: the core store, re
 - [Vision](docs/VISION.md) — the north star and settled behavioral invariants.
 - [Design record](docs/design-record.md) — the exploration and decisions behind the architecture.
 - [Focused designs](docs/design/) — the deeper contracts for demand, evidence, writes, composition, routing, and bounded delivery.
+- [Legacy evidence archive](docs/wiki/legacy-nmp/README.md) — recovered v1 conversation evidence; explicitly non-authoritative.
 - [Contributor guide](AGENTS.md) — issue-first workflow and verification discipline.
 
 ## Security and trust boundary
