@@ -396,18 +396,13 @@ impl NmpEngine {
         observer: Box<dyn SignEventObserver>,
     ) -> Result<Arc<NmpSignEventHandle>, FfiError> {
         let request = sign_event_request_from_ffi(event)?;
-        let reservation = self.engine.reserve_native_task("sign-event-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "sign-event-observer")?;
-        let operation = self
+        let cancel = self
             .engine
-            .sign_event(request)
+            .sign_event_with_completion(request, move |result| match result {
+                Ok(event) => observer.on_signed(signed_event_to_ffi(event)),
+                Err(error) => observer.on_failed(sign_event_failure(error)),
+            })
             .map_err(sign_event_start_error)?;
-        let cancel = operation.cancel_handle();
-        starter.run(move || match operation.recv() {
-            Ok(event) => observer.on_signed(signed_event_to_ffi(event)),
-            Err(error) => observer.on_failed(sign_event_failure(error)),
-        });
         Ok(Arc::new(NmpSignEventHandle { cancel }))
     }
 
@@ -973,8 +968,12 @@ mod tests {
     }
 
     #[test]
-    fn ffi_sign_event_returns_the_exact_verified_event_without_publish_api_use() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+    fn ffi_sign_event_cap_one_returns_the_exact_verified_event_without_publish_api_use() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
         let author = engine
             .add_account(format!("{:064x}", 17u8))
             .expect("account must register");
@@ -1008,6 +1007,8 @@ mod tests {
         assert_eq!(signed.sig.len(), 128);
         drop(handle);
         engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
         engine.shutdown();
     }
 
@@ -1035,6 +1036,160 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
         engine.await_native_tasks_idle();
         engine.shutdown();
+    }
+
+    struct MismatchedFfiSigner {
+        reported: nostr::PublicKey,
+        actual: nostr::Keys,
+    }
+
+    impl nmp_signer::SigningCapability for MismatchedFfiSigner {
+        fn public_key(&self) -> Option<nostr::PublicKey> {
+            Some(self.reported)
+        }
+
+        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            let substituted = nostr::UnsignedEvent::new(
+                self.actual.public_key(),
+                unsigned.created_at,
+                unsigned.kind,
+                unsigned.tags,
+                unsigned.content,
+            );
+            nmp_signer::SignerOp::ok(substituted.sign_with_keys(&self.actual).unwrap())
+        }
+    }
+
+    #[test]
+    fn ffi_sign_event_reports_malicious_output_without_fabricating_success() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let reported = nostr::Keys::generate().public_key();
+        engine
+            .engine
+            .add_signer(MismatchedFfiSigner {
+                reported,
+                actual: nostr::Keys::generate(),
+            })
+            .unwrap();
+        engine.engine.set_active_account(Some(reported)).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let handle = engine
+            .sign_event(
+                pending_ffi_request(),
+                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+            )
+            .expect("operation must start");
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            SignEventOutcome::Failed(FfiSignEventFailure::InvalidSignerOutput { .. })
+        ));
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(handle);
+        engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    struct PendingFfiSigner {
+        public_key: nostr::PublicKey,
+        cancellations: Arc<AtomicUsize>,
+    }
+
+    impl nmp_signer::SigningCapability for PendingFfiSigner {
+        fn public_key(&self) -> Option<nostr::PublicKey> {
+            Some(self.public_key)
+        }
+
+        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            let (tx, rx) = mpsc::channel();
+            let cancellations = Arc::clone(&self.cancellations);
+            nmp_signer::SignerOp::pending_with_cancel(rx, move || {
+                cancellations.fetch_add(1, Ordering::SeqCst);
+                drop(tx);
+            })
+        }
+    }
+
+    fn pending_ffi_sign_engine() -> (Arc<NmpEngine>, Arc<AtomicUsize>) {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = nostr::Keys::generate();
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        engine
+            .engine
+            .add_signer(PendingFfiSigner {
+                public_key: keys.public_key(),
+                cancellations: Arc::clone(&cancellations),
+            })
+            .unwrap();
+        engine
+            .engine
+            .set_active_account(Some(keys.public_key()))
+            .unwrap();
+        (engine, cancellations)
+    }
+
+    fn pending_ffi_request() -> FfiSignEventRequest {
+        FfiSignEventRequest {
+            created_at: 7,
+            kind: 1,
+            tags: Vec::new(),
+            content: "pending ffi".to_string(),
+        }
+    }
+
+    #[test]
+    fn ffi_sign_event_caller_cancel_completes_once_and_returns_executor_to_zero() {
+        let (engine, cancellations) = pending_ffi_sign_engine();
+        let (tx, rx) = mpsc::channel();
+        let handle = engine
+            .sign_event(
+                pending_ffi_request(),
+                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+            )
+            .expect("operation must start");
+        handle.cancel();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            SignEventOutcome::Failed(FfiSignEventFailure::Cancelled)
+        ));
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(handle);
+        engine.await_native_tasks_idle();
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn ffi_sign_event_shutdown_completes_once_and_joins_to_zero() {
+        let (engine, cancellations) = pending_ffi_sign_engine();
+        let (tx, rx) = mpsc::channel();
+        let handle = engine
+            .sign_event(
+                pending_ffi_request(),
+                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+            )
+            .expect("operation must start");
+        engine.shutdown();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            SignEventOutcome::Failed(FfiSignEventFailure::Cancelled)
+        ));
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(handle);
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
     }
 
     impl ReceiptObserver for ChannelReceiptObserver {
