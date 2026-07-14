@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError};
+use std::io;
+use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -58,6 +59,7 @@ pub enum FollowActionFailure {
     Compose(ComposeFollowError),
     EngineClosed,
     ReceiptUnavailable,
+    ThreadUnavailable { component: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,26 +288,81 @@ pub fn observe_following(
     engine: Arc<Engine>,
     target: PublicKey,
 ) -> Result<FollowObservation, nmp::EngineError> {
+    observe_following_with_spawn(engine, target, |builder, task| builder.spawn(task))
+}
+
+fn observe_following_with_spawn(
+    engine: Arc<Engine>,
+    target: PublicKey,
+    spawn: impl FnOnce(
+        thread::Builder,
+        Box<dyn FnOnce() + Send + 'static>,
+    ) -> io::Result<thread::JoinHandle<()>>,
+) -> Result<FollowObservation, nmp::EngineError> {
     let subscription = engine.observe(nmp::LiveQuery(active_account_demand()))?;
     let cancel = subscription.cancel_handle();
     let latest = Arc::new(LatestSlot::default());
     let producer = latest.clone();
 
-    thread::spawn(move || {
-        let mut accumulator = Accumulator::default();
-        while let Ok((deltas, evidence)) = subscription.recv() {
-            accumulator.apply(deltas);
-            let active = engine.active_account().ok().flatten();
-            producer.send(project(active, target, &accumulator, &evidence));
-        }
-        producer.close();
-    });
+    if let Err(error) = spawn(
+        thread::Builder::new().name("nmp-nip02-follow-observer".to_string()),
+        Box::new(move || {
+            let mut accumulator = Accumulator::default();
+            while let Ok((deltas, evidence)) = subscription.recv() {
+                accumulator.apply(deltas);
+                let active = engine.active_account().ok().flatten();
+                producer.send(project(active, target, &accumulator, &evidence));
+            }
+            producer.close();
+        }),
+    ) {
+        cancel.cancel();
+        return Err(nmp::EngineError::ThreadUnavailable {
+            component: "NIP-02 follow observer".to_string(),
+            reason: error.to_string(),
+        });
+    }
 
     Ok(FollowObservation { cancel, latest })
 }
 
 pub struct FollowAction {
     statuses: Receiver<FollowActionStatus>,
+}
+
+/// A prepared follow action whose worker has not started yet. Native bridges
+/// use this split to establish their observer before any acquisition or write
+/// can run unseen.
+pub struct FollowActionRunner {
+    task: Box<dyn FnOnce() + Send + 'static>,
+    failures: Sender<FollowActionStatus>,
+}
+
+impl FollowActionRunner {
+    pub fn start(self) {
+        self.start_with(|builder, task| builder.spawn(task));
+    }
+
+    fn start_with(
+        self,
+        spawn: impl FnOnce(
+            thread::Builder,
+            Box<dyn FnOnce() + Send + 'static>,
+        ) -> io::Result<thread::JoinHandle<()>>,
+    ) {
+        let Self { task, failures } = self;
+        if let Err(error) = spawn(
+            thread::Builder::new().name("nmp-nip02-follow-action".to_string()),
+            task,
+        ) {
+            let _ = failures.send(FollowActionStatus::Failed(
+                FollowActionFailure::ThreadUnavailable {
+                    component: "NIP-02 follow action".to_string(),
+                    reason: error.to_string(),
+                },
+            ));
+        }
+    }
 }
 
 impl FollowAction {
@@ -325,17 +382,42 @@ impl FollowAction {
 /// both an idle timeout and a closed snapshot budget, so relay churn cannot
 /// keep a pre-write action alive forever.
 pub fn set_following(engine: Arc<Engine>, target: PublicKey, change: FollowChange) -> FollowAction {
-    set_following_with_timeout(engine, target, change, ACQUISITION_TIMEOUT)
+    let (action, runner) = prepare_set_following(engine, target, change);
+    runner.start();
+    action
 }
 
+/// Prepare NMP's simple NIP-02 action without starting its worker. The caller
+/// must start the returned runner after its observation path is established.
+pub fn prepare_set_following(
+    engine: Arc<Engine>,
+    target: PublicKey,
+    change: FollowChange,
+) -> (FollowAction, FollowActionRunner) {
+    prepare_set_following_with_timeout(engine, target, change, ACQUISITION_TIMEOUT)
+}
+
+#[cfg(test)]
 fn set_following_with_timeout(
     engine: Arc<Engine>,
     target: PublicKey,
     change: FollowChange,
     timeout: Duration,
 ) -> FollowAction {
+    let (action, runner) = prepare_set_following_with_timeout(engine, target, change, timeout);
+    runner.start();
+    action
+}
+
+fn prepare_set_following_with_timeout(
+    engine: Arc<Engine>,
+    target: PublicKey,
+    change: FollowChange,
+    timeout: Duration,
+) -> (FollowAction, FollowActionRunner) {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
+    let failures = tx.clone();
+    let task = Box::new(move || {
         let _ = tx.send(FollowActionStatus::Acquiring);
         let author = match engine.active_account() {
             Ok(Some(author)) => author,
@@ -343,20 +425,16 @@ fn set_following_with_timeout(
                 let _ = tx.send(FollowActionStatus::Failed(FollowActionFailure::SignedOut));
                 return;
             }
-            Err(_) => {
-                let _ = tx.send(FollowActionStatus::Failed(
-                    FollowActionFailure::EngineClosed,
-                ));
+            Err(error) => {
+                let _ = tx.send(FollowActionStatus::Failed(engine_failure(error)));
                 return;
             }
         };
 
         let subscription = match engine.observe(nmp::LiveQuery(active_account_demand())) {
             Ok(subscription) => subscription,
-            Err(_) => {
-                let _ = tx.send(FollowActionStatus::Failed(
-                    FollowActionFailure::EngineClosed,
-                ));
+            Err(error) => {
+                let _ = tx.send(FollowActionStatus::Failed(engine_failure(error)));
                 return;
             }
         };
@@ -377,10 +455,8 @@ fn set_following_with_timeout(
                     accumulator.apply(deltas);
                     let active = match engine.active_account() {
                         Ok(active) => active,
-                        Err(_) => {
-                            let _ = tx.send(FollowActionStatus::Failed(
-                                FollowActionFailure::EngineClosed,
-                            ));
+                        Err(error) => {
+                            let _ = tx.send(FollowActionStatus::Failed(engine_failure(error)));
                             return;
                         }
                     };
@@ -449,16 +525,13 @@ fn set_following_with_timeout(
 
         let receipt = match engine.publish_tracked(intent) {
             Ok(receipt) => receipt,
-            Err(nmp::EngineError::EngineClosed) => {
-                let _ = tx.send(FollowActionStatus::Failed(
-                    FollowActionFailure::EngineClosed,
-                ));
-                return;
-            }
-            Err(_) => {
-                let _ = tx.send(FollowActionStatus::Failed(
-                    FollowActionFailure::ReceiptUnavailable,
-                ));
+            Err(error) => {
+                let failure = match error {
+                    nmp::EngineError::ThreadUnavailable { .. } => engine_failure(error),
+                    nmp::EngineError::EngineClosed => FollowActionFailure::EngineClosed,
+                    _ => FollowActionFailure::ReceiptUnavailable,
+                };
+                let _ = tx.send(FollowActionStatus::Failed(failure));
                 return;
             }
         };
@@ -472,7 +545,19 @@ fn set_following_with_timeout(
             }
         }
     });
-    FollowAction { statuses: rx }
+    (
+        FollowAction { statuses: rx },
+        FollowActionRunner { task, failures },
+    )
+}
+
+fn engine_failure(error: nmp::EngineError) -> FollowActionFailure {
+    match error {
+        nmp::EngineError::ThreadUnavailable { component, reason } => {
+            FollowActionFailure::ThreadUnavailable { component, reason }
+        }
+        _ => FollowActionFailure::EngineClosed,
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +565,65 @@ mod tests {
     use super::*;
     use nmp::{EngineConfig, RelayUrl, SourceEvidence};
     use nostr::Keys;
+
+    #[test]
+    fn injected_follow_observer_refusal_is_typed_and_cancels_the_subscription() {
+        let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+        let result =
+            observe_following_with_spawn(engine, Keys::generate().public_key(), |_, task| {
+                drop(task);
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "injected NIP-02 observer pressure",
+                ))
+            });
+        assert!(matches!(
+            result,
+            Err(nmp::EngineError::ThreadUnavailable { component, reason })
+                if component == "NIP-02 follow observer"
+                    && reason == "injected NIP-02 observer pressure"
+        ));
+    }
+
+    #[test]
+    fn injected_follow_action_worker_refusal_is_the_only_terminal_status() {
+        let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+        let (action, runner) = prepare_set_following_with_timeout(
+            engine,
+            Keys::generate().public_key(),
+            FollowChange::Follow,
+            Duration::from_millis(10),
+        );
+        runner.start_with(|_, task| {
+            drop(task);
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "injected NIP-02 action pressure",
+            ))
+        });
+        assert_eq!(
+            action.recv().unwrap(),
+            FollowActionStatus::Failed(FollowActionFailure::ThreadUnavailable {
+                component: "NIP-02 follow action".to_string(),
+                reason: "injected NIP-02 action pressure".to_string(),
+            })
+        );
+        assert_eq!(action.recv(), Err(RecvError));
+    }
+
+    #[test]
+    fn acquisition_thread_refusal_is_not_collapsed_to_engine_closed() {
+        assert_eq!(
+            engine_failure(nmp::EngineError::ThreadUnavailable {
+                component: "engine command bridge".to_string(),
+                reason: "injected pressure".to_string(),
+            }),
+            FollowActionFailure::ThreadUnavailable {
+                component: "engine command bridge".to_string(),
+                reason: "injected pressure".to_string(),
+            }
+        );
+    }
 
     #[test]
     fn signed_out_action_fails_typed_without_a_write() {
