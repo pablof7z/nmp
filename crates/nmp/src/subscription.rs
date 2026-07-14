@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nmp_engine::core::DiagnosticsSnapshot;
-use nmp_engine::runtime::{DiagnosticsHandle, Handle, LatestReceiver, QueryHandle, RowsMsg};
+use nmp_engine::core::{HistoryBatch, HistoryContinuation, HistoryLoadError};
+use nmp_engine::runtime::{
+    DiagnosticsHandle, Handle, HistoryHandle, LatestReceiver, QueryHandle, RowsMsg,
+};
 
 /// The facade's single opaque cancellation capability (#52; codex-nova's
 /// ratified shape), shared by both [`Subscription`] and
@@ -83,6 +86,58 @@ impl ObservationCancel {
 pub struct Subscription {
     cancel: ObservationCancel,
     rows: std::sync::mpsc::Receiver<RowsMsg>,
+}
+
+/// A coordinated, bounded history read. The engine owns every acquisition
+/// handle and cursor generation; this facade retains only the opaque runtime
+/// capability needed to request the next older window and cancel the whole
+/// session.
+pub struct HistorySubscription {
+    cancel: ObservationCancel,
+    engine: Handle,
+    handle: HistoryHandle,
+    batches: std::sync::mpsc::Receiver<HistoryBatch>,
+}
+
+impl HistorySubscription {
+    pub(crate) fn new(
+        engine: Handle,
+        handle: HistoryHandle,
+        batches: std::sync::mpsc::Receiver<HistoryBatch>,
+    ) -> Self {
+        let cancel_engine = engine.clone();
+        Self {
+            cancel: ObservationCancel::new(move || cancel_engine.unsubscribe_history(handle)),
+            engine,
+            handle,
+            batches,
+        }
+    }
+
+    pub fn recv(&self) -> Result<HistoryBatch, RecvError> {
+        self.batches.recv()
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<HistoryBatch, RecvTimeoutError> {
+        self.batches.recv_timeout(timeout)
+    }
+
+    pub fn load_older(&self, continuation: HistoryContinuation) -> Result<(), HistoryLoadError> {
+        self.engine.load_older(self.handle, continuation)
+    }
+
+    #[must_use]
+    pub fn cancel_handle(&self) -> ObservationCancel {
+        self.cancel.clone()
+    }
+
+    pub fn cancel(self) {}
+}
+
+impl Drop for HistorySubscription {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl Subscription {

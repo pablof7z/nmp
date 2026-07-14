@@ -952,6 +952,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
     methods.sort_unstable();
     let mut expected = vec![
         "add_signer",
+        "load_older",
         "observe_diagnostics",
         "publish",
         "publish_tracked",
@@ -963,7 +964,9 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "sign_event",
         "sign_event_with_completion",
         "subscribe",
+        "subscribe_history",
         "unsubscribe",
+        "unsubscribe_history",
     ];
     expected.sort_unstable();
     assert_eq!(

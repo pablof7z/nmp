@@ -67,7 +67,9 @@ pub use relay_information::{
     RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
-pub use subscription::{DiagnosticsSubscription, ObservationCancel, Subscription};
+pub use subscription::{
+    DiagnosticsSubscription, HistorySubscription, ObservationCancel, Subscription,
+};
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
 // `selection` is the `Filter`; `source`/`access`/`cache` are the #106 axes
@@ -135,7 +137,8 @@ pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
 pub use nmp_engine::core::{
-    AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry,
+    AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry, HistoryBatch,
+    HistoryContinuation, HistoryLoadError, HistoryLoadFact, HistoryQuery, HistoryQueryError,
     RelayDiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
 };
 pub use nmp_engine::runtime::RowsMsg;

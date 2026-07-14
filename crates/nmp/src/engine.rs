@@ -43,7 +43,7 @@ use crate::error::EngineError;
 use crate::relay_information::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
 };
-use crate::subscription::{DiagnosticsSubscription, Subscription};
+use crate::subscription::{DiagnosticsSubscription, HistorySubscription, Subscription};
 
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`
@@ -284,6 +284,24 @@ impl Engine {
             handle
                 .subscribe(query)
                 .map(|(query_handle, rows)| Subscription::new(handle.clone(), query_handle, rows))
+        })?
+        .map_err(EngineError::from_thread_error)
+    }
+
+    /// Open a coordinated, bounded history specialization of the read noun.
+    /// Continuations remain process-local capabilities owned by the returned
+    /// subscription; dropping it withdraws every engine-owned acquisition
+    /// handle opened by prior `load_older` calls.
+    pub fn observe_history(
+        &self,
+        query: nmp_engine::core::HistoryQuery,
+    ) -> Result<HistorySubscription, EngineError> {
+        self.with_handle(|handle| {
+            handle
+                .subscribe_history(query)
+                .map(|(history_handle, batches)| {
+                    HistorySubscription::new(handle.clone(), history_handle, batches)
+                })
         })?
         .map_err(EngineError::from_thread_error)
     }

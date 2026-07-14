@@ -60,7 +60,7 @@
 mod diagnostics_channel;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -84,8 +84,9 @@ use nostr::{
 use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
-    ReattachOutcome, ReceiptId, RelayAdmissionPolicy, RowDelta, RowSink,
+    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, HistoryBatch,
+    HistoryContinuation, HistoryLoadError, HistoryQuery, HistorySessionId, HistorySink,
+    PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteStatus};
 use crate::relay_information::{
@@ -129,6 +130,7 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
 /// per-source acquisition evidence (see the module doc's "two delivery
 /// channels" note).
 pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
+pub type HistoryMsg = HistoryBatch;
 
 /// The app-facing handle to a live subscription (returned by
 /// [`Handle::subscribe`]). `Send`, `Copy`-cheap, carries nothing that
@@ -136,6 +138,9 @@ pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
 /// [`Handle::unsubscribe`] needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryHandle(HandleId);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryHandle(HistorySessionId);
 
 /// A newly accepted write's stable store-issued identity plus its live
 /// observer. Keeping the id separate from the channel lets a later process
@@ -166,6 +171,12 @@ struct NullRowSink;
 
 impl RowSink for NullRowSink {
     fn on_rows(&self, _rows: Vec<RowDelta>) {}
+}
+
+struct NullHistorySink;
+
+impl HistorySink for NullHistorySink {
+    fn on_history(&self, _batch: HistoryBatch) {}
 }
 
 /// Forwards every `WriteStatus` `EngineCore` reports straight onto the
@@ -245,6 +256,16 @@ enum Cmd {
         query: LiveQuery,
         reply: Sender<Result<(HandleId, Receiver<RowsMsg>), EngineThreadError>>,
     },
+    SubscribeHistory {
+        query: HistoryQuery,
+        reply: Sender<Result<(HistorySessionId, Receiver<HistoryMsg>), EngineThreadError>>,
+    },
+    LoadOlder {
+        id: HistorySessionId,
+        continuation: HistoryContinuation,
+        reply: Sender<Result<(), HistoryLoadError>>,
+    },
+    UnsubscribeHistory(HistorySessionId),
     PublishTracked {
         intent: WriteIntent,
         sink: Box<dyn ReceiptSink>,
@@ -1078,6 +1099,7 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
+        let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
@@ -1108,6 +1130,7 @@ mod relay_worker_reconciliation_tests {
             first,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1121,6 +1144,7 @@ mod relay_worker_reconciliation_tests {
             withdrawn,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1140,6 +1164,7 @@ mod relay_worker_reconciliation_tests {
             replacement,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1206,6 +1231,7 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
+        let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
@@ -1225,6 +1251,7 @@ mod relay_worker_reconciliation_tests {
             ready,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1237,6 +1264,7 @@ mod relay_worker_reconciliation_tests {
             Vec::new(),
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1429,6 +1457,7 @@ fn engine_loop<S, D>(
     let native_tasks = &native_tasks;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
+    let mut history_channels: HashMap<HistorySessionId, Sender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
     let mut preambles: Preambles = Preambles::new();
@@ -1453,6 +1482,7 @@ fn engine_loop<S, D>(
         recovery_effects,
         &pool,
         &mut row_channels,
+        &mut history_channels,
         &mut diag_channels,
         &mut preambles,
         &registry,
@@ -1493,6 +1523,7 @@ fn engine_loop<S, D>(
                             effects,
                             &pool,
                             &mut row_channels,
+                            &mut history_channels,
                             &mut diag_channels,
                             &mut preambles,
                             &registry,
@@ -1510,6 +1541,7 @@ fn engine_loop<S, D>(
                             effects,
                             &pool,
                             &mut row_channels,
+                            &mut history_channels,
                             &mut diag_channels,
                             &mut preambles,
                             &registry,
@@ -1540,6 +1572,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1553,6 +1586,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1570,6 +1604,7 @@ fn engine_loop<S, D>(
                         effects,
                         &pool,
                         &mut row_channels,
+                        &mut history_channels,
                         &mut diag_channels,
                         &mut preambles,
                         &registry,
@@ -1723,6 +1758,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1752,6 +1788,7 @@ fn engine_loop<S, D>(
                         withdraw,
                         &pool,
                         &mut row_channels,
+                        &mut history_channels,
                         &mut diag_channels,
                         &mut preambles,
                         &registry,
@@ -1771,6 +1808,7 @@ fn engine_loop<S, D>(
                         withdraw,
                         &pool,
                         &mut row_channels,
+                        &mut history_channels,
                         &mut diag_channels,
                         &mut preambles,
                         &registry,
@@ -1783,6 +1821,158 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
+            Cmd::SubscribeHistory { query, reply } => {
+                let effects = core.handle(EngineMsg::SubscribeHistory(
+                    query,
+                    Box::new(NullHistorySink),
+                ));
+                let Some(id) = effects.iter().find_map(|effect| match effect {
+                    Effect::EmitHistory(id, _) if !history_channels.contains_key(id) => Some(*id),
+                    _ => None,
+                }) else {
+                    let _ = reply.send(Err(EngineThreadError::ThreadUnavailable {
+                        component: "history projection".to_string(),
+                        reason: "history session could not open its canonical projection"
+                            .to_string(),
+                    }));
+                    dispatch_core_effects(
+                        &core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    continue;
+                };
+                let (history_tx, history_rx) = mpsc::channel();
+                history_channels.insert(id, history_tx);
+                if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
+                    history_channels.remove(&id);
+                    let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
+                    dispatch_core_effects(
+                        &core,
+                        withdraw,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
+                if reply.send(Ok((id, history_rx))).is_err() {
+                    history_channels.remove(&id);
+                    let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
+                    dispatch_core_effects(
+                        &core,
+                        withdraw,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    continue;
+                }
+                dispatch_core_effects(
+                    &core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
+            Cmd::LoadOlder {
+                id,
+                continuation,
+                reply,
+            } => {
+                let effects = core.handle(EngineMsg::LoadOlder(id, continuation));
+                let result = effects.iter().find_map(|effect| match effect {
+                    Effect::HistoryLoadResult(session, result) if *session == id => {
+                        Some(result.clone())
+                    }
+                    _ => None,
+                });
+                if result.as_ref().is_some_and(Result::is_ok) {
+                    if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
+                        let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
+                        dispatch_core_effects(
+                            &core,
+                            rollback,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        let _ = reply.send(Err(HistoryLoadError::TransportUnavailable {
+                            reason: error.to_string(),
+                        }));
+                        continue;
+                    }
+                    if reply.send(Ok(())).is_err() {
+                        let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
+                        dispatch_core_effects(
+                            &core,
+                            rollback,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        continue;
+                    }
+                    core.handle(EngineMsg::CommitHistoryLoad(id));
+                } else {
+                    let _ = reply.send(result.unwrap_or(Err(HistoryLoadError::StoreUnavailable)));
+                }
+                dispatch_core_effects(
+                    &core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
+            Cmd::UnsubscribeHistory(id) => {
+                history_channels.remove(&id);
+                let effects = core.handle(EngineMsg::UnsubscribeHistory(id));
+                dispatch_core_effects(
+                    &core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1801,6 +1991,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1817,6 +2008,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1835,6 +2027,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1848,6 +2041,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1888,6 +2082,7 @@ fn dispatch_core_effects<S: EventStore>(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, Sender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -1906,6 +2101,7 @@ fn dispatch_core_effects<S: EventStore>(
         effects,
         pool,
         row_channels,
+        history_channels,
         diag_channels,
         preambles,
         registry,
@@ -1919,25 +2115,139 @@ fn dispatch_core_effects<S: EventStore>(
 /// construction error #442 requires. Successful opens are idempotently reused
 /// by ordinary effect dispatch.
 fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), EngineThreadError> {
+    preflight_query_relay_workers_with(
+        effects,
+        |relay| pool.live_handle(relay).is_some(),
+        |relay| match pool.ensure_open(relay) {
+            Ok(handle) => Ok(Some(handle)),
+            Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) => {
+                Err(EngineThreadError::ThreadUnavailable {
+                    component: error.role.to_string(),
+                    reason: error.reason,
+                })
+            }
+            // Capacity/unavailable remains ordinary local shortfall. It is
+            // represented by acquisition evidence, not construction failure.
+            Err(_) => Ok(None),
+        },
+        |handle| {
+            let _ = pool.close(handle);
+        },
+    )
+}
+
+fn preflight_query_relay_workers_with(
+    effects: &[Effect],
+    mut is_live: impl FnMut(&RelayUrl) -> bool,
+    mut ensure_open: impl FnMut(
+        &RelayUrl,
+    ) -> Result<Option<nmp_transport::RelayHandle>, EngineThreadError>,
+    mut close: impl FnMut(nmp_transport::RelayHandle),
+) -> Result<(), EngineThreadError> {
+    let mut relays = BTreeSet::new();
     for effect in effects {
         let Effect::Wire(delta) = effect else {
             continue;
         };
         for (relay, ops) in &delta.ops {
-            if !ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
-                continue;
+            if ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
+                relays.insert(relay.clone());
             }
-            if let Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) =
-                pool.ensure_open(relay)
-            {
-                return Err(EngineThreadError::ThreadUnavailable {
-                    component: error.role.to_string(),
-                    reason: error.reason,
-                });
+        }
+    }
+
+    let mut opened = Vec::new();
+    for relay in relays {
+        let was_live = is_live(&relay);
+        match ensure_open(&relay) {
+            Ok(Some(handle)) if !was_live => opened.push(handle),
+            Ok(_) => {}
+            Err(error) => {
+                for handle in opened {
+                    close(handle);
+                }
+                return Err(error);
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod history_preflight_tests {
+    use std::cell::RefCell;
+
+    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nmp_transport::RelayHandle;
+
+    use super::*;
+
+    #[test]
+    fn partial_history_preflight_failure_closes_every_worker_it_opened() {
+        let first = RelayUrl::parse("wss://a-history-preflight.example").unwrap();
+        let second = RelayUrl::parse("wss://b-history-preflight.example").unwrap();
+        let filter = ConcreteFilter::default();
+        let delta = WireDelta {
+            ops: vec![
+                (
+                    first.clone(),
+                    vec![WireOp::Req(
+                        SubId::for_wire(
+                            first.clone(),
+                            &filter,
+                            &SourceAuthority::Public,
+                            AccessContext::Public,
+                        ),
+                        filter.clone(),
+                    )],
+                ),
+                (
+                    second.clone(),
+                    vec![WireOp::Req(
+                        SubId::for_wire(
+                            second.clone(),
+                            &filter,
+                            &SourceAuthority::Public,
+                            AccessContext::Public,
+                        ),
+                        filter,
+                    )],
+                ),
+            ],
+        };
+        let effects = vec![Effect::Wire(delta)];
+        let closed = RefCell::new(Vec::new());
+        let result = preflight_query_relay_workers_with(
+            &effects,
+            |_| false,
+            |relay| {
+                if relay == &first {
+                    Ok(Some(RelayHandle {
+                        slot: 7,
+                        generation: 1,
+                    }))
+                } else {
+                    Err(EngineThreadError::ThreadUnavailable {
+                        component: "relay worker".to_string(),
+                        reason: "injected refusal".to_string(),
+                    })
+                }
+            },
+            |handle| closed.borrow_mut().push(handle),
+        );
+
+        assert!(matches!(
+            result,
+            Err(EngineThreadError::ThreadUnavailable { .. })
+        ));
+        assert_eq!(
+            closed.into_inner(),
+            vec![RelayHandle {
+                slot: 7,
+                generation: 1
+            }]
+        );
+    }
 }
 
 /// Retry the exact currently-owned relay set once after an actual worker
@@ -1978,6 +2288,7 @@ fn dispatch_effects(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, Sender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -1988,6 +2299,7 @@ fn dispatch_effects(
             effect,
             pool,
             row_channels,
+            history_channels,
             diag_channels,
             preambles,
             registry,
@@ -2003,6 +2315,7 @@ fn dispatch_effect(
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, Sender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -2145,6 +2458,12 @@ fn dispatch_effect(
                 let _ = tx.send((rows, evidence));
             }
         }
+        Effect::EmitHistory(id, batch) => {
+            if let Some(tx) = history_channels.get(&id) {
+                let _ = tx.send(batch);
+            }
+        }
+        Effect::HistoryLoadResult(..) => {}
         Effect::EmitDiagnostics(mut snapshot) => {
             // Fold in the transport pool's own relay-cap rejection count
             // (issue #121, worker-exhaustion half). `EngineCore` builds the
@@ -2569,6 +2888,43 @@ impl Handle {
         let _ = self
             .inbox
             .send(Cmd::Engine(EngineMsg::Unsubscribe(handle.0)));
+    }
+
+    pub fn subscribe_history(
+        &self,
+        query: HistoryQuery,
+    ) -> Result<(HistoryHandle, Receiver<HistoryMsg>), EngineThreadError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::SubscribeHistory {
+                query,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: subscribe_history() called after shutdown");
+        let (id, history_rx) = reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped the history subscribe reply")?;
+        Ok((HistoryHandle(id), history_rx))
+    }
+
+    pub fn load_older(
+        &self,
+        handle: HistoryHandle,
+        continuation: HistoryContinuation,
+    ) -> Result<(), HistoryLoadError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::LoadOlder {
+                id: handle.0,
+                continuation,
+                reply: reply_tx,
+            })
+            .map_err(|_| HistoryLoadError::WrongEngine)?;
+        reply_rx.recv().map_err(|_| HistoryLoadError::WrongEngine)?
+    }
+
+    pub fn unsubscribe_history(&self, handle: HistoryHandle) {
+        let _ = self.inbox.send(Cmd::UnsubscribeHistory(handle.0));
     }
 
     /// Register a signing/crypto capability, keyed by its own `public_key()`
