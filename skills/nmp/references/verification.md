@@ -74,7 +74,7 @@ At minimum exercise:
 - last-observer teardown;
 - two Kotlin collectors versus one explicitly shared flow;
 - pagination/window replacement without a permanent duplicate observation; and
-- thread-admission refusal with no escaped handle.
+- query/NIP-02 observation refusal with no escaped handle, plus terminal NIP-02 action refusal on the returned `FollowAction`.
 
 Assert rows/evidence, not a fabricated `synced` Boolean.
 
@@ -87,7 +87,7 @@ Exercise the product-relevant subset:
 - one ACK plus one rejection remains mixed evidence;
 - at-most-once ambiguity never offers blind retry;
 - pre-acceptance failure leaves no durable row/receipt;
-- native receipt-drain saturation/spawn refusal occurs before acceptance and leaves no obligation or consumed composed intent;
+- native receipt-bridge saturation/OS-thread refusal occurs before acceptance and leaves no obligation or consumed composed intent;
 - process restart reattaches the same receipt and frozen intent;
 - transient live statuses are not falsely claimed as replayed;
 - old remote-signer close cannot detach its replacement;
@@ -117,7 +117,7 @@ Do not golden-test screenshots or health scores. Do not assert unprojected Rust-
 
 Every async test needs a real deadline/task race. Avoid polling loops with `sleep`. A failed wait must report the missing state and most recent rows/evidence/receipt/diagnostics.
 
-Stress repeated query, diagnostics, follow, signer, receipt attachment, and content-session open/close when resource ownership changes. A successful test must show admitted native tasks stay at or below `maxNativeTasks`, typed `ExecutorSaturated` refuses without ownership transfer, OS `ThreadUnavailable` stays distinct, app-level aggregate content counts stay capped, and shutdown returns the raw/internal lifecycle census to idle without polling.
+Stress repeated query, diagnostics, follow, signer, receipt attachment, and content-session open/close when resource ownership changes. A successful native lifecycle test must show admitted tasks never exceed `maxNativeTasks`, drive the event-based idle barrier, and show exact executor census `admitted == 0 && running == 0`; it must also show app-level aggregate content/observer counts stay capped. Exercise both `ExecutorSaturated` and `ThreadUnavailable` without panic, preserve no-handle refusal for observations/direct signer setup, and preserve the terminal failure on the deliberately returned NIP-02 action handle.
 
 ## Live smoke discipline
 
