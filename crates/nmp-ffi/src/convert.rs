@@ -152,6 +152,11 @@ pub enum FfiError {
     RelayInformationUnavailable {
         reason: String,
     },
+    /// A single relay's in-flight NIP-11 waiter set reached its finite
+    /// admission bound. The refused caller was not retained.
+    RelayInformationWaitersSaturated {
+        capacity: u64,
+    },
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -231,6 +236,10 @@ impl std::fmt::Display for FfiError {
             Self::RelayInformationUnavailable { reason } => {
                 write!(f, "relay information unavailable: {reason}")
             }
+            Self::RelayInformationWaitersSaturated { capacity } => write!(
+                f,
+                "relay information refused: per-relay waiter capacity {capacity} is full"
+            ),
         }
     }
 }
@@ -239,6 +248,23 @@ impl From<nmp::RelayInformationRequestError> for FfiError {
     fn from(error: nmp::RelayInformationRequestError) -> Self {
         match error {
             nmp::RelayInformationRequestError::Engine(error) => error.into(),
+            nmp::RelayInformationRequestError::Acquisition(
+                nmp::RelayInformationError::ExecutorSaturated { capacity },
+            ) => Self::ExecutorSaturated {
+                component: "NIP-11 acquisition".to_string(),
+                capacity: capacity as u64,
+            },
+            nmp::RelayInformationRequestError::Acquisition(
+                nmp::RelayInformationError::WaiterSaturated { capacity },
+            ) => Self::RelayInformationWaitersSaturated {
+                capacity: capacity as u64,
+            },
+            nmp::RelayInformationRequestError::Acquisition(
+                nmp::RelayInformationError::ThreadUnavailable { reason },
+            ) => Self::ThreadUnavailable {
+                component: "NIP-11 acquisition".to_string(),
+                reason,
+            },
             nmp::RelayInformationRequestError::Acquisition(error) => {
                 Self::RelayInformationUnavailable {
                     reason: error.to_string(),

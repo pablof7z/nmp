@@ -65,7 +65,7 @@ private class LocalNIP11Server(
             }
         }
 
-    val relayUrl: String = "ws://127.0.0.1:${server.localPort}"
+    val relayUrl: String = "ws://localhost:${server.localPort}"
 
     fun awaitAccepted(): Boolean {
         val result = accepted.await(2, TimeUnit.SECONDS)

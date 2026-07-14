@@ -87,6 +87,15 @@ registry. Normal teardown is resource ownership: dropping the facade must close
 and join interior workers safely. Calling an explicit shutdown method must not
 leave a public object whose remaining methods panic or silently disconnect.
 
+Relay-information acquisition follows the same owner. Each distinct NIP-11
+flight reserves one immediately runnable slot from the engine's finite native
+executor; there is no separate worker pool or accepted-work queue. Same-relay
+callers join a finite waiter set. Shutdown closes that set with a typed terminal
+result, cancels Hickory DNS or HTTP body work, and joins the admitted task even
+if a cloned engine handle, live subscription, or cancellation token survives.
+The independent 250 ms capability-decision grace remains an engine-loop
+deadline, so a slow HTTP endpoint cannot hold the WebSocket NIP-77 fallback.
+
 ## Current implementation
 
 Some platform adapters already coalesce newest snapshots, while end-to-end

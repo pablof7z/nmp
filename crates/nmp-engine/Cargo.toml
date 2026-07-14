@@ -20,6 +20,7 @@ required-features = ["bench-instrumentation"]
 blake3.workspace = true
 crossbeam-channel = "0.5"
 futures-channel.workspace = true
+hickory-resolver.workspace = true
 httpdate.workspace = true
 nostr.workspace = true
 nmp-grammar.workspace = true
@@ -42,7 +43,8 @@ negentropy = { version = "0.5", default-features = false, features = ["std"] }
 hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
-ureq.workspace = true
+reqwest.workspace = true
+tokio = { version = "1", features = ["rt", "time", "net", "sync"] }
 
 [dev-dependencies]
 nmp-test-support.workspace = true

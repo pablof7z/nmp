@@ -742,6 +742,21 @@ enum Enum {
                 "NIP-11 acquisition failed before any last-good document existed.",
             ),
         },
+        Variant {
+            name: "RelayInformationWaitersSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A single relay's in-flight NIP-11 waiter set reached its finite\nadmission bound. The refused caller was not retained.",
+            ),
+        },
     ],
     shape: Error {
         flat: false,

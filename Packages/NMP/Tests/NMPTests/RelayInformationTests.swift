@@ -33,7 +33,7 @@ private final class LocalNIP11Server: @unchecked Sendable {
             listener.cancel()
             throw FixtureError.listenerDidNotStart
         }
-        relayURL = "ws://127.0.0.1:\(port.rawValue)"
+        relayURL = "ws://localhost:\(port.rawValue)"
     }
 
     deinit {

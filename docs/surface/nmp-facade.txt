@@ -25940,10 +25940,86 @@ reexport nmp::RelayInformationError => nmp_engine::relay_information::RelayInfor
           "inner": {
             "variant": {
               "discriminant": null,
-              "kind": "plain"
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "usize"
+                        }
+                      },
+                      "name": "capacity",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
             }
           },
-          "name": "QueueFull",
+          "name": "ExecutorSaturated",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "usize"
+                        }
+                      },
+                      "name": "capacity",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "WaiterSaturated",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "ThreadUnavailable",
           "visibility": "default"
         },
         {
