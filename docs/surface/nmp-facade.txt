@@ -26038,6 +26038,17 @@ reexport nmp::RelayInformationError => nmp_engine::relay_information::RelayInfor
           "inner": {
             "variant": {
               "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "CredentialedRelayUrl",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
               "kind": {
                 "struct": {
                   "fields": [

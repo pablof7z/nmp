@@ -133,13 +133,26 @@ about current code:
   257th fresh result is delivered but not retained. Fetches consume the shared
   zero-queue native-task ceiling and use cancellable Hickory DNS plus HTTP under
   one three-second deadline; engine shutdown closes every waiter and joins the
-  task even when app handles survive. Every redirect is refused before its
-  target is contacted. The cache is deliberately in memory for this first
-  contract; a cold process does not reuse the prior process's relay document.
+  task even when app handles survive. Relay URL credentials are rejected before
+  request construction so reqwest cannot turn them into HTTP Basic
+  `Authorization`; `RelayUrl` normalizes an empty userinfo marker to the same
+  credential-free typed URL. Every redirect is refused before
+  its target is contacted. Capability evidence retained by the reducer is
+  limited to relays in the current read plan, pruned when that plan changes,
+  and its diagnostic freshness is re-derived from the engine clock and the
+  cited document's deadline rather than frozen at acquisition time. The cache
+  is deliberately in memory for this first contract; a cold process does not
+  reuse the prior process's relay document.
   Runtime connection/AUTH state also remains separate: NIP-11 acquisition does
   not invent a polling stream or claim that HTTP metadata is link state. The
-  Kotlin package remains a desktop-JVM projection; this work does not add or
-  qualify an Android AAR.
+  Swift wrapper tests run on the macOS host and the generated XCFramework's
+  simulator slices compile, but an iOS Simulator runtime test target is not yet
+  present ([#465](https://github.com/pablof7z/nmp/issues/465)). The Kotlin
+  package remains a desktop-JVM projection; this work does not add or qualify
+  an Android AAR. Cardinality is finite, but full snapshot values are still
+  deep-cloned across cache access and waiter fan-out; the byte-amplification
+  reduction is tracked by
+  [#467](https://github.com/pablof7z/nmp/issues/467).
 - **~~Destructive trust-domain reset is missing as a defined contract~~ CLOSED
   (#232).** `Engine::reset_persistent_store`, the UniFFI operation, and the
   Swift/Kotlin `NMPEngine.resetPersistentStore` projections idempotently remove

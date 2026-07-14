@@ -615,7 +615,9 @@ pub struct EngineCore<S: EventStore> {
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
-    /// Latest provenance-bearing NIP-11 advertisement per relay. This is
+    /// Latest provenance-bearing NIP-11 advertisement for relays in the
+    /// current read plan. Recompile pruning and completion-time plan checks
+    /// prevent historical relay churn from becoming a shadow cache. This is
     /// kept separate from `prober`: advertisement is evidence, never proof.
     nip11_information: HashMap<RelayUrl, RelayInformationCapabilityEvidence>,
     /// Live reconciliation sessions, keyed by the SAME `SubId` a plain REQ
@@ -1598,9 +1600,10 @@ impl<S: EventStore> EngineCore<S> {
             if let Some(information) = self.nip11_information.get(&relay.relay) {
                 relay.nip11_supported_nips = information.supported_nips.clone();
                 relay.nip11_document_revision = Some(information.document_revision.clone());
-                relay.nip11_freshness = Some(match information.freshness {
-                    crate::relay_information::RelayInformationFreshness::Fresh => "fresh",
-                    crate::relay_information::RelayInformationFreshness::Stale => "stale",
+                relay.nip11_freshness = Some(if self.clock.as_secs() < information.fresh_until {
+                    "fresh"
+                } else {
+                    "stale"
                 });
                 relay.nip11_last_error = information.last_error.as_ref().map(ToString::to_string);
             }
@@ -1621,6 +1624,11 @@ impl<S: EventStore> EngineCore<S> {
             };
         }
         snapshot
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nip11_information_len(&self) -> usize {
+        self.nip11_information.len()
     }
 
     /// A pure clock update PLUS two deadline sweeps: NIP-40 expiry
@@ -2884,8 +2892,19 @@ impl<S: EventStore> EngineCore<S> {
             .as_ref()
             .and_then(|information| information.supported_nips.as_ref())
             .map(|nips| nips.contains(&77));
-        if let Some(information) = information {
-            self.nip11_information.insert(url.clone(), information);
+        let planned = self.router.plan().reqs.contains_key(&url);
+        if planned {
+            if let Some(information) = information {
+                self.nip11_information.insert(url.clone(), information);
+            } else {
+                // `None` means the service has no last-good authority for
+                // this relay. An older reducer copy must not survive it.
+                self.nip11_information.remove(&url);
+            }
+        } else {
+            // A flight may complete after demand changed. Late evidence has
+            // no current diagnostics owner and is never retained.
+            self.nip11_information.remove(&url);
         }
         let mut effects = Vec::new();
         if self.connected_relays.contains(&url)
@@ -3185,6 +3204,9 @@ impl<S: EventStore> EngineCore<S> {
         let wire_delta: WireDelta =
             self.router
                 .compile(&admitted_demand, self.directory.as_ref(), self.cap);
+        let planned = &self.router.plan().reqs;
+        self.nip11_information
+            .retain(|relay, _| planned.contains_key(relay));
         // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
         // for the full current demand, regardless of whether anything
         // actually changed on the wire (see `Router::compile`'s own body) —
