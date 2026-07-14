@@ -91,6 +91,24 @@ If the matching capability is absent or temporarily offline, the receipt says
 a matching signer, explicitly cancels it, a terminal protocol failure occurs,
 or protocol expiry makes it invalid. Missing NIP-46 connectivity is not failure.
 
+### Governed sign-only operation
+
+Signing and publishing are orthogonal. A host that must authorize an external
+client's exact Nostr event uses the engine's sign-only operation rather than
+fabricating an ephemeral write intent.
+
+The request carries an immutable unsigned NIP-01 body whose author must equal
+the active account. Acceptance freezes that author and body, resolves only the
+matching registered capability, and admits pending signer work through the
+same finite native-task owner used by other signer requests. The returned event
+is released only after its body, author, computed id, and signature all
+validate. Cancellation is scoped to that one signer operation.
+
+This path deliberately bypasses write acceptance. It creates no canonical
+pending row, intent or receipt id, outbox journal/lane, relay plan, or
+publication. NIP-07 origin authorization and prompting remain host policy; the
+operation supplies governed key custody and exact-result validation only.
+
 ## 4. Secret-material boundary
 
 The Rust event/outbox store persists signing obligations, expected pubkeys,

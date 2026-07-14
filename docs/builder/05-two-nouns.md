@@ -12,6 +12,9 @@ quick ownership check to use while designing an app or protocol module.
 
 Identity inputs, capabilities, diagnostics, and modules configure or explain
 those operations. They are not additional app workloads or lifecycle systems.
+The governed sign-only call is a bounded capability operation: it returns one
+verified event value and deliberately creates neither a live query nor a write
+obligation.
 
 ## Concern ownership
 

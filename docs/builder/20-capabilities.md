@@ -19,6 +19,26 @@ changing current pubkey.
 At acceptance NMP freezes the body, expected pubkey, final id, and chosen
 identity reference. The provider receives exactly that signing request.
 
+## Sign without publishing
+
+Browser/NIP-07 hosts sometimes need to authorize an external client's exact
+event while retaining origin and publication policy themselves. Use the
+engine's sign-only operation for that case:
+
+- Rust: `Engine::sign_event(unsigned)` returns a cancellable operation.
+- Swift: `try await engine.signEvent(unsigned)`.
+- Kotlin: `engine.signEvent(unsigned)` from a coroutine.
+
+The unsigned value names the active account explicitly. NMP refuses a missing
+active signer or author mismatch, freezes the exact body, routes only to the
+registered capability, and validates the returned body, author, id, and
+signature. Success returns a signed event value only. It does not create a
+write intent, canonical row, receipt, outbox work, relay plan, or publication.
+
+Origin allowlists, user prompts, and browser networking are app policy. If the
+host later decides to publish, it submits the already-signed event through the
+ordinary governed write path as a separate action.
+
 ## Provider output is untrusted input
 
 A provider result must:

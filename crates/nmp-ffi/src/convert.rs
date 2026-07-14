@@ -31,9 +31,9 @@ use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCacheMode,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
     FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventRequest,
-    FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiWriteIntent,
-    FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
+    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
+    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -74,10 +74,12 @@ pub enum FfiError {
     InvalidSigner {
         reason: String,
     },
-    SigningFailed {
-        reason: String,
-    },
-    InvalidSignedEvent {
+    /// The sign-only operation has no active account with a registered
+    /// signing capability. No operation was accepted.
+    NoActiveSigner,
+    /// The immutable sign-only request was malformed or named an author
+    /// other than the active account. No signer was invoked.
+    InvalidSignRequest {
         reason: String,
     },
     /// No upper-half correlation id remains for a publish rejected before
@@ -168,9 +170,6 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
             },
-            nmp::EngineError::NoActiveAccount => Self::NoActiveAccount,
-            nmp::EngineError::SigningFailed { reason } => Self::SigningFailed { reason },
-            nmp::EngineError::InvalidSignedEvent { reason } => Self::InvalidSignedEvent { reason },
             nmp::EngineError::ReceiptCorrelationIdExhausted => Self::ReceiptCorrelationIdExhausted,
             nmp::EngineError::EngineClosed => Self::EngineClosed,
         }
@@ -189,10 +188,9 @@ impl std::fmt::Display for FfiError {
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::InvalidSigner { reason } => write!(f, "invalid signer: {reason}"),
-            Self::NoActiveAccount => write!(f, "no active account"),
-            Self::SigningFailed { reason } => write!(f, "signing failed: {reason}"),
-            Self::InvalidSignedEvent { reason } => {
-                write!(f, "signer returned an invalid event: {reason}")
+            Self::NoActiveSigner => write!(f, "the active account has no registered signer"),
+            Self::InvalidSignRequest { reason } => {
+                write!(f, "invalid sign request: {reason}")
             }
             Self::ReceiptCorrelationIdExhausted => {
                 write!(f, "receipt correlation id namespace exhausted")
@@ -222,10 +220,71 @@ impl std::fmt::Display for FfiError {
             Self::EmptyPinnedRelaySet => {
                 write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
             }
+            Self::NoActiveAccount => write!(f, "group messages require an active account"),
             Self::IntentAlreadyConsumed => {
                 write!(f, "this composed write intent was already published once")
             }
         }
+    }
+}
+
+pub fn sign_event_request_from_ffi(
+    event: FfiSignEventRequest,
+) -> Result<nmp::SignEventRequest, FfiError> {
+    Ok(nmp::SignEventRequest {
+        created_at: Timestamp::from(event.created_at),
+        kind: nostr::Kind::from(event.kind),
+        tags: tags_from_ffi(event.tags)?,
+        content: event.content,
+    })
+}
+
+pub fn signed_event_to_ffi(event: SignedEvent) -> FfiSignedEvent {
+    FfiSignedEvent {
+        id: event.id.to_hex(),
+        pubkey: event.pubkey.to_hex(),
+        created_at: event.created_at.as_secs(),
+        kind: event.kind.as_u16(),
+        tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
+        content: event.content,
+        sig: event.sig.to_string(),
+    }
+}
+
+pub fn sign_event_start_error(error: nmp::SignEventError) -> FfiError {
+    match error {
+        nmp::SignEventError::NoActiveSigner => FfiError::NoActiveSigner,
+        nmp::SignEventError::InvalidRequest { reason } => FfiError::InvalidSignRequest { reason },
+        nmp::SignEventError::ExecutorSaturated { capacity } => FfiError::ExecutorSaturated {
+            component: "sign-event".to_string(),
+            capacity: capacity as u64,
+        },
+        nmp::SignEventError::ThreadUnavailable { component, reason } => {
+            FfiError::ThreadUnavailable { component, reason }
+        }
+        nmp::SignEventError::EngineClosed => FfiError::EngineClosed,
+        nmp::SignEventError::SignerUnavailable { reason }
+        | nmp::SignEventError::SignerRejected { reason }
+        | nmp::SignEventError::InvalidSignerOutput { reason } => FfiError::InvalidSigner { reason },
+        nmp::SignEventError::Cancelled => FfiError::EngineClosed,
+    }
+}
+
+pub fn sign_event_failure(error: nmp::SignEventError) -> FfiSignEventFailure {
+    match error {
+        nmp::SignEventError::SignerUnavailable { reason } => {
+            FfiSignEventFailure::SignerUnavailable { reason }
+        }
+        nmp::SignEventError::SignerRejected { reason } => {
+            FfiSignEventFailure::SignerRejected { reason }
+        }
+        nmp::SignEventError::InvalidSignerOutput { reason } => {
+            FfiSignEventFailure::InvalidSignerOutput { reason }
+        }
+        nmp::SignEventError::Cancelled => FfiSignEventFailure::Cancelled,
+        other => FfiSignEventFailure::InvalidSignerOutput {
+            reason: format!("unexpected post-acceptance sign failure: {other}"),
+        },
     }
 }
 
@@ -873,29 +932,6 @@ fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
     tags.into_iter()
         .map(|t| Tag::parse(t.clone()).map_err(|_| FfiError::InvalidTag { got: t }))
         .collect()
-}
-
-pub fn sign_event_request_from_ffi(
-    request: FfiSignEventRequest,
-) -> Result<nmp::SignEventRequest, FfiError> {
-    Ok(nmp::SignEventRequest {
-        created_at: Timestamp::from(request.created_at),
-        kind: nostr::Kind::from(request.kind),
-        tags: tags_from_ffi(request.tags)?,
-        content: request.content,
-    })
-}
-
-pub fn signed_event_to_ffi(event: SignedEvent) -> FfiSignedEvent {
-    FfiSignedEvent {
-        id: event.id.to_hex(),
-        pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_secs(),
-        kind: event.kind.as_u16(),
-        tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
-        content: event.content,
-        sig: event.sig.to_string(),
-    }
 }
 
 /// A `FfiWritePayload::Signed`'s fields -> a `nostr::Event`, PARSE ONLY --
