@@ -95,7 +95,7 @@ pub struct Subscription {
 pub struct HistorySubscription {
     cancel: ObservationCancel,
     advance: HistoryAdvance,
-    batches: std::sync::mpsc::Receiver<HistoryBatch>,
+    batches: HistoryReceiver,
 }
 
 /// Opaque, cloneable capability for advancing one exact history session.
