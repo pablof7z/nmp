@@ -7222,6 +7222,7 @@ mod tests {
             filter,
             source: nmp_grammar::SourceAuthority::AuthorOutboxes,
             access: nmp_grammar::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         let key = compute_coverage_key(&atom);
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
@@ -7269,6 +7270,7 @@ mod tests {
             filter: legacy_shape.clone(),
             source: nmp_grammar::SourceAuthority::AuthorOutboxes,
             access: nmp_grammar::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         });
         let mut legacy_hex = String::new();
         {

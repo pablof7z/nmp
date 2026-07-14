@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash, SourceAuthority};
+use nmp_grammar::{
+    ConcreteFilter, DescriptorHash, RoutingEvidence, RoutingEvidenceKind, SourceAuthority,
+};
 
 use crate::facts::{DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayUrl};
 use crate::solver::Coverage;
@@ -143,6 +145,54 @@ pub(crate) fn build_candidates(
         candidates.insert(author.clone(), list);
     }
     candidates
+}
+
+/// Add selector-projected evidence to the corresponding author's own-relay
+/// candidates. These facts participate in the same k-cover as directory
+/// hints/provenance; exact relay duplicates retain the directory's earlier,
+/// higher-priority lane.
+pub(crate) fn add_projected_candidates(
+    candidates: &mut BTreeMap<PubkeyHex, Vec<LanedRelay>>,
+    evidence_by_author: &BTreeMap<PubkeyHex, BTreeSet<RoutingEvidence>>,
+) {
+    for (author, evidence) in evidence_by_author {
+        let list = candidates.entry(author.clone()).or_default();
+        for fact in evidence {
+            if list.iter().any(|candidate| candidate.url == fact.relay) {
+                continue;
+            }
+            list.push(LanedRelay::new(
+                fact.relay.clone(),
+                match fact.origin {
+                    RoutingEvidenceKind::Hint => Lane::Hint,
+                    RoutingEvidenceKind::SourceProvenance => Lane::Provenance,
+                },
+            ));
+        }
+    }
+}
+
+/// Materialize selector-projected evidence for an authorless atom.
+pub(crate) fn provenance_for_projected(
+    evidence: &BTreeSet<RoutingEvidence>,
+) -> Vec<(RelayUrl, RouteProvenance)> {
+    evidence
+        .iter()
+        .map(|fact| {
+            (
+                fact.relay.clone(),
+                RouteProvenance {
+                    relay: fact.relay.clone(),
+                    lane: match fact.origin {
+                        RoutingEvidenceKind::Hint => Lane::Hint,
+                        RoutingEvidenceKind::SourceProvenance => Lane::Provenance,
+                    },
+                    covers_authors: BTreeSet::new(),
+                    route_kind: RouteKind::Pinned,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Additive indexer-lane routes for an outbox group: every `dir.indexers()`

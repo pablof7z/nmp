@@ -162,7 +162,7 @@ fn follow_feed_query() -> LiveQuery {
 /// 2. after A's kind:10002 lands, A's kind:1 content atom routes to R, not
 ///    the indexer.
 #[test]
-fn content_atom_reroutes_from_indexer_discovery_to_authors_write_relay_after_10002_arrives() {
+fn content_atom_adds_write_relay_without_erasing_projected_source_provenance() {
     let me = Keys::generate();
     let a = Keys::generate();
     let indexer = RelayUrl::parse("wss://indexer.example.com").unwrap();
@@ -200,10 +200,10 @@ fn content_atom_reroutes_from_indexer_discovery_to_authors_write_relay_after_100
     );
 
     // `me`'s kind:3 names A as a follow -- A's kind:1 atom now exists, but
-    // A's write relays are unknown, so (a) the content atom must route
-    // NOWHERE (never an indexer fallback) and (b) the engine must have
-    // opened its OWN internal kind:10002 discovery REQ against the indexer
-    // for A.
+    // A's write relays are unknown. #11 gives the projected `p` value one
+    // honest route immediately: the relay where the source contact list was
+    // observed, typed as Provenance (not IndexerDiscovery). The engine also
+    // opens its OWN kind:10002 discovery REQ against the indexer for A.
     let contacts = kind3(&me, &[a.public_key()], 100);
     plan.apply(&core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -231,19 +231,16 @@ fn content_atom_reroutes_from_indexer_discovery_to_authors_write_relay_after_100
          got: {indexer_reqs:?}"
     );
     assert!(
-        !indexer_reqs
+        indexer_reqs
             .iter()
             .any(|f| f.kinds == Some(BTreeSet::from([1u16]))),
-        "A's kind:1 content atom must NOT be routed to the indexer -- indexers are \
-         never a content fallback"
+        "A's kind:1 atom must use the source contact-list relay as projected provenance"
     );
     assert!(
-        !plan
-            .0
+        plan.0
             .values()
             .any(|f| f.kinds == Some(BTreeSet::from([1u16]))),
-        "a content atom for an author with no known write relays has zero wire subs \
-         anywhere at all"
+        "the projected source-provenance lane must prevent an unroutable ids/authors atom"
     );
 
     // A's kind:10002 arrives (over the SAME indexer connection, exactly as
@@ -279,11 +276,10 @@ fn content_atom_reroutes_from_indexer_discovery_to_authors_write_relay_after_100
         plan.reqs_for(&write_r)
     );
     assert!(
-        !plan
-            .reqs_for(&indexer)
+        plan.reqs_for(&indexer)
             .iter()
             .any(|f| f.kinds.as_ref().is_some_and(|ks| ks.contains(&1u16))),
-        "the indexer must never carry a content-kind REQ, even after discovery completes"
+        "the source-provenance route remains valid after NIP-65 discovery adds another candidate"
     );
 }
 

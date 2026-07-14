@@ -13,7 +13,11 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, IdentityField, IndexedTagName, Selector, SetAlgebra};
+use nmp_grammar::{
+    ConcreteFilter, IdentityField, IndexedTagName, RoutingEvidence, RoutingEvidenceKind, Selector,
+    SetAlgebra,
+};
+use nmp_store::StoredEvent;
 
 use crate::types::{Element, FieldSlot, ResolvedSet};
 
@@ -70,9 +74,10 @@ fn kind_value_for_coord_projection(event: &nostr::Event) -> u16 {
 /// [`Selector`] vocabulary. A single event may contribute zero, one, or
 /// several elements (e.g. an event with multiple `p` tags contributes one
 /// `Element::Scalar` per tag value).
-pub(crate) fn project_events(events: &[nostr::Event], project: &Selector) -> ResolvedSet {
+pub(crate) fn project_events(events: &[StoredEvent], project: &Selector) -> ResolvedSet {
     let mut out = ResolvedSet::new();
-    for event in events {
+    for stored in events {
+        let event = &stored.event;
         match project {
             Selector::Authors => {
                 out.insert(Element::Scalar(event.pubkey.to_hex()));
@@ -92,17 +97,50 @@ pub(crate) fn project_events(events: &[nostr::Event], project: &Selector) -> Res
                 for t in event.tags.iter() {
                     if t.as_slice().first().map(String::as_str) == Some(name.as_str()) {
                         if let Some(value) = t.content() {
-                            out.insert(Element::Scalar(value.to_string()));
+                            let explicit_hint = matches!(name.as_str(), "e" | "a" | "p")
+                                .then(|| t.as_slice().get(2))
+                                .flatten()
+                                .and_then(|raw| nostr::RelayUrl::parse(raw).ok())
+                                .map(|relay| RoutingEvidence {
+                                    relay,
+                                    origin: RoutingEvidenceKind::Hint,
+                                });
+                            let evidence: Vec<RoutingEvidence> = match explicit_hint {
+                                Some(hint) => vec![hint],
+                                None if matches!(name.as_str(), "e" | "a" | "p") => stored
+                                    .provenance
+                                    .seen
+                                    .keys()
+                                    .cloned()
+                                    .map(|relay| RoutingEvidence {
+                                        relay,
+                                        origin: RoutingEvidenceKind::SourceProvenance,
+                                    })
+                                    .collect(),
+                                None => Vec::new(),
+                            };
+                            out.insert_with(Element::Scalar(value.to_string()), evidence);
                         }
                     }
                 }
             }
             Selector::AddressCoord => {
-                out.insert(Element::Coord {
-                    kind: kind_value_for_coord_projection(event),
-                    author: event.pubkey.to_hex(),
-                    d: event.tags.identifier().unwrap_or("").to_string(),
-                });
+                out.insert_with(
+                    Element::Coord {
+                        kind: kind_value_for_coord_projection(event),
+                        author: event.pubkey.to_hex(),
+                        d: event.tags.identifier().unwrap_or("").to_string(),
+                    },
+                    stored
+                        .provenance
+                        .seen
+                        .keys()
+                        .cloned()
+                        .map(|relay| RoutingEvidence {
+                            relay,
+                            origin: RoutingEvidenceKind::SourceProvenance,
+                        }),
+                );
             }
         }
     }
@@ -130,15 +168,29 @@ pub(crate) fn resolve_reactive(
 pub(crate) fn resolve_setop(op: SetAlgebra, operands: &[&ResolvedSet]) -> ResolvedSet {
     match op {
         SetAlgebra::Union => operands.iter().fold(ResolvedSet::new(), |mut acc, s| {
-            acc.extend(s.iter().cloned());
+            acc.merge_from(s);
             acc
         }),
         SetAlgebra::Intersect => {
             let mut iter = operands.iter();
             match iter.next() {
                 None => ResolvedSet::new(),
-                Some(first) => iter.fold((*first).clone(), |acc, s| {
-                    acc.intersection(s).cloned().collect()
+                Some(first) => iter.fold((*first).clone(), |mut acc, s| {
+                    let missing: Vec<Element> = acc
+                        .iter()
+                        .filter_map(|(element, _)| {
+                            (!s.contains(element)).then_some(element.clone())
+                        })
+                        .collect();
+                    for element in missing {
+                        acc.remove(&element);
+                    }
+                    for (element, evidence) in s.iter() {
+                        if acc.contains(element) {
+                            acc.insert_with(element.clone(), evidence.iter().cloned());
+                        }
+                    }
+                    acc
                 }),
             }
         }
@@ -147,11 +199,13 @@ pub(crate) fn resolve_setop(op: SetAlgebra, operands: &[&ResolvedSet]) -> Resolv
             match iter.next() {
                 None => ResolvedSet::new(),
                 Some(first) => {
-                    let rest_union = iter.fold(ResolvedSet::new(), |mut acc, s| {
-                        acc.extend(s.iter().cloned());
-                        acc
-                    });
-                    (*first).difference(&rest_union).cloned().collect()
+                    let mut out = (*first).clone();
+                    for other in iter {
+                        for (element, _) in other.iter() {
+                            out.remove(element);
+                        }
+                    }
+                    out
                 }
             }
         }
@@ -169,12 +223,25 @@ mod tests {
     /// would reintroduce exactly the kind bias the v2 docs reject.
     const ARBITRARY_CALLER_KIND: u16 = 9999;
 
-    fn note_with_tags(tags: Vec<Tag>) -> nostr::Event {
+    fn note_with_tags(tags: Vec<Tag>) -> StoredEvent {
         let keys = Keys::generate();
-        EventBuilder::new(Kind::Custom(ARBITRARY_CALLER_KIND), "hi")
-            .tags(tags)
-            .sign_with_keys(&keys)
-            .expect("test fixture must sign cleanly")
+        StoredEvent {
+            event: EventBuilder::new(Kind::Custom(ARBITRARY_CALLER_KIND), "hi")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .expect("test fixture must sign cleanly"),
+            provenance: nmp_store::Provenance::default(),
+        }
+    }
+
+    fn observed(mut stored: StoredEvent, relays: &[&str]) -> StoredEvent {
+        for (index, relay) in relays.iter().enumerate() {
+            stored.provenance.seen.insert(
+                nostr::RelayUrl::parse(relay).unwrap(),
+                nostr::Timestamp::from(index as u64),
+            );
+        }
+        stored
     }
 
     /// `Selector::Tag` is a purely local projection over already-acquired
@@ -232,6 +299,78 @@ mod tests {
         assert_eq!(
             upper,
             ResolvedSet::from([Element::Scalar("upper".to_string())])
+        );
+    }
+
+    #[test]
+    fn reference_tags_carry_explicit_hint_or_source_provenance_fallback() {
+        let hinted = "wss://hint.example";
+        let source = "wss://source.example";
+        let values = [
+            ("e", "11".repeat(32)),
+            ("p", "22".repeat(32)),
+            ("a", format!("30023:{}:slug", "33".repeat(32))),
+        ];
+        for (name, value) in values {
+            let explicit = observed(
+                note_with_tags(vec![Tag::parse([name, value.as_str(), hinted]).unwrap()]),
+                &[source],
+            );
+            let set = project_events(&[explicit], &Selector::Tag(name.to_string()));
+            let (_, evidence) = set.iter().next().unwrap();
+            assert_eq!(
+                evidence,
+                &BTreeSet::from([RoutingEvidence {
+                    relay: nostr::RelayUrl::parse(hinted).unwrap(),
+                    origin: RoutingEvidenceKind::Hint,
+                }]),
+                "an explicit {name}-tag hint suppresses provenance fallback"
+            );
+
+            let fallback = observed(
+                note_with_tags(vec![Tag::parse([name, value.as_str()]).unwrap()]),
+                &[source],
+            );
+            let set = project_events(&[fallback], &Selector::Tag(name.to_string()));
+            let (_, evidence) = set.iter().next().unwrap();
+            assert_eq!(
+                evidence,
+                &BTreeSet::from([RoutingEvidence {
+                    relay: nostr::RelayUrl::parse(source).unwrap(),
+                    origin: RoutingEvidenceKind::SourceProvenance,
+                }])
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_projected_values_union_evidence_and_setops_preserve_it() {
+        let value = "44".repeat(32);
+        let one = observed(
+            note_with_tags(vec![Tag::parse(["e", value.as_str()]).unwrap()]),
+            &["wss://one.example"],
+        );
+        let two = observed(
+            note_with_tags(vec![Tag::parse(["e", value.as_str()]).unwrap()]),
+            &["wss://two.example"],
+        );
+        let projected = project_events(&[one, two], &Selector::Tag("e".to_string()));
+        assert_eq!(projected.iter().next().unwrap().1.len(), 2);
+
+        let intersected = resolve_setop(SetAlgebra::Intersect, &[&projected, &projected]);
+        assert_eq!(intersected, projected);
+        let removed = resolve_setop(SetAlgebra::Diff, &[&projected, &projected]);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn address_coord_uses_source_provenance() {
+        let event = observed(note_with_tags(Vec::new()), &["wss://coord.example"]);
+        let projected = project_events(&[event], &Selector::AddressCoord);
+        let (_, evidence) = projected.iter().next().unwrap();
+        assert_eq!(
+            evidence.iter().next().unwrap().origin,
+            RoutingEvidenceKind::SourceProvenance
         );
     }
 }

@@ -84,6 +84,7 @@ fn ctx_atom_with(filter: ConcreteFilter, source: SourceAuthority) -> ContextualA
         filter,
         source,
         access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
     }
 }
 
@@ -696,6 +697,34 @@ fn req_for<'a>(effects: &'a [Effect], relay: &RelayUrl) -> (&'a SubId, &'a Concr
         }
     }
     panic!("expected a WireOp::Req for {relay:?} in {effects:?}");
+}
+
+fn req_for_kind<'a>(
+    effects: &'a [Effect],
+    relay: &RelayUrl,
+    kind: u16,
+) -> (&'a SubId, &'a ConcreteFilter) {
+    for effect in effects {
+        if let Effect::Wire(delta) = effect {
+            for (r, ops) in &delta.ops {
+                if r != relay {
+                    continue;
+                }
+                for op in ops {
+                    if let WireOp::Req(sub_id, filter) = op {
+                        if filter
+                            .kinds
+                            .as_ref()
+                            .is_some_and(|kinds| kinds.contains(&kind))
+                        {
+                            return (sub_id, filter);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    panic!("expected a kind:{kind} WireOp::Req for {relay:?} in {effects:?}");
 }
 
 fn wire_sub_string(sub_id: &SubId) -> String {
@@ -2083,7 +2112,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     // Only the inner atom (kind:3 by `a`) is resolvable at subscribe time --
     // the outer author set is still empty (no wildcard), so relay0 is the
     // only wire sub open right now.
-    let (sub0, _) = req_for(&effects, &relay0);
+    let (sub0, _) = req_for_kind(&effects, &relay0, 3);
     let wire0 = wire_sub_string(sub0);
 
     // `a` follows `b`: the outer atom {kind:1, authors:{b}} now resolves and
@@ -2097,7 +2126,11 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
         },
         event_frame(&wire0, contact_list),
     ));
-    let (sub1, _) = req_for(&effects, &relay1);
+    // #11: the source relay is also projected as provenance for the outer
+    // author, so relay0 now carries a distinct kind:1 outer request too.
+    let (outer0, _) = req_for_kind(&effects, &relay0, 1);
+    let wire_outer0 = wire_sub_string(outer0);
+    let (sub1, _) = req_for_kind(&effects, &relay1, 1);
     let wire1 = wire_sub_string(sub1);
 
     // The OUTER atom's relay (relay1) proves its window; the INNER atom's
@@ -2127,7 +2160,9 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
          imply this feed is settled while the follow-list expansion is unproven"
     );
 
-    // Now the inner atom's own EOSE arrives: ONLY relay0's entry flips.
+    // The inner EOSE alone cannot flip relay0's aggregate source evidence:
+    // #11 also routes the outer atom there from source provenance, and that
+    // second relay0 request is still unproven.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -2135,6 +2170,17 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
             generation: 1,
         },
         eose_frame(&wire0),
+    ));
+    assert!(
+        evidence_from(&effects, id).is_none(),
+        "one of relay0's two current atoms remains unproven"
+    );
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        eose_frame(&wire_outer0),
     ));
     let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
     let inner = source_for(evidence, &relay0).expect("relay0 must still be a source");

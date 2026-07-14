@@ -88,6 +88,7 @@ pub fn coverage_key(atom: &ContextualAtom) -> CoverageKey {
         filter: window_erase(&atom.filter),
         source: atom.source.clone(),
         access: atom.access,
+        routing_evidence: BTreeSet::new(),
     };
     CoverageKey(fold_byte(windowed.hash(), COVERAGE_KEY_VERSION))
 }
@@ -325,6 +326,7 @@ mod tests {
             filter,
             source: nmp_grammar::SourceAuthority::AuthorOutboxes,
             access: nmp_grammar::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         }
     }
 
@@ -373,13 +375,28 @@ mod tests {
             filter: filter.clone(),
             source: nmp_grammar::SourceAuthority::AuthorOutboxes,
             access: nmp_grammar::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         let public = ContextualAtom {
             filter,
             source: nmp_grammar::SourceAuthority::Public,
             access: nmp_grammar::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         };
         assert_ne!(coverage_key(&outbox), coverage_key(&public));
+    }
+
+    #[test]
+    fn coverage_key_erases_routing_evidence() {
+        let plain = atom(cf(&[1], &["aa"], None, None));
+        let mut hinted = plain.clone();
+        hinted
+            .routing_evidence
+            .insert(nmp_grammar::RoutingEvidence {
+                relay: nostr::RelayUrl::parse("wss://hint.example").unwrap(),
+                origin: nmp_grammar::RoutingEvidenceKind::Hint,
+            });
+        assert_eq!(coverage_key(&plain), coverage_key(&hinted));
     }
 
     #[test]

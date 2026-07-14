@@ -75,6 +75,16 @@ about current code:
   only exact NIP-defined schemas while typed contextual operations may add their
   own tags and route facts to immutable foreign-owned drafts. No kind:1-first
   core catalog is part of the target.
+- **~~Selector-projected values lost their only routable lane~~ CLOSED
+  (#11).** `Tag(e/a/p)` now retains a valid tag relay hint or falls back to
+  the source row's observed-relay provenance; `AddressCoord` retains source
+  provenance. Typed evidence survives nested Derived/SetOp evaluation, is
+  gated by discovered-relay admission, and reaches both public ids-only atoms
+  and author outbox candidate solving. Duplicate source observations replace
+  the live atom with enlarged evidence, identical inner demand remains globally
+  refcount-shared across different selectors, and projected singleton ids are
+  widen-only packed into wire filters capped at 256 ids. Sliding recent-window
+  semantics remain separate; explicit NIP-01 inner limits are covered by #187.
 - **The optional content substrate and first SwiftUI family are built; the
   multi-platform/open-code ecosystem remains open (#75).** `nmp-content`,
   governed UniFFI values, and Swift/Kotlin content

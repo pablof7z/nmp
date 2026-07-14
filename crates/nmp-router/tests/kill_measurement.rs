@@ -66,6 +66,7 @@ fn falsifier_demand() -> BTreeSet<ContextualAtom> {
             },
             source: SourceAuthority::AuthorOutboxes,
             access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         })
         .collect()
 }
