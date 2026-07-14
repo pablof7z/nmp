@@ -2229,7 +2229,10 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
     assert_eq!(r0.status, SourceStatus::Requesting);
 
     // relay0 drops. Its watermark must survive; its status must flip.
-    let effects = core.handle(EngineMsg::RelayDisconnected(0));
+    let effects = core.handle(EngineMsg::RelayDisconnected(RelayHandle {
+        slot: 0,
+        generation: 1,
+    }));
     let evidence = evidence_from(&effects, id).expect("a link-status flip must emit EmitRows");
     let r0 = source_for(evidence, &relay0).expect("relay0 must still be a source");
     assert_eq!(
@@ -2241,6 +2244,61 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
         r0.status,
         SourceStatus::Disconnected,
         "the link status must independently reflect the drop"
+    );
+}
+
+/// #440: closing the last owner can synchronously release a pool slot while
+/// a caller immediately creates fresh demand for the same relay. The slot is
+/// then reused at a new generation before the old disconnect reaches the
+/// reducer. That stale fact must not erase the reopened connection.
+#[test]
+fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+    let effects = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(id, ..) => Some(*id),
+            _ => None,
+        })
+        .expect("subscribe emits its initial row snapshot");
+
+    let old = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let reopened = RelayHandle {
+        slot: 0,
+        generation: 2,
+    };
+    let _ = core.handle(EngineMsg::RelayConnected(old, relay.clone()));
+    let _ = core.handle(EngineMsg::RelayConnected(reopened, relay.clone()));
+
+    let stale = core.handle(EngineMsg::RelayDisconnected(old));
+    assert!(
+        stale.is_empty(),
+        "an old-generation disconnect must be a reducer no-op"
+    );
+
+    let current = core.handle(EngineMsg::RelayDisconnected(reopened));
+    let evidence = evidence_from(&current, id).expect("the current disconnect refreshes evidence");
+    assert_eq!(
+        source_for(evidence, &relay)
+            .expect("relay remains the planned source")
+            .status,
+        SourceStatus::Disconnected,
+    );
+    assert!(
+        current
+            .iter()
+            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &relay)),
+        "the current generation disconnect still re-ensures required work"
     );
 }
 
@@ -3087,7 +3145,10 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
         Effect::EmitReceipt(id, WriteStatus::Rejected(relay, _)) if *id == id_b && relay == &nack
     )));
 
-    let dropped = core.handle(EngineMsg::RelayDisconnected(2));
+    let dropped = core.handle(EngineMsg::RelayDisconnected(RelayHandle {
+        slot: 2,
+        generation: 1,
+    }));
     assert!(!dropped.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::GaveUp(_)) if *id == id_a)
     ));

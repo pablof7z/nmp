@@ -645,12 +645,18 @@ mod pool_bridge_tests {
             stopping: stop_rx,
         };
         sink.on_event(PoolEvent::Disconnected {
-            slot: 1,
+            handle: RelayHandle {
+                slot: 1,
+                generation: 1,
+            },
             reason: nmp_transport::DisconnectReason::Error,
         });
         let blocked = thread::spawn(move || {
             sink.on_event(PoolEvent::Disconnected {
-                slot: 2,
+                handle: RelayHandle {
+                    slot: 2,
+                    generation: 1,
+                },
                 reason: nmp_transport::DisconnectReason::Error,
             });
         });
@@ -876,7 +882,7 @@ mod relay_worker_reconciliation_tests {
 fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     match event {
         PoolEvent::Connected { handle, url } => Some(EngineMsg::RelayConnected(handle, url)),
-        PoolEvent::Disconnected { slot, .. } => Some(EngineMsg::RelayDisconnected(slot)),
+        PoolEvent::Disconnected { handle, .. } => Some(EngineMsg::RelayDisconnected(handle)),
         PoolEvent::Frame { handle, frame } => Some(EngineMsg::RelayFrame(handle, frame)),
         PoolEvent::Health { slot, health } => Some(EngineMsg::RelayHealth(slot, health)),
         PoolEvent::EventHandoff {

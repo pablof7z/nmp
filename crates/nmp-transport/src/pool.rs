@@ -223,7 +223,10 @@ pub enum PoolEvent {
         url: RelayUrl,
     },
     Disconnected {
-        slot: u32,
+        /// The exact connection generation that disconnected. A slot may
+        /// already have reopened by the time this event is reduced, so a
+        /// bare slot number cannot safely identify the connection that died.
+        handle: RelayHandle,
         reason: DisconnectReason,
     },
     Frame {

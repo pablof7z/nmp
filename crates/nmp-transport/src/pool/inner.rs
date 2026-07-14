@@ -295,7 +295,7 @@ impl PoolInner {
         worker.push(WorkerCommand::Shutdown);
         state.health.state = ConnState::Disconnected;
         Some(PoolEvent::Disconnected {
-            slot: h.slot,
+            handle: h,
             reason: DisconnectReason::Closed,
         })
     }
@@ -713,7 +713,10 @@ fn apply_worker_event_with_verdict(
             };
             if was_connected {
                 Some(PoolEvent::Disconnected {
-                    slot: event.slot,
+                    handle: RelayHandle {
+                        slot: event.slot,
+                        generation: event.generation,
+                    },
                     reason: DisconnectReason::Error,
                 })
             } else {
