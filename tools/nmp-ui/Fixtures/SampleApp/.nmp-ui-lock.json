@@ -1,0 +1,26 @@
+{
+  "components" : {
+    "action-surface" : {
+      "dependencies" : [],
+      "files" : {
+        "Components/NMPUI/ActionSurface.swift" : {
+          "upstreamBase" : "import SwiftUI\n\n/// App-owned interaction wrapper installed by nmp-ui.\npublic struct NMPSourceActionSurface<Content: View>: View {\n    private let action: (() -> Void)?\n    private let content: Content\n\n    public init(action: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {\n        self.action = action\n        self.content = content()\n    }\n\n    @ViewBuilder\n    public var body: some View {\n        if let action {\n            Button(action: action) { content }\n                .buttonStyle(.plain)\n        } else {\n            content\n        }\n    }\n}\n",
+          "upstreamHash" : "ada5f54d6628f3f912bbc2210e6e1dd182ce262bd03423d113f797654ab38273"
+        }
+      },
+      "version" : "1.0.0"
+    },
+    "article-medium-card" : {
+      "dependencies" : ["action-surface"],
+      "files" : {
+        "Components/NMPUI/ArticleMediumCard.swift" : {
+          "upstreamBase" : "import NMPContent\nimport NMPUI\nimport SwiftUI\n\n/// App-owned article row installed by nmp-ui. Edit it to match the host app.\npublic struct NMPSourceArticleMediumCard: View {\n    public let article: NostrArticle\n    public let authorProfile: NostrProfileMetadata?\n    public let action: (() -> Void)?\n\n    public init(\n        article: NostrArticle,\n        authorProfile: NostrProfileMetadata? = nil,\n        action: (() -> Void)? = nil\n    ) {\n        self.article = article\n        self.authorProfile = authorProfile\n        self.action = action\n    }\n\n    public var body: some View {\n        NMPSourceActionSurface(action: action) {\n            HStack(alignment: .top, spacing: 14) {\n                VStack(alignment: .leading, spacing: 7) {\n                    HStack(spacing: 6) {\n                        NMPAvatar(pubkey: article.author, profile: authorProfile, size: 20)\n                        NMPName(pubkey: article.author, profile: authorProfile)\n                            .font(.caption.weight(.medium))\n                    }\n\n                    NMPArticleTitle(article: article)\n                        .font(.headline.weight(.bold))\n                        .lineLimit(3)\n\n                    NMPArticleSummary(article: article)\n                        .font(.subheadline)\n                        .lineLimit(2)\n\n                    NMPArticleReadingTime(article: article)\n                        .font(.caption2)\n                }\n                .frame(maxWidth: .infinity, alignment: .leading)\n\n                NMPArticleImage(article: article, placeholderSystemImage: \"doc.richtext\")\n                    .frame(width: 108, height: 108)\n                    .clipShape(RoundedRectangle(cornerRadius: 10))\n            }\n            .padding(.vertical, 13)\n            .contentShape(Rectangle())\n        }\n        .accessibilityElement(children: .contain)\n        .accessibilityHint(action == nil ? \"\" : \"Opens article\")\n    }\n}\n",
+          "upstreamHash" : "34d39768883a24338bf0c92f51bb4dc3afdb3c516f794e836ca738ec371288aa"
+        }
+      },
+      "version" : "1.0.0"
+    }
+  },
+  "registryVersion" : "2026.07.1",
+  "schemaVersion" : 1
+}
