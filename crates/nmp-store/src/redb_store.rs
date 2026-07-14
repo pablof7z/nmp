@@ -8469,6 +8469,69 @@ mod tests {
     }
 
     #[test]
+    fn union_replacement_page_work_is_bounded_per_root_and_deduplicated_globally() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("union-replacement-work.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let author_a = nostr::Keys::generate();
+        let author_b = nostr::Keys::generate();
+        let noise = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://union-work.example").unwrap();
+        let mut newest_a = Vec::new();
+
+        for index in 0..64u64 {
+            let event = room_event(&author_a, "a", 3_000 - index, &format!("author-a-{index}"));
+            newest_a.push(event.id);
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(10_000 + index)),
+                )
+                .unwrap();
+            store
+                .insert(
+                    room_event(&author_b, "b", 2_000 - index, &format!("author-b-{index}")),
+                    RelayObserved::new(relay.clone(), Timestamp::from(11_000 + index)),
+                )
+                .unwrap();
+        }
+        for index in 0..256u64 {
+            store
+                .insert(
+                    room_event(&noise, "noise", 1_000 - index, &format!("noise-{index}")),
+                    RelayObserved::new(relay.clone(), Timestamp::from(12_000 + index)),
+                )
+                .unwrap();
+        }
+
+        let room_kind = Kind::from(9u16);
+        let filters = vec![
+            Filter::new().kind(room_kind).author(author_a.public_key()),
+            Filter::new().kind(room_kind).author(author_b.public_key()),
+            // This root overlaps both author roots and the large noise set.
+            // Its first three rows are the same rows returned by author A.
+            Filter::new().kind(room_kind),
+        ];
+        let before = EventCursor::new(Timestamp::from(4_000u64), newest_a[0]);
+        store.reset_query_work();
+        let rows = store.query_newest_before_any(&filters, before, 3).unwrap();
+
+        assert_eq!(
+            rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            newest_a[..3],
+            "overlapping roots must merge into one canonical de-duplicated page"
+        );
+        assert_eq!(
+            store.query_work(),
+            (9, 9, 9),
+            concat!(
+                "three roots at limit three must consume and materialize exactly nine rows; ",
+                "the 384-row store cannot turn union replacement into a full scan"
+            )
+        );
+    }
+
+    #[test]
     fn strict_ordered_scan_stops_after_requested_eligible_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("strict-provenance-work.redb");
