@@ -134,6 +134,10 @@ after restart.
 interpret a set of per-relay facts; the engine reports them without inventing a
 single success boolean.
 
+`Sent { relay, attempt, written_at }` is constructible only from a persisted
+`Written` handoff for that exact durable lane ordinal. Ephemeral transport work
+has no outbox attempt and therefore cannot mint this durable receipt fact.
+
 ## 6. Retry ownership
 
 Retry is split by domain, with exactly one owner each:

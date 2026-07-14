@@ -74,12 +74,6 @@ final class EvidenceMappingTests: XCTestCase {
             ),
             .sent(relay: "wss://written.example", attempt: 4, writtenAt: 125)
         )
-        XCTAssertEqual(
-            WriteStatus(
-                .sent(relay: "wss://ephemeral.example", attempt: nil, writtenAt: 126)
-            ),
-            .sent(relay: "wss://ephemeral.example", attempt: nil, writtenAt: 126)
-        )
     }
 
     func testPersistenceBlockedReceiptMappingRemainsNonterminal() {

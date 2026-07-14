@@ -105,10 +105,6 @@ class EvidenceMappingTest {
             WriteStatus.Sent("wss://written.example", 4uL, 125uL),
             WriteStatus.from(FfiWriteStatus.Sent("wss://written.example", 4uL, 125uL)),
         )
-        assertEquals(
-            WriteStatus.Sent("wss://ephemeral.example", null, 126uL),
-            WriteStatus.from(FfiWriteStatus.Sent("wss://ephemeral.example", null, 126uL)),
-        )
     }
 
     @Test

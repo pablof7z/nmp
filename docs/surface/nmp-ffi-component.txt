@@ -2346,9 +2346,7 @@ enum Enum {
                 },
                 Field {
                     name: "attempt",
-                    type_: Optional {
-                        inner_type: UInt64,
-                    },
+                    type_: UInt64,
                     default: None,
                     docstring: None,
                 },

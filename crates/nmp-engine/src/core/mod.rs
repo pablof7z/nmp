@@ -730,11 +730,6 @@ struct AttemptCorrelationTarget {
     /// Durable/AtMostOnce correlations identify the exact persisted lane
     /// ordinal. Ephemeral correlations have no outbox row.
     lane: Option<(IntentId, u64)>,
-    /// Ephemeral drops its `PendingWrite` immediately after producing the
-    /// handoff effects, so each correlation snapshots the observer set that
-    /// must still receive a truthful async `Sent`. Durable/AtMostOnce leave
-    /// this empty and continue to notify through their retained pending row.
-    ephemeral_sinks: Vec<Rc<dyn ReceiptSink>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -892,17 +887,6 @@ impl<S: EventStore> EngineCore<S> {
         };
 
         let Some((intent_id, ordinal)) = target.lane else {
-            if result == HandoffResult::Written && !target.ephemeral_sinks.is_empty() {
-                let status = WriteStatus::Sent {
-                    relay: target.relay.clone(),
-                    attempt: None,
-                    written_at: self.clock,
-                };
-                for sink in &target.ephemeral_sinks {
-                    sink.on_status(status.clone());
-                }
-                effects.push(Effect::EmitReceipt(target.receipt, status));
-            }
             return effects;
         };
 
@@ -967,7 +951,7 @@ impl<S: EventStore> EngineCore<S> {
                     target.receipt,
                     WriteStatus::Sent {
                         relay: target.relay,
-                        attempt: Some(ordinal),
+                        attempt: ordinal,
                         written_at: self.clock,
                     },
                     &mut effects,
@@ -1174,7 +1158,6 @@ impl<S: EventStore> EngineCore<S> {
                     receipt: id,
                     relay: lane.key.relay.clone(),
                     lane: Some((lane.key.intent_id, attempt.ordinal)),
-                    ephemeral_sinks: Vec::new(),
                 },
             );
             effects.push(Effect::PublishEvent(
@@ -1595,7 +1578,7 @@ impl<S: EventStore> EngineCore<S> {
                             }
                             HandoffEvidence::Written => replay.push(WriteStatus::Sent {
                                 relay: attempt.relay.clone(),
-                                attempt: Some(attempt.ordinal),
+                                attempt: attempt.ordinal,
                                 written_at: handoff.at,
                             }),
                             HandoffEvidence::Ambiguous => {
@@ -2435,7 +2418,6 @@ impl<S: EventStore> EngineCore<S> {
             .get(&id)
             .is_some_and(|pending| pending.durability == Durability::Ephemeral)
         {
-            let ephemeral_sinks = self.pending[&id].sinks.clone();
             for relay in relays {
                 let Ok(correlation) = self.alloc_attempt_correlation() else {
                     continue;
@@ -2446,7 +2428,6 @@ impl<S: EventStore> EngineCore<S> {
                         receipt: id,
                         relay: relay.clone(),
                         lane: None,
-                        ephemeral_sinks: ephemeral_sinks.clone(),
                     },
                 );
                 effects.push(Effect::PublishEvent(relay, event.clone(), correlation));

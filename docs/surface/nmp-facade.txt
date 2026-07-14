@@ -24965,24 +24965,7 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                                                               "attrs": [],
                                                               "inner": {
                                                                 "struct_field": {
-                                                                  "resolved_path": {
-                                                                    "args": {
-                                                                      "angle_bracketed": {
-                                                                        "args": [
-                                                                          {
-                                                                            "type": {
-                                                                              "primitive": "u64"
-                                                                            }
-                                                                          }
-                                                                        ],
-                                                                        "constraints": []
-                                                                      }
-                                                                    },
-                                                                    "path": "Option",
-                                                                    "resolved_item": {
-                                                                      "path": "core::option::Option"
-                                                                    }
-                                                                  }
+                                                                  "primitive": "u64"
                                                                 }
                                                               },
                                                               "name": "attempt",

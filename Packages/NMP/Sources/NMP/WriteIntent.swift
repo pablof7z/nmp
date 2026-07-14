@@ -99,7 +99,7 @@ public enum WriteStatus: Sendable, Hashable {
     case awaitingAuth(relay: String)
     case retryEligible(relay: String, attempt: UInt64, eligibleAt: UInt64)
     case handoffAmbiguous(relay: String, attempt: UInt64, observedAt: UInt64)
-    case sent(relay: String, attempt: UInt64?, writtenAt: UInt64)
+    case sent(relay: String, attempt: UInt64, writtenAt: UInt64)
     case acked(relay: String)
     case rejected(relay: String, reason: String)
     case gaveUp(relay: String)

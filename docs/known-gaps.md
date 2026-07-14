@@ -54,7 +54,8 @@ about current code:
   batch draining, so there is no zero-timeout busy-spin. Rust, UniFFI, Swift,
   and Kotlin receipts distinguish relay/AUTH waits, retry eligibility with the
   persisted attempt ordinal and time, ambiguous handoff, and proven socket
-  write/flush; `Sent` is never emitted for queue acceptance or ambiguity.
+  write/flush persisted against an exact lane ordinal; `Sent` is never emitted
+  for queue acceptance, ambiguity, or an ephemeral handoff with no outbox fact.
 - **The NIP-46 reconnect and governed sign-only paths are built; standard platform vault providers are not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
