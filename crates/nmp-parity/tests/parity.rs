@@ -16,6 +16,7 @@ use nmp::{
     WriteStatus,
 };
 use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
+use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpQueryHandle};
 use nmp_ffi::nip02::{
     FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
@@ -42,6 +43,73 @@ const REATTACH_TERMINAL_KIND: u16 = 9_995;
 const QUERY_CREATED_AT: u64 = 1_700_000_100;
 const WRITE_CREATED_AT: u64 = 1_700_000_200;
 const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+#[test]
+fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
+    let relay = nostr::RelayUrl::parse("wss://receipt-parity.example").unwrap();
+    let cases = [
+        (
+            WriteStatus::AwaitingRelay {
+                relay: relay.clone(),
+            },
+            FfiWriteStatus::AwaitingRelay {
+                relay: relay.to_string(),
+            },
+        ),
+        (
+            WriteStatus::AwaitingAuth {
+                relay: relay.clone(),
+            },
+            FfiWriteStatus::AwaitingAuth {
+                relay: relay.to_string(),
+            },
+        ),
+        (
+            WriteStatus::RetryEligible {
+                relay: relay.clone(),
+                attempt: 7,
+                eligible_at: Timestamp::from(123),
+            },
+            FfiWriteStatus::RetryEligible {
+                relay: relay.to_string(),
+                attempt: 7,
+                eligible_at: 123,
+            },
+        ),
+        (
+            WriteStatus::HandoffAmbiguous {
+                relay: relay.clone(),
+                attempt: 8,
+                observed_at: Timestamp::from(124),
+            },
+            FfiWriteStatus::HandoffAmbiguous {
+                relay: relay.to_string(),
+                attempt: 8,
+                observed_at: 124,
+            },
+        ),
+        (
+            WriteStatus::Sent {
+                relay: relay.clone(),
+                attempt: 9,
+                written_at: Timestamp::from(125),
+            },
+            FfiWriteStatus::Sent {
+                relay: relay.to_string(),
+                attempt: 9,
+                written_at: 125,
+            },
+        ),
+    ];
+
+    for (direct, expected_ffi) in cases {
+        assert_eq!(
+            write_status_to_ffi(WriteStatusRef(&direct)),
+            expected_ffi,
+            "direct/FFI parity must retain every relay, ordinal, and timestamp"
+        );
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct NormRow {
@@ -76,6 +144,10 @@ enum NormStatus {
     AwaitingCapability,
     Signed(String),
     Routed(Vec<String>),
+    AwaitingRelay(String),
+    AwaitingAuth(String),
+    RetryEligible(String, u64, u64),
+    HandoffAmbiguous(String, u64, u64),
     Sent(String),
     Acked(String),
     Rejected(String, String),
@@ -318,7 +390,33 @@ fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
                 .map(|url| normalize_url(url.as_str(), relay))
                 .collect(),
         ),
-        WriteStatus::Sent(url) => NormStatus::Sent(normalize_url(url.as_str(), relay)),
+        WriteStatus::AwaitingRelay { relay: url } => {
+            NormStatus::AwaitingRelay(normalize_url(url.as_str(), relay))
+        }
+        WriteStatus::AwaitingAuth { relay: url } => {
+            NormStatus::AwaitingAuth(normalize_url(url.as_str(), relay))
+        }
+        WriteStatus::RetryEligible {
+            relay: url,
+            attempt,
+            eligible_at,
+        } => NormStatus::RetryEligible(
+            normalize_url(url.as_str(), relay),
+            attempt,
+            eligible_at.as_secs(),
+        ),
+        WriteStatus::HandoffAmbiguous {
+            relay: url,
+            attempt,
+            observed_at,
+        } => NormStatus::HandoffAmbiguous(
+            normalize_url(url.as_str(), relay),
+            attempt,
+            observed_at.as_secs(),
+        ),
+        WriteStatus::Sent { relay: url, .. } => {
+            NormStatus::Sent(normalize_url(url.as_str(), relay))
+        }
         WriteStatus::Acked(url) => NormStatus::Acked(normalize_url(url.as_str(), relay)),
         WriteStatus::Rejected(url, reason) => {
             NormStatus::Rejected(normalize_url(url.as_str(), relay), reason)
@@ -353,7 +451,23 @@ fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
             relays.sort();
             NormStatus::Routed(relays)
         }
-        FfiWriteStatus::Sent { relay: url } => NormStatus::Sent(normalize_url(&url, relay)),
+        FfiWriteStatus::AwaitingRelay { relay: url } => {
+            NormStatus::AwaitingRelay(normalize_url(&url, relay))
+        }
+        FfiWriteStatus::AwaitingAuth { relay: url } => {
+            NormStatus::AwaitingAuth(normalize_url(&url, relay))
+        }
+        FfiWriteStatus::RetryEligible {
+            relay: url,
+            attempt,
+            eligible_at,
+        } => NormStatus::RetryEligible(normalize_url(&url, relay), attempt, eligible_at),
+        FfiWriteStatus::HandoffAmbiguous {
+            relay: url,
+            attempt,
+            observed_at,
+        } => NormStatus::HandoffAmbiguous(normalize_url(&url, relay), attempt, observed_at),
+        FfiWriteStatus::Sent { relay: url, .. } => NormStatus::Sent(normalize_url(&url, relay)),
         FfiWriteStatus::Acked { relay: url } => NormStatus::Acked(normalize_url(&url, relay)),
         FfiWriteStatus::Rejected { relay: url, reason } => {
             NormStatus::Rejected(normalize_url(&url, relay), reason)
@@ -937,7 +1051,11 @@ fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
         WriteStatus::AwaitingCapability => "awaiting_capability",
         WriteStatus::Signed(_) => "signed",
         WriteStatus::Routed(_) => "routed",
-        WriteStatus::Sent(_) => "sent",
+        WriteStatus::AwaitingRelay { .. } => "awaiting_relay",
+        WriteStatus::AwaitingAuth { .. } => "awaiting_auth",
+        WriteStatus::RetryEligible { .. } => "retry_eligible",
+        WriteStatus::HandoffAmbiguous { .. } => "handoff_ambiguous",
+        WriteStatus::Sent { .. } => "sent",
         WriteStatus::Acked(_) => "acked",
         WriteStatus::Rejected(_, _) => "rejected",
         WriteStatus::GaveUp(_) => "gave_up",
@@ -955,6 +1073,10 @@ fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
         FfiWriteStatus::AwaitingCapability => "awaiting_capability",
         FfiWriteStatus::Signed { .. } => "signed",
         FfiWriteStatus::Routed { .. } => "routed",
+        FfiWriteStatus::AwaitingRelay { .. } => "awaiting_relay",
+        FfiWriteStatus::AwaitingAuth { .. } => "awaiting_auth",
+        FfiWriteStatus::RetryEligible { .. } => "retry_eligible",
+        FfiWriteStatus::HandoffAmbiguous { .. } => "handoff_ambiguous",
         FfiWriteStatus::Sent { .. } => "sent",
         FfiWriteStatus::Acked { .. } => "acked",
         FfiWriteStatus::Rejected { .. } => "rejected",

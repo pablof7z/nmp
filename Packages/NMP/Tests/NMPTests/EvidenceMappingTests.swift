@@ -41,6 +41,41 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
+    func testEveryRetryLaneReceiptStateMapsWithoutLosingAttemptTruth() {
+        XCTAssertEqual(
+            WriteStatus(.awaitingRelay(relay: "wss://offline.example")),
+            .awaitingRelay(relay: "wss://offline.example")
+        )
+        XCTAssertEqual(
+            WriteStatus(.awaitingAuth(relay: "wss://auth.example")),
+            .awaitingAuth(relay: "wss://auth.example")
+        )
+        XCTAssertEqual(
+            WriteStatus(
+                .retryEligible(
+                    relay: "wss://retry.example", attempt: 2, eligibleAt: 123
+                )
+            ),
+            .retryEligible(relay: "wss://retry.example", attempt: 2, eligibleAt: 123)
+        )
+        XCTAssertEqual(
+            WriteStatus(
+                .handoffAmbiguous(
+                    relay: "wss://ambiguous.example", attempt: 3, observedAt: 124
+                )
+            ),
+            .handoffAmbiguous(
+                relay: "wss://ambiguous.example", attempt: 3, observedAt: 124
+            )
+        )
+        XCTAssertEqual(
+            WriteStatus(
+                .sent(relay: "wss://written.example", attempt: 4, writtenAt: 125)
+            ),
+            .sent(relay: "wss://written.example", attempt: 4, writtenAt: 125)
+        )
+    }
+
     func testPersistenceBlockedReceiptMappingRemainsNonterminal() {
         let blocked = WriteStatus(.persistenceBlocked(relay: "wss://blocked.example"))
         XCTAssertEqual(blocked, .persistenceBlocked(relay: "wss://blocked.example"))

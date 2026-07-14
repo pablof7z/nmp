@@ -1,9 +1,8 @@
 # Durable writes, signing, and retry
 
-- **Status:** IMPLEMENTED IN THE RUST MECHANISM - crash-safe acceptance,
-  canonical pending rows, signer reattachment, and the one durable retry
-  scheduler satisfy this contract. Governed lane-state projection across
-  Rust/FFI/Swift/Kotlin remains #96.
+- **Status:** IMPLEMENTED - crash-safe acceptance, canonical pending rows,
+  signer reattachment, the one durable retry scheduler, and truthful governed
+  lane-state projection across Rust/FFI/Swift/Kotlin satisfy this contract.
 - **Owns:** the meaning of `Accepted`, pending-row semantics, signer selection,
   receipt persistence, and retry ownership.
 
@@ -134,6 +133,10 @@ after restart.
 `Enqueued`, `sent`, and `converged` are never synonyms. Product policy may
 interpret a set of per-relay facts; the engine reports them without inventing a
 single success boolean.
+
+`Sent { relay, attempt, written_at }` is constructible only from a persisted
+`Written` handoff for that exact durable lane ordinal. Ephemeral transport work
+has no outbox attempt and therefore cannot mint this durable receipt fact.
 
 ## 6. Retry ownership
 

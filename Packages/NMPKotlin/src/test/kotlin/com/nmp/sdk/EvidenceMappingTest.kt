@@ -82,6 +82,32 @@ class EvidenceMappingTest {
     }
 
     @Test
+    fun everyRetryLaneReceiptStateMapsWithoutLosingAttemptTruth() {
+        assertEquals(
+            WriteStatus.AwaitingRelay("wss://offline.example"),
+            WriteStatus.from(FfiWriteStatus.AwaitingRelay("wss://offline.example")),
+        )
+        assertEquals(
+            WriteStatus.AwaitingAuth("wss://auth.example"),
+            WriteStatus.from(FfiWriteStatus.AwaitingAuth("wss://auth.example")),
+        )
+        assertEquals(
+            WriteStatus.RetryEligible("wss://retry.example", 2uL, 123uL),
+            WriteStatus.from(FfiWriteStatus.RetryEligible("wss://retry.example", 2uL, 123uL)),
+        )
+        assertEquals(
+            WriteStatus.HandoffAmbiguous("wss://ambiguous.example", 3uL, 124uL),
+            WriteStatus.from(
+                FfiWriteStatus.HandoffAmbiguous("wss://ambiguous.example", 3uL, 124uL),
+            ),
+        )
+        assertEquals(
+            WriteStatus.Sent("wss://written.example", 4uL, 125uL),
+            WriteStatus.from(FfiWriteStatus.Sent("wss://written.example", 4uL, 125uL)),
+        )
+    }
+
+    @Test
     fun persistenceBlockedReceiptMappingRemainsNonterminal() {
         val blocked = WriteStatus.from(FfiWriteStatus.PersistenceBlocked("wss://blocked.example"))
         assertEquals(WriteStatus.PersistenceBlocked("wss://blocked.example"), blocked)

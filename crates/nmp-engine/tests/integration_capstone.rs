@@ -539,12 +539,12 @@ async fn write_ack_per_relay_over_real_relays() {
     );
     assert!(
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Sent(r) if r == &url_ok)),
+            .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &url_ok)),
         "must observe Sent(relay_ok) (got: {seen:?})"
     );
     assert!(
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Sent(r) if r == &url_bad)),
+            .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &url_bad)),
         "must observe Sent(relay_bad) (got: {seen:?})"
     );
     assert!(acked_ok, "relay_ok must reach Acked (got stream: {seen:?})");

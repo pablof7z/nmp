@@ -89,7 +89,7 @@ Exercise the product-relevant subset:
 - pre-acceptance failure leaves no durable row/receipt;
 - native receipt-bridge saturation/OS-thread refusal occurs before acceptance and leaves no obligation or consumed composed intent;
 - process restart reattaches the same receipt and frozen intent;
-- transient live statuses are not falsely claimed as replayed;
+- restart replays persisted `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, `HandoffAmbiguous`, and exact-`Written` `Sent` facts while never replaying transient `Routed` or turning `AttemptStarted`, ambiguity, or an ephemeral handoff into `Sent`;
 - old remote-signer close cannot detach its replacement;
 - secret/account checkpoint is separate from event-store reset;
 - cancelling the app receipt consumer neither detaches the native bridge nor cancels the obligation; and
