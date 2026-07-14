@@ -295,7 +295,7 @@ impl PoolInner {
         worker.push(WorkerCommand::Shutdown);
         state.health.state = ConnState::Disconnected;
         Some(PoolEvent::Disconnected {
-            slot: h.slot,
+            handle: h,
             reason: DisconnectReason::Closed,
         })
     }
@@ -713,12 +713,18 @@ fn apply_worker_event_with_verdict(
             };
             if was_connected {
                 Some(PoolEvent::Disconnected {
-                    slot: event.slot,
+                    handle: RelayHandle {
+                        slot: event.slot,
+                        generation: event.generation,
+                    },
                     reason: DisconnectReason::Error,
                 })
             } else {
                 Some(PoolEvent::Health {
-                    slot: event.slot,
+                    handle: RelayHandle {
+                        slot: event.slot,
+                        generation: event.generation,
+                    },
                     health: state.health.clone(),
                 })
             }
@@ -745,14 +751,20 @@ fn apply_worker_event_with_verdict(
                 FrameVerdict::RejectMisbehavior => {
                     verify::record_misbehavior(&mut state.health);
                     Some(PoolEvent::Health {
-                        slot: event.slot,
+                        handle: RelayHandle {
+                            slot: event.slot,
+                            generation: event.generation,
+                        },
                         health: state.health.clone(),
                     })
                 }
                 FrameVerdict::RejectUnavailable => {
                     verify::record_unavailable(&mut state.health);
                     Some(PoolEvent::Health {
-                        slot: event.slot,
+                        handle: RelayHandle {
+                            slot: event.slot,
+                            generation: event.generation,
+                        },
                         health: state.health.clone(),
                     })
                 }

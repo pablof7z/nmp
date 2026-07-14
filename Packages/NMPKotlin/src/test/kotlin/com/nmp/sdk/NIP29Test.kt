@@ -18,6 +18,7 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Base64
@@ -95,6 +96,13 @@ private class LocalAckRelay : AutoCloseable {
                     0x9 -> writeFrame(output, 0xA, frame.payload)
                 }
             }
+        } catch (error: SocketException) {
+            val message = error.message.orEmpty().lowercase()
+            val expectedTeardown =
+                message.contains("connection reset") ||
+                    message.contains("broken pipe") ||
+                    message.contains("socket closed")
+            if (!closed.get() && !expectedTeardown) failure.compareAndSet(null, error)
         } catch (error: Throwable) {
             if (!closed.get()) failure.compareAndSet(null, error)
         }

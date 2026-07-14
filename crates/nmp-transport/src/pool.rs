@@ -223,7 +223,10 @@ pub enum PoolEvent {
         url: RelayUrl,
     },
     Disconnected {
-        slot: u32,
+        /// The exact connection generation that disconnected. A slot may
+        /// already have reopened by the time this event is reduced, so a
+        /// bare slot number cannot safely identify the connection that died.
+        handle: RelayHandle,
         reason: DisconnectReason,
     },
     Frame {
@@ -231,7 +234,10 @@ pub enum PoolEvent {
         frame: RelayFrame,
     },
     Health {
-        slot: u32,
+        /// The exact connection generation whose health changed. Like
+        /// frames and disconnects, health delivery crosses the off-lock
+        /// sink and may arrive after this slot has reopened.
+        handle: RelayHandle,
         health: RelayHealth,
     },
     /// The one, ever, typed result for a durable `EVENT` handoff submitted
