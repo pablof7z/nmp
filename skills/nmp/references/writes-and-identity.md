@@ -10,12 +10,14 @@ A `WriteIntent` combines payload, durability, and routing.
 
 Publishing enqueues work and returns an evidence stream. It does not mean all relays accepted the event. Handle every current terminal or ambiguous state listed in [Current surface and gaps](current-surface.md), especially per-relay rejection, `GaveUp`, persistence blockage, `OutcomeUnknown`, replaceable conflict, and whole-intent failure.
 
+Treat the retry-lane facts as evidence, not commands. `AwaitingRelay` reports a lane waiting for connectivity without offline time consuming an attempt. `AwaitingAuth` reports an authentication pause with no polling deadline. `RetryEligible` carries the engine-owned durable scheduler's persisted attempt ordinal and eligibility time; it does not grant an app retry verb. `HandoffAmbiguous` preserves the exact attempt and observation time without claiming a send. `Sent` carries an attempt and write time only when the exact durable lane has a persisted `Written` handoff; queue acceptance, pre-wire attempt start, ambiguity, and ephemeral transport work are not sent facts.
+
 Use tracked/native receipt publishing when the app must survive process loss. Persist the receipt id outside transient UI state, reopen the same NMP store, and call receipt reattachment. Distinguish attached, not found, and retained-but-unreadable.
 
 Recovery has sharp edges:
 
 - A pre-acceptance conflict or failure can return a stream-local correlation id with no durable receipt row; reattaching that id returns not found.
-- Reattachment replays retained receipt state, terminal attempt outcomes, and current persistence-blocked facts. It does not reconstruct transient `Routed` or `Sent` history, so journal live statuses if the product needs that history after restart.
+- Reattachment replays retained receipt state, relay/AUTH waits, exact retry eligibility, ambiguous handoffs, proven persisted-`Written` `Sent` facts, terminal attempt outcomes, and current persistence blockage. It does not reconstruct transient `Routed` history or invent facts for ephemeral handoffs, so journal non-retained live progress if the product needs a complete historical activity log.
 - NMP exposes no receipt enumeration. Persist the id as soon as it is returned, but acknowledge the crash window after engine acceptance and before app persistence.
 - Native tracked/composed publish reserves and starts its receipt observer before core acceptance, and composed publish does so before taking its intent. `ExecutorSaturated` or `ThreadUnavailable` therefore returns synchronously without accepting an obligation, consuming that composed intent, or returning an id.
 - Restore the signer and active account so accepted unsigned work can resume. Receipt-channel closure alone is never delivery success; retain the mixed terminal facts already observed.
