@@ -27,6 +27,10 @@ pub enum EngineError {
     /// [`Engine::reset_persistent_store`](crate::Engine::reset_persistent_store)
     /// could not remove the requested closed persistent store.
     StoreResetFailed { reason: String },
+    /// The OS refused one engine-owned transport/runtime thread, or the
+    /// configured relay budget could not be represented safely. No partial
+    /// engine escapes construction.
+    ThreadUnavailable { component: String, reason: String },
     /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
     /// not parse as a valid nostr key (hex or bech32 `nsec`).
     InvalidSecretKey,
@@ -48,6 +52,9 @@ impl std::fmt::Display for EngineError {
             Self::InvalidRelayUrl { url } => write!(f, "invalid relay url: {url:?}"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
+            Self::ThreadUnavailable { component, reason } => {
+                write!(f, "{component} thread unavailable: {reason}")
+            }
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
             Self::ReceiptCorrelationIdExhausted => {
@@ -61,6 +68,22 @@ impl std::fmt::Display for EngineError {
 impl std::error::Error for EngineError {}
 
 impl EngineError {
+    pub(crate) fn from_thread_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
+        match error {
+            nmp_engine::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
+                Self::ThreadUnavailable { component, reason }
+            }
+            nmp_engine::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
+                Self::ThreadUnavailable {
+                    component: "relay worker budget".to_string(),
+                    reason: format!(
+                        "configured max_relays {relay_limit} cannot represent its finite retirement envelope"
+                    ),
+                }
+            }
+        }
+    }
+
     pub(crate) fn from_publish_error(err: nmp_engine::core::PublishError) -> Self {
         match err {
             nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted => {

@@ -155,14 +155,17 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
             ..PoolConfig::default()
         },
         RelayAdmissionPolicy::default(),
-    );
+    )
+    .expect("test engine thread construction");
     handle
         .add_signer(LocalKeySigner::new(a.clone()))
         .expect("local signer has a public key");
 
     // Bootstrap: a's own (empty) kind:1 feed -- this is what actually opens
     // the connection to `url` and kicks off the capability probe.
-    let (_a_handle, _a_rows_rx) = handle.subscribe(literal_kind1(&a.public_key().to_hex()));
+    let (_a_handle, _a_rows_rx) = handle
+        .subscribe(literal_kind1(&a.public_key().to_hex()))
+        .expect("test subscription construction");
 
     // Bounded wait for the probe round-trip to resolve `Supported` --
     // `LocalRelay` answers NEG-OPEN synchronously over loopback, so this is
@@ -173,7 +176,9 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
     // Widen onto b's kind:1 feed -- SAME skeleton as `a`'s, so this
     // coalesces onto the SAME relay sub-id, which by now is Supported: the
     // reducer routes it negentropy-first instead of a plain REQ.
-    let (_b_handle, b_rows_rx) = handle.subscribe(literal_kind1(&b.public_key().to_hex()));
+    let (_b_handle, b_rows_rx) = handle
+        .subscribe(literal_kind1(&b.public_key().to_hex()))
+        .expect("test subscription construction");
 
     assert!(
         wait_for_rows(&b_rows_rx, Duration::from_secs(15), |rows, evidence| {

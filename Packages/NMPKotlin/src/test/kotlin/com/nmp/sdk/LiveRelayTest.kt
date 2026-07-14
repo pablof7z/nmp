@@ -51,6 +51,15 @@ class LiveRelayTest {
             )
     }
 
+    /** #442: the complete JVM/UniFFI engine lifecycle repeatedly returns
+     * every owned runtime/transport worker before the next construction. */
+    @Test
+    fun repeatedEngineConstructionAndShutdown() {
+        repeat(32) {
+            NMPEngine(NMPConfig()).close()
+        }
+    }
+
     /** THE headline live proof: construct the engine from ONLY the two
      * operator indexer relays (no write-relay map -- there is no such field
      * anymore), add a read-only account for fiatjaf, and observe the

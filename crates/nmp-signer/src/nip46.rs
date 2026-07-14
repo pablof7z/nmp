@@ -119,6 +119,7 @@ pub enum Nip46Error {
     Disconnected,
     Rejected(String),
     InvalidResponse(String),
+    ThreadUnavailable { component: String, reason: String },
 }
 
 impl fmt::Display for Nip46Error {
@@ -145,6 +146,9 @@ impl fmt::Display for Nip46Error {
             Self::Disconnected => f.write_str("NIP-46 connection ended"),
             Self::Rejected(reason) => write!(f, "NIP-46 signer rejected request: {reason}"),
             Self::InvalidResponse(reason) => write!(f, "invalid NIP-46 response: {reason}"),
+            Self::ThreadUnavailable { component, reason } => {
+                write!(f, "{component} thread unavailable: {reason}")
+            }
         }
     }
 }
@@ -285,8 +289,8 @@ impl Nip46Invitation {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let session = Session::spawn(self.relays, self.client_keys, None, cancellation);
-        forward_events(&session, event_sink);
+        let session = Session::spawn(self.relays, self.client_keys, None, cancellation)?;
+        forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
         let remote_signer_public_key = session
             .accept_invitation(self.secret.as_str())
@@ -393,8 +397,8 @@ impl Nip46Signer {
             Keys::generate(),
             Some(remote_signer_public_key),
             cancellation,
-        );
-        forward_events(&session, event_sink);
+        )?;
+        forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
 
         let metadata_json = serde_json::to_string(&metadata)
@@ -603,7 +607,7 @@ impl Session {
         client_keys: Keys,
         remote: Option<PublicKey>,
         cancellation: Option<&Nip46Cancellation>,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, Nip46Error> {
         let (commands, inbox) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let session = Arc::new(Self {
@@ -615,17 +619,32 @@ impl Session {
             cancellation.bind(session.commands.clone());
         }
         let weak = Arc::downgrade(&session);
-        thread::Builder::new()
+        let pool =
+            Pool::new(PoolConfig::default(), SessionPoolSink(commands)).map_err(|error| {
+                Nip46Error::ThreadUnavailable {
+                    component: "NIP-46 transport".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        let worker_pool = pool.clone();
+        let spawn = thread::Builder::new()
             .name("nmp-nip46".to_string())
             .spawn(move || {
-                let pool = Pool::new(PoolConfig::default(), SessionPoolSink(commands));
-                let mut worker = SessionWorker::new(pool, client_keys, remote, weak, subscribers);
+                let mut worker =
+                    SessionWorker::new(worker_pool, client_keys, remote, weak, subscribers);
                 worker.open_relays(relays);
                 worker.emit(Nip46ConnectionEvent::Connecting);
                 worker.run(inbox);
-            })
-            .expect("spawn NIP-46 session worker");
-        session
+            });
+        if let Err(error) = spawn {
+            pool.shutdown();
+            return Err(Nip46Error::ThreadUnavailable {
+                component: "NIP-46 session".to_string(),
+                reason: error.to_string(),
+            });
+        }
+        drop(pool);
+        Ok(session)
     }
 
     fn is_available(&self) -> bool {
@@ -685,35 +704,37 @@ impl Session {
     fn request_switch_relays(self: &Arc<Self>) {
         let op = request_string(self, "switch_relays", Vec::new());
         let session = Arc::downgrade(self);
-        thread::spawn(move || {
-            let Ok(result) = op.wait(SWITCH_RELAYS_TIMEOUT) else {
-                return;
-            };
-            if result == "null" {
-                return;
-            }
-            let Ok(relays) = serde_json::from_str::<Vec<String>>(&result) else {
-                return;
-            };
-            let mut parsed = Vec::new();
-            for relay in relays {
-                let Ok(relay) = RelayUrl::parse(&relay) else {
+        let _ = thread::Builder::new()
+            .name("nmp-nip46-switch-relays".to_string())
+            .spawn(move || {
+                let Ok(result) = op.wait(SWITCH_RELAYS_TIMEOUT) else {
                     return;
                 };
-                if !parsed.contains(&relay) {
-                    parsed.push(relay);
-                    if parsed.len() > MAX_NIP46_RELAYS {
+                if result == "null" {
+                    return;
+                }
+                let Ok(relays) = serde_json::from_str::<Vec<String>>(&result) else {
+                    return;
+                };
+                let mut parsed = Vec::new();
+                for relay in relays {
+                    let Ok(relay) = RelayUrl::parse(&relay) else {
                         return;
+                    };
+                    if !parsed.contains(&relay) {
+                        parsed.push(relay);
+                        if parsed.len() > MAX_NIP46_RELAYS {
+                            return;
+                        }
                     }
                 }
-            }
-            if !parsed.is_empty() {
-                let Some(session) = session.upgrade() else {
-                    return;
-                };
-                let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
-            }
-        });
+                if !parsed.is_empty() {
+                    let Some(session) = session.upgrade() else {
+                        return;
+                    };
+                    let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
+                }
+            });
     }
 }
 
@@ -907,7 +928,9 @@ impl SessionWorker {
                     self.on_frame(handle, frame);
                 }
             }
-            PoolEvent::Health { .. } | PoolEvent::EventHandoff { .. } => {}
+            PoolEvent::Health { .. }
+            | PoolEvent::EventHandoff { .. }
+            | PoolEvent::WorkerRetired => {}
         }
     }
 
@@ -1107,14 +1130,20 @@ where
         SignerOp::Pending(pending) => {
             let (rx, cancel) = pending.into_parts();
             let (tx, mapped_rx) = mpsc::channel();
-            thread::spawn(move || {
-                let result = match rx.recv() {
-                    Ok(Ok(value)) => map(value),
-                    Ok(Err(error)) => Err(error),
-                    Err(_) => Err(SignerError::Disconnected),
-                };
-                let _ = tx.send(result);
-            });
+            let failure = tx.clone();
+            let spawned = thread::Builder::new()
+                .name("nmp-nip46-result-map".to_string())
+                .spawn(move || {
+                    let result = match rx.recv() {
+                        Ok(Ok(value)) => map(value),
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => Err(SignerError::Disconnected),
+                    };
+                    let _ = tx.send(result);
+                });
+            if spawned.is_err() {
+                let _ = failure.send(Err(SignerError::Unavailable));
+            }
             SignerOp::pending_from_parts(mapped_rx, cancel)
         }
     }
@@ -1139,13 +1168,20 @@ fn emit_to(
 fn forward_events(
     session: &Arc<Session>,
     event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
-) {
+) -> Result<(), Nip46Error> {
     let events = session.subscribe();
-    thread::spawn(move || {
-        while let Ok(event) = events.recv() {
-            event_sink(event);
-        }
-    });
+    thread::Builder::new()
+        .name("nmp-nip46-event-forwarder".to_string())
+        .spawn(move || {
+            while let Ok(event) = events.recv() {
+                event_sink(event);
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| Nip46Error::ThreadUnavailable {
+            component: "NIP-46 event forwarder".to_string(),
+            reason: error.to_string(),
+        })
 }
 
 #[cfg(test)]

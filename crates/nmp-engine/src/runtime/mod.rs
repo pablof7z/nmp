@@ -212,9 +212,13 @@ enum Cmd {
         frames: Vec<(nmp_transport::RelayHandle, nmp_transport::RelayFrame)>,
         applied: cb::Sender<()>,
     },
+    /// A closed relay OS thread has been joined and the finite retirement
+    /// envelope has capacity again. Reconcile exact required demand once;
+    /// this event edge replaces polling or a retry spin.
+    RelayWorkerRetired,
     Subscribe {
         query: LiveQuery,
-        reply: Sender<(HandleId, Receiver<RowsMsg>)>,
+        reply: Sender<Result<(HandleId, Receiver<RowsMsg>), EngineThreadError>>,
     },
     PublishTracked {
         intent: WriteIntent,
@@ -322,6 +326,67 @@ pub struct EngineThread {
     bridge_join: Option<JoinHandle<()>>,
 }
 
+#[cfg(test)]
+static ACTIVE_RUNTIME_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+struct RuntimeThreadCountGuard;
+
+#[cfg(test)]
+impl RuntimeThreadCountGuard {
+    fn enter() -> Self {
+        ACTIVE_RUNTIME_THREADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RuntimeThreadCountGuard {
+    fn drop(&mut self) {
+        ACTIVE_RUNTIME_THREADS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Supported construction failure for the engine-owned thread graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineThreadError {
+    ThreadUnavailable { component: String, reason: String },
+    RelayBudgetOverflow { relay_limit: usize },
+}
+
+impl std::fmt::Display for EngineThreadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ThreadUnavailable { component, reason } => {
+                write!(f, "{component} thread unavailable: {reason}")
+            }
+            Self::RelayBudgetOverflow { relay_limit } => write!(
+                f,
+                "relay worker budget {relay_limit} cannot represent its retirement envelope"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EngineThreadError {}
+
+fn pool_build_error(error: nmp_transport::PoolBuildError) -> EngineThreadError {
+    match error {
+        nmp_transport::PoolBuildError::ThreadUnavailable(error) => {
+            EngineThreadError::ThreadUnavailable {
+                component: error.role.to_string(),
+                reason: error.reason,
+            }
+        }
+        nmp_transport::PoolBuildError::RelayBudgetOverflow { max_relays } => {
+            EngineThreadError::RelayBudgetOverflow {
+                relay_limit: max_relays,
+            }
+        }
+    }
+}
+
 impl EngineThread {
     /// Spawn the engine thread + the pool-bridge thread. `store`/`directory`
     /// are constructed by the CALLER but moved whole into the engine
@@ -332,14 +397,13 @@ impl EngineThread {
     /// (zero accounts, read-only) — matching a logged-out launch (M4 §5);
     /// the caller registers accounts afterward via [`Handle::add_signer`] and
     /// picks one via [`Handle::set_active_account`].
-    #[must_use]
     pub fn spawn<S, D>(
         store: S,
         directory: D,
         cap: usize,
         mut pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
-    ) -> (Self, Handle)
+    ) -> Result<(Self, Handle), EngineThreadError>
     where
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
@@ -369,42 +433,69 @@ impl EngineThread {
                 events: pool_evt_tx,
                 stopping: pool_stop_rx.clone(),
             },
-        );
+        )
+        .map_err(pool_build_error)?;
 
         let bridge_inbox = cmd_tx.clone();
-        let bridge_join = thread::Builder::new()
+        let bridge_join = match thread::Builder::new()
             .name("nmp-engine-pool-bridge".to_string())
             .spawn(move || {
+                #[cfg(test)]
+                let _thread_count = RuntimeThreadCountGuard::enter();
                 pool_bridge_loop(&pool_evt_rx, &pool_stop_rx, &bridge_inbox, max_engine_batch)
-            })
-            .expect("nmp-engine: pool-bridge thread spawn must succeed");
+            }) {
+            Ok(join) => join,
+            Err(error) => {
+                pool.shutdown();
+                return Err(EngineThreadError::ThreadUnavailable {
+                    component: "engine pool bridge".to_string(),
+                    reason: error.to_string(),
+                });
+            }
+        };
 
         let self_inbox = cmd_tx.clone();
-        let engine_join = thread::Builder::new()
-            .name("nmp-engine".to_string())
-            .spawn(move || {
-                engine_loop(
-                    store,
-                    directory,
-                    cap,
-                    admission,
-                    EnginePoolRuntime {
-                        pool,
-                        stop: pool_stop_tx,
-                    },
-                    &cmd_rx,
-                    &self_inbox,
-                )
-            })
-            .expect("nmp-engine: engine thread spawn must succeed");
+        let engine_pool = pool.clone();
+        let engine_stop = pool_stop_tx.clone();
+        let engine_join =
+            match thread::Builder::new()
+                .name("nmp-engine".to_string())
+                .spawn(move || {
+                    #[cfg(test)]
+                    let _thread_count = RuntimeThreadCountGuard::enter();
+                    engine_loop(
+                        store,
+                        directory,
+                        cap,
+                        admission,
+                        EnginePoolRuntime {
+                            pool: engine_pool,
+                            stop: engine_stop,
+                        },
+                        &cmd_rx,
+                        &self_inbox,
+                    )
+                }) {
+                Ok(join) => join,
+                Err(error) => {
+                    drop(pool_stop_tx);
+                    pool.shutdown();
+                    let _ = bridge_join.join();
+                    return Err(EngineThreadError::ThreadUnavailable {
+                        component: "engine runtime".to_string(),
+                        reason: error.to_string(),
+                    });
+                }
+            };
+        drop(pool);
 
-        (
+        Ok((
             Self {
                 engine_join: Some(engine_join),
                 bridge_join: Some(bridge_join),
             },
             Handle { inbox: cmd_tx },
-        )
+        ))
     }
 
     /// Block until both the engine thread and the pool-bridge thread have
@@ -487,18 +578,24 @@ fn pool_bridge_loop(
             if !applied {
                 break;
             }
-            if let Some(trailing) = trailing.and_then(translate_pool_event) {
-                if engine_inbox.send(Cmd::Engine(trailing)).is_err() {
+            if let Some(trailing) = trailing {
+                if !forward_pool_event(trailing, engine_inbox) {
                     break;
                 }
             }
             continue;
         }
-        if let Some(msg) = translate_pool_event(event) {
-            if engine_inbox.send(Cmd::Engine(msg)).is_err() {
-                break; // engine thread is gone; nothing left to feed.
-            }
+        if !forward_pool_event(event, engine_inbox) {
+            break; // engine thread is gone; nothing left to feed.
         }
+    }
+}
+
+fn forward_pool_event(event: PoolEvent, engine_inbox: &Sender<Cmd>) -> bool {
+    match event {
+        PoolEvent::WorkerRetired => engine_inbox.send(Cmd::RelayWorkerRetired).is_ok(),
+        event => translate_pool_event(event)
+            .is_none_or(|message| engine_inbox.send(Cmd::Engine(message)).is_ok()),
     }
 }
 
@@ -695,6 +792,28 @@ mod relay_worker_reconciliation_tests {
         })
     }
 
+    #[test]
+    fn repeated_engine_shutdown_returns_runtime_threads_to_exact_baseline() {
+        let baseline = ACTIVE_RUNTIME_THREADS.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..16 {
+            let (engine, handle) = EngineThread::spawn(
+                MemoryStore::new(),
+                FixtureDirectory::new(),
+                1,
+                PoolConfig::default(),
+                RelayAdmissionPolicy::default(),
+            )
+            .expect("engine construction");
+            handle.shutdown();
+            engine.join();
+            assert_eq!(
+                ACTIVE_RUNTIME_THREADS.load(std::sync::atomic::Ordering::SeqCst),
+                baseline,
+                "join must be an exact engine/bridge teardown barrier"
+            );
+        }
+    }
+
     /// #20 churn falsifier: a cap-sized old plan must release its historical
     /// worker set before a disjoint replacement plan dials. Before exact
     /// reconciliation, the first worker stayed live after its last `CLOSE`,
@@ -713,7 +832,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx);
+        let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
         let mut diagnostics = HashMap::new();
         let mut preambles = Preambles::new();
@@ -831,7 +950,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx);
+        let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
         let mut diagnostics = HashMap::new();
         let mut preambles = Preambles::new();
@@ -889,6 +1008,7 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
             correlation,
             result,
         } => Some(EngineMsg::EventHandoff(correlation, result)),
+        PoolEvent::WorkerRetired => None,
     }
 }
 
@@ -1089,7 +1209,23 @@ fn engine_loop<S, D>(
                     .expect("Subscribe must yield a fresh EmitRows for its own handle");
                 let (rows_tx, rows_rx) = mpsc::channel();
                 row_channels.insert(id, rows_tx);
-                if reply.send((id, rows_rx)).is_err() {
+                if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
+                    row_channels.remove(&id);
+                    let withdraw = core.handle(EngineMsg::Unsubscribe(id));
+                    dispatch_core_effects(
+                        &core,
+                        withdraw,
+                        &pool,
+                        &mut row_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        self_inbox,
+                    );
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
+                if reply.send(Ok((id, rows_rx))).is_err() {
                     // Caller already gave up on `subscribe()` -- withdraw
                     // immediately rather than leak a live demand atom nobody
                     // will ever read from.
@@ -1117,6 +1253,9 @@ fn engine_loop<S, D>(
                     &registry,
                     self_inbox,
                 );
+            }
+            Cmd::RelayWorkerRetired => {
+                retry_required_relay_workers(&core, &pool, &mut preambles);
             }
             Cmd::Engine(EngineMsg::Unsubscribe(id)) => {
                 let effects = core.handle(EngineMsg::Unsubscribe(id));
@@ -1233,6 +1372,63 @@ fn dispatch_core_effects<S: EventStore>(
     );
 }
 
+/// Acquire the relay worker threads needed by one new query before its
+/// synchronous handle crosses the supported facade. Capacity refusal remains
+/// ordinary local shortfall, but an OS spawn refusal is returned as the typed
+/// construction error #442 requires. Successful opens are idempotently reused
+/// by ordinary effect dispatch.
+fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), EngineThreadError> {
+    for effect in effects {
+        let Effect::Wire(delta) = effect else {
+            continue;
+        };
+        for (relay, ops) in &delta.ops {
+            if !ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
+                continue;
+            }
+            if let Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) =
+                pool.ensure_open(relay)
+            {
+                return Err(EngineThreadError::ThreadUnavailable {
+                    component: error.role.to_string(),
+                    reason: error.reason,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Retry the exact currently-owned relay set once after an actual worker
+/// join releases retirement capacity. Read relays replay the full preamble
+/// retained even when their first spawn was refused; write-only relays need
+/// only be opened, after which the ordinary Connected path advances them.
+fn retry_required_relay_workers<S: EventStore>(
+    core: &EngineCore<S>,
+    pool: &Pool,
+    preambles: &mut Preambles,
+) {
+    let Some(required) = core.required_relay_workers() else {
+        return;
+    };
+    for relay in required {
+        if pool.live_handle(&relay).is_some() {
+            continue;
+        }
+        let Ok(handle) = pool.ensure_open(&relay) else {
+            continue;
+        };
+        let Some(entry) = preambles.get(&relay) else {
+            continue;
+        };
+        let frames: Vec<_> = entry.values().cloned().collect();
+        for frame in &frames {
+            let _ = pool.send(handle, WireFrame::Text(frame.clone()));
+        }
+        pool.set_reconnect_preamble(handle, frames);
+    }
+}
+
 /// Execute every `Effect` `EngineCore::handle` returned, in order.
 fn dispatch_effects(
     effects: Vec<Effect>,
@@ -1310,12 +1506,21 @@ fn dispatch_effect(
                     // and keeps the engine thread itself from ever blocking
                     // on a remote signer round-trip.
                     let inbox = self_inbox.clone();
-                    thread::spawn(move || {
-                        let result = pending.recv();
-                        let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
-                            id, generation, result,
+                    let result = thread::Builder::new()
+                        .name("nmp-engine-signer-waiter".to_string())
+                        .spawn(move || {
+                            let result = pending.recv();
+                            let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
+                                id, generation, result,
+                            )));
+                        });
+                    if result.is_err() {
+                        let _ = self_inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
+                            id,
+                            generation,
+                            Err(nmp_signer::SignerError::Unavailable),
                         )));
-                    });
+                    }
                 }
             },
             None => {
@@ -1460,37 +1665,40 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
     for (relay, ops) in &delta.ops {
         let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
         let handle = if has_req {
-            let Ok(handle) = pool.ensure_open(relay) else {
-                continue;
-            };
-            handle
+            pool.ensure_open(relay).ok()
         } else {
             // A close-only delta must never reopen a worker already released
             // by exact relay-demand reconciliation. Socket teardown already
             // withdrew every subscription on that connection.
-            let Some(handle) = pool.live_handle(relay) else {
-                preambles.remove(relay);
-                continue;
-            };
-            handle
+            pool.live_handle(relay)
         };
         let entry = preambles.entry(relay.clone()).or_default();
         for op in ops {
             match op {
                 WireOp::Req(sub_id, filter) => {
                     let text = req_frame_text(sub_id, filter);
-                    let _ = pool.send(handle, WireFrame::Text(text.clone()));
+                    if let Some(handle) = handle {
+                        let _ = pool.send(handle, WireFrame::Text(text.clone()));
+                    }
                     entry.insert(sub_id.clone(), text);
                 }
                 WireOp::Close(sub_id) => {
                     let text = close_frame_text(sub_id);
-                    let _ = pool.send(handle, WireFrame::Text(text));
+                    if let Some(handle) = handle {
+                        let _ = pool.send(handle, WireFrame::Text(text));
+                    }
                     entry.remove(sub_id);
                 }
             }
         }
         let frames: Vec<String> = entry.values().cloned().collect();
-        pool.set_reconnect_preamble(handle, frames);
+        let empty = frames.is_empty();
+        if let Some(handle) = handle {
+            pool.set_reconnect_preamble(handle, frames);
+        }
+        if empty {
+            preambles.remove(relay);
+        }
     }
 }
 
@@ -1634,14 +1842,19 @@ impl std::error::Error for AddSignerError {}
 impl Handle {
     /// Open a live subscription. Blocks (briefly — one engine-thread round
     /// trip, never network-bound) until `EngineCore` has assigned the
-    /// `HandleId` and the row channel is registered, then returns both.
+    /// `HandleId` and the row channel is registered, then returns both. An
+    /// OS refusal to create an initially required relay worker rolls the
+    /// subscription back and returns [`EngineThreadError::ThreadUnavailable`]
+    /// before a handle escapes.
     ///
     /// # Panics
     /// If the engine thread has already shut down. Calling `subscribe`
     /// after `shutdown` is a caller bug, not a recoverable runtime state —
     /// there is no engine left to own the subscription.
-    #[must_use]
-    pub fn subscribe(&self, query: LiveQuery) -> (QueryHandle, Receiver<RowsMsg>) {
+    pub fn subscribe(
+        &self,
+        query: LiveQuery,
+    ) -> Result<(QueryHandle, Receiver<RowsMsg>), EngineThreadError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::Subscribe {
@@ -1651,8 +1864,8 @@ impl Handle {
             .expect("nmp-engine: subscribe() called after the engine thread shut down");
         let (id, rows_rx) = reply_rx
             .recv()
-            .expect("nmp-engine: engine thread dropped the subscribe reply");
-        (QueryHandle(id), rows_rx)
+            .expect("nmp-engine: engine thread dropped the subscribe reply")?;
+        Ok((QueryHandle(id), rows_rx))
     }
 
     /// Withdraw a live subscription. Fire-and-forget: once the engine thread
