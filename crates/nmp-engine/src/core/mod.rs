@@ -68,6 +68,7 @@ use nmp_transport::{
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
 use crate::outbox::{ReceiptSink, WriteStatus};
+use crate::relay_information::RelayInformationCapabilityEvidence;
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
 /// negentropy session with no reply is abandoned in favor of a plain REQ
@@ -369,6 +370,10 @@ pub enum EngineMsg {
     SetActivePubkey(Option<PublicKey>),
     Publish(WriteIntent, Box<dyn ReceiptSink>),
     RelayConnected(TransportRelayHandle, RelayUrl),
+    /// Result of the engine-owned NIP-11 one-shot started for a connected
+    /// relay. `Some` retains document revision/freshness/error provenance;
+    /// `None` means no document fact was acquired before the decision grace.
+    RelayInformationResolved(RelayUrl, Option<RelayInformationCapabilityEvidence>),
     RelayDisconnected(TransportRelayHandle),
     RelayHealth(TransportRelayHandle, RelayHealth),
     RelayFrame(TransportRelayHandle, RelayFrame),
@@ -409,6 +414,8 @@ pub enum Effect {
     Wire(WireDelta),
     /// Reconnect: resend the current wire subs on the NEW generation.
     Replay(RelayUrl, Vec<WireReq>),
+    /// Acquire/revalidate NIP-11 without blocking the reducer thread.
+    FetchRelayInformation(RelayUrl),
     /// Place a capability-probing `NEG-OPEN` on the wire (`negentropy::
     /// Prober::begin_probe`'s output, carried in full since the runtime has
     /// no negentropy-protocol knowledge of its own): the sub-id, the
@@ -608,6 +615,11 @@ pub struct EngineCore<S: EventStore> {
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
+    /// Latest provenance-bearing NIP-11 advertisement for relays in the
+    /// current read plan. Recompile pruning and completion-time plan checks
+    /// prevent historical relay churn from becoming a shadow cache. This is
+    /// kept separate from `prober`: advertisement is evidence, never proof.
+    nip11_information: HashMap<RelayUrl, RelayInformationCapabilityEvidence>,
     /// Live reconciliation sessions, keyed by the SAME `SubId` a plain REQ
     /// for this shape would have used (REQ and negentropy share one
     /// subscription-id namespace on the wire, NIP-77) -- never more than one
@@ -749,6 +761,7 @@ impl<S: EventStore> EngineCore<S> {
             pending: HashMap::new(),
             event_to_receipts: HashMap::new(),
             prober: Prober::new(),
+            nip11_information: HashMap::new(),
             neg_sessions: HashMap::new(),
             pending_backfills: BTreeSet::new(),
             pending_neg_credit: HashMap::new(),
@@ -1583,7 +1596,39 @@ impl<S: EventStore> EngineCore<S> {
         // see on its own.
         snapshot.store_degraded = self.store_degraded.clone();
         snapshot.transport_degraded = self.transport_degraded.clone();
+        for relay in &mut snapshot.relays {
+            if let Some(information) = self.nip11_information.get(&relay.relay) {
+                relay.nip11_supported_nips = information.supported_nips.clone();
+                relay.nip11_document_revision = Some(information.document_revision.clone());
+                relay.nip11_freshness = Some(if self.clock.as_secs() < information.fresh_until {
+                    "fresh"
+                } else {
+                    "stale"
+                });
+                relay.nip11_last_error = information.last_error.as_ref().map(ToString::to_string);
+            }
+            relay.nip77_advertisement = match relay
+                .nip11_supported_nips
+                .as_ref()
+                .map(|nips| nips.contains(&77))
+            {
+                Some(true) => "advertised_supported",
+                Some(false) => "advertised_unsupported",
+                None => "unknown",
+            };
+            relay.nip77_behavior = match self.prober.state(&relay.relay) {
+                crate::negentropy::ProbeState::Unknown => "unknown",
+                crate::negentropy::ProbeState::Probing => "probing",
+                crate::negentropy::ProbeState::Supported => "behaviorally_proven",
+                crate::negentropy::ProbeState::Unsupported => "behaviorally_rejected",
+            };
+        }
         snapshot
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nip11_information_len(&self) -> usize {
+        self.nip11_information.len()
     }
 
     /// A pure clock update PLUS two deadline sweeps: NIP-40 expiry
@@ -1701,6 +1746,9 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::SetActivePubkey(pk) => self.on_set_active_pubkey(pk),
             EngineMsg::Publish(intent, sink) => self.on_publish(intent, sink),
             EngineMsg::RelayConnected(handle, url) => self.on_relay_connected(handle, url),
+            EngineMsg::RelayInformationResolved(url, information) => {
+                self.on_relay_information_resolved(url, information)
+            }
             EngineMsg::RelayDisconnected(handle) => self.on_relay_disconnected(handle),
             EngineMsg::RelayHealth(handle, health) => self.on_relay_health(handle, health),
             EngineMsg::RelayFrame(handle, frame) => self.on_relay_frame(handle, frame),
@@ -2817,18 +2865,14 @@ impl<S: EventStore> EngineCore<S> {
                 effects.push(Effect::Replay(url.clone(), reqs.clone()));
             }
         }
-        // Capability probe (plan §6 E): idempotent -- a relay whose verdict
-        // is already cached (`Supported`/`Unsupported`) from an earlier
-        // connection on this same `Prober` is never re-probed.
+        // NIP-11 is one-shot HTTP evidence, not a stream. Resolve it off the
+        // reducer thread before deciding whether a behavioral NIP-77 probe
+        // is useful. Explicit negative advertisement can avoid known-noisy
+        // probes; positive advertisement can NEVER mint `ProbedRelay`.
+        // A connection outside the current read plan has no authority to
+        // create either acquisition or capability-probe work.
         if planned_read_reqs.is_some() {
-            if let Some(probe) = self.prober.begin_probe(&url) {
-                effects.push(Effect::StartProbe(
-                    url.clone(),
-                    probe.sub_id,
-                    probe.filter,
-                    probe.initial_message_hex,
-                ));
-            }
+            effects.push(Effect::FetchRelayInformation(url.clone()));
         }
         // A relay coming online can flip a handle's `AcquisitionEvidence`
         // (`Connecting` -> `Requesting`) with no coverage/row change at all
@@ -2836,6 +2880,49 @@ impl<S: EventStore> EngineCore<S> {
         // EOSE-driven watermark advance below.
         self.refresh_all_handles(&mut effects);
         effects.extend(self.wake_relay_lanes(&url, false));
+        effects
+    }
+
+    fn on_relay_information_resolved(
+        &mut self,
+        url: RelayUrl,
+        information: Option<RelayInformationCapabilityEvidence>,
+    ) -> Vec<Effect> {
+        let advertises_nip77 = information
+            .as_ref()
+            .and_then(|information| information.supported_nips.as_ref())
+            .map(|nips| nips.contains(&77));
+        let planned = self.router.plan().reqs.contains_key(&url);
+        if planned {
+            if let Some(information) = information {
+                self.nip11_information.insert(url.clone(), information);
+            } else {
+                // `None` means the service has no last-good authority for
+                // this relay. An older reducer copy must not survive it.
+                self.nip11_information.remove(&url);
+            }
+        } else {
+            // A flight may complete after demand changed. Late evidence has
+            // no current diagnostics owner and is never retained.
+            self.nip11_information.remove(&url);
+        }
+        let mut effects = Vec::new();
+        if self.connected_relays.contains(&url)
+            && self.router.plan().reqs.contains_key(&url)
+            && advertises_nip77 != Some(false)
+        {
+            if let Some(probe) = self.prober.begin_probe(&url) {
+                effects.push(Effect::StartProbe(
+                    url,
+                    probe.sub_id,
+                    probe.filter,
+                    probe.initial_message_hex,
+                ));
+            }
+        }
+        // Capability evidence is itself observable diagnostics state; do
+        // not wait for an unrelated query recompile/EOSE to publish it.
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
         effects
     }
 
@@ -3117,6 +3204,9 @@ impl<S: EventStore> EngineCore<S> {
         let wire_delta: WireDelta =
             self.router
                 .compile(&admitted_demand, self.directory.as_ref(), self.cap);
+        let planned = &self.router.plan().reqs;
+        self.nip11_information
+            .retain(|relay, _| planned.contains_key(relay));
         // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
         // for the full current demand, regardless of whether anything
         // actually changed on the wire (see `Router::compile`'s own body) —

@@ -171,6 +171,21 @@ public final class NMPEngine: Sendable {
         try NMPDiagnostics(engine: ffi)
     }
 
+    // MARK: - Relay information (NIP-11)
+
+    /// Acquire the relay's NIP-11 representation once. `.useCache` returns
+    /// a still-fresh shared value immediately; `.refresh` revalidates it.
+    /// Concurrent callers share one engine-owned HTTP flight.
+    public func relayInformation(
+        for relay: String,
+        policy: RelayInformationCachePolicy = .useCache
+    ) async throws -> RelayInformation {
+        let value = try await nmpRethrowingAsync {
+            try await ffi.relayInformation(relay: relay, policy: policy.toFfi())
+        }
+        return RelayInformation(value)
+    }
+
     // MARK: - Lifecycle
 
     /// Stop the engine. Idempotent. Also called automatically on `deinit` as

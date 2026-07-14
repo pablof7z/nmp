@@ -727,6 +727,36 @@ enum Enum {
                 "#115: `NmpEngine::publish_composed` was called a second time on the\nsame `FfiComposedWriteIntent` handle -- it is take-once by design\n(recompose via `group_message_intent` again is the correct retry path,\nsince NMP-owned time and couriered `previous` evidence should refresh).",
             ),
         },
+        Variant {
+            name: "RelayInformationUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "NIP-11 acquisition failed before any last-good document existed.",
+            ),
+        },
+        Variant {
+            name: "RelayInformationWaitersSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A single relay's in-flight NIP-11 waiter set reached its finite\nadmission bound. The refused caller was not retained.",
+            ),
+        },
     ],
     shape: Error {
         flat: false,
@@ -1632,6 +1662,54 @@ enum Enum {
                     docstring: None,
                 },
             ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiRelayInformationCachePolicy",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "UseCache",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Refresh",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiRelayInformationFreshness",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Fresh",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Stale",
+            discr: None,
+            fields: [],
             docstring: None,
         },
     ],
@@ -3292,9 +3370,378 @@ record Record {
             default: None,
             docstring: None,
         },
+        Field {
+            name: "nip11_supported_nips",
+            type_: Optional {
+                inner_type: Sequence {
+                    inner_type: UInt16,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "nip11_document_revision",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "nip11_freshness",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "nip11_last_error",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "nip77_advertisement",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "nip77_behavior",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
     ],
     docstring: Some(
         "One relay's full diagnostics (M5 plan §1.1) -- per-relay wire-sub count,\nexact filters, lane breakdown, reverse coverage (authors served), events\nactually received per kind, and per-filter coverage state. Every field\nhere is a REAL number read off the running engine -- never fabricated or\nestimated (the plan's truth-anchor rule).",
+    ),
+}
+
+record Record {
+    name: "FfiRelayInformation",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "relay",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "document",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRelayInformationDocument",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "raw_json",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "document_revision",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "fetched_at",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "fresh_until",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "freshness",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiRelayInformationFreshness",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "etag",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "last_modified",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "cache_control",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "expires",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "last_error",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
+    name: "FfiRelayInformationDocument",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "name",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "description",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "banner",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "icon",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "pubkey",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "self_pubkey",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "contact",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "supported_nips",
+            type_: Optional {
+                inner_type: Sequence {
+                    inner_type: UInt16,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "software",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "version",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "terms_of_service",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "limitation",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRelayInformationLimitations",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "structured",
+            type_: Map {
+                key_type: String,
+                value_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Typed NIP-11 fields understood today. The enclosing record's `raw_json`\nremains authoritative for fields added by future NIP-11 revisions.",
+    ),
+}
+
+record Record {
+    name: "FfiRelayInformationLimitations",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "max_message_length",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_subscriptions",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_filters",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_limit",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_subid_length",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_event_tags",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "max_content_length",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "min_pow_difficulty",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "auth_required",
+            type_: Optional {
+                inner_type: Boolean,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "payment_required",
+            type_: Optional {
+                inner_type: Boolean,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "created_at_lower_limit",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "created_at_upper_limit",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Advisory limitation claims understood today. The enclosing document's\nexact raw JSON remains authoritative for future fields.",
     ),
 }
 
@@ -6498,6 +6945,86 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_receipt",
             checksum: Some(
                 39241,
+            ),
+        },
+        Method {
+            name: "relay_information",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "relay",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "policy",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRelayInformationCachePolicy",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiRelayInformation",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_relay_information",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "relay",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "policy",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiRelayInformationCachePolicy",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Explicit one-shot NIP-11 acquisition. Fresh reads are cache hits;\nconcurrent misses/refreshes share one bounded engine-owned flight.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_relay_information",
+            checksum: Some(
+                22760,
             ),
         },
         Method {

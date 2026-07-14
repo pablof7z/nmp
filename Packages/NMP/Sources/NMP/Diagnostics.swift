@@ -73,6 +73,12 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
     public let filters: [String]
     public let eventsByKind: [KindCount]
     public let coverage: [FilterCoverage]
+    public let nip11SupportedNips: [UInt16]?
+    public let nip11DocumentRevision: String?
+    public let nip11Freshness: String?
+    public let nip11LastError: String?
+    public let nip77Advertisement: String
+    public let nip77Behavior: String
 
     init(_ ffi: FfiRelayDiagnostics) {
         relay = ffi.relay
@@ -82,6 +88,12 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
         filters = ffi.filters
         eventsByKind = ffi.eventsByKind.map(KindCount.init)
         coverage = ffi.coverage.map(FilterCoverage.init)
+        nip11SupportedNips = ffi.nip11SupportedNips
+        nip11DocumentRevision = ffi.nip11DocumentRevision
+        nip11Freshness = ffi.nip11Freshness
+        nip11LastError = ffi.nip11LastError
+        nip77Advertisement = ffi.nip77Advertisement
+        nip77Behavior = ffi.nip77Behavior
     }
 }
 

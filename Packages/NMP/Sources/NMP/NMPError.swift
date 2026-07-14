@@ -60,6 +60,10 @@ public enum NMPError: Error, Sendable, Equatable {
     /// `groupMessageIntent` again for a retry, since NMP-owned time and
     /// couriered evidence should refresh anyway).
     case intentAlreadyConsumed
+    /// No last-good NIP-11 document exists and acquisition failed.
+    case relayInformationUnavailable(String)
+    /// One relay's in-flight NIP-11 waiter set is at its finite bound.
+    case relayInformationWaitersSaturated(capacity: UInt64)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -87,6 +91,9 @@ public enum NMPError: Error, Sendable, Equatable {
         case .EmptyPinnedRelaySet: self = .emptyPinnedRelaySet
         case .NoActiveAccount: self = .noActiveAccount
         case .IntentAlreadyConsumed: self = .intentAlreadyConsumed
+        case .RelayInformationUnavailable(let reason): self = .relayInformationUnavailable(reason)
+        case .RelayInformationWaitersSaturated(let capacity):
+            self = .relayInformationWaitersSaturated(capacity: capacity)
         }
     }
 }
@@ -96,6 +103,16 @@ public enum NMPError: Error, Sendable, Equatable {
 func nmpRethrowing<T>(_ body: () throws -> T) throws -> T {
     do {
         return try body()
+    } catch let error as FfiError {
+        throw NMPError(error)
+    }
+}
+
+/// Async counterpart used by generated UniFFI operations. The suspension
+/// remains visible to callers while preserving the ergonomic error surface.
+func nmpRethrowingAsync<T>(_ body: () async throws -> T) async throws -> T {
+    do {
+        return try await body()
     } catch let error as FfiError {
         throw NMPError(error)
     }

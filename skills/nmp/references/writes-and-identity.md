@@ -30,6 +30,8 @@ Adding a local account and activating it are separate operations. Changing the a
 
 Direct Rust can register an arbitrary `SigningCapability`. Swift/Kotlin expose local-key account import and NIP-46 connection helpers, not arbitrary Rust trait implementations.
 
+Governed sign-only is separate from publication. Direct Rust calls `Engine::sign_event(SignEventRequest)` and owns the returned cancellable `SignEventOperation`; Swift calls async `signEvent(NMPUnsignedEvent)` and Kotlin calls the suspending equivalent. NMP freezes the active author, admits bounded work before invoking the signer, and verifies the exact returned event. Success creates no write intent, pending row, receipt, stored event, route, relay attempt, or publication claim. A direct-Rust asynchronous signer resolves through the opaque `PendingSignerSender` returned by `SignerOp::pending_channel` or `pending_channel_with_cancel`; its internal receiver is not public API.
+
 NIP-46 handoff readiness is asynchronous. Derive/cache the handoff URI or value before invitation connection consumes the invitation; then connect/start listening, launch the cached handoff, and wait for the connection state to become ready. OS launch success is not signer readiness. Close the exact connection deterministically.
 
 The optional `NMPInsecureFileAccountStore`/`NMPInsecureFileAccountStore` equivalents persist plaintext credentials for explicitly insecure personal/development use. They are not Keychain, Secure Enclave, or Keystore integrations. Clear persisted credentials before shutting down on sign-out.

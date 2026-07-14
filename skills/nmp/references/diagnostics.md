@@ -7,6 +7,8 @@ Use two different proof surfaces for two different questions:
 
 Current cross-platform relay diagnostics expose relay URL, wire subscription count, authors served, lane counts, exact wire-filter JSON, events received by kind, and per-filter coverage intervals. The snapshot also exposes uncovered author count, dropped merge rules, and transport degradation on all supported tiers.
 
+Each relay summary also carries the latest NIP-11 `supported_nips` advertisement, cited document revision, freshness, last refresh error, NIP-77 advertisement state, and an independently sourced behavioral NIP-77 state. Advertisement may influence whether a probe starts, but only a real NEG response creates behavioral proof; a document cannot mint that authority.
+
 Rust additionally exposes discovered-private-relay rejection count, over-cap rejection count, `store_degraded`, and transport degradation. Swift/Kotlin do not currently project `store_degraded` or the two rejection counters. Do not design a native recovery screen around fields it cannot observe.
 
 Do not claim that diagnostics currently provide:
@@ -19,6 +21,8 @@ Do not claim that diagnostics currently provide:
 - database row counts or GC telemetry.
 
 Executor saturation and OS-thread refusal are call/action facts, not diagnostics snapshot fields. Ordinary direct-Rust engine/query setup can return `EngineError::ThreadUnavailable`; NIP-02 observation additionally reserves a native task and can return `EngineError::ExecutorSaturated`. NIP-02 action-worker refusal is a terminal `FollowActionStatus::Failed` with the matching failure value, and initial direct-Rust NIP-46 setup returns the matching `Nip46Error`. Native synchronous outer-bridge errors and post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
+
+NIP-11 executor saturation, per-relay waiter saturation, service closure, and acquisition failure are likewise one-shot call facts, not scheduler diagnostics. A successful stale snapshot can carry its refresh error while diagnostics retain the cited last-good advertisement; absence of behavioral proof remains absence.
 
 The raw FFI native-task census and exact idle barrier are lifecycle-test seams, not engine diagnostics. Swift/Kotlin keep their wrapper methods internal. Do not poll the census as queue pressure, expose it as product telemetry, or infer that increasing `maxNativeTasks` is a retry policy.
 

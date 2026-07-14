@@ -9,7 +9,7 @@ Use NMP as an embeddable engine with two app-facing nouns: a live query and a wr
 
 ## Establish current truth first
 
-Verified-Revision: `25e85876c73fa30bea06d999bc1e2d39a004120a`
+Verified-Revision: `bc8fb9738679261cbb811f3ae274040785a8bbfe`
 
 This is the audited revision of the declared product/source authorities, not the skill package's own commit. A newer checkout is not automatically stale when only skill files changed; the bundled validator proves whether any declared source drifted.
 
@@ -45,7 +45,9 @@ For a requested deliverable, copy and fill the appropriate reusable asset instea
 - A publish call is not convergence. Retain and observe the receipt; persist its id when restart reattachment matters.
 - Do not expose secret keys in logs, fixtures, screenshots, or source. The bundled file account stores are explicitly insecure development conveniences, not Keychain/Keystore providers.
 - Do not promise write cancellation, app-controlled retries, typed pending-row metadata, populated AUTH phases, native `maxRelays`, or secure native signer persistence: those are not current cross-platform public capabilities. Swift/Kotlin do expose `maxNativeTasks`; do not confuse that native-task ceiling with the Rust/raw-FFI relay ceiling.
+- Treat governed sign-only as a cancellable operation, not a write. It freezes the active author, validates the exact signed result, and creates no pending row, receipt, route, relay attempt, storage fact, or publication claim. A pending external Rust signer resolves through NMP's opaque `PendingSignerSender`; do not expose or depend on its internal channel.
 - Keep finite-capacity refusal distinct from OS-thread refusal. A full zero-queue native executor returns `ExecutorSaturated { component, capacity }`; an OS spawn failure remains `ThreadUnavailable { component, reason }`. Direct Rust uses the owning `EngineError`, `FollowActionFailure`, or `Nip46Error` variant. Raw UniFFI uses `FfiError`, and Swift/Kotlin map synchronous setup failures to the corresponding `NMPError`. Refusal occurs before underlying stream/operation ownership transfers, but the NIP-02 action API deliberately returns its `FollowAction` first and reports worker refusal as a terminal failure on that handle. Once a native NIP-46 handle exists, an inner session/relay-worker failure may instead arrive as streamed `failed(reason)`/`Failed` followed by closure. Never match one boundary's type at another, treat saturation as a queue, or relabel either refusal as a timeout or panic.
+- Treat NIP-11 as an explicit engine-owned one-shot, not a relay stream or an app-owned cache. Its flights share the same zero-queue native executor, each relay has a finite waiter set, and executor saturation, waiter saturation, OS-thread refusal, service closure, credentialed-URL refusal, HTTP failure, size refusal, and invalid JSON are distinct acquisition facts. A stale-on-error snapshot preserves the last-good document and carries the refresh error separately. Reducer advertisement evidence exists only for relays in the current read plan; diagnostic freshness is derived from the engine clock and the cited document deadline. Relay advertisement never becomes behavioral capability proof.
 
 ## Completion gate
 
