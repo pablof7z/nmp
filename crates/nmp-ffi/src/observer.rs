@@ -4,7 +4,10 @@
 //! blocking-`recv`s the M3 channel, D8: blocking recv, never poll) which a
 //! thin Swift layer (a later builder) adapts into `AsyncStream`.
 
-use crate::types::{FfiAcquisitionEvidence, FfiDiagnosticsSnapshot, FfiRowDelta, FfiWriteStatus};
+use crate::types::{
+    FfiAcquisitionEvidence, FfiDiagnosticsSnapshot, FfiRowDelta, FfiSignEventFailure,
+    FfiSignedEvent, FfiWriteStatus,
+};
 
 /// Drains a live subscription's `Receiver<RowsMsg>` (M4 §4b). `on_batch` is
 /// called once per delivered batch, in order, on a dedicated drain thread —
@@ -48,4 +51,13 @@ pub trait ReceiptObserver: Send + Sync {
 pub trait DiagnosticsObserver: Send + Sync {
     fn on_snapshot(&self, snapshot: FfiDiagnosticsSnapshot);
     fn on_closed(&self);
+}
+
+/// Exactly-once completion callback for one governed sign-only operation.
+/// Success carries a fully verified event; failure is terminal. Cancellation
+/// uses the same terminal callback so native async continuations cannot hang.
+#[uniffi::export(callback_interface)]
+pub trait SignEventObserver: Send + Sync {
+    fn on_signed(&self, event: FfiSignedEvent);
+    fn on_failed(&self, failure: FfiSignEventFailure);
 }

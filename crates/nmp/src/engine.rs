@@ -28,13 +28,14 @@ use std::sync::{Arc, Mutex};
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{
-    EngineThread, Handle, ReceiptReattachment, ReceiptStream, SignerRegistration,
+    EngineThread, Handle, ReceiptReattachment, ReceiptStream, SignEventError, SignEventOperation,
+    SignerRegistration,
 };
 use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
-use nostr::{Event, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use nostr::{Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::config::{build_admission_policy, build_directory, EngineConfig};
 use crate::error::EngineError;
@@ -340,6 +341,66 @@ impl Engine {
         self.with_handle(|handle| handle.remove_signer(registration))
     }
 
+    /// Sign one immutable unsigned event through the currently active
+    /// account's registered capability and return the exact signed event.
+    ///
+    /// This is intentionally orthogonal to [`Self::publish`]: it creates no
+    /// write intent, pending row, receipt, outbox lane, relay plan, or
+    /// publication. The active author is frozen while the same lifecycle /
+    /// identity lock is held, and the runtime validates the returned body,
+    /// author, id, and signature before completion.
+    pub fn sign_event(
+        &self,
+        request: SignEventRequest,
+    ) -> Result<SignEventOperation, SignEventError> {
+        let (handle, pubkey) = {
+            let guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let inner = guard.as_ref().ok_or(SignEventError::EngineClosed)?;
+            let pubkey = inner.active_pubkey.ok_or(SignEventError::NoActiveSigner)?;
+            (inner.handle.clone(), pubkey)
+        };
+        let unsigned = UnsignedEvent::new(
+            pubkey,
+            request.created_at,
+            request.kind,
+            request.tags,
+            request.content,
+        );
+        handle.sign_event(unsigned)
+    }
+
+    /// Native callback adapter for [`Self::sign_event`]. The runtime owns
+    /// both signer waiting and callback delivery on the operation's single
+    /// admitted executor task, so an FFI caller does not need a second
+    /// bridge slot.
+    #[doc(hidden)]
+    pub fn sign_event_with_completion(
+        &self,
+        request: SignEventRequest,
+        completion: impl FnOnce(Result<nostr::Event, SignEventError>) + Send + 'static,
+    ) -> Result<nmp_engine::runtime::SignEventCancel, SignEventError> {
+        let (handle, pubkey) = {
+            let guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let inner = guard.as_ref().ok_or(SignEventError::EngineClosed)?;
+            let pubkey = inner.active_pubkey.ok_or(SignEventError::NoActiveSigner)?;
+            (inner.handle.clone(), pubkey)
+        };
+        let unsigned = UnsignedEvent::new(
+            pubkey,
+            request.created_at,
+            request.kind,
+            request.tags,
+            request.content,
+        );
+        handle.sign_event_with_completion(unsigned, completion)
+    }
+
     /// Re-root every reactive query AND the active signing capability
     /// together onto `pubkey` (`None` -> logged-out / read-only). `pubkey`
     /// need not have been registered via [`Self::add_account`] -- read-only
@@ -375,29 +436,6 @@ impl Engine {
             Some(inner) => Ok(inner.active_pubkey),
             None => Err(EngineError::EngineClosed),
         }
-    }
-
-    /// Sign one exact event with the active account. The active author is
-    /// frozen under the lifecycle mutex before the request reaches the
-    /// signer. No publish, store, outbox, routing, or relay path is entered.
-    pub fn sign_event(&self, request: SignEventRequest) -> Result<Event, EngineError> {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let inner = guard.as_ref().ok_or(EngineError::EngineClosed)?;
-        let pubkey = inner.active_pubkey.ok_or(EngineError::NoActiveAccount)?;
-        let unsigned = UnsignedEvent::new(
-            pubkey,
-            request.created_at,
-            request.kind,
-            request.tags,
-            request.content,
-        );
-        inner
-            .handle
-            .sign_only(unsigned)
-            .map_err(EngineError::from_sign_only_error)
     }
 
     /// Open a live diagnostics stream. Same `Drop` discipline as
@@ -445,6 +483,7 @@ impl Drop for Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn persistent_store_reset_is_destructive_and_idempotent() {
@@ -471,6 +510,467 @@ mod tests {
 
         let reopened = Engine::new(config).expect("reset path must open as a fresh store");
         reopened.shutdown();
+    }
+
+    #[test]
+    fn sign_event_returns_exact_verified_event_without_store_or_outbox_residue() {
+        use nmp_store::EventStore;
+
+        let fixture = tempfile::tempdir().expect("temporary directory");
+        let path = fixture.path().join("sign-only.redb");
+        let engine = Engine::new(EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let secret = format!("{:064x}", 7u8);
+        let author = engine.add_account(&secret).expect("account must register");
+        engine
+            .set_active_account(Some(author))
+            .expect("account must activate");
+        let request = SignEventRequest {
+            created_at: nostr::Timestamp::from(1_723_456_789),
+            kind: nostr::Kind::Custom(27_272),
+            tags: vec![nostr::Tag::parse(vec!["t".to_string(), "sign-only".to_string()]).unwrap()],
+            content: "exact body".to_string(),
+        };
+
+        let signed = engine
+            .sign_event(request.clone())
+            .expect("sign-only operation must start")
+            .recv()
+            .expect("active local signer must complete");
+        assert_eq!(signed.pubkey, author);
+        assert_eq!(signed.created_at, request.created_at);
+        assert_eq!(signed.kind, request.kind);
+        assert_eq!(
+            signed.tags.iter().cloned().collect::<Vec<_>>(),
+            request.tags
+        );
+        assert_eq!(signed.content, request.content);
+        signed.verify().expect("returned signature must verify");
+        engine.shutdown();
+
+        let store = nmp_store::RedbStore::open(&path).expect("store must reopen");
+        assert!(
+            store
+                .query(&nostr::Filter::new())
+                .expect("canonical query must succeed")
+                .is_empty(),
+            "sign-only must not create a canonical row"
+        );
+        assert!(
+            store.recover_outbox().is_empty(),
+            "sign-only must not create an intent, receipt, or outbox lane"
+        );
+    }
+
+    #[test]
+    fn sign_event_rejects_missing_active_account_or_signer_before_invocation() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let active = nostr::Keys::generate().public_key();
+        let request = SignEventRequest {
+            created_at: nostr::Timestamp::from(1),
+            kind: nostr::Kind::TextNote,
+            tags: Vec::new(),
+            content: "body".to_string(),
+        };
+        match engine.sign_event(request.clone()) {
+            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
+            Ok(_) => panic!("a missing active account must refuse before acceptance"),
+        }
+        engine.set_active_account(Some(active)).unwrap();
+        match engine.sign_event(request) {
+            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
+            Ok(_) => panic!("a missing signer must refuse before acceptance"),
+        }
+        engine.shutdown();
+    }
+
+    struct MismatchedSigner {
+        reported: PublicKey,
+        actual: Keys,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl nmp_signer::SigningCapability for MismatchedSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.reported)
+        }
+
+        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let substituted = nostr::UnsignedEvent::new(
+                self.actual.public_key(),
+                unsigned.created_at,
+                unsigned.kind,
+                unsigned.tags,
+                unsigned.content,
+            );
+            nmp_signer::SignerOp::ok(substituted.sign_with_keys(&self.actual).unwrap())
+        }
+    }
+
+    #[test]
+    fn sign_event_rejects_mismatched_signer_output() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let reported = nostr::Keys::generate();
+        let calls = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(MismatchedSigner {
+                reported: reported.public_key(),
+                actual: nostr::Keys::generate(),
+                calls: Arc::clone(&calls),
+            })
+            .expect("signer must register");
+        engine
+            .set_active_account(Some(reported.public_key()))
+            .unwrap();
+        let request = SignEventRequest {
+            created_at: nostr::Timestamp::from(2),
+            kind: nostr::Kind::TextNote,
+            tags: Vec::new(),
+            content: "frozen".to_string(),
+        };
+        assert!(matches!(
+            engine.sign_event(request).unwrap().recv(),
+            Err(SignEventError::InvalidSignerOutput { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        engine.shutdown();
+    }
+
+    struct PendingSigner {
+        public_key: PublicKey,
+        cancellations: Arc<AtomicUsize>,
+    }
+
+    struct NoHookPendingSigner {
+        public_key: PublicKey,
+        operation: Mutex<Option<nmp_signer::SignerOp<nostr::Event>>>,
+    }
+
+    impl nmp_signer::SigningCapability for NoHookPendingSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.public_key)
+        }
+
+        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            self.operation
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+                .expect("fixture signs once")
+        }
+    }
+
+    struct HookCompletesSigner {
+        keys: Keys,
+        cancellations: Arc<AtomicUsize>,
+    }
+
+    impl nmp_signer::SigningCapability for HookCompletesSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.keys.public_key())
+        }
+
+        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            let signed = unsigned.sign_with_keys(&self.keys).unwrap();
+            let completion: Arc<Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>> =
+                Arc::new(Mutex::new(None));
+            let completion_for_cancel = Arc::clone(&completion);
+            let cancellations = Arc::clone(&self.cancellations);
+            let (sender, operation) =
+                nmp_signer::SignerOp::pending_channel_with_cancel(move || {
+                    cancellations.fetch_add(1, Ordering::SeqCst);
+                    if let Some(sender) = completion_for_cancel
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take()
+                    {
+                        let _ = sender.resolve(Ok(signed));
+                    }
+                });
+            *completion
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
+            operation
+        }
+    }
+
+    struct CountingSigner {
+        keys: Keys,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl nmp_signer::SigningCapability for CountingSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.keys.public_key())
+        }
+
+        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            nmp_signer::SignerOp::ok(unsigned.sign_with_keys(&self.keys).unwrap())
+        }
+    }
+
+    #[test]
+    fn sign_event_cap_one_admits_then_invokes_the_signer_exactly_once() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let calls = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(CountingSigner {
+                keys: keys.clone(),
+                calls: Arc::clone(&calls),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+
+        let signed = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(5),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "one slot".to_string(),
+            })
+            .expect("cap=1 must admit the operation")
+            .recv()
+            .expect("local signer must complete");
+        assert_eq!(signed.pubkey, keys.public_key());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    impl nmp_signer::SigningCapability for PendingSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.public_key)
+        }
+
+        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            let producer: Arc<Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>> =
+                Arc::new(Mutex::new(None));
+            let producer_for_cancel = Arc::clone(&producer);
+            let cancellations = Arc::clone(&self.cancellations);
+            let (sender, operation) =
+                nmp_signer::SignerOp::pending_channel_with_cancel(move || {
+                    cancellations.fetch_add(1, Ordering::SeqCst);
+                    producer_for_cancel
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take();
+                });
+            *producer.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
+            operation
+        }
+    }
+
+    #[test]
+    fn sign_event_is_bounded_and_cancellation_is_session_scoped() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = nostr::Keys::generate();
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(PendingSigner {
+                public_key: keys.public_key(),
+                cancellations: Arc::clone(&cancellations),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let request = SignEventRequest {
+            created_at: nostr::Timestamp::from(3),
+            kind: nostr::Kind::TextNote,
+            tags: Vec::new(),
+            content: "pending".to_string(),
+        };
+
+        let operation = engine.sign_event(request).expect("one slot is available");
+        assert_eq!(engine.native_task_census().admitted, 1);
+        operation.cancel_handle().cancel();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.native_task_census().admitted, 0);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn shutdown_cancels_and_joins_an_accepted_sign_event() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(PendingSigner {
+                public_key: keys.public_key(),
+                cancellations: Arc::clone(&cancellations),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let operation = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(6),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "shutdown".to_string(),
+            })
+            .expect("operation must be accepted");
+
+        engine.shutdown();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+    }
+
+    #[test]
+    fn sign_event_cancellation_without_adapter_hook_drops_retained_producer_and_joins() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let (producer, operation) = nmp_signer::SignerOp::pending_channel();
+        engine
+            .add_signer(NoHookPendingSigner {
+                public_key: keys.public_key(),
+                operation: Mutex::new(Some(operation)),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let operation = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(7),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "no cancellation hook".to_string(),
+            })
+            .expect("operation must be accepted");
+
+        operation.cancel_handle().cancel();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        assert!(
+            matches!(
+                producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
+                Err(nmp_signer::PendingSignerResolveError::ReceiverDropped(_))
+            ),
+            "the worker receiver must be dropped even while the producer is retained"
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn sign_event_shutdown_without_adapter_hook_drops_retained_producer_and_joins() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let (producer, operation) = nmp_signer::SignerOp::pending_channel();
+        engine
+            .add_signer(NoHookPendingSigner {
+                public_key: keys.public_key(),
+                operation: Mutex::new(Some(operation)),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let operation = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(8),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "shutdown without hook".to_string(),
+            })
+            .expect("operation must be accepted");
+
+        engine.shutdown();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        assert!(
+            matches!(
+                producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
+                Err(nmp_signer::PendingSignerResolveError::ReceiverDropped(_))
+            ),
+            "shutdown must drop the worker receiver while the producer is retained"
+        );
+    }
+
+    #[test]
+    fn sign_event_cancellation_claim_beats_hook_that_simultaneously_completes() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(HookCompletesSigner {
+                keys: keys.clone(),
+                cancellations: Arc::clone(&cancellations),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let operation = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(9),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "cancel wins".to_string(),
+            })
+            .expect("operation must be accepted");
+
+        operation.cancel_handle().cancel();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn sign_event_capacity_refusal_happens_before_signer_invocation() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let secret = format!("{:064x}", 23u8);
+        let author = engine.add_account(&secret).unwrap();
+        engine.set_active_account(Some(author)).unwrap();
+        let _held = engine.reserve_native_task("test-capacity").unwrap();
+        let request = SignEventRequest {
+            created_at: nostr::Timestamp::from(4),
+            kind: nostr::Kind::TextNote,
+            tags: Vec::new(),
+            content: "refused".to_string(),
+        };
+        match engine.sign_event(request) {
+            Err(error) => assert_eq!(error, SignEventError::ExecutorSaturated { capacity: 1 }),
+            Ok(_) => panic!("capacity must refuse before signer invocation"),
+        }
+        engine.shutdown();
     }
     use nmp_grammar::{Durability, WritePayload, WriteRouting};
     use nostr::ToBech32;
@@ -573,6 +1073,8 @@ mod tests {
                 tags: vec![Tag::parse(["client", "nip07-test"]).expect("valid tag")],
                 content: "sign without publish".to_string(),
             })
+            .expect("active local signer must start")
+            .recv()
             .expect("active local signer must sign");
 
         assert_eq!(signed.pubkey, pubkey);
@@ -592,7 +1094,10 @@ mod tests {
             tags: Vec::new(),
             content: "unsigned".to_string(),
         });
-        assert_eq!(result, Err(EngineError::NoActiveAccount));
+        match result {
+            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
+            Ok(_) => panic!("a missing active account must fail closed"),
+        }
         engine.shutdown();
     }
 

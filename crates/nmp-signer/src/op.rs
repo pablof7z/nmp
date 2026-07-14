@@ -1,10 +1,83 @@
 //! The pollable thunk (§3.3, HARVEST `nmp-signer-iface::op`).
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 
 #[doc(hidden)]
 pub type PendingCancel = Box<dyn FnOnce() + Send + 'static>;
+
+type PendingSignerSlot<T> = Mutex<Option<Sender<Result<T, SignerError>>>>;
+
+/// NMP-owned completion door for one asynchronous signer operation.
+///
+/// Clones share one terminal slot: the first call to [`Self::resolve`] owns
+/// the result, and every later call receives a typed `AlreadyResolved` error.
+/// No channel implementation type crosses the public signer boundary.
+pub struct PendingSignerSender<T: Send + 'static> {
+    sender: Arc<PendingSignerSlot<T>>,
+}
+
+impl<T: Send + 'static> Clone for PendingSignerSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: Arc::clone(&self.sender),
+        }
+    }
+}
+
+impl<T: Send + 'static> PendingSignerSender<T> {
+    /// Resolve the matching pending operation exactly once.
+    pub fn resolve(
+        &self,
+        result: Result<T, SignerError>,
+    ) -> Result<(), PendingSignerResolveError<T>> {
+        let Some(sender) = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        else {
+            return Err(PendingSignerResolveError::AlreadyResolved(result));
+        };
+        sender
+            .send(result)
+            .map_err(|error| PendingSignerResolveError::ReceiverDropped(error.0))
+    }
+}
+
+/// Typed refusal from [`PendingSignerSender::resolve`].
+#[derive(Debug)]
+pub enum PendingSignerResolveError<T: Send + 'static> {
+    /// Another sender clone already claimed the operation's one result slot.
+    AlreadyResolved(Result<T, SignerError>),
+    /// The pending operation was cancelled or dropped before resolution.
+    ReceiverDropped(Result<T, SignerError>),
+}
+
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct PendingSignerCancel(Sender<()>);
+
+#[doc(hidden)]
+pub struct PendingSignerCancelled(Receiver<()>);
+
+#[doc(hidden)]
+pub fn pending_signer_cancellation() -> (PendingSignerCancel, PendingSignerCancelled) {
+    let (cancel, cancelled) = crossbeam_channel::bounded(1);
+    (
+        PendingSignerCancel(cancel),
+        PendingSignerCancelled(cancelled),
+    )
+}
+
+impl PendingSignerCancel {
+    #[doc(hidden)]
+    pub fn cancel(&self) {
+        let _ = self.0.try_send(());
+    }
+}
 
 /// One cancellable asynchronous signer result.
 ///
@@ -80,13 +153,23 @@ impl<T: Send + 'static> PendingSignerOp<T> {
     }
 
     #[doc(hidden)]
-    pub fn into_parts(mut self) -> (Receiver<Result<T, SignerError>>, Option<PendingCancel>) {
-        let receiver = self
-            .receiver
-            .take()
-            .expect("pending signer receiver is consumed exactly once");
-        let cancel = self.cancel.take();
-        (receiver, cancel)
+    pub fn recv_or_cancel(
+        mut self,
+        cancelled: PendingSignerCancelled,
+    ) -> Option<Result<T, SignerError>> {
+        let outcome = crossbeam_channel::select_biased! {
+            recv(cancelled.0) -> _ => None,
+            recv(self.receiver.as_ref().expect("pending signer receiver is consumed exactly once")) -> result => {
+                Some(result.unwrap_or(Err(SignerError::Disconnected)))
+            }
+        };
+        self.receiver = None;
+        if outcome.is_some() {
+            self.cancel = None;
+        } else if let Some(cancel) = self.cancel.take() {
+            cancel();
+        }
+        outcome
     }
 }
 
@@ -101,8 +184,8 @@ impl<T: Send + 'static> Drop for PendingSignerOp<T> {
 }
 
 /// An op that may complete synchronously (`Ready`) or later (`Pending`).
-/// `Pending` carries a receiver that yields exactly one result when the
-/// operation completes — the engine's blocking recv loop polls it
+/// `Pending` carries an NMP-owned asynchronous operation that yields exactly
+/// one result when the operation completes — callers may poll it
 /// (non-blocking, via [`SignerOp::poll`]) or blocks on it (via
 /// [`SignerOp::wait`]); no tokio is ever pulled into the engine (D8).
 ///
@@ -129,25 +212,34 @@ impl<T: Send + 'static> SignerOp<T> {
         Self::Ready(Err(error))
     }
 
-    /// Construct an asynchronous operation without adapter cancellation.
-    /// This is the portable constructor for custom `nmp`-only signers.
+    /// Create an asynchronous operation and its NMP-owned completion door.
+    ///
+    /// The sender can move to any caller-owned thread without exposing the
+    /// channel mechanism used internally by NMP.
     #[must_use]
-    pub fn pending(receiver: Receiver<Result<T, SignerError>>) -> Self {
-        Self::Pending(PendingSignerOp::new(receiver, None))
+    pub fn pending_channel() -> (PendingSignerSender<T>, Self) {
+        Self::pending_channel_from_cancel(None)
     }
 
-    pub(crate) fn pending_with_cancel(
-        receiver: Receiver<Result<T, SignerError>>,
+    /// Create an asynchronous operation with an adapter-owned cancellation
+    /// hook and its NMP-owned completion door.
+    #[must_use]
+    pub fn pending_channel_with_cancel(
         cancel: impl FnOnce() + Send + 'static,
-    ) -> Self {
-        Self::Pending(PendingSignerOp::new(receiver, Some(Box::new(cancel))))
+    ) -> (PendingSignerSender<T>, Self) {
+        Self::pending_channel_from_cancel(Some(Box::new(cancel)))
     }
 
-    pub(crate) fn pending_from_parts(
-        receiver: Receiver<Result<T, SignerError>>,
+    fn pending_channel_from_cancel(
         cancel: Option<PendingCancel>,
-    ) -> Self {
-        Self::Pending(PendingSignerOp::new(receiver, cancel))
+    ) -> (PendingSignerSender<T>, Self) {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        (
+            PendingSignerSender {
+                sender: Arc::new(Mutex::new(Some(sender))),
+            },
+            Self::Pending(PendingSignerOp::new(receiver, cancel)),
+        )
     }
 
     /// Block the current thread for up to `timeout` waiting for the result.
@@ -255,24 +347,35 @@ mod tests {
 
     #[test]
     fn dropped_pending_sender_is_disconnected() {
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(), SignerError>>();
-        drop(tx);
+        let (sender, operation) = SignerOp::<()>::pending_channel();
+        drop(sender);
         assert_eq!(
-            SignerOp::pending(rx).wait(Duration::from_millis(10)),
+            operation.wait(Duration::from_millis(10)),
             Err(SignerError::Disconnected)
         );
     }
 
     #[test]
     fn timeout_cancels_the_adapter_owned_pending_slot_once() {
-        let (_tx, rx) = std::sync::mpsc::channel::<Result<(), SignerError>>();
         let cancelled = Arc::new(AtomicUsize::new(0));
         let cancelled_for_op = Arc::clone(&cancelled);
-        let op = SignerOp::pending_with_cancel(rx, move || {
+        let (_sender, op) = SignerOp::<()>::pending_channel_with_cancel(move || {
             cancelled_for_op.fetch_add(1, Ordering::SeqCst);
         });
 
         assert_eq!(op.wait(Duration::from_millis(1)), Err(SignerError::Timeout));
         assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cloned_completion_door_resolves_exactly_once_with_typed_refusal() {
+        let (sender, operation) = SignerOp::pending_channel();
+        let competing_sender = sender.clone();
+        sender.resolve(Ok(7u8)).unwrap();
+        assert!(matches!(
+            competing_sender.resolve(Ok(8u8)),
+            Err(PendingSignerResolveError::AlreadyResolved(Ok(8)))
+        ));
+        assert_eq!(operation.wait(Duration::from_millis(10)), Ok(7));
     }
 }
