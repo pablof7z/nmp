@@ -370,7 +370,7 @@ impl<S: EventStore> Engine<S> {
         let Some(&root) = self.handle_to_root.get(&id) else {
             return BTreeSet::new();
         };
-        self.graph.cached_atoms_of(root).clone()
+        self.graph.cached_filters_of(root)
     }
 
     /// Every atom in `id`'s subscription's FULL subtree — interior
@@ -723,7 +723,13 @@ impl<S: EventStore> Engine<S> {
             .chain(provenance_grew.iter())
             .cloned()
             .collect();
-        let delta = self.react(inserted, removed)?;
+        // A duplicate whose provenance grew can change selector routing
+        // evidence even though its projected VALUE is unchanged. Seed the
+        // same generic Derived recompute lane so the old atom is replaced
+        // by one carrying the enlarged source-relay set.
+        let mut inserted_or_provenance_changed = inserted;
+        inserted_or_provenance_changed.extend(provenance_grew);
+        let delta = self.react(inserted_or_provenance_changed, removed)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(RelayIngestResult {
             delta,
@@ -743,7 +749,7 @@ impl<S: EventStore> Engine<S> {
             .copied()
             .map(|root| {
                 let shape = ProjectionShape {
-                    root_atoms: self.graph.cached_atoms_of(root).clone(),
+                    root_atoms: self.graph.cached_filters_of(root),
                     subtree_atoms: self
                         .graph
                         .atoms_in_structural_order(root)
@@ -1025,13 +1031,13 @@ impl<S: EventStore> Engine<S> {
     fn projection_input_events(
         &self,
         filter: &ConcreteFilter,
-    ) -> Result<Vec<nostr::Event>, PersistenceError> {
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let nostr_filter = filter.to_nostr();
         let rows = match filter.limit {
             Some(limit) => self.store.query_newest(&nostr_filter, limit)?,
             None => self.store.query(&nostr_filter)?,
         };
-        Ok(rows.into_iter().map(|stored| stored.event).collect())
+        Ok(rows)
     }
 
     /// Recompute node `id`'s value from its (already-current) children.
@@ -1072,26 +1078,11 @@ impl<S: EventStore> Engine<S> {
                 if old_atoms == new_atoms {
                     return Ok(false);
                 }
-                let (source, access) = self.graph.context_of(id);
                 for a in old_atoms.difference(&new_atoms) {
-                    self.unref_atom(
-                        &ContextualAtom {
-                            filter: a.clone(),
-                            source: source.clone(),
-                            access,
-                        },
-                        acc,
-                    );
+                    self.unref_atom(a, acc);
                 }
                 for a in new_atoms.difference(&old_atoms) {
-                    self.ref_atom(
-                        &ContextualAtom {
-                            filter: a.clone(),
-                            source: source.clone(),
-                            access,
-                        },
-                        acc,
-                    );
+                    self.ref_atom(a, acc);
                 }
                 true
             }

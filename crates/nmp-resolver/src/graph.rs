@@ -59,7 +59,7 @@ pub(crate) struct FilterNodeData {
     pub(crate) until: Option<u64>,
     pub(crate) limit: Option<usize>,
     pub(crate) bound: Vec<(FieldSlot, NodeId)>,
-    pub(crate) cached_atoms: BTreeSet<ConcreteFilter>,
+    pub(crate) cached_atoms: BTreeSet<ContextualAtom>,
     /// This FilterNode's OWN Demand's source/access -- set once at
     /// construction (#106) and never mutated. Uniform for every atom this
     /// node ever produces; a nested `Derived`'s inner FilterNode carries its
@@ -164,17 +164,12 @@ impl Graph {
     /// descendant `Derived`'s inner FilterNode atoms, for demand-set
     /// refcounting). Used by `Engine::root_atoms` to report exactly what a
     /// subscription's OWN descriptor resolves to.
-    pub(crate) fn cached_atoms_of(&self, filter_id: NodeId) -> &BTreeSet<ConcreteFilter> {
-        &self.filter_data(filter_id).cached_atoms
-    }
-
-    /// A FilterNode's own `(source, access)` context (#106) -- the axes its
-    /// `cached_atoms` all share, needed by the engine's ref/unref-counting
-    /// layer to wrap a bare `ConcreteFilter` diff into `ContextualAtom`s
-    /// without re-deriving context from the `Filter` shape a second time.
-    pub(crate) fn context_of(&self, filter_id: NodeId) -> (SourceAuthority, AccessContext) {
-        let f = self.filter_data(filter_id);
-        (f.source.clone(), f.access)
+    pub(crate) fn cached_filters_of(&self, filter_id: NodeId) -> BTreeSet<ConcreteFilter> {
+        self.filter_data(filter_id)
+            .cached_atoms
+            .iter()
+            .map(|atom| atom.filter.clone())
+            .collect()
     }
 
     /// The wide query filter for a FilterNode: base (kinds/since/until/limit)
@@ -200,7 +195,7 @@ impl Graph {
             if set.is_empty() {
                 return None;
             }
-            for el in set {
+            for (el, _) in set {
                 merge_element_into(&mut cf, slot, el);
             }
         }
@@ -212,7 +207,7 @@ impl Graph {
     /// field's resolved elements. Zero bound fields => exactly one atom
     /// (the base). Any bound field resolving to the empty set => zero atoms
     /// (never a wildcard).
-    pub(crate) fn compute_atoms(&self, filter_id: NodeId) -> BTreeSet<ConcreteFilter> {
+    pub(crate) fn compute_atoms(&self, filter_id: NodeId) -> BTreeSet<ContextualAtom> {
         let f = self.filter_data(filter_id);
         let base = ConcreteFilter {
             kinds: f.kinds.clone(),
@@ -222,25 +217,40 @@ impl Graph {
             ..ConcreteFilter::default()
         };
         if f.bound.is_empty() {
-            return BTreeSet::from([base]);
+            return BTreeSet::from([ContextualAtom {
+                filter: base,
+                source: f.source.clone(),
+                access: f.access,
+                routing_evidence: BTreeSet::new(),
+            }]);
         }
-        let mut atoms = vec![base];
+        let mut atoms = vec![(base, BTreeSet::new())];
         for (slot, binding_id) in &f.bound {
             let set = self.resolved_set_of(*binding_id);
             if set.is_empty() {
                 return BTreeSet::new();
             }
             let mut next = Vec::with_capacity(atoms.len() * set.len());
-            for existing in &atoms {
-                for el in set {
+            for (existing, existing_evidence) in &atoms {
+                for (el, element_evidence) in set {
                     let mut cf = existing.clone();
                     merge_element_into(&mut cf, slot, el);
-                    next.push(cf);
+                    let mut routing_evidence = existing_evidence.clone();
+                    routing_evidence.extend(element_evidence.iter().cloned());
+                    next.push((cf, routing_evidence));
                 }
             }
             atoms = next;
         }
-        atoms.into_iter().collect()
+        atoms
+            .into_iter()
+            .map(|(filter, routing_evidence)| ContextualAtom {
+                filter,
+                source: f.source.clone(),
+                access: f.access,
+                routing_evidence,
+            })
+            .collect()
     }
 
     pub(crate) fn set_reactive_cached(&mut self, id: NodeId, new: ResolvedSet) -> bool {
@@ -281,8 +291,8 @@ impl Graph {
     pub(crate) fn set_filter_cached_atoms(
         &mut self,
         id: NodeId,
-        new: BTreeSet<ConcreteFilter>,
-    ) -> BTreeSet<ConcreteFilter> {
+        new: BTreeSet<ContextualAtom>,
+    ) -> BTreeSet<ContextualAtom> {
         match self.nodes.get_mut(&id).expect("filter node must exist") {
             Node::Filter(f) => std::mem::replace(&mut f.cached_atoms, new),
             _ => panic!("node {id} is not a FilterNode"),
@@ -307,11 +317,7 @@ impl Graph {
         for (_, binding_id) in &f.bound {
             self.walk_binding_postorder(*binding_id, out);
         }
-        out.extend(f.cached_atoms.iter().cloned().map(|filter| ContextualAtom {
-            filter,
-            source: f.source.clone(),
-            access: f.access,
-        }));
+        out.extend(f.cached_atoms.iter().cloned());
     }
 
     fn walk_binding_postorder(&self, binding_id: NodeId, out: &mut Vec<ContextualAtom>) {

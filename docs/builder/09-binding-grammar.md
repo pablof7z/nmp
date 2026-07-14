@@ -103,6 +103,19 @@ through an outer group host or borrowing its AUTH evidence.
 - a projected tag into another tag field; or
 - address coordinates into address-aware selection.
 
+For reference-bearing projections, the value does not travel alone. `e`, `a`,
+and `p` tag selectors retain a valid relay hint from the tag; without one they
+retain the relays where the source event was observed. `AddressCoord` retains
+the source observation relays. This evidence is routed with the projected atom,
+including through set operations, so an ids-only outer filter does not need an
+unrelated global relay to rediscover where its target may live. Discovered
+relay admission still applies; a network event cannot use a hint to bypass the
+local/private-host policy.
+
+When reasoning about or enforcing graph depth, count only `Derived` edges.
+Nesting `SetOp` nodes combines values at the same level and consumes no
+additional Derived hop.
+
 ## Set operations: compose closed sets
 
 ```swift

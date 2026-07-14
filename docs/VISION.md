@@ -70,6 +70,17 @@ which stay exactly NIP-01's single-ASCII-letter alphabet). Selectors remain
 closed, typed, hashable, and introspectable. App closures
 never enter demand, admission, routing, ordering, or cursor decisions.
 
+Reference selectors preserve routing evidence with the value they project:
+`Tag("e")`, `Tag("a")`, and `Tag("p")` use a valid tag relay hint when one is
+present and otherwise retain the source event's observed-relay provenance;
+`AddressCoord` retains source provenance. Evidence follows the value through
+interior `Derived` and `SetOp` nodes, is admission-gated before routing, and
+does not change which events the resulting filter matches.
+
+A graph's derived depth counts only edges that enter `Binding::Derived`.
+`SetOp` is a same-level value combinator and does not consume another Derived
+hop, however deeply its operands are nested syntactically.
+
 `$currentPubkey` is a useful reactive root, not a global engine identity. When
 the app changes it, only graphs that reference it re-resolve. A simultaneous
 literal query such as `#p:[accountA, accountB]` remains live and unchanged.
@@ -219,7 +230,9 @@ coverage/evidence, and related local state. Silent partial cleanup is unsafe.
 - Receipt transitions are durable facts and are reattachable; they are not an
   unbounded in-memory observer queue.
 - Large derived sets may be chunked only when chunking preserves semantics and
-  the complete demand remains explainable.
+  the complete demand remains explainable. Projected id atoms are packed into
+  deterministic widen-only wire filters of at most 256 ids; further ids ship
+  as additional exact chunks rather than being truncated.
 - When graph, wire, relay, or result limits prevent the full planned acquisition,
   NMP still returns cached rows with explicit local shortfall evidence.
 - NMP never silently takes the first N values and presents them as the complete

@@ -31,6 +31,8 @@ pub enum Binding {
 /// the inner). A `$myFollows`-shaped outer query pinned to R1, whose inner
 /// kind:3 lookup should resolve from the author's own outbox regardless,
 /// is exactly why this must be explicit per-Demand, not inherited.
+/// Derived depth counts only edges entering this type. `Binding::SetOp` is
+/// a same-level combinator and adds no Derived hop of its own.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Derived {
     /// The inner live query's full descriptor.

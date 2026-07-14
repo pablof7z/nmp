@@ -3,9 +3,9 @@
 //! resolved-value element shape, field slots, and parent links (M1 plan
 //! §3.1/§3.2).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::IndexedTagName;
+use nmp_grammar::{IndexedTagName, RoutingEvidence};
 
 /// Opaque node identifier. A plain incrementing counter (not the `slotmap`
 /// crate) — M1's graphs are small and bounded (depth ≤ 3), so a `HashMap`
@@ -47,8 +47,80 @@ pub(crate) enum Element {
     },
 }
 
-/// A `BindingNode`'s resolved value set — the "ResolvedSet" of M1 plan §3.1.
-pub(crate) type ResolvedSet = BTreeSet<Element>;
+/// A `BindingNode`'s resolved values together with every routing fact that
+/// reached each value. Set algebra operates on the map keys and retains or
+/// unions the corresponding evidence; evidence never changes value equality.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ResolvedSet(BTreeMap<Element, BTreeSet<RoutingEvidence>>);
+
+impl ResolvedSet {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn insert(&mut self, element: Element) {
+        self.0.entry(element).or_default();
+    }
+
+    pub(crate) fn insert_with(
+        &mut self,
+        element: Element,
+        evidence: impl IntoIterator<Item = RoutingEvidence>,
+    ) {
+        self.0.entry(element).or_default().extend(evidence);
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Element, &BTreeSet<RoutingEvidence>)> {
+        self.0.iter()
+    }
+
+    pub(crate) fn contains(&self, element: &Element) -> bool {
+        self.0.contains_key(element)
+    }
+
+    pub(crate) fn merge_from(&mut self, other: &Self) {
+        for (element, evidence) in other.iter() {
+            self.insert_with(element.clone(), evidence.iter().cloned());
+        }
+    }
+
+    pub(crate) fn remove(&mut self, element: &Element) {
+        self.0.remove(element);
+    }
+}
+
+impl<const N: usize> From<[Element; N]> for ResolvedSet {
+    fn from(elements: [Element; N]) -> Self {
+        elements.into_iter().collect()
+    }
+}
+
+impl FromIterator<Element> for ResolvedSet {
+    fn from_iter<T: IntoIterator<Item = Element>>(iter: T) -> Self {
+        let mut set = Self::new();
+        for element in iter {
+            set.insert(element);
+        }
+        set
+    }
+}
+
+impl<'a> IntoIterator for &'a ResolvedSet {
+    type Item = (&'a Element, &'a BTreeSet<RoutingEvidence>);
+    type IntoIter = std::collections::btree_map::Iter<'a, Element, BTreeSet<RoutingEvidence>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
 
 /// Where a node's changed value must propagate to next. Every node in a
 /// graph has exactly one parent (the grammar's dependency graph is a tree)

@@ -77,6 +77,7 @@ mod tests {
             },
             source: SourceAuthority::Public,
             access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         }
     }
 

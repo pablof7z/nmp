@@ -271,6 +271,7 @@ mod tests {
             },
             source: SourceAuthority::AuthorOutboxes,
             access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         }
     }
 

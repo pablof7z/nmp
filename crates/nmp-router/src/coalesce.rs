@@ -109,6 +109,46 @@ impl MergeRule for KindUnion {
     }
 }
 
+/// Maximum event ids carried by one coalesced wire filter. Resolver fan-out
+/// produces singleton projected-id atoms; `IdUnion` packs those atoms up to
+/// this bound and then leaves additional chunks as separate REQs.
+pub const MAX_IDS_PER_FILTER: usize = 256;
+
+/// `IdUnion` — identical-except-ids widening with an explicit output cap.
+/// The cap is operational, not part of the widening proof: every successful
+/// merge still contains the full union of both inputs.
+pub struct IdUnion;
+
+impl MergeRule for IdUnion {
+    fn name(&self) -> &'static str {
+        "IdUnion"
+    }
+
+    fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
+        let (Some(a_ids), Some(b_ids)) = (&a.ids, &b.ids) else {
+            return None;
+        };
+        let same_rest = a.authors == b.authors
+            && a.kinds == b.kinds
+            && a.tags == b.tags
+            && a.since == b.since
+            && a.until == b.until
+            && neither_limited(a, b)
+            && a.ids != b.ids;
+        if !same_rest {
+            return None;
+        }
+        let mut ids = a_ids.clone();
+        ids.extend(b_ids.iter().cloned());
+        if ids.is_empty() || ids.len() > MAX_IDS_PER_FILTER {
+            return None;
+        }
+        let mut merged = a.clone();
+        merged.ids = Some(ids);
+        Some(merged)
+    }
+}
+
 /// A rule that is DELIBERATELY non-widening — construction-only, used by
 /// `non_widening_rule_is_dropped_and_ships_separately` (test 13) to prove
 /// the drop mechanism actually works. It "merges" `a`/`b` by discarding `b`
@@ -137,7 +177,7 @@ impl MergeRule for DiscardSecondOperand {
 
 /// The merge-rule registry. `default_widen_only()` contains only rules
 /// whose widening claim has been independently property-tested green
-/// (`AuthorUnion`, `KindUnion`); `dropped_rules()` reports any rule that was
+/// (`AuthorUnion`, `KindUnion`, `IdUnion`); `dropped_rules()` reports any rule that was
 /// constructed but excluded (graceful-degradation visibility, M2 plan §6).
 pub struct RuleRegistry {
     rules: Vec<Box<dyn MergeRule>>,
@@ -148,7 +188,11 @@ impl RuleRegistry {
     /// The default, PROVEN-widening registry.
     pub fn default_widen_only() -> Self {
         Self {
-            rules: vec![Box::new(AuthorUnion), Box::new(KindUnion)],
+            rules: vec![
+                Box::new(AuthorUnion),
+                Box::new(KindUnion),
+                Box::new(IdUnion),
+            ],
             dropped: Vec::new(),
         }
     }
@@ -422,5 +466,36 @@ mod tests {
         let filters = Set::from([cf_since(&[1], 100), cf_since(&[1], 200)]);
         let out = registry.coalesce(filters);
         assert_eq!(out.len(), 2, "dropped rule must not fire");
+    }
+
+    #[test]
+    fn id_union_chunks_projected_singletons_at_the_wire_bound() {
+        let filters: Set<ConcreteFilter> = (0..(MAX_IDS_PER_FILTER * 2 + 17))
+            .map(|i| ConcreteFilter {
+                kinds: Some(Set::from([1])),
+                ids: Some(Set::from([format!("{i:064x}")])),
+                ..ConcreteFilter::default()
+            })
+            .collect();
+        let expected: Set<String> = filters
+            .iter()
+            .flat_map(|filter| filter.ids.clone().unwrap_or_default())
+            .collect();
+
+        let out = RuleRegistry::default_widen_only().coalesce(filters);
+
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|filter| {
+            filter
+                .ids
+                .as_ref()
+                .is_some_and(|ids| ids.len() <= MAX_IDS_PER_FILTER)
+        }));
+        assert_eq!(
+            out.iter()
+                .flat_map(|filter| filter.ids.clone().unwrap_or_default())
+                .collect::<Set<_>>(),
+            expected
+        );
     }
 }

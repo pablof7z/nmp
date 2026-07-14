@@ -10,7 +10,9 @@ use nostr::{EventBuilder, Keys, Kind};
 use proptest::prelude::*;
 
 use nmp_grammar::ConcreteFilter;
-use nmp_router::{deliver, AuthorUnion, DiscardSecondOperand, KindUnion, MergeRule, RuleRegistry};
+use nmp_router::{
+    deliver, AuthorUnion, DiscardSecondOperand, IdUnion, KindUnion, MergeRule, RuleRegistry,
+};
 
 fn matches(cf: &ConcreteFilter, e: &nostr::Event) -> bool {
     cf.to_nostr().match_event(e, MatchEventOptions::new())
@@ -104,6 +106,39 @@ fn merge_rule_widens_kind_union() {
             for e in &evs {
                 if matches(&a, e) || matches(&b, e) {
                     prop_assert!(matches(&m, e));
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn merge_rule_widens_id_union() {
+    let keys = Keys::generate();
+    let events: Vec<nostr::Event> = (0..8)
+        .map(|i| {
+            EventBuilder::new(Kind::TextNote, format!("event-{i}"))
+                .sign_with_keys(&keys)
+                .unwrap()
+        })
+        .collect();
+
+    proptest!(|(
+        ids_a in prop::collection::btree_set(0usize..events.len(), 1..=4),
+        ids_b in prop::collection::btree_set(0usize..events.len(), 1..=4)
+    )| {
+        let a = ConcreteFilter {
+            ids: Some(ids_a.iter().map(|&i| events[i].id.to_hex()).collect()),
+            ..ConcreteFilter::default()
+        };
+        let b = ConcreteFilter {
+            ids: Some(ids_b.iter().map(|&i| events[i].id.to_hex()).collect()),
+            ..ConcreteFilter::default()
+        };
+        if let Some(merged) = IdUnion.try_merge(&a, &b) {
+            for event in &events {
+                if matches(&a, event) || matches(&b, event) {
+                    prop_assert!(matches(&merged, event));
                 }
             }
         }

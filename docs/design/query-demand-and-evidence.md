@@ -58,6 +58,26 @@ change. These properties may not:
 - withdrawn demand closes only when no other descriptor still requires it;
 - no content kind receives a privileged engine branch.
 
+### Projected values carry routing evidence
+
+`Tag("e")`, `Tag("a")`, and `Tag("p")` project a `(value, routing evidence)`
+fact rather than discarding the relay context around the value. A valid tag
+relay hint is the primary fact. When no valid hint exists, every relay in the
+source row's observed provenance is retained as fallback. `AddressCoord`
+retains the same source provenance for its coordinate. Other arbitrary tag
+selectors remain value-only.
+
+Evidence is keyed by projected value. Union and intersection union the facts
+from every surviving path; difference retains the first operand's facts for
+surviving values. The outer atom carries the resulting evidence through router
+compilation. The engine applies discovered-relay admission before those facts
+become candidates. Live atom identity includes evidence so a later observation
+can re-route exactly; durable coverage identity erases it because route choice
+must not fragment proof for the same selection/source/access tuple.
+
+Derived depth is the number of `Binding::Derived` edges on a path. `SetOp` is
+a same-level combinator and adds zero Derived hops.
+
 `$currentPubkey` is one reactive root. Changing it re-resolves only graphs that
 reference it. It is not a command to clear other account queries, change every
 signer, or partition the cache.

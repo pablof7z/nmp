@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{
+    AccessContext, ConcreteFilter, ContextualAtom, RoutingEvidence, SourceAuthority,
+};
 use nmp_store::{coverage_key, CoverageKey};
 
 use crate::coalesce::RuleRegistry;
@@ -149,6 +151,7 @@ fn push_routes(
         filter: filter.clone(),
         source: source.clone(),
         access,
+        routing_evidence: BTreeSet::new(),
     });
     for (relay, prov) in routes {
         bag.entry(relay)
@@ -193,9 +196,11 @@ impl Router {
         // needing a second widening later; every atom reaching this branch
         // shares `source: AuthorOutboxes` by construction (that's the
         // `classify` arm that produced it), so it isn't tracked per-group.
-        let mut outbox_groups: BTreeMap<(Skeleton, AccessContext), BTreeSet<PubkeyHex>> =
-            BTreeMap::new();
-        let mut pinned_atoms: BTreeSet<ConcreteFilter> = BTreeSet::new();
+        let mut outbox_groups: BTreeMap<
+            (Skeleton, AccessContext),
+            BTreeMap<PubkeyHex, BTreeSet<RoutingEvidence>>,
+        > = BTreeMap::new();
+        let mut pinned_atoms: BTreeMap<ConcreteFilter, BTreeSet<RoutingEvidence>> = BTreeMap::new();
         // #107: query-declared `SourceAuthority::Pinned(relays)` atoms — kept
         // in their OWN collection, never merged into `pinned_atoms` (the
         // directory-fact `Public`-sourced kind), since these must skip every
@@ -205,13 +210,19 @@ impl Router {
         for atom in demand {
             match route::classify(&atom.filter, &atom.source) {
                 AtomClass::Outbox { skeleton, authors } => {
-                    outbox_groups
-                        .entry((skeleton, atom.access))
-                        .or_default()
-                        .extend(authors);
+                    let group = outbox_groups.entry((skeleton, atom.access)).or_default();
+                    for author in authors {
+                        group
+                            .entry(author)
+                            .or_default()
+                            .extend(atom.routing_evidence.iter().cloned());
+                    }
                 }
                 AtomClass::Pinned => {
-                    pinned_atoms.insert(atom.filter.clone());
+                    pinned_atoms
+                        .entry(atom.filter.clone())
+                        .or_default()
+                        .extend(atom.routing_evidence.iter().cloned());
                 }
                 AtomClass::ExplicitPinned(relays) => {
                     explicit_pinned_atoms.push((atom.filter.clone(), atom.access, relays));
@@ -234,10 +245,13 @@ impl Router {
         let mut bag: BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>> = BTreeMap::new();
         let mut uncovered_authors: BTreeMap<PubkeyHex, Shortfall> = BTreeMap::new();
 
-        for ((skeleton, access), authors) in &outbox_groups {
+        for ((skeleton, access), evidence_by_author) in &outbox_groups {
             let access = *access;
             let source = SourceAuthority::AuthorOutboxes;
-            let candidates = route::build_candidates(authors, dir);
+            let authors: BTreeSet<PubkeyHex> = evidence_by_author.keys().cloned().collect();
+            let candidates = route::build_candidates(&authors, dir);
+            let mut candidates = candidates;
+            route::add_projected_candidates(&mut candidates, evidence_by_author);
             let coverage = solver::solve(&CoverageInput {
                 candidates: candidates.clone(),
                 k: 2,
@@ -255,6 +269,10 @@ impl Router {
                     filter: filter.clone(),
                     source: source.clone(),
                     access,
+                    routing_evidence: evidence_by_author
+                        .get(prov.covers_authors.first().expect("one-author route"))
+                        .cloned()
+                        .unwrap_or_default(),
                 });
                 bag.entry(relay)
                     .or_default()
@@ -265,8 +283,8 @@ impl Router {
 
             // Additive indexer + app lanes: both route the group's FULL
             // author set, so they share the same (filter, key).
-            let mut additive = route::indexer_lane_routes(dir, &self.discovery, skeleton, authors);
-            additive.extend(route::app_lane_routes(dir, authors));
+            let mut additive = route::indexer_lane_routes(dir, &self.discovery, skeleton, &authors);
+            additive.extend(route::app_lane_routes(dir, &authors));
             push_routes(
                 &mut bag,
                 &skeleton.with_authors(authors.clone()),
@@ -291,7 +309,7 @@ impl Router {
             );
         }
 
-        for atom in &pinned_atoms {
+        for (atom, routing_evidence) in &pinned_atoms {
             // #106's closed vocabulary has only one directory-fact non-outbox
             // source (`Public`) and one `AccessContext` (`Public`), so a
             // fixed context here is exact today, not a placeholder — #107's
@@ -304,8 +322,11 @@ impl Router {
                 filter: atom.clone(),
                 source: source.clone(),
                 access,
+                routing_evidence: routing_evidence.clone(),
             });
-            for (relay, prov) in route::provenance_for_pinned(atom, dir) {
+            let mut routes = route::provenance_for_pinned(atom, dir);
+            routes.extend(route::provenance_for_projected(routing_evidence));
+            for (relay, prov) in routes {
                 bag.entry(relay)
                     .or_default()
                     .entry((source.clone(), access))
@@ -330,6 +351,7 @@ impl Router {
                 filter: filter.clone(),
                 source: source.clone(),
                 access: *access,
+                routing_evidence: BTreeSet::new(),
             });
             for (relay, prov) in route::provenance_for_explicit_pinned(relays) {
                 bag.entry(relay)
@@ -405,6 +427,7 @@ mod tests {
     use super::*;
     use crate::facts::{test_relay, FixtureDirectory, Lane};
     use crate::solver::ShortfallReason;
+    use nmp_grammar::RoutingEvidenceKind;
 
     fn pk(c: char) -> PubkeyHex {
         c.to_string().repeat(64)
@@ -425,6 +448,7 @@ mod tests {
             filter,
             source,
             access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
         }
     }
 
@@ -992,5 +1016,56 @@ mod tests {
             router.diagnostics().uncovered_authors[&a].reason,
             ShortfallReason::CapExhausted
         );
+    }
+
+    #[test]
+    fn projected_evidence_routes_authorless_atoms_with_typed_lane() {
+        let relay = test_relay(44);
+        let mut atom = pinned(ConcreteFilter {
+            ids: Some(BTreeSet::from(["11".repeat(32)])),
+            ..ConcreteFilter::default()
+        });
+        atom.routing_evidence.insert(RoutingEvidence {
+            relay: relay.clone(),
+            origin: RoutingEvidenceKind::Hint,
+        });
+        let mut router = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        router.compile(
+            &BTreeSet::from([atom]),
+            &FixtureDirectory::new(),
+            usize::MAX,
+        );
+
+        let req = &router.plan().reqs[&relay][0];
+        assert!(req.provenance.iter().any(|fact| fact.lane == Lane::Hint));
+    }
+
+    #[test]
+    fn projected_author_evidence_participates_in_own_relay_cover() {
+        let author = pk('a');
+        let directory_relay = test_relay(1);
+        let hint_relay = test_relay(2);
+        let dir = FixtureDirectory::new().with_write(author.clone(), [directory_relay.clone()]);
+        let mut atom = outbox(1, &[author.as_str()]);
+        atom.routing_evidence.insert(RoutingEvidence {
+            relay: hint_relay.clone(),
+            origin: RoutingEvidenceKind::Hint,
+        });
+        let mut router = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+
+        router.compile(&BTreeSet::from([atom]), &dir, usize::MAX);
+
+        assert_eq!(
+            router.plan().reqs.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([directory_relay, hint_relay])
+        );
+        assert!(router.diagnostics().uncovered_authors.is_empty());
     }
 }
