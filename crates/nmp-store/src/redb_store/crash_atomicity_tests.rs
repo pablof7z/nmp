@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use nmp_grammar::{AccessContext, SourceAuthority};
 use nostr::{EventBuilder, Filter, JsonUtil, Keys, Kind};
 use redb::ReadableTableMetadata;
 use tempfile::TempDir;
@@ -43,6 +44,23 @@ fn pair(kind: Kind, content: &str, created_at: u64) -> (Event, Event) {
 
 fn event_pair() -> (Event, Event) {
     pair(Kind::TextNote, "u5-crash-proof", 1_000)
+}
+
+fn retention_atom() -> ContextualAtom {
+    ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            authors: Some(BTreeSet::from([keys().public_key().to_hex()])),
+            ids: None,
+            tags: BTreeMap::new(),
+            since: None,
+            until: None,
+            limit: None,
+        },
+        source: SourceAuthority::AuthorOutboxes,
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
 }
 
 fn accept(frozen: Event) -> AcceptWrite {
@@ -179,6 +197,11 @@ fn redb_crash_worker() {
                     .expect("open worker store");
             let relay = RelayUrl::parse(RELAY_TWO).expect("second relay");
             let _ = store.insert(signed, RelayObserved::new(relay, Timestamp::from(2_000u64)));
+        }
+        "gc-before-commit" => {
+            let mut store = RedbStore::open_with_crash_point(path, RedbCrashPoint::GcBeforeCommit)
+                .expect("open worker store");
+            let _ = store.gc(&ClaimSet::new(Vec::new()));
         }
         "start-before-commit" => {
             let mut store =
@@ -324,6 +347,68 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         drop(reopened);
         assert_path_canonical_integrity(&path);
     }
+}
+
+#[test]
+fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_death() {
+    let (_dir, path) = fixture();
+    let relay = RelayUrl::parse(RELAY).expect("relay");
+    let atom = retention_atom();
+    let key = compute_coverage_key(&atom);
+    let before = CoverageInterval::new(Timestamp::from(900u64), Timestamp::from(1_100u64));
+    let (_, signed) = event_pair();
+
+    {
+        let mut store = RedbStore::open(&path).expect("initialize retention fixture");
+        store
+            .insert(
+                signed.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(2_000u64)),
+            )
+            .expect("insert durable row");
+        store
+            .record_coverage(&atom, &relay, before)
+            .expect("record covering evidence");
+    }
+
+    crash(&path, "gc-before-commit");
+
+    {
+        let store = RedbStore::open(&path).expect("reopen rolled-back retention fixture");
+        let rows = store
+            .query(&Filter::new().id(signed.id))
+            .expect("query retained row after crash");
+        assert_eq!(rows.len(), 1, "row deletion must roll back with coverage");
+        assert_eq!(
+            rows[0].provenance.seen.get(&relay),
+            Some(&Timestamp::from(2_000u64)),
+            "retained provenance must roll back with its row"
+        );
+        assert_eq!(
+            store.get_coverage(key, &relay),
+            Some(before),
+            "coverage lowering must roll back with row deletion"
+        );
+    }
+
+    let mut store = RedbStore::open(&path).expect("reopen for successful explicit policy");
+    let report = store
+        .gc(&ClaimSet::new(Vec::new()))
+        .expect("apply explicit retention policy");
+    assert_eq!(report.events_evicted, 1);
+    assert_eq!(report.coverage_rows_shrunk, 1);
+    assert!(store
+        .query(&Filter::new().id(signed.id))
+        .expect("query after explicit eviction")
+        .is_empty());
+    assert_eq!(
+        store.get_coverage(key, &relay),
+        Some(CoverageInterval::new(
+            Timestamp::from(1_001u64),
+            Timestamp::from(1_100u64),
+        )),
+        "successful explicit policy must lower evidence with row deletion"
+    );
 }
 
 #[test]
