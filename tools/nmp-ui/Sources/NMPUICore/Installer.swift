@@ -6,9 +6,17 @@ public final class NMPUIInstaller {
     private let fileSystem: ProjectFileSystem
     private let merger: ThreeWayMerging
 
-    public init(catalog: ComponentCatalog, projectRoot: URL) throws {
+    public convenience init(catalog: ComponentCatalog, projectRoot: URL) throws {
+        try self.init(catalog: catalog, projectRoot: projectRoot, mutationHook: nil)
+    }
+
+    init(
+        catalog: ComponentCatalog,
+        projectRoot: URL,
+        mutationHook: ProjectFileSystem.MutationHook?
+    ) throws {
         self.catalog = catalog
-        self.fileSystem = ProjectFileSystem(root: projectRoot)
+        self.fileSystem = try ProjectFileSystem(root: projectRoot, mutationHook: mutationHook)
         self.merger = GitThreeWayMerger()
         self.componentsByName = try Self.validate(catalog: catalog, root: projectRoot)
     }
@@ -71,9 +79,11 @@ public final class NMPUIInstaller {
             lines.append("installed \(component.name)@\(component.version)")
         }
 
-        for (path, content) in writes { try fileSystem.write(content, to: path) }
         lock.registryVersion = catalog.registry.registryVersion
-        try fileSystem.saveLock(lock)
+        try fileSystem.commit(
+            writes: try fileSystem.transactionWrites(writes, lock: lock),
+            removals: []
+        )
         return OperationReport(lines: lines)
     }
 
@@ -103,6 +113,9 @@ public final class NMPUIInstaller {
     public func update(_ name: String) throws -> OperationReport {
         let closure = try dependencyClosure(for: name)
         var lock = try fileSystem.loadLock(registryVersion: catalog.registry.registryVersion)
+        for component in closure where lock.components[component.name] == nil {
+            throw NMPUIError.notInstalled(component.name)
+        }
         var conflicts = try fileSystem.loadConflicts()
         let unresolved = closure.compactMap { conflicts.components[$0.name]?.paths }.flatMap { $0 }
         if !unresolved.isEmpty { throw NMPUIError.updateConflict(unresolved) }
@@ -114,21 +127,7 @@ public final class NMPUIInstaller {
 
         for component in closure {
             guard let installed = lock.components[component.name] else {
-                var files: [String: LockedFile] = [:]
-                for file in component.files.sorted(by: { $0.destination < $1.destination }) {
-                    if try fileSystem.exists(file.destination) { throw NMPUIError.collision(file.destination) }
-                    let upstream = try catalog.template(named: file.source)
-                    writes[file.destination] = upstream
-                    files[file.destination] = LockedFile(
-                        upstreamHash: SHA256.digest(upstream), upstreamBase: upstream
-                    )
-                }
-                nextEntries[component.name] = LockedComponent(
-                    version: component.version,
-                    dependencies: component.dependencies.sorted(),
-                    files: files
-                )
-                continue
+                throw NMPUIError.notInstalled(component.name)
             }
 
             let currentFiles = Dictionary(uniqueKeysWithValues: component.files.map { ($0.destination, $0) })
@@ -198,11 +197,12 @@ public final class NMPUIInstaller {
             throw NMPUIError.updateConflict(conflictPaths)
         }
 
-        for path in removals.sorted() { try fileSystem.remove(path) }
-        for (path, content) in writes.sorted(by: { $0.key < $1.key }) { try fileSystem.write(content, to: path) }
         for (name, entry) in nextEntries { lock.components[name] = entry }
         lock.registryVersion = catalog.registry.registryVersion
-        try fileSystem.saveLock(lock)
+        try fileSystem.commit(
+            writes: try fileSystem.transactionWrites(writes, lock: lock),
+            removals: removals
+        )
         return OperationReport(lines: closure.map { "updated \($0.name)@\($0.version)" })
     }
 
@@ -236,7 +236,7 @@ public final class NMPUIInstaller {
         }
         var components: [String: RegistryComponent] = [:]
         var destinations: [String: String] = [:]
-        let checker = ProjectFileSystem(root: root)
+        let checker = try ProjectFileSystem(root: root)
         for component in catalog.registry.components {
             guard !component.name.isEmpty,
                   component.name.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }) else {
