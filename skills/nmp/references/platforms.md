@@ -49,11 +49,13 @@ swift test
 
 Drop `--sim-only` when a physical-device slice is required. Rebuild the xcframework after a UniFFI surface change.
 
+`swift test` above executes on the macOS host. The build script compiles the iOS Simulator slices, but the package currently has no simulator runtime test target; issue #465 tracks that missing qualification harness.
+
 Swift `NMPConfig` has `storePath`, `indexerRelays`, `appRelays`, `fallbackRelays`, and `maxNativeTasks` (default 12); it does not expose Rust's `allowed_local_relay_hosts` or `max_relays`.
 
 Construction, observation, receipt attachment, and both `connectNip46` overloads throw. Construction can report OS spawn refusal; native observer/receipt/connection setup can report a full executor as `NMPError.executorSaturated(component:capacity:)` or OS spawn refusal as `NMPError.threadUnavailable(component:reason:)`. Swift following actions carry the corresponding `NMPFollowActionFailure` terminal case. Derive/cache the signer handoff URI before invitation connection consumes the invitation; then connect, establish the listener, and launch the cached handoff. Invitation connection reserves capacity before consuming the invitation, but an admitted outer bridge can still consume it before an OS spawn refusal. After `connectNip46` returns a handle, an inner worker failure arrives as `.failed(reason:)` and stream completion. Do not turn any immediate failure shape into a readiness timeout. `NMPEngine`'s census and idle-barrier methods are internal lifecycle falsifiers, not public app diagnostics.
 
-`relayInformation(for:policy:)` suspends and throws. Its engine-flight admission maps to `NMPError.executorSaturated`, its per-relay waiter refusal maps to `NMPError.relayInformationWaitersSaturated`, and OS spawn refusal maps to `NMPError.threadUnavailable`; HTTP, document, size, and closed-service failures map to `NMPError.relayInformationUnavailable`. Treat `RelayInformation.rawJSON` as forward-compatible authority and `lastError` as stale-on-error evidence.
+`relayInformation(for:policy:)` suspends and throws. Its engine-flight admission maps to `NMPError.executorSaturated`, its per-relay waiter refusal maps to `NMPError.relayInformationWaitersSaturated`, and OS spawn refusal maps to `NMPError.threadUnavailable`; credentialed URL, HTTP, document, size, and closed-service failures map to `NMPError.relayInformationUnavailable`. Treat `RelayInformation.rawJSON` as forward-compatible authority and `lastError` as stale-on-error evidence.
 
 ## Kotlin/JVM
 
