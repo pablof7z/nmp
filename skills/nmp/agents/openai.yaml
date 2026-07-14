@@ -1,0 +1,3 @@
+interface:
+  display_name: "NMP app development"
+  short_description: "Build against NMP's verified Rust, Swift, and Kotlin facade"
