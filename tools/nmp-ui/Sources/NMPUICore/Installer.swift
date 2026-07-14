@@ -274,6 +274,9 @@ public final class NMPUIInstaller {
             }
             var componentDestinations = Set<String>()
             for file in component.files {
+                guard !ProjectFileSystem.reservedPaths.contains(file.destination) else {
+                    throw NMPUIError.invalidRegistry("reserved destination \(file.destination)")
+                }
                 _ = try checker.resolve(file.source)
                 _ = try checker.resolve(file.destination)
                 _ = try catalog.template(named: file.source)
@@ -301,6 +304,9 @@ public final class NMPUIInstaller {
         var owners: [String: String] = [:]
         for component in closure {
             for file in component.files {
+                guard !ProjectFileSystem.reservedPaths.contains(file.destination) else {
+                    throw NMPUIError.invalidRegistry("reserved destination \(file.destination)")
+                }
                 if let owner = owners[file.destination] {
                     throw NMPUIError.invalidRegistry(
                         "planned destination \(file.destination) belongs to both \(owner) and \(component.name)"

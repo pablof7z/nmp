@@ -302,6 +302,61 @@ final class NMPUICoreTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
     }
 
+    func testDirectReservedLockDestinationIsTypedBeforeMutation() throws {
+        let root = temporaryDirectory()
+        let reserved = catalog(
+            version: "v1",
+            components: [
+                component(
+                    "reserved",
+                    version: "1",
+                    source: "reserved.swift",
+                    destination: ProjectFileSystem.lockPath
+                ),
+            ],
+            templates: ["reserved.swift": "not a lock\n"]
+        )
+
+        XCTAssertThrowsError(try NMPUIInstaller(catalog: reserved, projectRoot: root)) { error in
+            XCTAssertEqual(
+                error as? NMPUIError,
+                .invalidRegistry("reserved destination \(ProjectFileSystem.lockPath)")
+            )
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
+    func testDependencyReservedConflictDestinationIsTypedBeforeMutation() throws {
+        let root = temporaryDirectory()
+        let reserved = catalog(
+            version: "v1",
+            components: [
+                component(
+                    "dependency",
+                    version: "1",
+                    source: "dependency.swift",
+                    destination: ProjectFileSystem.conflictPath
+                ),
+                component(
+                    "root",
+                    version: "1",
+                    source: "root.swift",
+                    destination: "Components/Root.swift",
+                    dependencies: ["dependency"]
+                ),
+            ],
+            templates: ["dependency.swift": "not conflicts\n", "root.swift": "root\n"]
+        )
+
+        XCTAssertThrowsError(try NMPUIInstaller(catalog: reserved, projectRoot: root)) { error in
+            XCTAssertEqual(
+                error as? NMPUIError,
+                .invalidRegistry("reserved destination \(ProjectFileSystem.conflictPath)")
+            )
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
     func testDiffReportsCleanModifiedAndMissingFiles() throws {
         let root = temporaryDirectory()
         let installer = try NMPUIInstaller(catalog: .bundled(), projectRoot: root)
@@ -353,6 +408,130 @@ final class NMPUICoreTests: XCTestCase {
 
     func testLateUpdateLockFailureRestoresEveryFileAndLockAndRemovesNewFiles() throws {
         try assertUpdateRollback(at: .write(ProjectFileSystem.lockPath))
+    }
+
+    func testFailureAfterAtomicSwapRestoresTargetAndWholeTransaction() throws {
+        let root = temporaryDirectory()
+        let v1 = pairedCatalog(registry: "v1", dependency: "dep one\n", root: "root one\n", version: "1")
+        _ = try NMPUIInstaller(catalog: v1, projectRoot: root).add("root")
+        let dependencyURL = root.appendingPathComponent("Components/Dep.swift")
+        let rootURL = root.appendingPathComponent("Components/Root.swift")
+        let lockURL = root.appendingPathComponent(ProjectFileSystem.lockPath)
+        let dependencyBefore = try Data(contentsOf: dependencyURL)
+        let rootBefore = try Data(contentsOf: rootURL)
+        let lockBefore = try Data(contentsOf: lockURL)
+        let failurePoint = ProjectFileSystem.MutationPoint.afterSwap("Components/Root.swift")
+        let v2 = pairedCatalog(registry: "v2", dependency: "dep two\n", root: "root two\n", version: "2")
+
+        XCTAssertThrowsError(try failingInstaller(catalog: v2, root: root, at: failurePoint).update("root")) { error in
+            XCTAssertEqual(error as? InjectedFailure, .mutation(failurePoint))
+        }
+        XCTAssertEqual(try Data(contentsOf: dependencyURL), dependencyBefore)
+        XCTAssertEqual(try Data(contentsOf: rootURL), rootBefore)
+        XCTAssertEqual(try Data(contentsOf: lockURL), lockBefore)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dependencyURL.path))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Components").path).sorted(),
+            ["Dep.swift", "Root.swift"]
+        )
+    }
+
+    func testFailureAfterQuarantineRenameRestoresTargetAndWholeTransaction() throws {
+        let root = temporaryDirectory()
+        let v1Component = RegistryComponent(
+            name: "card",
+            version: "1",
+            summary: "card",
+            files: [
+                RegistryFile(source: "keep.swift", destination: "Components/Keep.swift"),
+                RegistryFile(source: "removed-a.swift", destination: "Components/RemovedA.swift"),
+                RegistryFile(source: "removed-b.swift", destination: "Components/RemovedB.swift"),
+            ]
+        )
+        let v1 = catalog(
+            version: "v1",
+            components: [v1Component],
+            templates: [
+                "keep.swift": "keep one\n",
+                "removed-a.swift": "remove a\n",
+                "removed-b.swift": "remove b\n",
+            ]
+        )
+        _ = try NMPUIInstaller(catalog: v1, projectRoot: root).add("card")
+        let keepURL = root.appendingPathComponent("Components/Keep.swift")
+        let removedAURL = root.appendingPathComponent("Components/RemovedA.swift")
+        let removedBURL = root.appendingPathComponent("Components/RemovedB.swift")
+        let lockURL = root.appendingPathComponent(ProjectFileSystem.lockPath)
+        let keepBefore = try Data(contentsOf: keepURL)
+        let removedABefore = try Data(contentsOf: removedAURL)
+        let removedBBefore = try Data(contentsOf: removedBURL)
+        let lockBefore = try Data(contentsOf: lockURL)
+        let v2 = catalog(
+            version: "v2",
+            components: [
+                component(
+                    "card",
+                    version: "2",
+                    source: "keep.swift",
+                    destination: "Components/Keep.swift"
+                ),
+            ],
+            templates: ["keep.swift": "keep two\n"]
+        )
+        let failurePoint = ProjectFileSystem.MutationPoint.afterQuarantine("Components/RemovedB.swift")
+
+        XCTAssertThrowsError(try failingInstaller(catalog: v2, root: root, at: failurePoint).update("card")) { error in
+            XCTAssertEqual(error as? InjectedFailure, .mutation(failurePoint))
+        }
+        XCTAssertEqual(try Data(contentsOf: keepURL), keepBefore)
+        XCTAssertEqual(try Data(contentsOf: removedAURL), removedABefore)
+        XCTAssertEqual(try Data(contentsOf: removedBURL), removedBBefore)
+        XCTAssertEqual(try Data(contentsOf: lockURL), lockBefore)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: removedAURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: removedBURL.path))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Components").path).sorted(),
+            ["Keep.swift", "RemovedA.swift", "RemovedB.swift"]
+        )
+    }
+
+    func testRollbackPreservesExternallyRecreatedEmptyDirectoryByIdentity() throws {
+        let root = temporaryDirectory()
+        let newDirectory = root.appendingPathComponent("New")
+        var replacementIdentity: String?
+        let component = RegistryComponent(
+            name: "race",
+            version: "1",
+            summary: "race",
+            files: [
+                RegistryFile(source: "new.swift", destination: "New/File.swift"),
+                RegistryFile(source: "late.swift", destination: "Z.swift"),
+            ]
+        )
+        let raceCatalog = catalog(
+            version: "v1",
+            components: [component],
+            templates: ["new.swift": "new\n", "late.swift": "late\n"]
+        )
+        let installer = try NMPUIInstaller(catalog: raceCatalog, projectRoot: root) { point in
+            guard point == .write("Z.swift") else { return }
+            try FileManager.default.removeItem(at: newDirectory)
+            try FileManager.default.createDirectory(at: newDirectory, withIntermediateDirectories: false)
+            replacementIdentity = try self.fileIdentity(newDirectory)
+            throw InjectedFailure.mutation(point)
+        }
+
+        XCTAssertThrowsError(try installer.add("race")) { error in
+            guard case .transactionFailed(let message) = error as? NMPUIError else {
+                return XCTFail("expected transactionFailed, got \(error)")
+            }
+            XCTAssertTrue(message.contains("created directory changed before cleanup: New"))
+        }
+        XCTAssertNotNil(replacementIdentity)
+        XCTAssertEqual(try fileIdentity(newDirectory), replacementIdentity)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: newDirectory.path), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Z.swift").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(ProjectFileSystem.lockPath).path))
     }
 
     func testManagedFileEditedAfterPlanningIsRestoredAndNeverOverwritten() throws {
@@ -470,6 +649,13 @@ final class NMPUICoreTests: XCTestCase {
         try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         temporaryDirectories.append(url)
         return url
+    }
+
+    private func fileIdentity(_ url: URL) throws -> String {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let device = attributes[.systemNumber] as! NSNumber
+        let inode = attributes[.systemFileNumber] as! NSNumber
+        return "\(device.uint64Value):\(inode.uint64Value)"
     }
 
     private func failingInstaller(

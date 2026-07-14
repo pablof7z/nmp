@@ -9,6 +9,13 @@ import Glibc
 struct ProjectFileSystem {
     static let lockPath = ".nmp-ui-lock.json"
     static let conflictPath = ".nmp-ui-conflicts.json"
+    static let reservedPaths: Set<String> = [lockPath, conflictPath]
+
+    private struct CreatedDirectory: Hashable {
+        let path: String
+        let device: UInt64
+        let inode: UInt64
+    }
 
     struct FileState {
         let data: Data?
@@ -20,6 +27,8 @@ struct ProjectFileSystem {
     enum MutationPoint: Equatable {
         case write(String)
         case remove(String)
+        case afterSwap(String)
+        case afterQuarantine(String)
     }
 
     typealias MutationHook = (MutationPoint) throws -> Void
@@ -102,7 +111,7 @@ struct ProjectFileSystem {
     func remove(_ path: String) throws {
         let expected = FileState(data: try readDataIfPresent(path))
         try mutationHook?(.remove(path))
-        var createdDirectories = Set<String>()
+        var createdDirectories = Set<CreatedDirectory>()
         try replace(
             path,
             expected: expected,
@@ -121,7 +130,7 @@ struct ProjectFileSystem {
             throw NMPUIError.invalidRegistry("mutation plan does not cover its exact target set")
         }
 
-        var createdDirectories = Set<String>()
+        var createdDirectories = Set<CreatedDirectory>()
         var completed: [(path: String, before: FileState, after: FileState)] = []
         do {
             for path in removals.sorted() {
@@ -174,9 +183,9 @@ struct ProjectFileSystem {
             }
             for directory in createdDirectories.sorted(by: deeperPathFirst) {
                 do {
-                    try removeDirectoryIfEmpty(directory)
+                    try removeCreatedDirectoryIfUnchanged(directory)
                 } catch {
-                    rollbackErrors.append("\(directory): \(error)")
+                    rollbackErrors.append("\(directory.path): \(error)")
                 }
             }
             guard rollbackErrors.isEmpty else {
@@ -191,7 +200,7 @@ struct ProjectFileSystem {
 
     private func write(_ data: Data, to path: String, expected: FileState) throws {
         try mutationHook?(.write(path))
-        var createdDirectories = Set<String>()
+        var createdDirectories = Set<CreatedDirectory>()
         do {
             try replace(
                 path,
@@ -200,10 +209,22 @@ struct ProjectFileSystem {
                 createdDirectories: &createdDirectories
             )
         } catch {
+            let originalError = error
+            var cleanupErrors: [String] = []
             for directory in createdDirectories.sorted(by: deeperPathFirst) {
-                try? removeDirectoryIfEmpty(directory)
+                do {
+                    try removeCreatedDirectoryIfUnchanged(directory)
+                } catch {
+                    cleanupErrors.append("\(directory.path): \(error)")
+                }
             }
-            throw error
+            guard cleanupErrors.isEmpty else {
+                throw NMPUIError.transactionFailed(
+                    "mutation failed with \(originalError); cleanup refused or failed: "
+                        + cleanupErrors.joined(separator: "; ")
+                )
+            }
+            throw originalError
         }
     }
 
@@ -211,7 +232,7 @@ struct ProjectFileSystem {
         _ path: String,
         expected: FileState,
         desired: FileState,
-        createdDirectories: inout Set<String>
+        createdDirectories: inout Set<CreatedDirectory>
     ) throws {
         switch (expected.data, desired.data) {
         case (nil, nil):
@@ -241,7 +262,7 @@ struct ProjectFileSystem {
     private func createWithoutReplacing(
         _ data: Data,
         at path: String,
-        createdDirectories: inout Set<String>
+        createdDirectories: inout Set<CreatedDirectory>
     ) throws {
         let target = try openParentDirectory(
             for: path,
@@ -276,7 +297,7 @@ struct ProjectFileSystem {
         _ path: String,
         expected: Data,
         desired: Data,
-        createdDirectories: inout Set<String>
+        createdDirectories: inout Set<CreatedDirectory>
     ) throws {
         let target = try openParentDirectory(
             for: path,
@@ -306,6 +327,7 @@ struct ProjectFileSystem {
         }
 
         do {
+            try mutationHook?(.afterSwap(path))
             let displaced = try readData(parent: target.descriptor, name: temporary.name, path: path)
             guard displaced == expected else {
                 temporaryExists = false
@@ -318,6 +340,10 @@ struct ProjectFileSystem {
                 )
                 throw NMPUIError.concurrentModification(path)
             }
+
+            let removed = temporary.name.withCString { unlinkat(target.descriptor, $0, 0) }
+            guard removed == 0 else { throw posixError() }
+            temporaryExists = false
         } catch {
             if let nmpError = error as? NMPUIError,
                case .concurrentModification = nmpError {
@@ -333,11 +359,6 @@ struct ProjectFileSystem {
             )
             throw error
         }
-
-        temporary.name.withCString {
-            if unlinkat(target.descriptor, $0, 0) == 0 { temporaryExists = false }
-        }
-        guard !temporaryExists else { throw posixError() }
     }
 
     private func restoreUnexpectedExchange(
@@ -378,7 +399,7 @@ struct ProjectFileSystem {
     }
 
     private func removeIfUnchanged(_ path: String, expected: Data) throws {
-        var ignoredDirectories = Set<String>()
+        var ignoredDirectories = Set<CreatedDirectory>()
         let target = try openParentDirectory(
             for: path,
             createMissing: false,
@@ -405,6 +426,7 @@ struct ProjectFileSystem {
         }
 
         do {
+            try mutationHook?(.afterQuarantine(path))
             let displaced = try readData(parent: target.descriptor, name: quarantine, path: path)
             guard displaced == expected else {
                 quarantineExists = false
@@ -422,6 +444,10 @@ struct ProjectFileSystem {
                 }
                 throw NMPUIError.concurrentModification(path)
             }
+
+            let removed = quarantine.withCString { unlinkat(target.descriptor, $0, 0) }
+            guard removed == 0 else { throw posixError() }
+            quarantineExists = false
         } catch {
             if let nmpError = error as? NMPUIError,
                case .concurrentModification = nmpError {
@@ -438,11 +464,6 @@ struct ProjectFileSystem {
             guard restored == 0 else { throw NMPUIError.transactionFailed("could not restore \(path)") }
             throw error
         }
-
-        quarantine.withCString {
-            if unlinkat(target.descriptor, $0, 0) == 0 { quarantineExists = false }
-        }
-        guard !quarantineExists else { throw posixError() }
     }
 
     private func verifyCurrent(_ path: String, expected: Data) throws {
@@ -507,7 +528,8 @@ struct ProjectFileSystem {
         return try handle.readToEnd() ?? Data()
     }
 
-    private func removeDirectoryIfEmpty(_ path: String) throws {
+    private func removeCreatedDirectoryIfUnchanged(_ directory: CreatedDirectory) throws {
+        let path = directory.path
         let target: (descriptor: Int32, name: String)
         do {
             target = try openParentDirectory(for: path, createMissing: false)
@@ -523,9 +545,17 @@ struct ProjectFileSystem {
             if errno == ENOENT { return }
             throw posixError()
         }
-        guard metadata.st_mode & S_IFMT != S_IFLNK else { throw NMPUIError.unsafePath(path) }
+        guard metadata.st_mode & S_IFMT == S_IFDIR,
+              UInt64(metadata.st_dev) == directory.device,
+              UInt64(metadata.st_ino) == directory.inode else {
+            throw NMPUIError.transactionFailed("created directory changed before cleanup: \(path)")
+        }
         let result = target.name.withCString { unlinkat(target.descriptor, $0, AT_REMOVEDIR) }
-        if result != 0, errno != ENOTEMPTY, errno != EEXIST, errno != ENOENT { throw posixError() }
+        if result != 0 {
+            if errno == ENOTEMPTY || errno == EEXIST { return }
+            if errno == ENOENT { return }
+            throw posixError()
+        }
     }
 
     private func itemExists(parent: Int32, name: String, path: String) throws -> Bool {
@@ -545,7 +575,7 @@ struct ProjectFileSystem {
         for path: String,
         createMissing: Bool
     ) throws -> (descriptor: Int32, name: String) {
-        var ignored = Set<String>()
+        var ignored = Set<CreatedDirectory>()
         return try openParentDirectory(
             for: path,
             createMissing: createMissing,
@@ -556,7 +586,7 @@ struct ProjectFileSystem {
     private func openParentDirectory(
         for path: String,
         createMissing: Bool,
-        createdDirectories: inout Set<String>
+        createdDirectories: inout Set<CreatedDirectory>
     ) throws -> (descriptor: Int32, name: String) {
         let pieces = try pathPieces(path)
         var current = dup(descriptor.value)
@@ -574,7 +604,19 @@ struct ProjectFileSystem {
                         mkdirat(current, $0, mode_t(S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))
                     }
                     if made == 0 {
-                        createdDirectories.insert(traversed.joined(separator: "/"))
+                        var metadata = stat()
+                        let status = component.withCString {
+                            fstatat(current, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+                        }
+                        guard status == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
+                            component.withCString { _ = unlinkat(current, $0, AT_REMOVEDIR) }
+                            throw status == 0 ? NMPUIError.unsafePath(path) : posixError()
+                        }
+                        createdDirectories.insert(CreatedDirectory(
+                            path: traversed.joined(separator: "/"),
+                            device: UInt64(metadata.st_dev),
+                            inode: UInt64(metadata.st_ino)
+                        ))
                     } else if errno != EEXIST {
                         throw posixError()
                     }
@@ -607,10 +649,10 @@ struct ProjectFileSystem {
         return pieces
     }
 
-    private func deeperPathFirst(_ left: String, _ right: String) -> Bool {
-        let leftDepth = left.split(separator: "/").count
-        let rightDepth = right.split(separator: "/").count
-        return leftDepth == rightDepth ? left > right : leftDepth > rightDepth
+    private func deeperPathFirst(_ left: CreatedDirectory, _ right: CreatedDirectory) -> Bool {
+        let leftDepth = left.path.split(separator: "/").count
+        let rightDepth = right.path.split(separator: "/").count
+        return leftDepth == rightDepth ? left.path > right.path : leftDepth > rightDepth
     }
 
     private func posixError() -> Error {
