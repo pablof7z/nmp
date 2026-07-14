@@ -148,6 +148,15 @@ pub enum FfiError {
     /// (recompose via `group_message_intent` again is the correct retry path,
     /// since NMP-owned time and couriered `previous` evidence should refresh).
     IntentAlreadyConsumed,
+    /// NIP-11 acquisition failed before any last-good document existed.
+    RelayInformationUnavailable {
+        reason: String,
+    },
+    /// A single relay's in-flight NIP-11 waiter set reached its finite
+    /// admission bound. The refused caller was not retained.
+    RelayInformationWaitersSaturated {
+        capacity: u64,
+    },
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -223,6 +232,43 @@ impl std::fmt::Display for FfiError {
             Self::NoActiveAccount => write!(f, "group messages require an active account"),
             Self::IntentAlreadyConsumed => {
                 write!(f, "this composed write intent was already published once")
+            }
+            Self::RelayInformationUnavailable { reason } => {
+                write!(f, "relay information unavailable: {reason}")
+            }
+            Self::RelayInformationWaitersSaturated { capacity } => write!(
+                f,
+                "relay information refused: per-relay waiter capacity {capacity} is full"
+            ),
+        }
+    }
+}
+
+impl From<nmp::RelayInformationRequestError> for FfiError {
+    fn from(error: nmp::RelayInformationRequestError) -> Self {
+        match error {
+            nmp::RelayInformationRequestError::Engine(error) => error.into(),
+            nmp::RelayInformationRequestError::Acquisition(
+                nmp::RelayInformationError::ExecutorSaturated { capacity },
+            ) => Self::ExecutorSaturated {
+                component: "NIP-11 acquisition".to_string(),
+                capacity: capacity as u64,
+            },
+            nmp::RelayInformationRequestError::Acquisition(
+                nmp::RelayInformationError::WaiterSaturated { capacity },
+            ) => Self::RelayInformationWaitersSaturated {
+                capacity: capacity as u64,
+            },
+            nmp::RelayInformationRequestError::Acquisition(
+                nmp::RelayInformationError::ThreadUnavailable { reason },
+            ) => Self::ThreadUnavailable {
+                component: "NIP-11 acquisition".to_string(),
+                reason,
+            },
+            nmp::RelayInformationRequestError::Acquisition(error) => {
+                Self::RelayInformationUnavailable {
+                    reason: error.to_string(),
+                }
             }
         }
     }
@@ -790,6 +836,12 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
                 coverage: entry.coverage.map(coverage_interval_to_ffi),
             })
             .collect(),
+        nip11_supported_nips: r.nip11_supported_nips,
+        nip11_document_revision: r.nip11_document_revision,
+        nip11_freshness: r.nip11_freshness.map(str::to_string),
+        nip11_last_error: r.nip11_last_error,
+        nip77_advertisement: r.nip77_advertisement.to_string(),
+        nip77_behavior: r.nip77_behavior.to_string(),
     }
 }
 
@@ -1148,6 +1200,12 @@ mod tests {
                         coverage: None,
                     },
                 ],
+                nip11_supported_nips: Some(vec![11, 77]),
+                nip11_document_revision: Some("revision".to_string()),
+                nip11_freshness: Some("fresh"),
+                nip11_last_error: None,
+                nip77_advertisement: "advertised_supported",
+                nip77_behavior: "behaviorally_proven",
             }],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],

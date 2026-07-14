@@ -21,4 +21,5 @@
 pub mod core;
 pub mod negentropy;
 pub mod outbox;
+pub mod relay_information;
 pub mod runtime;

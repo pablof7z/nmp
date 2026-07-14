@@ -49,17 +49,23 @@
 mod config;
 mod engine;
 mod error;
+mod relay_information;
 mod subscription;
 
 pub use config::EngineConfig;
 #[doc(hidden)]
 pub use engine::NativeTaskCancel;
+pub use engine::RelayInformationRequestError;
 pub use engine::{Engine, SignEventRequest};
 pub use error::EngineError;
 #[doc(hidden)]
 pub use nmp_executor::{
     Census as NativeTaskCensus, Executor as NativeTaskExecutor,
     Reservation as NativeTaskReservation, StartedTask as StartedNativeTask,
+};
+pub use relay_information::{
+    RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
+    RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
 pub use subscription::{DiagnosticsSubscription, ObservationCancel, Subscription};
 

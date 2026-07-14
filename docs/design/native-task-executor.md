@@ -26,8 +26,11 @@ representative steady composed app peak of nine tasks -- query, demand, the
 two-task FFI follow path, receipt, plus an established NIP-46 session and one
 in-flight sign operation. It also covers the eleven-task transient in which
 the connection and `switch_relays` tasks have not yet reaped when signing
-starts, with one slot of headroom. Eight fails that measured role count. A host
-with measured demand may raise it explicitly.
+starts, plus one concurrent NIP-11 acquisition. That NIP-11 flight consumes the
+twelfth slot rather than owning a hidden pool; another flight is synchronously
+refused without publishing a request or altering any accepted durable
+obligation. Eight fails the measured signing role count. A host with measured
+demand may raise the ceiling explicitly.
 
 ## Ordering and ownership
 
@@ -42,6 +45,7 @@ The same engine executor owns:
 
 - FFI row, demand, follow, receipt, reattachment, and diagnostics bridges;
 - NIP-02 follow projection and action workers;
+- engine-owned NIP-11 DNS/HTTP flights;
 - engine remote-signer result waiters;
 - engine-associated NIP-46 connection, session, result-map, switch-relay, and
   event-forwarding tasks.
@@ -82,6 +86,12 @@ is explicit:
 
 That is `7 + 2 * max_relays + max_native_tasks` native threads on the ordinary
 native path, rather than an unbounded stream-proportional count.
+
+NIP-11 adds no term to that formula. Each flight is already one of the
+`max_native_tasks` admitted threads and runs a current-thread Tokio reactor on
+that owned thread; it creates no Tokio worker pool or blocking DNS thread.
+Hickory performs asynchronous DNS, and executor cancellation races the whole
+DNS/request/status/body operation under a three-second total deadline.
 
 An engine-associated NIP-46 session adds one separately owned transport pool.
 Its pool configuration sets `R46 = MAX_NIP46_RELAYS = 8`, the same bound

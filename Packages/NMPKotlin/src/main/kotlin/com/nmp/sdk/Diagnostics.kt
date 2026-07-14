@@ -61,6 +61,12 @@ data class RelayDiagnostics(
     val filters: List<String>,
     val eventsByKind: List<KindCount>,
     val coverage: List<FilterCoverage>,
+    val nip11SupportedNips: List<UShort>?,
+    val nip11DocumentRevision: String?,
+    val nip11Freshness: String?,
+    val nip11LastError: String?,
+    val nip77Advertisement: String,
+    val nip77Behavior: String,
 ) {
     companion object {
         fun from(ffi: FfiRelayDiagnostics): RelayDiagnostics =
@@ -72,6 +78,12 @@ data class RelayDiagnostics(
                 filters = ffi.filters,
                 eventsByKind = ffi.eventsByKind.map { KindCount.from(it) },
                 coverage = ffi.coverage.map { FilterCoverage.from(it) },
+                nip11SupportedNips = ffi.nip11SupportedNips,
+                nip11DocumentRevision = ffi.nip11DocumentRevision,
+                nip11Freshness = ffi.nip11Freshness,
+                nip11LastError = ffi.nip11LastError,
+                nip77Advertisement = ffi.nip77Advertisement,
+                nip77Behavior = ffi.nip77Behavior,
             )
     }
 }

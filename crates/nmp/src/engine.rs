@@ -35,10 +35,14 @@ use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
+use nostr::RelayUrl;
 use nostr::{Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::config::{build_admission_policy, build_directory, EngineConfig};
 use crate::error::EngineError;
+use crate::relay_information::{
+    RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
+};
 use crate::subscription::{DiagnosticsSubscription, Subscription};
 
 /// The open state: the `Handle` verbs are driven through, plus the
@@ -84,6 +88,25 @@ impl NativeTaskCancel {
         (self.action)();
     }
 }
+
+/// Failure of an explicit NIP-11 one-shot: lifecycle/URL validation stays
+/// distinct from network/document acquisition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayInformationRequestError {
+    Engine(EngineError),
+    Acquisition(RelayInformationError),
+}
+
+impl std::fmt::Display for RelayInformationRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Engine(error) => error.fmt(f),
+            Self::Acquisition(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RelayInformationRequestError {}
 
 impl Engine {
     /// Destructively remove one closed persistent engine store.
@@ -447,6 +470,38 @@ impl Engine {
         })
     }
 
+    /// Acquire a relay's NIP-11 document once through the engine-owned,
+    /// bounded, single-flight cache. This is intentionally not `observe_*`:
+    /// NIP-11 is one HTTP representation, not a stream. Callers choose when
+    /// to refresh; ordinary relay reconnects reuse the same freshness rules.
+    pub async fn relay_information(
+        &self,
+        relay: &str,
+        policy: RelayInformationCachePolicy,
+    ) -> Result<RelayInformationSnapshot, RelayInformationRequestError> {
+        let relay = RelayUrl::parse(relay).map_err(|_| {
+            RelayInformationRequestError::Engine(EngineError::InvalidRelayUrl {
+                url: relay.to_string(),
+            })
+        })?;
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            guard.as_ref().map(|inner| inner.handle.clone()).ok_or(
+                RelayInformationRequestError::Engine(EngineError::EngineClosed),
+            )?
+        };
+        handle
+            .relay_information_async(relay, policy.into_engine())
+            .await
+            .map(RelayInformationSnapshot::from_engine)
+            .map_err(|error| {
+                RelayInformationRequestError::Acquisition(RelayInformationError::from_engine(error))
+            })
+    }
+
     /// Stop the engine. Idempotent: a second call (or a call racing another
     /// thread's call) finds `inner` already `None` and no-ops. Every verb
     /// above shares this same lock, so no call that starts after this one
@@ -482,8 +537,37 @@ impl Drop for Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::io::Read;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ThreadWake(std::thread::Thread);
+
+    impl Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = Box::pin(future);
+        let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
 
     #[test]
     fn persistent_store_reset_is_destructive_and_idempotent() {
@@ -1199,8 +1283,6 @@ mod tests {
     /// been called.
     #[test]
     fn concurrent_shutdown_calls_are_race_free() {
-        use std::sync::Arc;
-
         let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
         let other = Arc::clone(&engine);
         let joined = std::thread::spawn(move || other.shutdown());
@@ -1395,6 +1477,68 @@ mod tests {
         // (or simply drop) after the engine they named is already gone.
         query_cancel.cancel();
         diagnostics_cancel.cancel();
+    }
+
+    #[test]
+    fn live_nip11_cannot_outlive_real_engine_shutdown_with_retained_owners() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = Arc::new(std::sync::Barrier::new(2));
+        let server_accepted = Arc::clone(&accepted);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "HTTP request ended before its headers");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            server_accepted.wait();
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+        });
+
+        let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
+        let retained_engine = Arc::clone(&engine);
+        let subscription = engine.observe(probe_query()).expect("engine is open");
+        subscription
+            .recv()
+            .expect("a fresh subscription delivers its initial frame");
+        let cancel = subscription.cancel_handle();
+        let relay = format!("ws://{address}");
+        let acquisition = std::thread::spawn(move || {
+            block_on(
+                retained_engine.relay_information(&relay, RelayInformationCachePolicy::Refresh),
+            )
+        });
+        accepted.wait();
+
+        let shutdown_engine = Arc::clone(&engine);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            shutdown_engine.shutdown();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("live cancellable DNS/HTTP must not hold EngineThread shutdown");
+        assert!(matches!(
+            acquisition.join().unwrap(),
+            Err(RelayInformationRequestError::Acquisition(
+                RelayInformationError::ServiceClosed
+            ))
+        ));
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        assert!(!engine.native_task_census().accepting);
+        assert!(subscription.recv().is_err());
+
+        // These retained owners remain safe after exact-zero teardown.
+        cancel.cancel();
+        drop(subscription);
+        drop(engine);
+        server.join().unwrap();
     }
 
     fn probe_query() -> LiveQuery {

@@ -732,13 +732,36 @@ fn wire_sub_string(sub_id: &SubId) -> String {
 }
 
 fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
-    core.handle(EngineMsg::RelayConnected(
+    let mut effects = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot,
             generation: 1,
         },
         url.clone(),
-    ))
+    ));
+    // Most legacy headless tests model a relay with no NIP-11 support list.
+    // Resolve that one-shot explicitly now that connection and HTTP
+    // capability acquisition are separate reducer inputs.
+    effects.extend(core.handle(EngineMsg::RelayInformationResolved(url.clone(), None)));
+    effects
+}
+
+fn nip11_evidence(
+    supported_nips: Option<Vec<u16>>,
+) -> nmp_engine::relay_information::RelayInformationCapabilityEvidence {
+    nip11_evidence_until(supported_nips, u64::MAX)
+}
+
+fn nip11_evidence_until(
+    supported_nips: Option<Vec<u16>>,
+    fresh_until: u64,
+) -> nmp_engine::relay_information::RelayInformationCapabilityEvidence {
+    nmp_engine::relay_information::RelayInformationCapabilityEvidence {
+        supported_nips,
+        document_revision: "test-revision".to_string(),
+        fresh_until,
+        last_error: None,
+    }
 }
 
 fn mark_written<S: EventStore>(
@@ -4446,6 +4469,192 @@ fn unprobed_relay_never_routes_to_negentropy() {
         "an unprobed relay must never receive Effect::NegOpen -- only a plain REQ"
     );
     req_for(&effects, &relay0); // panics if there is no plain REQ.
+}
+
+#[test]
+fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    let subscribed = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let handle = subscribed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(handle, ..) => Some(*handle),
+            _ => None,
+        })
+        .expect("subscribe emits the handle's initial row batch");
+
+    let connected = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        relay0.clone(),
+    ));
+    assert!(connected
+        .iter()
+        .any(|effect| matches!(effect, Effect::FetchRelayInformation(url) if url == &relay0)));
+
+    let resolved = core.handle(EngineMsg::RelayInformationResolved(
+        relay0.clone(),
+        Some(nip11_evidence(Some(vec![11, 50]))),
+    ));
+    assert!(
+        !resolved
+            .iter()
+            .any(|effect| matches!(effect, Effect::StartProbe(..) | Effect::NegOpen(..))),
+        "advertised unsupported avoids a probe but cannot create a ProbedRelay"
+    );
+    let diagnostics = core.diagnostics_snapshot();
+    let relay = diagnostics
+        .relays
+        .iter()
+        .find(|relay| relay.relay == relay0)
+        .expect("planned relay must be diagnosable");
+    assert_eq!(relay.nip11_supported_nips, Some(vec![11, 50]));
+    assert_eq!(
+        relay.nip11_document_revision.as_deref(),
+        Some("test-revision")
+    );
+    assert_eq!(relay.nip11_freshness, Some("fresh"));
+    assert_eq!(relay.nip77_advertisement, "advertised_unsupported");
+    assert_eq!(relay.nip77_behavior, "unknown");
+
+    let _ = core.handle(EngineMsg::Unsubscribe(handle));
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let replanned = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .find(|relay| relay.relay == relay0)
+        .expect("relay is planned again");
+    assert_eq!(replanned.nip11_document_revision, None);
+    assert_eq!(replanned.nip11_freshness, None);
+    assert_eq!(replanned.nip77_advertisement, "unknown");
+}
+
+#[test]
+fn positive_nip11_advertisement_starts_probe_but_is_not_behavioral_proof() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        relay0.clone(),
+    ));
+
+    let resolved = core.handle(EngineMsg::RelayInformationResolved(
+        relay0.clone(),
+        Some(nip11_evidence(Some(vec![11, 77]))),
+    ));
+    assert!(resolved
+        .iter()
+        .any(|effect| matches!(effect, Effect::StartProbe(url, ..) if url == &relay0)));
+    assert!(!resolved
+        .iter()
+        .any(|effect| matches!(effect, Effect::NegOpen(..))));
+    let diagnostics = core.diagnostics_snapshot();
+    let relay = diagnostics
+        .relays
+        .iter()
+        .find(|relay| relay.relay == relay0)
+        .unwrap();
+    assert_eq!(relay.nip77_advertisement, "advertised_supported");
+    assert_eq!(relay.nip77_behavior, "probing");
+}
+
+#[test]
+fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        relay0.clone(),
+    ));
+
+    let resolved = core.handle(EngineMsg::RelayInformationResolved(
+        relay0.clone(),
+        Some(nip11_evidence(None)),
+    ));
+    assert!(resolved
+        .iter()
+        .any(|effect| matches!(effect, Effect::StartProbe(url, ..) if url == &relay0)));
+    let relay = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .find(|relay| relay.relay == relay0)
+        .unwrap();
+    assert_eq!(relay.nip11_supported_nips, None);
+    assert_eq!(
+        relay.nip11_document_revision.as_deref(),
+        Some("test-revision")
+    );
+    assert_eq!(relay.nip77_advertisement, "unknown");
+    assert_eq!(relay.nip77_behavior, "probing");
+}
+
+#[test]
+fn nip11_diagnostics_freshness_expires_from_engine_clock_without_another_acquisition() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+    let _ = core.handle(EngineMsg::RelayInformationResolved(
+        relay0.clone(),
+        Some(nip11_evidence_until(Some(vec![11, 77]), 150)),
+    ));
+
+    let at_acquisition = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .find(|relay| relay.relay == relay0)
+        .unwrap();
+    assert_eq!(at_acquisition.nip11_freshness, Some("fresh"));
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(150u64)));
+    let after_expiry = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .find(|relay| relay.relay == relay0)
+        .unwrap();
+    assert_eq!(after_expiry.nip11_freshness, Some("stale"));
+    assert_eq!(
+        after_expiry.nip11_document_revision.as_deref(),
+        Some("test-revision")
+    );
 }
 
 /// #20 structural bypass falsifier: a transport connection notification is
