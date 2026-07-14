@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "registryVersion": "2026.07.1",
+  "components": [
+    {
+      "name": "action-surface",
+      "version": "1.0.0",
+      "summary": "App-owned optional button treatment used by source-installed cards.",
+      "dependencies": [],
+      "files": [
+        {
+          "source": "ActionSurface.swift",
+          "destination": "Components/NMPUI/ActionSurface.swift",
+          "role": "dependency"
+        }
+      ]
+    },
+    {
+      "name": "article-medium-card",
+      "version": "1.0.0",
+      "summary": "Editable Medium-style article row built from linked NMPContent and NMPUI primitives.",
+      "dependencies": ["action-surface"],
+      "files": [
+        {
+          "source": "ArticleMediumCard.swift",
+          "destination": "Components/NMPUI/ArticleMediumCard.swift",
+          "role": "component"
+        }
+      ]
+    }
+  ]
+}
