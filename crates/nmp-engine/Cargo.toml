@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 bench-instrumentation = ["nmp-store/bench-instrumentation"]
+test-instrumentation = []
 
 [[example]]
 name = "incremental_delta_bench"
