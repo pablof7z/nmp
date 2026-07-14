@@ -749,10 +749,17 @@ fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -
 fn nip11_evidence(
     supported_nips: Option<Vec<u16>>,
 ) -> nmp_engine::relay_information::RelayInformationCapabilityEvidence {
+    nip11_evidence_until(supported_nips, u64::MAX)
+}
+
+fn nip11_evidence_until(
+    supported_nips: Option<Vec<u16>>,
+    fresh_until: u64,
+) -> nmp_engine::relay_information::RelayInformationCapabilityEvidence {
     nmp_engine::relay_information::RelayInformationCapabilityEvidence {
         supported_nips,
         document_revision: "test-revision".to_string(),
-        freshness: nmp_engine::relay_information::RelayInformationFreshness::Fresh,
+        fresh_until,
         last_error: None,
     }
 }
@@ -4470,10 +4477,17 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(
+    let subscribed = core.handle(EngineMsg::Subscribe(
         literal_query(&[1], &a.public_key().to_hex()),
         Box::new(CapturingSink::default()),
     ));
+    let handle = subscribed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(handle, ..) => Some(*handle),
+            _ => None,
+        })
+        .expect("subscribe emits the handle's initial row batch");
 
     let connected = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
@@ -4510,6 +4524,21 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
     assert_eq!(relay.nip11_freshness, Some("fresh"));
     assert_eq!(relay.nip77_advertisement, "advertised_unsupported");
     assert_eq!(relay.nip77_behavior, "unknown");
+
+    let _ = core.handle(EngineMsg::Unsubscribe(handle));
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let replanned = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .find(|relay| relay.relay == relay0)
+        .expect("relay is planned again");
+    assert_eq!(replanned.nip11_document_revision, None);
+    assert_eq!(replanned.nip11_freshness, None);
+    assert_eq!(replanned.nip77_advertisement, "unknown");
 }
 
 #[test]
@@ -4588,6 +4617,44 @@ fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
     );
     assert_eq!(relay.nip77_advertisement, "unknown");
     assert_eq!(relay.nip77_behavior, "probing");
+}
+
+#[test]
+fn nip11_diagnostics_freshness_expires_from_engine_clock_without_another_acquisition() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+    let _ = core.handle(EngineMsg::RelayInformationResolved(
+        relay0.clone(),
+        Some(nip11_evidence_until(Some(vec![11, 77]), 150)),
+    ));
+
+    let at_acquisition = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .find(|relay| relay.relay == relay0)
+        .unwrap();
+    assert_eq!(at_acquisition.nip11_freshness, Some("fresh"));
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(150u64)));
+    let after_expiry = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .find(|relay| relay.relay == relay0)
+        .unwrap();
+    assert_eq!(after_expiry.nip11_freshness, Some("stale"));
+    assert_eq!(
+        after_expiry.nip11_document_revision.as_deref(),
+        Some("test-revision")
+    );
 }
 
 /// #20 structural bypass falsifier: a transport connection notification is

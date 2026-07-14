@@ -50,13 +50,29 @@ pub enum RelayInformationFreshness {
 /// values; they are never represented as an empty relay document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayInformationError {
-    ExecutorSaturated { capacity: usize },
-    WaiterSaturated { capacity: usize },
-    ThreadUnavailable { reason: String },
+    ExecutorSaturated {
+        capacity: usize,
+    },
+    WaiterSaturated {
+        capacity: usize,
+    },
+    ThreadUnavailable {
+        reason: String,
+    },
     ServiceClosed,
-    Http { reason: String },
-    ResponseTooLarge { limit_bytes: u64 },
-    InvalidDocument { reason: String },
+    /// Relay URL credentials are rejected before an HTTP request is
+    /// constructed; reqwest otherwise converts them into a Basic
+    /// `Authorization` header.
+    CredentialedRelayUrl,
+    Http {
+        reason: String,
+    },
+    ResponseTooLarge {
+        limit_bytes: u64,
+    },
+    InvalidDocument {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for RelayInformationError {
@@ -74,6 +90,9 @@ impl std::fmt::Display for RelayInformationError {
                 write!(f, "NIP-11 acquisition thread unavailable: {reason}")
             }
             Self::ServiceClosed => f.write_str("NIP-11 acquisition service is closed"),
+            Self::CredentialedRelayUrl => {
+                f.write_str("NIP-11 acquisition refuses relay URL userinfo")
+            }
             Self::Http { reason } => write!(f, "NIP-11 HTTP request failed: {reason}"),
             Self::ResponseTooLarge { limit_bytes } => {
                 write!(f, "NIP-11 response exceeds {limit_bytes} bytes")
@@ -169,7 +188,7 @@ impl RelayInformationSnapshot {
         RelayInformationCapabilityEvidence {
             supported_nips: self.document.supported_nips.clone(),
             document_revision: self.document_revision.clone(),
-            freshness: self.freshness,
+            fresh_until: self.fresh_until,
             last_error: self.last_error.clone(),
         }
     }
@@ -182,7 +201,9 @@ impl RelayInformationSnapshot {
 pub struct RelayInformationCapabilityEvidence {
     pub supported_nips: Option<Vec<u16>>,
     pub document_revision: String,
-    pub freshness: RelayInformationFreshness,
+    /// Absolute Unix-seconds deadline. Diagnostics derives freshness from
+    /// the engine clock instead of retaining a read-time label forever.
+    pub fresh_until: u64,
     pub last_error: Option<RelayInformationError>,
 }
 
@@ -310,6 +331,11 @@ struct HttpFetcher {
     resolver_strategy: hickory_resolver::config::LookupIpStrategy,
 }
 
+/// An HTTP URL whose authority has been proven not to contain userinfo.
+/// Keeping this distinct from `String` makes the no-Authorization invariant
+/// a prerequisite of `fetch_http`, not a request-builder convention.
+struct UncredentialedHttpUrl(reqwest::Url);
+
 impl HttpFetcher {
     fn new() -> Self {
         Self {
@@ -343,7 +369,7 @@ impl Fetcher for HttpFetcher {
         validators: Option<(&str, &str)>,
         cancellation: FetchCancellation,
     ) -> Result<FetchResult, RelayInformationError> {
-        let url = relay_http_url(relay);
+        let url = relay_http_url(relay)?;
         let validators =
             validators.map(|(etag, last_modified)| (etag.to_string(), last_modified.to_string()));
         let runtime = http_runtime()?;
@@ -385,7 +411,7 @@ fn http_runtime() -> Result<tokio::runtime::Runtime, RelayInformationError> {
 }
 
 async fn fetch_http(
-    url: String,
+    url: UncredentialedHttpUrl,
     validators: Option<(String, String)>,
     resolver_config: Option<hickory_resolver::config::ResolverConfig>,
     resolver_strategy: hickory_resolver::config::LookupIpStrategy,
@@ -406,8 +432,14 @@ async fn fetch_http(
         .map_err(|error| RelayInformationError::Http {
             reason: format!("HTTP client construction failed: {error}"),
         })?;
+    // `url` can only be built by `relay_http_url`, which rejects URL
+    // credentials before this request builder exists; an empty userinfo marker
+    // has already normalized to a credential-free typed URL. Proxies,
+    // redirects, referrers, and retries are disabled above, so no other
+    // URL-derived authentication or authority hop exists. Conditional headers
+    // below are server-provided validators and still pass HeaderValue checks.
     let mut request = client
-        .get(url)
+        .get(url.0)
         .header(reqwest::header::ACCEPT, "application/nostr+json");
     if let Some((etag, last_modified)) = validators {
         if !etag.is_empty() {
@@ -567,15 +599,33 @@ fn fresh_for_headers(
     Some(expires.duration_since(now).unwrap_or_default())
 }
 
-fn relay_http_url(relay: &RelayUrl) -> String {
-    let relay = relay.as_str();
-    if let Some(rest) = relay.strip_prefix("wss://") {
-        format!("https://{rest}")
-    } else if let Some(rest) = relay.strip_prefix("ws://") {
-        format!("http://{rest}")
-    } else {
-        relay.to_owned()
+fn relay_http_url(relay: &RelayUrl) -> Result<UncredentialedHttpUrl, RelayInformationError> {
+    let source: &reqwest::Url = relay.into();
+    let serialized = source.as_str();
+    let authority_has_userinfo = serialized
+        .split_once("://")
+        .map(|(_, rest)| {
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            rest[..end].contains('@')
+        })
+        .unwrap_or(false);
+    if authority_has_userinfo || !source.username().is_empty() || source.password().is_some() {
+        return Err(RelayInformationError::CredentialedRelayUrl);
     }
+
+    let mut http = source.clone();
+    let scheme = if source.scheme() == "wss" {
+        "https"
+    } else {
+        "http"
+    };
+    http.set_scheme(scheme)
+        .map_err(|_| RelayInformationError::Http {
+            reason: "could not translate relay URL to HTTP".to_string(),
+        })?;
+    debug_assert!(http.username().is_empty());
+    debug_assert!(http.password().is_none());
+    Ok(UncredentialedHttpUrl(http))
 }
 
 impl RelayInformationService {
@@ -956,14 +1006,16 @@ fn finish_fetch(
     if let Some(raw_json) = fetched.raw_json {
         let document = parse_document(&raw_json)?;
         let fresh_for = fetched.fresh_for.unwrap_or(DEFAULT_FRESH_FOR);
+        let fetched_at = now_secs();
+        let fresh_until = fetched_at.saturating_add(fresh_for.as_secs());
         Ok(RelayInformationSnapshot {
             relay: relay.clone(),
             document,
             document_revision: blake3::hash(raw_json.as_bytes()).to_hex().to_string(),
             raw_json,
-            fetched_at: now_secs(),
-            fresh_until: now_secs().saturating_add(fresh_for.as_secs()),
-            freshness: RelayInformationFreshness::Fresh,
+            fetched_at,
+            fresh_until,
+            freshness: freshness_at(fresh_until, fetched_at),
             etag: fetched.etag,
             last_modified: fetched.last_modified,
             cache_control: fetched.cache_control,
@@ -989,11 +1041,19 @@ fn finish_fetch(
             .unwrap_or(DEFAULT_FRESH_FOR);
         snapshot.fetched_at = now_secs();
         snapshot.fresh_until = snapshot.fetched_at.saturating_add(fresh_for.as_secs());
-        snapshot.freshness = RelayInformationFreshness::Fresh;
+        snapshot.freshness = freshness_at(snapshot.fresh_until, snapshot.fetched_at);
         snapshot.etag = fetched.etag.or(snapshot.etag);
         snapshot.last_modified = fetched.last_modified.or(snapshot.last_modified);
         snapshot.last_error = None;
         Ok(snapshot)
+    }
+}
+
+fn freshness_at(fresh_until: u64, now: u64) -> RelayInformationFreshness {
+    if now < fresh_until {
+        RelayInformationFreshness::Fresh
+    } else {
+        RelayInformationFreshness::Stale
     }
 }
 
@@ -1146,6 +1206,7 @@ fn complete(
                         | RelayInformationError::WaiterSaturated { .. }
                         | RelayInformationError::ThreadUnavailable { .. }
                         | RelayInformationError::ServiceClosed
+                        | RelayInformationError::CredentialedRelayUrl
                 );
                 match state
                     .entries
@@ -1278,6 +1339,9 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::core::{EngineCore, EngineMsg};
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
 
     struct CountingFetcher {
         calls: AtomicUsize,
@@ -1593,6 +1657,7 @@ mod tests {
 
         assert_eq!(value.cache_control.as_deref(), Some("no-cache"));
         assert!(value.fresh_until <= value.fetched_at);
+        assert_eq!(value.freshness, RelayInformationFreshness::Stale);
         assert_eq!(
             service.cached(&relay).unwrap().freshness,
             RelayInformationFreshness::Stale
@@ -1631,6 +1696,48 @@ mod tests {
         assert!(value.fresh_until.saturating_sub(value.fetched_at) <= 120);
         service.close();
         executor.shutdown();
+    }
+
+    #[test]
+    fn past_expires_and_zero_fresh_304_are_stale_at_delivery() {
+        let relay = RelayUrl::parse("wss://stale.example").unwrap();
+        let past = httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_secs(1));
+        let past_fresh_for = fresh_for_headers(None, Some(&past), SystemTime::now()).unwrap();
+        assert_eq!(past_fresh_for, Duration::ZERO);
+        let first = finish_fetch(
+            &relay,
+            None,
+            FetchResult {
+                raw_json: Some(r#"{"name":"Past"}"#.to_string()),
+                etag: Some("v1".to_string()),
+                last_modified: None,
+                cache_control: None,
+                expires: Some(past),
+                fresh_for: Some(past_fresh_for),
+            },
+        )
+        .unwrap();
+        assert_eq!(first.freshness, RelayInformationFreshness::Stale);
+
+        let cached = Cached {
+            fresh_until: first.fresh_until,
+            snapshot: first,
+        };
+        let revalidated = finish_fetch(
+            &relay,
+            Some(&cached),
+            FetchResult {
+                raw_json: None,
+                etag: Some("v1".to_string()),
+                last_modified: None,
+                cache_control: Some("no-cache".to_string()),
+                expires: None,
+                fresh_for: Some(Duration::ZERO),
+            },
+        )
+        .unwrap();
+        assert_eq!(revalidated.freshness, RelayInformationFreshness::Stale);
+        assert!(revalidated.fresh_until <= revalidated.fetched_at);
     }
 
     #[test]
@@ -1748,6 +1855,7 @@ mod tests {
             },
         )
         .unwrap();
+        let completed_evidence = completed.capability_evidence();
 
         complete(&shared, &relay_257, generation_257, Ok(completed));
 
@@ -1765,6 +1873,35 @@ mod tests {
             .entries
             .values()
             .all(|entry| { entry.cached.is_some() && entry.flight.is_some() }));
+
+        let reducer_evidence: Vec<_> = state
+            .entries
+            .iter()
+            .filter_map(|(relay, entry)| {
+                entry
+                    .cached
+                    .as_ref()
+                    .map(|cached| (relay.clone(), cached.snapshot.capability_evidence()))
+            })
+            .collect();
+        drop(state);
+        let mut core = EngineCore::new(
+            MemoryStore::new(),
+            Box::new(FixtureDirectory::new()),
+            CACHE_CAPACITY,
+        );
+        for (relay, evidence) in reducer_evidence {
+            let _ = core.handle(EngineMsg::RelayInformationResolved(relay, Some(evidence)));
+        }
+        let _ = core.handle(EngineMsg::RelayInformationResolved(
+            relay_257,
+            Some(completed_evidence),
+        ));
+        assert_eq!(
+            core.nip11_information_len(),
+            0,
+            "the reducer must not become a shadow cache for evicted or unplanned evidence"
+        );
     }
 
     #[test]
@@ -2104,6 +2241,56 @@ mod tests {
     }
 
     #[test]
+    fn held_hickory_dns_is_cancelled_and_joined_at_exact_shutdown() {
+        let dns = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dns_address = dns.local_addr().unwrap();
+        let (query_seen_tx, query_seen_rx) = bounded(1);
+        let (release_dns_tx, release_dns_rx) = bounded(1);
+        let dns_server = std::thread::spawn(move || {
+            let mut query = [0u8; 512];
+            let _ = dns.recv_from(&mut query).unwrap();
+            query_seen_tx.send(()).unwrap();
+            let _ = release_dns_rx.recv();
+        });
+        let nameservers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
+            &[dns_address.ip()],
+            dns_address.port(),
+            true,
+        );
+        let resolver =
+            hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), nameservers);
+        let executor = nmp_executor::Executor::new(1).unwrap();
+        let service = RelayInformationService::with_executor_and_limits(
+            executor.clone(),
+            Arc::new(HttpFetcher::with_resolver_config(resolver)),
+            2,
+            2,
+        );
+        let relay = RelayUrl::parse("ws://held-dns.nmp.test:80").unwrap();
+        let result = service
+            .request(relay, RelayInformationCachePolicy::Refresh)
+            .unwrap();
+        query_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the injected Hickory server observes the unresolved query");
+
+        let started = Instant::now();
+        service.close();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_secs(1)),
+            Ok(Err(RelayInformationError::ServiceClosed))
+        ));
+        executor.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+        assert!(!executor.census().accepting);
+
+        release_dns_tx.send(()).unwrap();
+        dns_server.join().unwrap();
+    }
+
+    #[test]
     fn http_runtime_has_one_current_thread_worker_and_no_tokio_worker_pool() {
         let runtime = http_runtime().unwrap();
         assert_eq!(
@@ -2116,8 +2303,40 @@ mod tests {
     #[test]
     fn websocket_urls_map_to_http_without_losing_path() {
         assert_eq!(
-            relay_http_url(&RelayUrl::parse("wss://relay.example/nostr").unwrap()),
+            relay_http_url(&RelayUrl::parse("wss://relay.example/nostr").unwrap())
+                .unwrap()
+                .0
+                .as_str(),
             "https://relay.example/nostr"
         );
+    }
+
+    #[test]
+    fn relay_url_userinfo_is_typed_refusal_before_any_request_or_authorization_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+
+        for userinfo in ["user:secret@", "user@", ":secret@"] {
+            let relay = RelayUrl::parse(&format!("ws://{userinfo}{address}/nip11")).unwrap();
+            assert!(matches!(
+                HttpFetcher::new().fetch(&relay, None),
+                Err(RelayInformationError::CredentialedRelayUrl)
+            ));
+        }
+
+        // `RelayUrl::parse` normalizes an empty userinfo marker away. The
+        // resulting typed URL therefore carries no credential that reqwest
+        // could project as Basic Authorization.
+        let empty = RelayUrl::parse(&format!("ws://@{address}/nip11")).unwrap();
+        let normalized: &reqwest::Url = (&empty).into();
+        assert!(normalized.username().is_empty());
+        assert!(normalized.password().is_none());
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 }

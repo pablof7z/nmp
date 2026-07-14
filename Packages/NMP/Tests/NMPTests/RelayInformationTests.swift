@@ -10,14 +10,20 @@ private final class LocalNIP11Server: @unchecked Sendable {
     private let lock = NSLock()
     private let body: Data
     private let responseDelay: DispatchTimeInterval
+    private let responseGate: DispatchSemaphore?
     private var responseTime: UInt64?
 
     private(set) var relayURL = ""
 
-    init(body: String, responseDelay: DispatchTimeInterval = .milliseconds(0)) throws {
+    init(
+        body: String,
+        responseDelay: DispatchTimeInterval = .milliseconds(0),
+        gated: Bool = false
+    ) throws {
         listener = try NWListener(using: .tcp, on: .any)
         self.body = Data(body.utf8)
         self.responseDelay = responseDelay
+        responseGate = gated ? DispatchSemaphore(value: 0) : nil
 
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { state in
@@ -37,6 +43,7 @@ private final class LocalNIP11Server: @unchecked Sendable {
     }
 
     deinit {
+        responseGate?.signal()
         listener.cancel()
     }
 
@@ -48,6 +55,10 @@ private final class LocalNIP11Server: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return responseTime
+    }
+
+    func releaseResponse() {
+        responseGate?.signal()
     }
 
     private func serve(_ connection: NWConnection, received: Data) {
@@ -69,6 +80,7 @@ private final class LocalNIP11Server: @unchecked Sendable {
             }
 
             self.accepted.signal()
+            self.responseGate?.wait()
             self.queue.asyncAfter(deadline: .now() + self.responseDelay) {
                 let headers = Data(
                     ("HTTP/1.1 200 OK\r\n" +
@@ -137,5 +149,84 @@ final class RelayInformationTests: XCTestCase {
                 return XCTFail("unexpected typed error: \(error)")
             }
         }
+    }
+
+    func testRelayInformationExecutorSaturationRemainsTypedThroughWrapper() async throws {
+        let engine = try NMPEngine(config: NMPConfig(maxNativeTasks: 1))
+        defer { engine.shutdown() }
+        let held = try engine.observeDiagnostics()
+        defer { held.cancel() }
+        XCTAssertEqual(engine.nativeTaskCensus().admitted, 1)
+
+        do {
+            _ = try await engine.relayInformation(
+                for: "ws://localhost:9",
+                policy: .refresh
+            )
+            XCTFail("a full shared executor must refuse before HTTP")
+        } catch let error as NMPError {
+            XCTAssertEqual(
+                error,
+                .executorSaturated(component: "NIP-11 acquisition", capacity: 1)
+            )
+        }
+    }
+
+    func testRelayInformationWaiterSaturationRemainsTypedThroughWrapper() async throws {
+        let server = try LocalNIP11Server(
+            body: #"{"name":"Shared"}"#,
+            gated: true
+        )
+        defer { server.releaseResponse() }
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+
+        enum Outcome: Sendable {
+            case value
+            case waiters(UInt64)
+            case failure(String)
+        }
+
+        let outcomes = await withTaskGroup(of: Outcome.self) { group in
+            for _ in 0..<65 {
+                group.addTask {
+                    do {
+                        _ = try await engine.relayInformation(
+                            for: server.relayURL,
+                            policy: .refresh
+                        )
+                        return .value
+                    } catch let error as NMPError {
+                        if case .relayInformationWaitersSaturated(let capacity) = error {
+                            return .waiters(capacity)
+                        }
+                        return .failure(String(describing: error))
+                    } catch {
+                        return .failure(String(describing: error))
+                    }
+                }
+            }
+
+            var outcomes: [Outcome] = []
+            if let first = await group.next() {
+                outcomes.append(first)
+                server.releaseResponse()
+            }
+            for await outcome in group {
+                outcomes.append(outcome)
+            }
+            return outcomes
+        }
+
+        XCTAssertEqual(outcomes.count, 65)
+        XCTAssertEqual(outcomes.filter { if case .value = $0 { true } else { false } }.count, 64)
+        XCTAssertEqual(
+            outcomes.compactMap { if case .waiters(let capacity) = $0 { capacity } else { nil } },
+            [UInt64(64)]
+        )
+        XCTAssertTrue(
+            outcomes.allSatisfy { if case .failure = $0 { false } else { true } },
+            "only the typed waiter refusal is allowed"
+        )
     }
 }

@@ -9,8 +9,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -20,11 +25,13 @@ import org.junit.jupiter.api.Test
 private class LocalNIP11Server(
     private val body: String,
     private val responseDelayMillis: Long = 0,
+    gated: Boolean = false,
 ) : AutoCloseable {
     private val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
     private val accepted = CountDownLatch(1)
     private val responseTime = AtomicLong(0)
     private val failure = AtomicReference<Throwable?>()
+    private val responseGate = CountDownLatch(if (gated) 1 else 0)
     private val worker =
         thread(name = "nmp-kotlin-nip11-fixture", isDaemon = true) {
             try {
@@ -44,6 +51,7 @@ private class LocalNIP11Server(
                             .contains("Accept: application/nostr+json", ignoreCase = true),
                     ) { "NIP-11 request omitted its media-type accept header" }
                     accepted.countDown()
+                    check(responseGate.await(2, TimeUnit.SECONDS)) { "response gate was not released" }
                     Thread.sleep(responseDelayMillis)
                     val bytes = body.toByteArray(StandardCharsets.UTF_8)
                     val headers =
@@ -75,7 +83,10 @@ private class LocalNIP11Server(
 
     fun respondedAt(): Long = responseTime.get()
 
+    fun releaseResponse() = responseGate.countDown()
+
     override fun close() {
+        responseGate.countDown()
         server.close()
         worker.join(2_000)
         failure.get()?.let { throw AssertionError("local NIP-11 fixture failed", it) }
@@ -130,6 +141,73 @@ class RelayInformationTest {
                     } catch (error: NMPError.RelayInformationUnavailable) {
                         assertTrue(error.reason.isNotEmpty())
                     }
+                }
+            }
+        }
+
+    @Test
+    fun relayInformationExecutorSaturationRemainsTypedThroughWrapper() =
+        runBlocking {
+            NMPEngine(NMPConfig(maxNativeTasks = 1u)).use { engine ->
+                val firstSnapshot = CompletableDeferred<Unit>()
+                val held = launch {
+                    engine.observeDiagnostics().collect {
+                        firstSnapshot.complete(Unit)
+                        awaitCancellation()
+                    }
+                }
+                firstSnapshot.await()
+                try {
+                    engine.relayInformation(
+                        "ws://localhost:9",
+                        RelayInformationCachePolicy.Refresh,
+                    )
+                    fail("a full shared executor must refuse before HTTP")
+                } catch (error: NMPError.ExecutorSaturated) {
+                    assertEquals("NIP-11 acquisition", error.component)
+                    assertEquals(1uL, error.capacity)
+                } finally {
+                    held.cancelAndJoin()
+                }
+            }
+        }
+
+    @Test
+    fun relayInformationWaiterSaturationRemainsTypedThroughWrapper() =
+        runBlocking {
+            LocalNIP11Server(body = """{"name":"Shared"}""", gated = true).use { server ->
+                NMPEngine(NMPConfig()).use { engine ->
+                    val requests =
+                        List(65) {
+                            async(start = CoroutineStart.UNDISPATCHED) {
+                                try {
+                                    engine.relayInformation(
+                                        server.relayUrl,
+                                        RelayInformationCachePolicy.Refresh,
+                                    )
+                                    null
+                                } catch (error: NMPError) {
+                                    error
+                                }
+                            }
+
+                    val refusal = requests.last().await()
+                    assertTrue(refusal is NMPError.RelayInformationWaitersSaturated)
+                    assertEquals(
+                        64uL,
+                        (refusal as NMPError.RelayInformationWaitersSaturated).capacity,
+                    )
+                    server.releaseResponse()
+
+                    val outcomes = requests.map { it.await() }
+                    assertEquals(64, outcomes.count { it == null })
+                    assertEquals(
+                        1,
+                        outcomes.count { it is NMPError.RelayInformationWaitersSaturated },
+                    )
+                    assertTrue(
+                        outcomes.all { it == null || it is NMPError.RelayInformationWaitersSaturated },
+                    )
                 }
             }
         }
