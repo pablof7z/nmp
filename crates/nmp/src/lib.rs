@@ -146,8 +146,8 @@ pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, Unsig
 // validates every external signer result against the frozen accepted event.
 pub use nmp_signer::{
     known_local_signers, LocalSignerApp, LocalSignerProtocol, Nip46ClientMetadata,
-    Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer, SignerError, SignerOp,
-    SigningCapability,
+    Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer, PendingSignerResolveError,
+    PendingSignerSender, SignerError, SignerOp, SigningCapability,
 };
 
 #[cfg(test)]

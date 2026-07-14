@@ -54,32 +54,48 @@ public struct NMPSignedEvent: Sendable, Hashable {
 }
 
 final class SignEventBridge: SignEventObserver, @unchecked Sendable {
+    private enum TerminalState {
+        case open
+        case cancelled
+        case completed
+    }
+
     private let lock = NSLock()
     private var continuation: CheckedContinuation<NMPSignedEvent, Error>?
     private var cancelOperation: (() -> Void)?
-    private var cancellationRequested = false
-    private var completed = false
+    private var terminalState = TerminalState.open
 
-    func start(_ continuation: CheckedContinuation<NMPSignedEvent, Error>) {
+    @discardableResult
+    func installContinuation(
+        _ continuation: CheckedContinuation<NMPSignedEvent, Error>
+    ) -> Bool {
         lock.lock()
-        self.continuation = continuation
-        let cancelled = cancellationRequested
-        lock.unlock()
-        if cancelled {
-            requestCancellation()
+        switch terminalState {
+        case .open:
+            self.continuation = continuation
+            lock.unlock()
+            return true
+        case .cancelled:
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return false
+        case .completed:
+            lock.unlock()
+            return false
         }
     }
 
     func installCancellation(_ cancelOperation: @escaping () -> Void) {
         lock.lock()
-        let alreadyCompleted = completed
-        if !alreadyCompleted {
+        switch terminalState {
+        case .open:
             self.cancelOperation = cancelOperation
-        }
-        let cancelled = cancellationRequested
-        lock.unlock()
-        if !alreadyCompleted && cancelled {
+            lock.unlock()
+        case .cancelled:
+            lock.unlock()
             cancelOperation()
+        case .completed:
+            lock.unlock()
         }
     }
 
@@ -89,9 +105,17 @@ final class SignEventBridge: SignEventObserver, @unchecked Sendable {
 
     func requestCancellation() {
         lock.lock()
-        cancellationRequested = true
+        guard case .open = terminalState else {
+            lock.unlock()
+            return
+        }
+        terminalState = .cancelled
+        let continuation = continuation
+        self.continuation = nil
         let cancelOperation = cancelOperation
+        self.cancelOperation = nil
         lock.unlock()
+        continuation?.resume(throwing: CancellationError())
         cancelOperation?()
     }
 
@@ -114,15 +138,16 @@ final class SignEventBridge: SignEventObserver, @unchecked Sendable {
 
     private func finish(_ result: Result<NMPSignedEvent, Error>) {
         lock.lock()
-        guard !completed, let continuation else {
+        guard terminalState == .open else {
             lock.unlock()
             return
         }
-        completed = true
+        terminalState = .completed
+        let continuation = continuation
         self.continuation = nil
         self.cancelOperation = nil
         lock.unlock()
-        continuation.resume(with: result)
+        continuation?.resume(with: result)
     }
 }
 
@@ -133,7 +158,9 @@ func performSignEvent(
     let bridge = SignEventBridge()
     return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { continuation in
-            bridge.start(continuation)
+            guard bridge.installContinuation(continuation) else {
+                return
+            }
             do {
                 bridge.installCancellation(try start(event.toFfi(), bridge))
             } catch {
