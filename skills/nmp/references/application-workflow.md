@@ -11,7 +11,7 @@ Avoid these boundary errors:
 - a boolean `isSynced` derived from EOSE or one relay;
 - a view creating an unbounded observation every render;
 - treating publish acceptance as delivered-to-all;
-- collapsing typed thread-unavailability into a timeout, crash, or empty stream;
+- collapsing typed executor saturation or thread-unavailability into a timeout, crash, or empty stream;
 - importing internal crates or generated bindings to bypass an ergonomic gap.
 
 ## Build a vertical slice
@@ -21,7 +21,7 @@ Avoid these boundary errors:
 3. Start one observation at the feature/lifecycle owner. Rust consumers accumulate deltas by id; Swift/Kotlin replace from each already-accumulated `RowBatch` snapshot. Render app-owned order.
 4. Render acquisition evidence and shortfalls as facts, not a global verdict.
 5. If the feature writes, construct one `WriteIntent`, retain the receipt, and model per-relay outcomes.
-6. Bind query, content-session, signer-session, engine teardown, and receipt-observation tasks to deterministic owners. Preserve engine/query errors, terminal action statuses, direct signer-connection errors, and native streamed signer-session failures as distinct facts at their owning boundaries. Cancelling receipt observation does not cancel a durable write obligation.
+6. Bind query, content-session, signer-session, engine teardown, and receipt-observation tasks to deterministic owners. Treat `max_native_tasks`/`maxNativeTasks` as an immediately-running admission ceiling, not queue capacity. Preserve executor saturation, OS spawn refusal, terminal action statuses, direct signer-connection errors, and native streamed signer-session failures as distinct facts at their owning boundaries. Cancelling receipt observation does not cancel a durable write obligation.
 7. Add a bounded running proof using a real or scripted relay. Include restart proof for durable receipts or persistent cache claims.
 
 ## Review checklist

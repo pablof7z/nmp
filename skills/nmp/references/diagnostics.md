@@ -18,7 +18,9 @@ Do not claim that diagnostics currently provide:
 - a global connection generation or populated AUTH lifecycle;
 - database row counts or GC telemetry.
 
-Thread refusal is a call/action fact, not a diagnostics snapshot field. Direct Rust engine/query and NIP-02 observation setup return `EngineError::ThreadUnavailable`; NIP-02 action-worker refusal is a terminal `FollowActionStatus::Failed(FollowActionFailure::ThreadUnavailable)`; initial direct-Rust NIP-46 connection setup returns `Nip46Error::ThreadUnavailable`. Native synchronous outer-bridge errors and post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
+Executor saturation and OS-thread refusal are call/action facts, not diagnostics snapshot fields. Ordinary direct-Rust engine/query setup can return `EngineError::ThreadUnavailable`; NIP-02 observation additionally reserves a native task and can return `EngineError::ExecutorSaturated`. NIP-02 action-worker refusal is a terminal `FollowActionStatus::Failed` with the matching failure value, and initial direct-Rust NIP-46 setup returns the matching `Nip46Error`. Native synchronous outer-bridge errors and post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
+
+The raw FFI native-task census and exact idle barrier are lifecycle-test seams, not engine diagnostics. Swift/Kotlin keep their wrapper methods internal. Do not poll the census as queue pressure, expose it as product telemetry, or infer that increasing `maxNativeTasks` is a retry policy.
 
 `SourceStatus.awaitingAuth`/`authDenied` and `AuthPhase` exist as reserved public vocabulary but are not populated by the current engine. Label them reserved if they appear in exhaustive UI switches.
 

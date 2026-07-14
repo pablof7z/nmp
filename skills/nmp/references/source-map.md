@@ -8,6 +8,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `docs/VISION.md`
 - Source: `docs/known-gaps.md`
 - Source: `docs/bug-class-ledger.md`
+- Source: `docs/design/native-task-executor.md`
 - Source: `docs/architecture/supported-surface.md`
 - Source: `docs/surface-change-log.md`
 
@@ -24,10 +25,13 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-engine/src/outbox/mod.rs`
 - Source: `crates/nmp-engine/src/core/diagnostics.rs`
 - Source: `crates/nmp-engine/src/core/mod.rs`
+- Source: `crates/nmp-engine/src/runtime/mod.rs`
+- Source: `crates/nmp-executor/src/lib.rs`
 - Source: `crates/nmp-nip02/src/lib.rs`
 - Source: `crates/nmp-nip02/src/service.rs`
 - Source: `crates/nmp-nip29/src/lib.rs`
 - Source: `crates/nmp-signer/src/nip46.rs`
+- Source: `crates/nmp-signer/tests/nip46_mock_relay.rs`
 
 ## FFI and native wrappers
 
@@ -45,6 +49,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Diagnostics.swift`
 - Source: `Packages/NMP/Sources/NMP/NostrEntity.swift`
 - Source: `Packages/NMP/Sources/NMP/RemoteSigner.swift`
+- Source: `Packages/NMP/Tests/NMPTests/DiagnosticsTests.swift`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Engine.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPError.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPFilter.kt`
@@ -55,6 +60,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Diagnostics.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NostrEntity.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/RemoteSigner.kt`
+- Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/DiagnosticsConcurrencyTest.kt`
 
 ## Optional packages and build truth
 
