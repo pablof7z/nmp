@@ -73,6 +73,14 @@ DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
 SIM_X86_TARGET=x86_64-apple-ios
 MACOS_TARGET=aarch64-apple-darwin
+DEPLOYMENT_CHECKER="$REPO_ROOT/scripts/check-macos-deployment-target.sh"
+MACOS_DEPLOYMENT_TARGET=$(
+  "$DEPLOYMENT_CHECKER" --print-deployment-target
+)
+# Some native build scripts fingerprint CFLAGS but not MACOSX_DEPLOYMENT_TARGET.
+# Set both so cached C/C++ objects are rebuilt when the package minimum changes.
+MACOS_CFLAGS="${CFLAGS:+$CFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
+MACOS_CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
 
 # Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
 # script runs Cargo at the repository root, so resolve the same path here when
@@ -86,18 +94,27 @@ fi
 
 echo "== 1. cargo build (release) =="
 if [[ "$MODE" != macos ]]; then
-  cargo build -p "$CRATE" --release --target "$SIM_ARM_TARGET"
-  cargo build -p "$CRATE" --release --target "$SIM_X86_TARGET"
+  env -u MACOSX_DEPLOYMENT_TARGET \
+    cargo build -p "$CRATE" --release --target "$SIM_ARM_TARGET"
+  env -u MACOSX_DEPLOYMENT_TARGET \
+    cargo build -p "$CRATE" --release --target "$SIM_X86_TARGET"
 fi
-cargo build -p "$CRATE" --release --target "$MACOS_TARGET"
+MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
+  CFLAGS="$MACOS_CFLAGS" \
+  CXXFLAGS="$MACOS_CXXFLAGS" \
+  cargo build -p "$CRATE" --release --target "$MACOS_TARGET"
 if [[ "$MODE" == all ]]; then
-  cargo build -p "$CRATE" --release --target "$DEVICE_TARGET"
+  env -u MACOSX_DEPLOYMENT_TARGET \
+    cargo build -p "$CRATE" --release --target "$DEVICE_TARGET"
 fi
 
 SIM_ARM_LIB="$TARGET_DIR/$SIM_ARM_TARGET/release/$LIB_NAME"
 SIM_X86_LIB="$TARGET_DIR/$SIM_X86_TARGET/release/$LIB_NAME"
 MACOS_LIB="$TARGET_DIR/$MACOS_TARGET/release/$LIB_NAME"
 DEVICE_LIB="$TARGET_DIR/$DEVICE_TARGET/release/$LIB_NAME"
+
+echo "== 1b. verify macOS deployment target ($MACOS_DEPLOYMENT_TARGET) =="
+"$DEPLOYMENT_CHECKER" "$MACOS_LIB"
 
 if [[ "$MODE" != macos ]]; then
   echo "== 2. lipo the two simulator arches into one fat staticlib =="
@@ -114,7 +131,8 @@ fi
 
 echo "== 3. uniffi-bindgen (library mode) -> Swift bindings =="
 mkdir -p "$GEN_DIR"
-cargo run -p "$CRATE" --bin uniffi-bindgen -- generate \
+env -u MACOSX_DEPLOYMENT_TARGET \
+  cargo run -p "$CRATE" --bin uniffi-bindgen -- generate \
   --library "$BINDGEN_LIB" \
   --language swift \
   --out-dir "$GEN_DIR"
