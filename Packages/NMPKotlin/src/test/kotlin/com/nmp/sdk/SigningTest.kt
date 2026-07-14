@@ -1,10 +1,12 @@
 package com.nmp.sdk
 
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
+import uniffi.nmp_ffi.FfiSignedEvent
 
 class SigningTest {
     private val secret = "0".repeat(63) + "1"
@@ -58,4 +60,36 @@ class SigningTest {
             }
         }
     }
+
+    @Test
+    fun signEventCompletionBeforeCancellationHandleInstallIsSafe() =
+        runBlocking {
+            val request =
+                NMPUnsignedEvent(
+                    createdAt = 9uL,
+                    kind = 1u.toUShort(),
+                    tags = emptyList(),
+                    content = "immediate",
+                )
+            val cancellationCalls = AtomicInteger(0)
+            val signed =
+                signEvent(request) { _, observer ->
+                    observer.onSigned(
+                        FfiSignedEvent(
+                            id = "a".repeat(64),
+                            pubkey = author,
+                            createdAt = request.createdAt,
+                            kind = request.kind,
+                            tags = request.tags,
+                            content = request.content,
+                            sig = "b".repeat(128),
+                        ),
+                    )
+                    val cancel: () -> Unit = { cancellationCalls.incrementAndGet() }
+                    cancel
+                }
+
+            assertEquals(request.content, signed.content)
+            assertEquals(0, cancellationCalls.get())
+        }
 }

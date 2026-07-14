@@ -8,7 +8,6 @@ import uniffi.nmp_ffi.FfiSignEventFailure
 import uniffi.nmp_ffi.FfiSignedEvent
 import uniffi.nmp_ffi.FfiSignEventRequest
 import uniffi.nmp_ffi.NmpEngineInterface
-import uniffi.nmp_ffi.NmpSignEventHandle
 import uniffi.nmp_ffi.SignEventObserver
 
 /** Immutable sign-only event body; NMP freezes its author from active identity. */
@@ -45,9 +44,18 @@ data class NMPSignedEvent(
 internal suspend fun signEvent(
     engine: NmpEngineInterface,
     event: NMPUnsignedEvent,
+): NMPSignedEvent = signEvent(event) { request, observer ->
+    val handle = nmpRethrowing { engine.signEvent(request, observer) }
+    val cancel: () -> Unit = { handle.cancel() }
+    cancel
+}
+
+internal suspend fun signEvent(
+    event: NMPUnsignedEvent,
+    start: (FfiSignEventRequest, SignEventObserver) -> (() -> Unit),
 ): NMPSignedEvent =
     suspendCancellableCoroutine { continuation ->
-        val handle = AtomicReference<NmpSignEventHandle?>(null)
+        val cancelOperation = AtomicReference<(() -> Unit)?>(null)
         val cancellationRequested = AtomicBoolean(false)
         val observer =
             object : SignEventObserver {
@@ -73,14 +81,14 @@ internal suspend fun signEvent(
 
         continuation.invokeOnCancellation {
             cancellationRequested.set(true)
-            handle.get()?.cancel()
+            cancelOperation.get()?.invoke()
         }
 
         try {
-            val started = nmpRethrowing { engine.signEvent(event.toFfi(), observer) }
-            handle.set(started)
+            val cancel = start(event.toFfi(), observer)
+            cancelOperation.set(cancel)
             if (cancellationRequested.get()) {
-                started.cancel()
+                cancel()
             }
         } catch (error: Throwable) {
             continuation.tryResumeWithException(error)?.let(continuation::completeResume)

@@ -1,5 +1,6 @@
 import XCTest
 @testable import NMP
+import NMPFFI
 
 final class SigningTests: XCTestCase {
     private let secret = String(repeating: "0", count: 63) + "1"
@@ -50,5 +51,32 @@ final class SigningTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? NMPError, .noActiveSigner)
         }
+    }
+
+    func testSignEventCompletionBeforeCancellationHandleInstallIsSafe() async throws {
+        let request = NMPUnsignedEvent(
+            createdAt: 9,
+            kind: 1,
+            tags: [],
+            content: "immediate"
+        )
+        var cancellationCalls = 0
+        let signed = try await performSignEvent(request) { _, observer in
+            observer.onSigned(
+                event: FfiSignedEvent(
+                    id: String(repeating: "a", count: 64),
+                    pubkey: author,
+                    createdAt: request.createdAt,
+                    kind: request.kind,
+                    tags: request.tags,
+                    content: request.content,
+                    sig: String(repeating: "b", count: 128)
+                )
+            )
+            return { cancellationCalls += 1 }
+        }
+
+        XCTAssertEqual(signed.content, request.content)
+        XCTAssertEqual(cancellationCalls, 0)
     }
 }

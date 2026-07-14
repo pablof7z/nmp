@@ -547,20 +547,15 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "SigningFailed",
+            name: "NoActiveSigner",
             discr: None,
-            fields: [
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
+            fields: [],
+            docstring: Some(
+                "The sign-only operation has no active account with a registered\nsigning capability. No operation was accepted.",
+            ),
         },
         Variant {
-            name: "InvalidSignedEvent",
+            name: "InvalidSignRequest",
             discr: None,
             fields: [
                 Field {
@@ -570,7 +565,9 @@ enum Enum {
                     docstring: None,
                 },
             ],
-            docstring: None,
+            docstring: Some(
+                "The immutable sign-only request was malformed or named an author\nother than the active account. No signer was invoked.",
+            ),
         },
         Variant {
             name: "ReceiptCorrelationIdExhausted",
@@ -1831,6 +1828,65 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp::ShortfallFact` mirror -- an explicit, never-silent shortfall in a\nquery's subtree acquisition (never folded into `sources`).",
+    ),
+}
+
+enum Enum {
+    name: "FfiSignEventFailure",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "SignerUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SignerRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidSignerOutput",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Cancelled",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Failures that may resolve after a sign-only operation was accepted.",
     ),
 }
 
@@ -3413,7 +3469,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "Event fields a native app may ask the active NMP signer to sign. The\nauthor is deliberately absent and is frozen from engine identity state.",
+        "Immutable NIP-01 event body accepted by the governed sign-only operation.\nThe author is deliberately absent and is frozen from engine identity state.",
     ),
 }
 
@@ -3470,7 +3526,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "A fully signed Nostr event returned by the governed sign-only operation.",
+        "Exact verified result of a sign-only operation. This is an event value,\nnot a canonical store row: it has no relay provenance and was not\npublished or persisted by signing.",
     ),
 }
 
@@ -6539,7 +6595,7 @@ object Object {
             object_impl: Struct,
             arguments: [
                 Argument {
-                    name: "request",
+                    name: "event",
                     type_: Record {
                         module_path: "nmp_ffi",
                         name: "FfiSignEventRequest",
@@ -6548,11 +6604,22 @@ object Object {
                     optional: false,
                     default: None,
                 },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "SignEventObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
             ],
             return_type: Some(
-                Record {
+                Object {
                     module_path: "nmp_ffi",
-                    name: "FfiSignedEvent",
+                    name: "NmpSignEventHandle",
+                    imp: Struct,
                 },
             ),
             ffi_func: FfiFunction {
@@ -6566,7 +6633,7 @@ object Object {
                         ),
                     },
                     FfiArgument {
-                        name: "request",
+                        name: "event",
                         type_: RustBuffer(
                             Some(
                                 ExternalFfiMetadata {
@@ -6576,22 +6643,21 @@ object Object {
                             ),
                         ),
                     },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
                 ],
                 return_type: Some(
-                    RustBuffer(
-                        Some(
-                            ExternalFfiMetadata {
-                                name: "FfiSignedEvent",
-                                module_path: "nmp_ffi",
-                            },
-                        ),
+                    RustArcPtr(
+                        "NmpSignEventHandle",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Sign exactly one event with the active NMP signer without publishing.",
+                "Sign one exact event through the active account without accepting a\nwrite, persisting a row/receipt, planning relays, or publishing. The\nreturned handle cancels only this signer operation; completion fires\nexactly once through `observer`.",
             ),
             throws: Some(
                 Enum {
@@ -6602,7 +6668,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_sign_event",
             checksum: Some(
-                30936,
+                7136,
             ),
         },
         Method {
@@ -6870,6 +6936,87 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "The app-facing handle to a live subscription (returned by\n[`NmpEngine::observe`]). `Drop` withdraws the subscription -- the SDK\nnever requires an app-owned container or lifecycle hook to make this\nhappen (plan §7's kill test). Holds ONLY the opaque\n[`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) -- no\n`Handle`/`QueryHandle` (the raw imperative engine-control capability)\never reaches this crate. The receiving half of the subscription is owned\nentirely by [`NmpEngine::observe`]'s drain thread, since `recv()`\nblocks; `cancel()`/`Drop` here and the drain thread's own teardown\nconverge on the token's single withdrawal guard (see that type's doc).",
+    ),
+}
+
+object Object {
+    name: "NmpSignEventHandle",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpSignEventHandle",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpsigneventhandle_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpSignEventHandle",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpsigneventhandle_cancel",
+            checksum: Some(
+                36811,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpsigneventhandle",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpSignEventHandle",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpSignEventHandle",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpsigneventhandle",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpSignEventHandle",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Scoped cancellation handle for one sign-only operation. It owns no\nsigner registration and cannot affect accepted durable writes.",
     ),
 }
 
@@ -7458,5 +7605,102 @@ callback CallbackInterface {
     },
     docstring: Some(
         "Drains a live subscription's `Receiver<RowsMsg>` (M4 §4b). `on_batch` is\ncalled once per delivered batch, in order, on a dedicated drain thread —\nnever on the engine thread itself, so a slow Swift-side consumer cannot\nstall `EngineCore`'s own recv loop. `on_closed` fires exactly once, when\nthe engine has torn the subscription down (cancel, or the row channel's\n`Sender` was dropped for any other reason) — after which no further\n`on_batch` call will ever occur. `evidence` is the query's scoped\nper-source acquisition evidence for this batch\n(`docs/design/scoped-evidence-49-12-plan.md` §4) -- never a collapsed\ncompleteness verdict.",
+    ),
+}
+
+callback CallbackInterface {
+    name: "SignEventObserver",
+    module_path: "nmp_ffi",
+    methods: [
+        Method {
+            name: "on_signed",
+            object_name: "SignEventObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "event",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSignedEvent",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_signeventobserver_on_signed",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_signeventobserver_on_signed",
+            checksum: Some(
+                65091,
+            ),
+        },
+        Method {
+            name: "on_failed",
+            object_name: "SignEventObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "failure",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiSignEventFailure",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_signeventobserver_on_failed",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_signeventobserver_on_failed",
+            checksum: Some(
+                24830,
+            ),
+        },
+    ],
+    ffi_init_callback: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_init_callback_vtable_signeventobserver",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "vtable",
+                type_: Reference(
+                    Struct(
+                        "VTableCallbackInterfaceSignEventObserver",
+                    ),
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: false,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Exactly-once completion callback for one governed sign-only operation.\nSuccess carries a fully verified event; failure is terminal. Cancellation\nuses the same terminal callback so native async continuations cannot hang.",
     ),
 }

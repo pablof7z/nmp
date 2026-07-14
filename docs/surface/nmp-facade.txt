@@ -45,6 +45,9 @@ pub use nmp::Selector
 pub use nmp::SetAlgebra
 pub use nmp::SetOp
 pub use nmp::ShortfallFact
+pub use nmp::SignEventCancel
+pub use nmp::SignEventError
+pub use nmp::SignEventOperation
 pub use nmp::SignerError
 pub use nmp::SignerOp
 pub use nmp::SignerRegistration
@@ -69,13 +72,8 @@ pub nmp::EngineError::ExecutorSaturated::component: alloc::string::String
 pub nmp::EngineError::InvalidRelayUrl
 pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
 pub nmp::EngineError::InvalidSecretKey
-pub nmp::EngineError::InvalidSignedEvent
-pub nmp::EngineError::InvalidSignedEvent::reason: alloc::string::String
-pub nmp::EngineError::NoActiveAccount
 pub nmp::EngineError::ReceiptCorrelationIdExhausted
 pub nmp::EngineError::SignerMissingPublicKey
-pub nmp::EngineError::SigningFailed
-pub nmp::EngineError::SigningFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreOpenFailed
 pub nmp::EngineError::StoreOpenFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreResetFailed
@@ -130,7 +128,7 @@ pub fn nmp::Engine::remove_signer(&self, nmp_engine::runtime::SignerRegistration
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
-pub fn nmp::Engine::sign_event(&self, nmp::SignEventRequest) -> core::result::Result<nostr::event::Event, nmp::EngineError>
+pub fn nmp::Engine::sign_event(&self, nmp::SignEventRequest) -> core::result::Result<nmp_engine::runtime::SignEventOperation, nmp_engine::runtime::SignEventError>
 impl core::ops::drop::Drop for nmp::Engine
 pub fn nmp::Engine::drop(&mut self)
 impl !core::marker::Freeze for nmp::Engine
@@ -22320,7 +22318,37 @@ reexport nmp::Nip46Invitation => nmp_signer::nip46::Nip46Invitation
                                                                                 },
                                                                                 "path": "Receiver",
                                                                                 "resolved_item": {
-                                                                                  "path": "std::sync::mpsc::Receiver"
+                                                                                  "definition": {
+                                                                                    "attrs": [],
+                                                                                    "inner": {
+                                                                                      "struct": {
+                                                                                        "generics": {
+                                                                                          "params": [
+                                                                                            {
+                                                                                              "kind": {
+                                                                                                "type": {
+                                                                                                  "bounds": [],
+                                                                                                  "default": null,
+                                                                                                  "is_synthetic": false
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "T"
+                                                                                            }
+                                                                                          ],
+                                                                                          "where_predicates": []
+                                                                                        },
+                                                                                        "kind": {
+                                                                                          "plain": {
+                                                                                            "fields": [],
+                                                                                            "has_stripped_fields": true
+                                                                                          }
+                                                                                        }
+                                                                                      }
+                                                                                    },
+                                                                                    "name": "Receiver",
+                                                                                    "visibility": "public"
+                                                                                  },
+                                                                                  "path": "crossbeam_channel::channel::Receiver"
                                                                                 }
                                                                               }
                                                                             }
@@ -22334,6 +22362,185 @@ reexport nmp::Nip46Invitation => nmp_signer::nip46::Nip46Invitation
                                                                     }
                                                                   },
                                                                   "name": "pending",
+                                                                  "visibility": "public"
+                                                                },
+                                                                {
+                                                                  "attrs": [
+                                                                    {
+                                                                      "must_use": {
+                                                                        "reason": null
+                                                                      }
+                                                                    }
+                                                                  ],
+                                                                  "inner": {
+                                                                    "function": {
+                                                                      "default_unstable": null,
+                                                                      "generics": {
+                                                                        "params": [
+                                                                          {
+                                                                            "kind": {
+                                                                              "type": {
+                                                                                "bounds": [
+                                                                                  {
+                                                                                    "trait_bound": {
+                                                                                      "generic_params": [],
+                                                                                      "modifier": "none",
+                                                                                      "trait": {
+                                                                                        "args": {
+                                                                                          "parenthesized": {
+                                                                                            "inputs": [],
+                                                                                            "output": null
+                                                                                          }
+                                                                                        },
+                                                                                        "path": "FnOnce",
+                                                                                        "resolved_item": {
+                                                                                          "path": "core::ops::function::FnOnce"
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  },
+                                                                                  {
+                                                                                    "trait_bound": {
+                                                                                      "generic_params": [],
+                                                                                      "modifier": "none",
+                                                                                      "trait": {
+                                                                                        "args": null,
+                                                                                        "path": "Send",
+                                                                                        "resolved_item": {
+                                                                                          "path": "core::marker::Send"
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  },
+                                                                                  {
+                                                                                    "outlives": "'static"
+                                                                                  }
+                                                                                ],
+                                                                                "default": null,
+                                                                                "is_synthetic": true
+                                                                              }
+                                                                            },
+                                                                            "name": "impl FnOnce() + Send + 'static"
+                                                                          }
+                                                                        ],
+                                                                        "where_predicates": []
+                                                                      },
+                                                                      "has_body": true,
+                                                                      "header": {
+                                                                        "abi": "Rust",
+                                                                        "is_async": false,
+                                                                        "is_const": false,
+                                                                        "is_unsafe": false
+                                                                      },
+                                                                      "sig": {
+                                                                        "inputs": [
+                                                                          [
+                                                                            "receiver",
+                                                                            {
+                                                                              "resolved_path": {
+                                                                                "args": {
+                                                                                  "angle_bracketed": {
+                                                                                    "args": [
+                                                                                      {
+                                                                                        "type": {
+                                                                                          "resolved_path": {
+                                                                                            "args": {
+                                                                                              "angle_bracketed": {
+                                                                                                "args": [
+                                                                                                  {
+                                                                                                    "type": {
+                                                                                                      "generic": "T"
+                                                                                                    }
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "type": {
+                                                                                                      "resolved_path": {
+                                                                                                        "args": null,
+                                                                                                        "path": "SignerError",
+                                                                                                        "resolved_item": {
+                                                                                                          "definition": {
+                                                                                                            "previously_defined": "nmp_signer::op::SignerError"
+                                                                                                          },
+                                                                                                          "path": "nmp_signer::op::SignerError"
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  }
+                                                                                                ],
+                                                                                                "constraints": []
+                                                                                              }
+                                                                                            },
+                                                                                            "path": "Result",
+                                                                                            "resolved_item": {
+                                                                                              "path": "core::result::Result"
+                                                                                            }
+                                                                                          }
+                                                                                        }
+                                                                                      }
+                                                                                    ],
+                                                                                    "constraints": []
+                                                                                  }
+                                                                                },
+                                                                                "path": "Receiver",
+                                                                                "resolved_item": {
+                                                                                  "definition": {
+                                                                                    "previously_defined": "crossbeam_channel::channel::Receiver"
+                                                                                  },
+                                                                                  "path": "crossbeam_channel::channel::Receiver"
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          ],
+                                                                          [
+                                                                            "cancel",
+                                                                            {
+                                                                              "impl_trait": [
+                                                                                {
+                                                                                  "trait_bound": {
+                                                                                    "generic_params": [],
+                                                                                    "modifier": "none",
+                                                                                    "trait": {
+                                                                                      "args": {
+                                                                                        "parenthesized": {
+                                                                                          "inputs": [],
+                                                                                          "output": null
+                                                                                        }
+                                                                                      },
+                                                                                      "path": "FnOnce",
+                                                                                      "resolved_item": {
+                                                                                        "path": "core::ops::function::FnOnce"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                },
+                                                                                {
+                                                                                  "trait_bound": {
+                                                                                    "generic_params": [],
+                                                                                    "modifier": "none",
+                                                                                    "trait": {
+                                                                                      "args": null,
+                                                                                      "path": "Send",
+                                                                                      "resolved_item": {
+                                                                                        "path": "core::marker::Send"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                },
+                                                                                {
+                                                                                  "outlives": "'static"
+                                                                                }
+                                                                              ]
+                                                                            }
+                                                                          ]
+                                                                        ],
+                                                                        "is_c_variadic": false,
+                                                                        "output": {
+                                                                          "generic": "Self"
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  },
+                                                                  "name": "pending_with_cancel",
                                                                   "visibility": "public"
                                                                 },
                                                                 {
@@ -24843,6 +25050,494 @@ reexport nmp::SetOp => nmp_grammar::binding::SetOp
 reexport nmp::ShortfallFact => nmp_engine::core::evidence::ShortfallFact
 {
   "previously_defined": "nmp_engine::core::evidence::ShortfallFact"
+}
+reexport nmp::SignEventCancel => nmp_engine::runtime::SignEventCancel
+{
+  "attrs": [],
+  "inherent_impls": [
+    {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "items": [
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": null
+              }
+            }
+          },
+          "name": "cancel",
+          "visibility": "public"
+        }
+      ]
+    }
+  ],
+  "inner": {
+    "struct": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "kind": {
+        "plain": {
+          "fields": [],
+          "has_stripped_fields": true
+        }
+      }
+    }
+  },
+  "name": "SignEventCancel",
+  "visibility": "public"
+}
+reexport nmp::SignEventError => nmp_engine::runtime::SignEventError
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "NoActiveSigner",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "InvalidRequest",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "SignerUnavailable",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "SignerRejected",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "InvalidSignerOutput",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "usize"
+                        }
+                      },
+                      "name": "capacity",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "ExecutorSaturated",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "component",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "ThreadUnavailable",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "EngineClosed",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Cancelled",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "SignEventError",
+  "visibility": "public"
+}
+reexport nmp::SignEventOperation => nmp_engine::runtime::SignEventOperation
+{
+  "attrs": [],
+  "inherent_impls": [
+    {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "items": [
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "generic": "Self"
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "SignedEvent",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nostr::event::Event"
+                                  },
+                                  "path": "nostr::event::Event"
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "SignEventError",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nmp_engine::runtime::SignEventError"
+                                  },
+                                  "path": "nmp_engine::runtime::SignEventError"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Result",
+                    "resolved_item": {
+                      "path": "core::result::Result"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "recv",
+          "visibility": "public"
+        },
+        {
+          "attrs": [
+            {
+              "must_use": {
+                "reason": null
+              }
+            }
+          ],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": null,
+                    "path": "SignEventCancel",
+                    "resolved_item": {
+                      "definition": {
+                        "previously_defined": "nmp_engine::runtime::SignEventCancel"
+                      },
+                      "path": "nmp_engine::runtime::SignEventCancel"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "cancel_handle",
+          "visibility": "public"
+        }
+      ]
+    }
+  ],
+  "inner": {
+    "struct": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "kind": {
+        "plain": {
+          "fields": [],
+          "has_stripped_fields": true
+        }
+      }
+    }
+  },
+  "name": "SignEventOperation",
+  "visibility": "public"
 }
 reexport nmp::SignerError => nmp_signer::op::SignerError
 {

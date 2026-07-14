@@ -53,10 +53,10 @@ public struct NMPSignedEvent: Sendable, Hashable {
     }
 }
 
-private final class SignEventBridge: SignEventObserver, @unchecked Sendable {
+final class SignEventBridge: SignEventObserver, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<NMPSignedEvent, Error>?
-    private var handle: NmpSignEventHandle?
+    private var cancelOperation: (() -> Void)?
     private var cancellationRequested = false
     private var completed = false
 
@@ -70,16 +70,16 @@ private final class SignEventBridge: SignEventObserver, @unchecked Sendable {
         }
     }
 
-    func install(_ handle: NmpSignEventHandle) {
+    func installCancellation(_ cancelOperation: @escaping () -> Void) {
         lock.lock()
         let alreadyCompleted = completed
         if !alreadyCompleted {
-            self.handle = handle
+            self.cancelOperation = cancelOperation
         }
         let cancelled = cancellationRequested
         lock.unlock()
         if !alreadyCompleted && cancelled {
-            handle.cancel()
+            cancelOperation()
         }
     }
 
@@ -90,9 +90,9 @@ private final class SignEventBridge: SignEventObserver, @unchecked Sendable {
     func requestCancellation() {
         lock.lock()
         cancellationRequested = true
-        let handle = handle
+        let cancelOperation = cancelOperation
         lock.unlock()
-        handle?.cancel()
+        cancelOperation?()
     }
 
     func onSigned(event: FfiSignedEvent) {
@@ -120,9 +120,28 @@ private final class SignEventBridge: SignEventObserver, @unchecked Sendable {
         }
         completed = true
         self.continuation = nil
-        self.handle = nil
+        self.cancelOperation = nil
         lock.unlock()
         continuation.resume(with: result)
+    }
+}
+
+func performSignEvent(
+    _ event: NMPUnsignedEvent,
+    start: (FfiSignEventRequest, SignEventObserver) throws -> (() -> Void)
+) async throws -> NMPSignedEvent {
+    let bridge = SignEventBridge()
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+            bridge.start(continuation)
+            do {
+                bridge.installCancellation(try start(event.toFfi(), bridge))
+            } catch {
+                bridge.failToStart(error)
+            }
+        }
+    } onCancel: {
+        bridge.requestCancellation()
     }
 }
 
@@ -130,21 +149,11 @@ extension NMPEngine {
     /// Sign one exact event with the active signer without creating a write
     /// intent, pending row, receipt, relay plan, or publication.
     public func signEvent(_ event: NMPUnsignedEvent) async throws -> NMPSignedEvent {
-        let bridge = SignEventBridge()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                bridge.start(continuation)
-                do {
-                    let handle = try nmpRethrowing {
-                        try ffi.signEvent(event: event.toFfi(), observer: bridge)
-                    }
-                    bridge.install(handle)
-                } catch {
-                    bridge.failToStart(error)
-                }
+        try await performSignEvent(event) { request, observer in
+            let handle = try nmpRethrowing {
+                try ffi.signEvent(event: request, observer: observer)
             }
-        } onCancel: {
-            bridge.requestCancellation()
+            return { handle.cancel() }
         }
     }
 }
