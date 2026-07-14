@@ -502,6 +502,20 @@ impl Engine {
             })
     }
 
+    #[cfg(test)]
+    fn relay_information_retention_census(
+        &self,
+    ) -> nmp_engine::relay_information::RelayInformationRetentionCensus {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard
+            .as_ref()
+            .map(|inner| nmp_engine::runtime::relay_information_retention_census(&inner.handle))
+            .expect("test census requires an open engine")
+    }
+
     /// Stop the engine. Idempotent: a second call (or a call racing another
     /// thread's call) finds `inner` already `None` and no-ops. Every verb
     /// above shares this same lock, so no call that starts after this one
@@ -538,7 +552,7 @@ impl Drop for Engine {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
@@ -1539,6 +1553,75 @@ mod tests {
         drop(subscription);
         drop(engine);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn sixty_four_owned_facade_values_do_not_become_engine_retention() {
+        const BODY_BYTES: usize = 256 * 1024;
+        const CALLS: usize = 64;
+
+        let prefix = r#"{"description":""#;
+        let suffix = r#""}"#;
+        let body = format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(BODY_BYTES - prefix.len() - suffix.len())
+        );
+        assert_eq!(body.len(), BODY_BYTES);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "HTTP request ended before its headers");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let relay = format!("ws://{address}");
+        let mut caller_owned = Vec::with_capacity(CALLS);
+        caller_owned.push(
+            block_on(engine.relay_information(&relay, RelayInformationCachePolicy::Refresh))
+                .unwrap(),
+        );
+        server.join().unwrap();
+        for _ in 1..CALLS {
+            caller_owned.push(
+                block_on(engine.relay_information(&relay, RelayInformationCachePolicy::UseCache))
+                    .unwrap(),
+            );
+        }
+        assert!(caller_owned
+            .iter()
+            .all(|snapshot| snapshot.raw_json.len() == BODY_BYTES));
+
+        let while_callers_retain = engine.relay_information_retention_census();
+        assert_eq!(while_callers_retain.cached_entries, 1);
+        assert_eq!(while_callers_retain.cached_payloads, 1);
+        assert_eq!(while_callers_retain.cached_raw_body_bytes, BODY_BYTES);
+        assert_eq!(while_callers_retain.active_flights, 0);
+        assert_eq!(while_callers_retain.admitted_waiters, 0);
+
+        // The 64 ordinary facade values above intentionally own 64 public
+        // copies. Dropping them cannot change the engine census because those
+        // copies transferred to the caller at the supported value boundary.
+        drop(caller_owned);
+        assert_eq!(
+            engine.relay_information_retention_census(),
+            while_callers_retain
+        );
+        engine.shutdown();
     }
 
     fn probe_query() -> LiveQuery {

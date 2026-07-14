@@ -167,10 +167,24 @@ about current code:
   simulator slices compile, but an iOS Simulator runtime test target is not yet
   present ([#465](https://github.com/pablof7z/nmp/issues/465)). The Kotlin
   package remains a desktop-JVM projection; this work does not add or qualify
-  an Android AAR. Cardinality is finite, but full snapshot values are still
-  deep-cloned across cache access and waiter fan-out; the byte-amplification
-  reduction is tracked by
-  [#467](https://github.com/pablof7z/nmp/issues/467).
+  an Android AAR. **The hidden cache/flight/waiter copy amplification is closed
+  (#467).** One immutable payload owns the parsed document (including
+  structured maps), exact raw JSON, and revision; cache entries, refreshing
+  workers, 304/stale metadata versions, and all waiters share that payload.
+  Runtime capability projection extracts only its compact evidence and retains
+  no raw body. Under the default 12-task admission ceiling, the exact hidden
+  raw-body envelope is 256 cached bodies plus at most 12 active
+  response bodies: `268 * 256 KiB = 70,254,592 bytes` (67 MiB). A fully
+  admitted 12-flight/64-waiter matrix therefore carries 768 shared snapshot
+  pointers (6,144 bytes on the qualified 64-bit target), not 768 additional
+  bodies. This is deliberately a raw-body bound, not a total-RSS claim: parsed
+  values, relay URLs, HTTP metadata, maps, allocator/container overhead, and
+  task/channel scaffolding are additional costs outside that number. The
+  supported Rust facade still returns its existing ordinary owned value and
+  UniFFI/native records remain owned; an application that concurrently
+  materializes and retains 64 results owns those 64 copies by contract. A
+  facade falsifier proves dropping them leaves exactly the one cached engine
+  payload rather than a hidden waiter/result shadow cache.
 - **~~Destructive trust-domain reset is missing as a defined contract~~ CLOSED
   (#232).** `Engine::reset_persistent_store`, the UniFFI operation, and the
   Swift/Kotlin `NMPEngine.resetPersistentStore` projections idempotently remove
