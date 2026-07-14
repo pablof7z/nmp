@@ -1,90 +1,133 @@
 #!/usr/bin/env bash
-# M4 plan §3: cargo -> xcframework -> (a later builder wires) SwiftPM.
+# Build the generated Swift bindings and NMP.xcframework from nmp-ffi.
 #
-# 1. Build the nmp-ffi staticlib for device + both simulator triples, plus a
-#    macOS (aarch64-apple-darwin) slice.
-# 2. lipo the two simulator arches into one fat sim staticlib (device stays
-#    separate -- xcframework requires arch-disjoint slices).
-# 3. Run uniffi-bindgen in LIBRARY mode against one compiled staticlib to
-#    generate the Swift bindings (nmp_ffi.swift / nmp_ffiFFI.h / .modulemap)
-#    -- no .udl file, metadata is read straight out of the compiled binary.
-# 4. `xcodebuild -create-xcframework` the device + fat-sim + macOS slices
-#    into NMP.xcframework.
-#
-# The macOS slice exists so `swift test` (which runs the package's own test
-# host process on THIS Mac, not a simulator) can link NMPFFI at all --
-# SwiftPM test hosts run on the build machine's own arch, so without a
-# macos-arm64 slice `swift build`/`swift test` cannot resolve the
-# binaryTarget. It carries the exact same Rust core as the iOS slices;
-# nothing macOS-specific lives behind it.
-#
-# Usage: scripts/build-swift-xcframework.sh [--sim-only]
-#   --sim-only  skip the device (aarch64-apple-ios) slice -- useful in CI/
-#               sandboxes with no signing identity; the sim + macOS slices
-#               alone prove the pipeline (M4 plan §C: "sim slice is enough
-#               for now; device needs signing").
+# The default keeps the historical device + simulator + macOS output.
+# `--sim-only` keeps the historical simulator + macOS CI output, while
+# `--macos-only` prepares only the host artifact needed by SwiftPM builds and
+# tests that do not run an iOS target.
 
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+usage() {
+  cat <<'USAGE'
+Usage: scripts/build-swift-xcframework.sh [OPTION]
 
-SIM_ONLY=0
-if [[ "${1:-}" == "--sim-only" ]]; then
-  SIM_ONLY=1
+Build generated Swift bindings and NMP.xcframework from nmp-ffi.
+
+Options:
+  --sim-only    build iOS simulator and macOS slices, but no device slice
+  --macos-only  build only the macOS slice needed by host SwiftPM builds
+  -h, --help    show this help without building
+
+With no option, build iOS device, iOS simulator, and macOS slices.
+CARGO_TARGET_DIR is honored when supplied by the caller.
+USAGE
+}
+
+fail_usage() {
+  echo "error: $1" >&2
+  usage >&2
+  exit 2
+}
+
+MODE=all
+SHOW_HELP=0
+for arg in "$@"; do
+  case "$arg" in
+    --sim-only)
+      [[ "$MODE" == all || "$MODE" == sim ]] \
+        || fail_usage "--sim-only and --macos-only cannot be combined"
+      MODE=sim
+      ;;
+    --macos-only)
+      [[ "$MODE" == all || "$MODE" == macos ]] \
+        || fail_usage "--sim-only and --macos-only cannot be combined"
+      MODE=macos
+      ;;
+    -h|--help)
+      SHOW_HELP=1
+      ;;
+    --*)
+      fail_usage "unknown option: $arg"
+      ;;
+    *)
+      fail_usage "unexpected argument: $arg"
+      ;;
+  esac
+done
+
+if [[ "$SHOW_HELP" -eq 1 ]]; then
+  usage
+  exit 0
 fi
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
 
 CRATE=nmp-ffi
 LIB_NAME=libnmp_ffi.a
-GEN_DIR=gen
-XCFRAMEWORK_OUT=Packages/NMP/NMP.xcframework
+GEN_DIR="$REPO_ROOT/gen"
+XCFRAMEWORK_OUT="$REPO_ROOT/Packages/NMP/NMP.xcframework"
 
 DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
 SIM_X86_TARGET=x86_64-apple-ios
 MACOS_TARGET=aarch64-apple-darwin
 
+# Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
+# script runs Cargo at the repository root, so resolve the same path here when
+# locating the resulting archives and storing packaging intermediates.
+TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
+if [[ "$TARGET_DIR_VALUE" == /* ]]; then
+  TARGET_DIR="$TARGET_DIR_VALUE"
+else
+  TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
+fi
+
 echo "== 1. cargo build (release) =="
-cargo build -p "$CRATE" --release --target "$SIM_ARM_TARGET"
-cargo build -p "$CRATE" --release --target "$SIM_X86_TARGET"
+if [[ "$MODE" != macos ]]; then
+  cargo build -p "$CRATE" --release --target "$SIM_ARM_TARGET"
+  cargo build -p "$CRATE" --release --target "$SIM_X86_TARGET"
+fi
 cargo build -p "$CRATE" --release --target "$MACOS_TARGET"
-if [[ "$SIM_ONLY" -eq 0 ]]; then
+if [[ "$MODE" == all ]]; then
   cargo build -p "$CRATE" --release --target "$DEVICE_TARGET"
 fi
 
-SIM_ARM_LIB="target/$SIM_ARM_TARGET/release/$LIB_NAME"
-SIM_X86_LIB="target/$SIM_X86_TARGET/release/$LIB_NAME"
-MACOS_LIB="target/$MACOS_TARGET/release/$LIB_NAME"
-DEVICE_LIB="target/$DEVICE_TARGET/release/$LIB_NAME"
+SIM_ARM_LIB="$TARGET_DIR/$SIM_ARM_TARGET/release/$LIB_NAME"
+SIM_X86_LIB="$TARGET_DIR/$SIM_X86_TARGET/release/$LIB_NAME"
+MACOS_LIB="$TARGET_DIR/$MACOS_TARGET/release/$LIB_NAME"
+DEVICE_LIB="$TARGET_DIR/$DEVICE_TARGET/release/$LIB_NAME"
 
-echo "== 2. lipo the two simulator arches into one fat staticlib =="
-FAT_SIM_DIR="target/ios-sim-fat"
-mkdir -p "$FAT_SIM_DIR"
-FAT_SIM_LIB="$FAT_SIM_DIR/$LIB_NAME"
-lipo -create "$SIM_ARM_LIB" "$SIM_X86_LIB" -output "$FAT_SIM_LIB"
-lipo -info "$FAT_SIM_LIB"
+if [[ "$MODE" != macos ]]; then
+  echo "== 2. lipo the two simulator arches into one fat staticlib =="
+  FAT_SIM_DIR="$TARGET_DIR/ios-sim-fat"
+  mkdir -p "$FAT_SIM_DIR"
+  FAT_SIM_LIB="$FAT_SIM_DIR/$LIB_NAME"
+  lipo -create "$SIM_ARM_LIB" "$SIM_X86_LIB" -output "$FAT_SIM_LIB"
+  lipo -info "$FAT_SIM_LIB"
+  BINDGEN_LIB="$SIM_ARM_LIB"
+else
+  echo "== 2. simulator lipo skipped (macOS only) =="
+  BINDGEN_LIB="$MACOS_LIB"
+fi
 
 echo "== 3. uniffi-bindgen (library mode) -> Swift bindings =="
 mkdir -p "$GEN_DIR"
 cargo run -p "$CRATE" --bin uniffi-bindgen -- generate \
-  --library "$SIM_ARM_LIB" \
+  --library "$BINDGEN_LIB" \
   --language swift \
   --out-dir "$GEN_DIR"
 
-# Split bindgen's output: the xcframework's `-headers` slice should carry
-# ONLY the C header + a `module.modulemap` (the conventional name Xcode's
-# Clang importer looks for) -- never the generated `.swift` file, which
-# belongs in the SwiftPM package's own `Sources/NMPFFI/` as a plain Swift
-# source the "NMPFFI" target compiles (M4 plan §2's layout). This script
-# stops at producing both pieces; wiring `Package.swift`'s two targets
-# (`NMPFFI` binaryTarget + `NMP` ergonomic target) is the next builder's job
-# (plan §8 step D/E).
-HEADERS_DIR="target/ios-ffi-headers"
+# The xcframework carries only the generated C header and modulemap. The
+# generated Swift source remains an ordinary NMPFFI target source.
+HEADERS_DIR="$TARGET_DIR/ios-ffi-headers"
 rm -rf "$HEADERS_DIR"
 mkdir -p "$HEADERS_DIR"
 cp "$GEN_DIR/nmp_ffiFFI.h" "$HEADERS_DIR/"
 cp "$GEN_DIR/nmp_ffiFFI.modulemap" "$HEADERS_DIR/module.modulemap"
 
-SWIFT_SOURCES_DIR="Packages/NMP/Sources/NMPFFI"
+SWIFT_SOURCES_DIR="$REPO_ROOT/Packages/NMP/Sources/NMPFFI"
 mkdir -p "$SWIFT_SOURCES_DIR"
 cp "$GEN_DIR/nmp_ffi.swift" "$SWIFT_SOURCES_DIR/"
 
@@ -92,17 +135,21 @@ echo "== 4. xcodebuild -create-xcframework =="
 mkdir -p "$(dirname "$XCFRAMEWORK_OUT")"
 rm -rf "$XCFRAMEWORK_OUT"
 
-# Headers/modulemap are arch-agnostic (same generated metadata for every
-# slice) -- every -library shares the one $HEADERS_DIR.
-XCFRAMEWORK_ARGS=(
-  -library "$FAT_SIM_LIB" -headers "$HEADERS_DIR"
-  -library "$MACOS_LIB" -headers "$HEADERS_DIR"
-)
-if [[ "$SIM_ONLY" -eq 0 ]]; then
+XCFRAMEWORK_ARGS=(-library "$MACOS_LIB" -headers "$HEADERS_DIR")
+SLICES=macos-arm64
+if [[ "$MODE" != macos ]]; then
+  XCFRAMEWORK_ARGS=(
+    -library "$FAT_SIM_LIB" -headers "$HEADERS_DIR"
+    "${XCFRAMEWORK_ARGS[@]}"
+  )
+  SLICES="ios-simulator + $SLICES"
+fi
+if [[ "$MODE" == all ]]; then
   XCFRAMEWORK_ARGS=(
     -library "$DEVICE_LIB" -headers "$HEADERS_DIR"
     "${XCFRAMEWORK_ARGS[@]}"
   )
+  SLICES="ios-device + $SLICES"
 fi
 
 xcodebuild -create-xcframework \
@@ -110,6 +157,7 @@ xcodebuild -create-xcframework \
   -output "$XCFRAMEWORK_OUT"
 
 echo "== done =="
+echo "Cargo target directory:    $TARGET_DIR"
 echo "Raw bindgen output:        $GEN_DIR/"
-echo "xcframework:                $XCFRAMEWORK_OUT (ios device + ios simulator + macos-arm64 slices)"
-echo "Swift bindings source:      $SWIFT_SOURCES_DIR/nmp_ffi.swift (Package.swift wiring is the next builder's job)"
+echo "xcframework:               $XCFRAMEWORK_OUT ($SLICES)"
+echo "Swift bindings source:     $SWIFT_SOURCES_DIR/nmp_ffi.swift"
