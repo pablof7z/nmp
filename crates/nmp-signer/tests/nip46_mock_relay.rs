@@ -433,7 +433,7 @@ fn client_invitation_ignores_forged_secret_then_accepts_valid_signer() {
 
 #[test]
 fn unavailable_signer_operation_is_retryable() {
-    let (tx, rx) = mpsc::channel::<Result<String, nmp_signer::SignerError>>();
+    let (tx, rx) = crossbeam_channel::unbounded::<Result<String, nmp_signer::SignerError>>();
     drop(tx);
     assert_eq!(
         SignerOp::pending(rx).wait(Duration::from_millis(10)),

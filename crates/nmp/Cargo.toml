@@ -26,4 +26,5 @@ nmp-transport.workspace = true
 nmp-executor.workspace = true
 
 [dev-dependencies]
+crossbeam-channel = "0.5"
 tempfile = "3"

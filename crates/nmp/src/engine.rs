@@ -645,6 +645,50 @@ mod tests {
         cancellations: Arc<AtomicUsize>,
     }
 
+    struct NoHookPendingSigner {
+        public_key: PublicKey,
+        receiver: Mutex<
+            Option<crossbeam_channel::Receiver<Result<nostr::Event, nmp_signer::SignerError>>>,
+        >,
+    }
+
+    impl nmp_signer::SigningCapability for NoHookPendingSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.public_key)
+        }
+
+        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            nmp_signer::SignerOp::pending(
+                self.receiver
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .take()
+                    .expect("fixture signs once"),
+            )
+        }
+    }
+
+    struct HookCompletesSigner {
+        keys: Keys,
+        cancellations: Arc<AtomicUsize>,
+    }
+
+    impl nmp_signer::SigningCapability for HookCompletesSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.keys.public_key())
+        }
+
+        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            let signed = unsigned.sign_with_keys(&self.keys).unwrap();
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let cancellations = Arc::clone(&self.cancellations);
+            nmp_signer::SignerOp::pending_with_cancel(rx, move || {
+                cancellations.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(Ok(signed));
+            })
+        }
+    }
+
     struct CountingSigner {
         keys: Keys,
         calls: Arc<AtomicUsize>,
@@ -702,7 +746,7 @@ mod tests {
         }
 
         fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = crossbeam_channel::unbounded();
             let cancellations = Arc::clone(&self.cancellations);
             nmp_signer::SignerOp::pending_with_cancel(rx, move || {
                 cancellations.fetch_add(1, Ordering::SeqCst);
@@ -774,6 +818,116 @@ mod tests {
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
         assert_eq!(engine.native_task_census().admitted, 0);
         assert_eq!(engine.native_task_census().running, 0);
+    }
+
+    #[test]
+    fn sign_event_cancellation_without_adapter_hook_drops_retained_producer_and_joins() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let (producer, receiver) = crossbeam_channel::unbounded();
+        engine
+            .add_signer(NoHookPendingSigner {
+                public_key: keys.public_key(),
+                receiver: Mutex::new(Some(receiver)),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let operation = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(7),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "no cancellation hook".to_string(),
+            })
+            .expect("operation must be accepted");
+
+        operation.cancel_handle().cancel();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        assert!(
+            producer
+                .send(Err(nmp_signer::SignerError::Unavailable))
+                .is_err(),
+            "the worker receiver must be dropped even while the producer is retained"
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn sign_event_shutdown_without_adapter_hook_drops_retained_producer_and_joins() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let (producer, receiver) = crossbeam_channel::unbounded();
+        engine
+            .add_signer(NoHookPendingSigner {
+                public_key: keys.public_key(),
+                receiver: Mutex::new(Some(receiver)),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let operation = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(8),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "shutdown without hook".to_string(),
+            })
+            .expect("operation must be accepted");
+
+        engine.shutdown();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        assert!(
+            producer
+                .send(Err(nmp_signer::SignerError::Unavailable))
+                .is_err(),
+            "shutdown must drop the worker receiver while the producer is retained"
+        );
+    }
+
+    #[test]
+    fn sign_event_cancellation_claim_beats_hook_that_simultaneously_completes() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(HookCompletesSigner {
+                keys: keys.clone(),
+                cancellations: Arc::clone(&cancellations),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+        let operation = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(9),
+                kind: Kind::TextNote,
+                tags: Vec::new(),
+                content: "cancel wins".to_string(),
+            })
+            .expect("operation must be accepted");
+
+        operation.cancel_handle().cancel();
+        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
     }
 
     #[test]

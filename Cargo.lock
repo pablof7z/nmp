@@ -1357,6 +1357,7 @@ checksum = "f0efe882e02d206d8d279c20eb40e03baf7cb5136a1476dc084a324fbc3ec42d"
 name = "nmp"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "nmp-engine",
  "nmp-executor",
  "nmp-grammar",
@@ -1453,6 +1454,7 @@ version = "0.1.0"
 name = "nmp-ffi"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "nmp",
  "nmp-content",
  "nmp-grammar",
@@ -1549,6 +1551,7 @@ dependencies = [
 name = "nmp-signer"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "nmp-executor",
  "nmp-transport",
  "nostr 0.44.4",

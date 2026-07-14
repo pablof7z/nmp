@@ -1,7 +1,8 @@
 //! The pollable thunk (§3.3, HARVEST `nmp-signer-iface::op`).
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
+
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
 
 #[doc(hidden)]
 pub type PendingCancel = Box<dyn FnOnce() + Send + 'static>;
@@ -259,7 +260,7 @@ mod tests {
 
     #[test]
     fn dropped_pending_sender_is_disconnected() {
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(), SignerError>>();
+        let (tx, rx) = crossbeam_channel::unbounded::<Result<(), SignerError>>();
         drop(tx);
         assert_eq!(
             SignerOp::pending(rx).wait(Duration::from_millis(10)),
@@ -269,7 +270,7 @@ mod tests {
 
     #[test]
     fn timeout_cancels_the_adapter_owned_pending_slot_once() {
-        let (_tx, rx) = std::sync::mpsc::channel::<Result<(), SignerError>>();
+        let (_tx, rx) = crossbeam_channel::unbounded::<Result<(), SignerError>>();
         let cancelled = Arc::new(AtomicUsize::new(0));
         let cancelled_for_op = Arc::clone(&cancelled);
         let op = SignerOp::pending_with_cancel(rx, move || {
