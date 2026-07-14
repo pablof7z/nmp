@@ -22,10 +22,13 @@
 #    one platform.
 #
 # Usage: scripts/build-kotlin-jvm.sh
+#
+# CARGO_TARGET_DIR is honored when supplied by the caller.
 
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
 
 CRATE=nmp-ffi
 GEN_DIR=gen-kotlin
@@ -42,19 +45,34 @@ esac
 
 LIB_NAME="libnmp_ffi.$LIB_EXT"
 
+# Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
+# script runs Cargo at the repository root, so resolve the same path here when
+# locating the resulting host library.
+TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
+if [[ "$TARGET_DIR_VALUE" == /* ]]; then
+  TARGET_DIR="$TARGET_DIR_VALUE"
+else
+  TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
+fi
+
 echo "== 1. cargo build (release, host triple) =="
 cargo build -p "$CRATE" --release
 
-HOST_LIB="target/release/$LIB_NAME"
+HOST_LIB="$TARGET_DIR/release/$LIB_NAME"
 if [[ ! -f "$HOST_LIB" ]]; then
   echo "error: expected $HOST_LIB after cargo build -- check nmp-ffi's [lib] crate-type includes cdylib" >&2
+  exit 1
+fi
+BINDGEN="$TARGET_DIR/release/uniffi-bindgen"
+if [[ ! -x "$BINDGEN" ]]; then
+  echo "error: expected executable $BINDGEN after cargo build" >&2
   exit 1
 fi
 
 echo "== 2. uniffi-bindgen (library mode) -> Kotlin bindings =="
 rm -rf "$GEN_DIR"
 mkdir -p "$GEN_DIR"
-cargo run -p "$CRATE" --bin uniffi-bindgen -- generate \
+"$BINDGEN" generate \
   --library "$HOST_LIB" \
   --language kotlin \
   --out-dir "$GEN_DIR"
