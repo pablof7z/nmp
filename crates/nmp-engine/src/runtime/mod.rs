@@ -2482,6 +2482,17 @@ impl std::fmt::Display for AddSignerError {
 
 impl std::error::Error for AddSignerError {}
 
+/// Test-only proof seam for hidden NIP-11 cache/flight ownership. It is a
+/// free function specifically so the reviewed [`Handle`] verb set cannot grow
+/// an alternate command surface.
+#[cfg(feature = "test-instrumentation")]
+#[doc(hidden)]
+pub fn relay_information_retention_census(
+    handle: &Handle,
+) -> crate::relay_information::RelayInformationRetentionCensus {
+    handle.relay_information.retention_census()
+}
+
 impl Handle {
     /// Acquire NIP-11 once through the engine-owned cache. This may block
     /// the CALLER on HTTP, never the reducer thread. The resolved
@@ -2522,6 +2533,7 @@ impl Handle {
             )));
         Ok(snapshot)
     }
+
     /// Open a live subscription. Blocks (briefly — one engine-thread round
     /// trip, never network-bound) until `EngineCore` has assigned the
     /// `HandleId` and the row channel is registered, then returns both. An

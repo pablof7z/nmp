@@ -26,4 +26,5 @@ nmp-transport.workspace = true
 nmp-executor.workspace = true
 
 [dev-dependencies]
+nmp-engine = { workspace = true, features = ["test-instrumentation"] }
 tempfile = "3"
