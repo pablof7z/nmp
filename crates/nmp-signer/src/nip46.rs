@@ -870,8 +870,15 @@ impl SessionWorker {
                     self.emit(Nip46ConnectionEvent::Available);
                 }
             }
-            PoolEvent::Disconnected { slot, .. } => {
-                self.handles.remove(&slot);
+            PoolEvent::Disconnected { handle, .. } => {
+                if !self
+                    .handles
+                    .get(&handle.slot)
+                    .is_some_and(|(current, _)| *current == handle)
+                {
+                    return;
+                }
+                self.handles.remove(&handle.slot);
                 if let Some(session) = self.session.upgrade() {
                     session
                         .connected_relays
