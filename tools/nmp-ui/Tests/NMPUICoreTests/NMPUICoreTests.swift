@@ -534,6 +534,83 @@ final class NMPUICoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(ProjectFileSystem.lockPath).path))
     }
 
+    func testReplacementAfterDirectoryPublicationIsNeverAdopted() throws {
+        let root = temporaryDirectory()
+        let newDirectory = root.appendingPathComponent("New")
+        var replacementIdentity: String?
+        let publicationCatalog = catalog(
+            version: "v1",
+            components: [
+                component(
+                    "publication-race",
+                    version: "1",
+                    source: "new.swift",
+                    destination: "New/File.swift"
+                ),
+            ],
+            templates: ["new.swift": "new\n"]
+        )
+        let installer = try NMPUIInstaller(catalog: publicationCatalog, projectRoot: root) { point in
+            guard point == .afterDirectoryPublication("New") else { return }
+            try FileManager.default.removeItem(at: newDirectory)
+            try FileManager.default.createDirectory(at: newDirectory, withIntermediateDirectories: false)
+            replacementIdentity = try self.fileIdentity(newDirectory)
+        }
+
+        XCTAssertThrowsError(try installer.add("publication-race")) { error in
+            guard case .transactionFailed(let message) = error as? NMPUIError else {
+                return XCTFail("expected transactionFailed, got \(error)")
+            }
+            XCTAssertTrue(message.contains("created directory changed after publication: New"))
+        }
+        XCTAssertNotNil(replacementIdentity)
+        XCTAssertEqual(try fileIdentity(newDirectory), replacementIdentity)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: newDirectory.path), [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["New"])
+    }
+
+    func testReplacementAfterCleanupValidationIsPreservedAndReported() throws {
+        let root = temporaryDirectory()
+        let newDirectory = root.appendingPathComponent("New")
+        var replacementIdentity: String?
+        let component = RegistryComponent(
+            name: "cleanup-race",
+            version: "1",
+            summary: "cleanup-race",
+            files: [
+                RegistryFile(source: "new.swift", destination: "New/File.swift"),
+                RegistryFile(source: "late.swift", destination: "Z.swift"),
+            ]
+        )
+        let cleanupCatalog = catalog(
+            version: "v1",
+            components: [component],
+            templates: ["new.swift": "new\n", "late.swift": "late\n"]
+        )
+        let installer = try NMPUIInstaller(catalog: cleanupCatalog, projectRoot: root) { point in
+            switch point {
+            case .write("Z.swift"):
+                throw InjectedFailure.mutation(point)
+            case .afterDirectoryCleanupValidation("New"):
+                try FileManager.default.createDirectory(at: newDirectory, withIntermediateDirectories: false)
+                replacementIdentity = try self.fileIdentity(newDirectory)
+            default:
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try installer.add("cleanup-race")) { error in
+            guard case .transactionFailed(let message) = error as? NMPUIError else {
+                return XCTFail("expected transactionFailed, got \(error)")
+            }
+            XCTAssertTrue(message.contains("created directory was replaced during cleanup: New"))
+        }
+        XCTAssertNotNil(replacementIdentity)
+        XCTAssertEqual(try fileIdentity(newDirectory), replacementIdentity)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: newDirectory.path), [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["New"])
+    }
+
     func testManagedFileEditedAfterPlanningIsRestoredAndNeverOverwritten() throws {
         let root = temporaryDirectory()
         let v1 = pairedCatalog(registry: "v1", dependency: "dep one\n", root: "root one\n", version: "1")
