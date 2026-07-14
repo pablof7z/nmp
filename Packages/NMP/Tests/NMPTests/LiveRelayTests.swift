@@ -87,10 +87,12 @@ final class LiveRelayTests: XCTestCase {
             limit: 50
         )
         let query = try engine.observe(followFeed)
+        // Keep the native query demand owned through the diagnostics sample;
+        // diagnostics intentionally projects only the current relay plan.
+        defer { query.cancel() }
         let rows = await Self.firstNonEmptyBatch(from: query, timeoutSeconds: 30)
 
         guard rows != nil else {
-            query.cancel()
             throw XCTSkip(
                 "Observed no follow-feed rows within 30s from \(Self.indexerRelays) alone -- "
                     + "diagnostics has nothing real to report in this test environment."
@@ -98,9 +100,8 @@ final class LiveRelayTests: XCTestCase {
         }
 
         let diagnostics = try engine.observeDiagnostics()
+        defer { diagnostics.cancel() }
         let snapshot = await Self.firstSnapshotWithReceivedKind1(from: diagnostics, timeoutSeconds: 10)
-        diagnostics.cancel()
-        query.cancel()
 
         guard let snapshot else {
             return XCTFail(
