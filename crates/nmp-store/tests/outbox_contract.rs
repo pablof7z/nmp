@@ -17,9 +17,9 @@ use std::collections::BTreeSet;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome,
-    EventStore, FinishAttemptOutcome, InsertOutcome, IntentSigState, LocalOrigin, MemoryStore,
-    PromoteOutcome, ReceiptState, RedbStore, RefuseReason, RelayObserved, RetractReason, SigState,
-    WriteDurability,
+    EventCursor, EventStore, FinishAttemptOutcome, InsertOutcome, IntentSigState, LocalOrigin,
+    MemoryStore, PromoteOutcome, ReceiptState, RedbStore, RefuseReason, RelayObserved,
+    RetractReason, SigState, WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -1702,6 +1702,7 @@ fn kind5_immediate_delete_hides_target_before_relay_echo() {
         // Locally compose + accept a kind:5 deleting it — BEFORE any relay
         // echo of the deletion itself.
         let deletion = deletion_event(&k, vec![Tag::event(target_id)], 100);
+        let before = EventCursor::from_event(&deletion);
         let outcome = do_accept(store, accept(deletion, k.public_key(), 100));
         let intent = outcome.journaled_intent_id().expect("journaled");
         match &outcome {
@@ -1718,6 +1719,10 @@ fn kind5_immediate_delete_hides_target_before_relay_echo() {
             .query(&Filter::new().id(target_id))
             .unwrap()
             .is_empty());
+        assert!(store
+            .query_newest_before(&Filter::new().kind(Kind::TextNote), before, 10)
+            .unwrap()
+            .is_empty());
 
         // It was never actually removed: cancelling brings it straight
         // back, reported via `revealed`.
@@ -1732,6 +1737,13 @@ fn kind5_immediate_delete_hides_target_before_relay_echo() {
             other => panic!("expected Compensated, got {other:?}"),
         }
         assert_eq!(store.query(&Filter::new().id(target_id)).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .query_newest_before(&Filter::new().kind(Kind::TextNote), before, 10)
+                .unwrap()
+                .len(),
+            1
+        );
     });
 }
 

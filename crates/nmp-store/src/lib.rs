@@ -241,6 +241,37 @@ pub struct StoredEvent {
     pub provenance: Provenance,
 }
 
+/// The closed canonical continuation key for newest-first event selection.
+///
+/// Store pages are ordered by `created_at` descending, then event id
+/// ascending. A cursor is exclusive: the next page may contain exactly rows
+/// whose timestamp is lower, or whose timestamp is equal and id is greater.
+/// Keeping both protocol facts in one typed key prevents callers from
+/// approximating a continuation by decrementing Nostr's one-second timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EventCursor {
+    pub created_at: Timestamp,
+    pub event_id: EventId,
+}
+
+impl EventCursor {
+    pub const fn new(created_at: Timestamp, event_id: EventId) -> Self {
+        Self {
+            created_at,
+            event_id,
+        }
+    }
+
+    pub fn from_event(event: &Event) -> Self {
+        Self::new(event.created_at, event.id)
+    }
+
+    fn admits(&self, event: &Event) -> bool {
+        event.created_at < self.created_at
+            || (event.created_at == self.created_at && event.id > self.event_id)
+    }
+}
+
 /// Which relay delivered an event, and the engine's wall-clock time at
 /// receipt — the `insert` door's second argument (M3 §3.1's `from:
 /// RelayObserved`).
@@ -1063,6 +1094,37 @@ pub trait EventStore {
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let mut rows = self.query(filter)?;
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Return at most `limit` current matches strictly after `before` in the
+    /// canonical newest-first order used by [`EventStore::query_newest`].
+    ///
+    /// The exact exclusive predicate is:
+    /// `created_at < before.created_at ||
+    /// (created_at == before.created_at && id > before.event_id)`.
+    /// This predicate intersects the filter's ordinary inclusive time window;
+    /// it never rewrites that window or turns a cursor into relay acquisition
+    /// authority. The default implementation is the `MemoryStore` oracle;
+    /// persistent backends override it with an exact ordered-index range.
+    fn query_newest_before(
+        &self,
+        filter: &Filter,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self.query(filter)?;
+        rows.retain(|row| before.admits(&row.event));
         rows.sort_by(|a, b| {
             b.event
                 .created_at
