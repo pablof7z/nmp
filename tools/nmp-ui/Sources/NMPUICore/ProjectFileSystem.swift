@@ -29,6 +29,8 @@ struct ProjectFileSystem {
         case remove(String)
         case afterSwap(String)
         case afterQuarantine(String)
+        case afterDirectoryPublication(String)
+        case afterDirectoryCleanupValidation(String)
     }
 
     typealias MutationHook = (MutationPoint) throws -> Void
@@ -537,24 +539,168 @@ struct ProjectFileSystem {
             return
         }
         defer { close(target.descriptor) }
+        let quarantine = ".nmp-ui-dir-old-\(UUID().uuidString)"
+        let moved = atomicRename(
+            oldParent: target.descriptor,
+            oldName: target.name,
+            newParent: target.descriptor,
+            newName: quarantine,
+            flags: UInt32(RENAME_EXCL)
+        )
+        guard moved == 0 else {
+            if errno == ENOENT { return }
+            throw posixError()
+        }
+
+        var quarantineExists = true
+        var quarantineMatchesJournal = false
+        do {
+            let firstIdentityMatches = try directoryEntryMatches(
+                parent: target.descriptor,
+                name: quarantine,
+                directory: directory
+            )
+            guard firstIdentityMatches else {
+                try restoreQuarantinedDirectory(
+                    parent: target.descriptor,
+                    quarantine: quarantine,
+                    target: target.name,
+                    path: path
+                )
+                quarantineExists = false
+                throw NMPUIError.transactionFailed("created directory changed before cleanup: \(path)")
+            }
+            quarantineMatchesJournal = true
+
+            try mutationHook?(.afterDirectoryCleanupValidation(path))
+
+            let finalIdentityMatches = try directoryEntryMatches(
+                parent: target.descriptor,
+                name: quarantine,
+                directory: directory
+            )
+            guard finalIdentityMatches else {
+                quarantineMatchesJournal = false
+                try restoreQuarantinedDirectory(
+                    parent: target.descriptor,
+                    quarantine: quarantine,
+                    target: target.name,
+                    path: path
+                )
+                quarantineExists = false
+                throw NMPUIError.transactionFailed("created directory changed during cleanup: \(path)")
+            }
+
+            if try entryExists(parent: target.descriptor, name: target.name) {
+                let removed = quarantine.withCString {
+                    unlinkat(target.descriptor, $0, AT_REMOVEDIR)
+                }
+                if removed == 0 { quarantineExists = false }
+                throw NMPUIError.transactionFailed("created directory was replaced during cleanup: \(path)")
+            }
+
+            let removed = quarantine.withCString {
+                unlinkat(target.descriptor, $0, AT_REMOVEDIR)
+            }
+            if removed == 0 {
+                quarantineExists = false
+                if try entryExists(parent: target.descriptor, name: target.name) {
+                    throw NMPUIError.transactionFailed("created directory was replaced during cleanup: \(path)")
+                }
+                return
+            }
+            if errno == ENOTEMPTY || errno == EEXIST {
+                try restoreQuarantinedDirectory(
+                    parent: target.descriptor,
+                    quarantine: quarantine,
+                    target: target.name,
+                    path: path
+                )
+                quarantineExists = false
+                return
+            }
+            throw posixError()
+        } catch {
+            let originalError = error
+            guard quarantineExists else { throw originalError }
+
+            if !(try entryExists(parent: target.descriptor, name: target.name)) {
+                try restoreQuarantinedDirectory(
+                    parent: target.descriptor,
+                    quarantine: quarantine,
+                    target: target.name,
+                    path: path
+                )
+                quarantineExists = false
+                throw originalError
+            }
+
+            if quarantineMatchesJournal {
+                let removed = quarantine.withCString {
+                    unlinkat(target.descriptor, $0, AT_REMOVEDIR)
+                }
+                if removed == 0 { quarantineExists = false }
+            }
+            throw NMPUIError.transactionFailed(
+                "cleanup failed with \(originalError); preserved replacement for \(path)"
+            )
+        }
+    }
+
+    private func directoryIdentity(parent: Int32, name: String, path: String) throws -> CreatedDirectory {
         var metadata = stat()
-        let status = target.name.withCString {
-            fstatat(target.descriptor, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+        let status = name.withCString {
+            fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
         }
-        if status != 0 {
-            if errno == ENOENT { return }
-            throw posixError()
+        guard status == 0 else { throw posixError() }
+        guard metadata.st_mode & S_IFMT == S_IFDIR else { throw NMPUIError.unsafePath(path) }
+        return CreatedDirectory(
+            path: path,
+            device: UInt64(metadata.st_dev),
+            inode: UInt64(metadata.st_ino)
+        )
+    }
+
+    private func directoryEntryMatches(
+        parent: Int32,
+        name: String,
+        directory: CreatedDirectory
+    ) throws -> Bool {
+        var metadata = stat()
+        let status = name.withCString {
+            fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
         }
-        guard metadata.st_mode & S_IFMT == S_IFDIR,
-              UInt64(metadata.st_dev) == directory.device,
-              UInt64(metadata.st_ino) == directory.inode else {
-            throw NMPUIError.transactionFailed("created directory changed before cleanup: \(path)")
+        guard status == 0 else { throw posixError() }
+        return metadata.st_mode & S_IFMT == S_IFDIR
+            && UInt64(metadata.st_dev) == directory.device
+            && UInt64(metadata.st_ino) == directory.inode
+    }
+
+    private func entryExists(parent: Int32, name: String) throws -> Bool {
+        var metadata = stat()
+        let status = name.withCString {
+            fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
         }
-        let result = target.name.withCString { unlinkat(target.descriptor, $0, AT_REMOVEDIR) }
-        if result != 0 {
-            if errno == ENOTEMPTY || errno == EEXIST { return }
-            if errno == ENOENT { return }
-            throw posixError()
+        if status == 0 { return true }
+        if errno == ENOENT { return false }
+        throw posixError()
+    }
+
+    private func restoreQuarantinedDirectory(
+        parent: Int32,
+        quarantine: String,
+        target: String,
+        path: String
+    ) throws {
+        let restored = atomicRename(
+            oldParent: parent,
+            oldName: quarantine,
+            newParent: parent,
+            newName: target,
+            flags: UInt32(RENAME_EXCL)
+        )
+        guard restored == 0 else {
+            throw NMPUIError.transactionFailed("could not restore quarantined directory \(path)")
         }
     }
 
@@ -600,27 +746,13 @@ struct ProjectFileSystem {
                     openat(current, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
                 }
                 if next < 0, errno == ENOENT, createMissing {
-                    let made = component.withCString {
-                        mkdirat(current, $0, mode_t(S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))
-                    }
-                    if made == 0 {
-                        var metadata = stat()
-                        let status = component.withCString {
-                            fstatat(current, $0, &metadata, AT_SYMLINK_NOFOLLOW)
-                        }
-                        guard status == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
-                            component.withCString { _ = unlinkat(current, $0, AT_REMOVEDIR) }
-                            throw status == 0 ? NMPUIError.unsafePath(path) : posixError()
-                        }
-                        createdDirectories.insert(CreatedDirectory(
-                            path: traversed.joined(separator: "/"),
-                            device: UInt64(metadata.st_dev),
-                            inode: UInt64(metadata.st_ino)
-                        ))
-                    } else if errno != EEXIST {
-                        throw posixError()
-                    }
-                    next = component.withCString {
+                    next = try createAndPublishDirectory(
+                        parent: current,
+                        name: component,
+                        path: traversed.joined(separator: "/"),
+                        fullPath: path,
+                        createdDirectories: &createdDirectories
+                    ) ?? component.withCString {
                         openat(current, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
                     }
                 }
@@ -636,6 +768,69 @@ struct ProjectFileSystem {
             close(current)
             throw error
         }
+    }
+
+    private func createAndPublishDirectory(
+        parent: Int32,
+        name: String,
+        path: String,
+        fullPath: String,
+        createdDirectories: inout Set<CreatedDirectory>
+    ) throws -> Int32? {
+        let staged = ".nmp-ui-dir-new-\(UUID().uuidString)"
+        let made = staged.withCString {
+            mkdirat(parent, $0, mode_t(S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))
+        }
+        guard made == 0 else { throw posixError() }
+        var stagedExists = true
+        defer {
+            if stagedExists {
+                staged.withCString { _ = unlinkat(parent, $0, AT_REMOVEDIR) }
+            }
+        }
+
+        let stagedDescriptor = staged.withCString {
+            openat(parent, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard stagedDescriptor >= 0 else { throw posixError() }
+        var descriptorOwned = true
+        defer {
+            if descriptorOwned { close(stagedDescriptor) }
+        }
+
+        var metadata = stat()
+        guard fstat(stagedDescriptor, &metadata) == 0 else { throw posixError() }
+        guard metadata.st_mode & S_IFMT == S_IFDIR else { throw NMPUIError.unsafePath(fullPath) }
+        let identity = CreatedDirectory(
+            path: path,
+            device: UInt64(metadata.st_dev),
+            inode: UInt64(metadata.st_ino)
+        )
+
+        let published = atomicRename(
+            oldParent: parent,
+            oldName: staged,
+            newParent: parent,
+            newName: name,
+            flags: UInt32(RENAME_EXCL)
+        )
+        guard published == 0 else {
+            if errno == EEXIST {
+                return nil
+            }
+            throw posixError()
+        }
+        stagedExists = false
+        createdDirectories.insert(identity)
+
+        try mutationHook?(.afterDirectoryPublication(path))
+
+        let publishedIdentity = try directoryIdentity(parent: parent, name: name, path: path)
+        guard publishedIdentity == identity else {
+            throw NMPUIError.transactionFailed("created directory changed after publication: \(path)")
+        }
+        descriptorOwned = false
+        return stagedDescriptor
     }
 
     private func pathPieces(_ relativePath: String) throws -> [String] {
