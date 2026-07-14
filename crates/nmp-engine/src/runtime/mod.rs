@@ -60,7 +60,7 @@
 mod diagnostics_channel;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -252,7 +252,7 @@ enum Cmd {
         unsigned: UnsignedEvent,
         reservation: nmp_executor::Reservation,
         completion: SignEventCompletion,
-        reply: Sender<Result<u64, SignEventError>>,
+        reply: Sender<Result<SignEventRegistration, SignEventError>>,
     },
     CancelSignEvent(u64),
     SignEventFinished(u64),
@@ -300,6 +300,98 @@ pub enum SignEventError {
 }
 
 type SignEventCompletion = Box<dyn FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static>;
+
+const SIGN_EVENT_OPEN: u8 = 0;
+const SIGN_EVENT_CANCELLED: u8 = 1;
+const SIGN_EVENT_RESOLVED: u8 = 2;
+
+/// One linearization point shared by caller cancellation, engine shutdown,
+/// executor shutdown, and signer completion. Only the admitted worker owns
+/// the foreign completion; cancellation merely claims `Open -> Cancelled`,
+/// wakes that worker, and releases an optional adapter RPC.
+struct SignEventTerminal {
+    state: AtomicU8,
+    cancel: cb::Sender<()>,
+    adapter_cancel: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
+}
+
+impl SignEventTerminal {
+    fn new() -> (Arc<Self>, cb::Receiver<()>) {
+        let (cancel, cancelled) = cb::bounded(1);
+        (
+            Arc::new(Self {
+                state: AtomicU8::new(SIGN_EVENT_OPEN),
+                cancel,
+                adapter_cancel: Mutex::new(None),
+            }),
+            cancelled,
+        )
+    }
+
+    fn cancel(&self) -> bool {
+        if self
+            .state
+            .compare_exchange(
+                SIGN_EVENT_OPEN,
+                SIGN_EVENT_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        let _ = self.cancel.try_send(());
+        let adapter_cancel = self
+            .adapter_cancel
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if let Some(adapter_cancel) = adapter_cancel {
+            adapter_cancel();
+        }
+        true
+    }
+
+    fn install_adapter_cancel(&self, adapter_cancel: Option<Box<dyn FnOnce() + Send + 'static>>) {
+        let Some(adapter_cancel) = adapter_cancel else {
+            return;
+        };
+        let mut slot = self
+            .adapter_cancel
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if self.state.load(Ordering::Acquire) == SIGN_EVENT_OPEN {
+            *slot = Some(adapter_cancel);
+            return;
+        }
+        drop(slot);
+        adapter_cancel();
+    }
+
+    fn resolve(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SIGN_EVENT_OPEN,
+                SIGN_EVENT_RESOLVED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn discard_adapter_cancel(&self) {
+        self.adapter_cancel
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+    }
+}
+
+struct SignEventRegistration {
+    id: u64,
+    terminal: Arc<SignEventTerminal>,
+}
 
 impl std::fmt::Display for SignEventError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1236,8 +1328,7 @@ fn engine_loop<S, D>(
     let mut registry = SignerRegistry::default();
     let mut active_pubkey = None;
     let mut next_sign_event_id = 1u64;
-    let mut sign_event_cancellations: HashMap<u64, Arc<dyn Fn() + Send + Sync + 'static>> =
-        HashMap::new();
+    let mut sign_event_cancellations: HashMap<u64, Arc<SignEventTerminal>> = HashMap::new();
 
     // Recovery happens before the first externally-issued command. Pending
     // rows already live in the store; this only rebuilds ownership and may
@@ -1355,31 +1446,11 @@ fn engine_loop<S, D>(
                     continue;
                 };
 
-                let completion = Arc::new(Mutex::new(Some(completion)));
-                let pending_cancel =
-                    Arc::new(Mutex::new(None::<Box<dyn FnOnce() + Send + 'static>>));
-                let cancel_action: Arc<dyn Fn() + Send + Sync> = {
-                    let pending_cancel = Arc::clone(&pending_cancel);
-                    let completion = Arc::clone(&completion);
-                    Arc::new(move || {
-                        if let Some(cancel) = pending_cancel
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner())
-                            .take()
-                        {
-                            cancel();
-                        }
-                        if let Some(completion) = completion
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner())
-                            .take()
-                        {
-                            completion(Err(SignEventError::Cancelled));
-                        }
-                    })
-                };
-                let shutdown_cancel = Arc::clone(&cancel_action);
-                let starter = match reservation.start_with_cancel(move || shutdown_cancel()) {
+                let (terminal, cancelled) = SignEventTerminal::new();
+                let shutdown_terminal = Arc::clone(&terminal);
+                let starter = match reservation.start_with_cancel(move || {
+                    shutdown_terminal.cancel();
+                }) {
                     Ok(starter) => starter,
                     Err(error) => {
                         let error = match error {
@@ -1404,47 +1475,51 @@ fn engine_loop<S, D>(
                     SignerOp::Ready(result) => SignEventSignerResult::Ready(result),
                     SignerOp::Pending(pending) => {
                         let (receiver, cancel) = pending.into_parts();
-                        *pending_cancel
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner()) = cancel;
+                        terminal.install_adapter_cancel(cancel);
                         SignEventSignerResult::Pending(receiver)
                     }
                 };
 
-                sign_event_cancellations.insert(operation_id, Arc::clone(&cancel_action));
-                if reply.send(Ok(operation_id)).is_err() {
+                sign_event_cancellations.insert(operation_id, Arc::clone(&terminal));
+                if reply
+                    .send(Ok(SignEventRegistration {
+                        id: operation_id,
+                        terminal: Arc::clone(&terminal),
+                    }))
+                    .is_err()
+                {
                     sign_event_cancellations.remove(&operation_id);
-                    cancel_action();
+                    terminal.cancel();
                     continue;
                 }
 
                 let inbox = self_inbox.clone();
                 starter.run(move || {
+                    let signer_result = match signer_result {
+                        SignEventSignerResult::Ready(result) => Some(result),
+                        SignEventSignerResult::Pending(receiver) => cb::select! {
+                            recv(cancelled) -> _ => None,
+                            recv(receiver) -> result => Some(
+                                result.unwrap_or(Err(nmp_signer::SignerError::Disconnected))
+                            ),
+                        },
+                    };
                     let result = match signer_result {
-                        SignEventSignerResult::Ready(result) => result,
-                        SignEventSignerResult::Pending(receiver) => receiver
-                            .recv()
-                            .unwrap_or(Err(nmp_signer::SignerError::Disconnected)),
-                    }
-                    .map_err(signer_error)
-                    .and_then(|signed| validate_signer_output(&unsigned, expected_id, signed));
-                    pending_cancel
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take();
-                    if let Some(completion) = completion
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take()
-                    {
-                        completion(result);
-                    }
+                        Some(result) if terminal.resolve() => {
+                            result.map_err(signer_error).and_then(|signed| {
+                                validate_signer_output(&unsigned, expected_id, signed)
+                            })
+                        }
+                        Some(_) | None => Err(SignEventError::Cancelled),
+                    };
+                    terminal.discard_adapter_cancel();
                     let _ = inbox.send(Cmd::SignEventFinished(operation_id));
+                    completion(result);
                 });
             }
             Cmd::CancelSignEvent(id) => {
-                if let Some(cancel) = sign_event_cancellations.remove(&id) {
-                    cancel();
+                if let Some(terminal) = sign_event_cancellations.remove(&id) {
+                    terminal.cancel();
                 }
             }
             Cmd::SignEventFinished(id) => {
@@ -1633,8 +1708,8 @@ fn engine_loop<S, D>(
         }
     }
 
-    for (_, cancel) in sign_event_cancellations.drain() {
-        cancel();
+    for (_, terminal) in sign_event_cancellations.drain() {
+        terminal.cancel();
     }
 
     // Tear down this thread's OWN `Pool` clone. If no other `Pool` clone
@@ -2149,7 +2224,7 @@ pub struct SignEventOperation {
 
 enum SignEventSignerResult {
     Ready(Result<SignedEvent, nmp_signer::SignerError>),
-    Pending(Receiver<Result<SignedEvent, nmp_signer::SignerError>>),
+    Pending(cb::Receiver<Result<SignedEvent, nmp_signer::SignerError>>),
 }
 
 impl SignEventOperation {
@@ -2160,7 +2235,6 @@ impl SignEventOperation {
             .expect("sign-event result is consumed exactly once")
             .recv()
             .unwrap_or(Err(SignEventError::Cancelled));
-        self.cancel.disarm();
         result
     }
 
@@ -2183,18 +2257,14 @@ impl Drop for SignEventOperation {
 pub struct SignEventCancel {
     inbox: Sender<Cmd>,
     id: u64,
-    finished: Arc<AtomicBool>,
+    terminal: Arc<SignEventTerminal>,
 }
 
 impl SignEventCancel {
     pub fn cancel(&self) {
-        if !self.finished.swap(true, Ordering::AcqRel) {
+        if self.terminal.cancel() {
             let _ = self.inbox.send(Cmd::CancelSignEvent(self.id));
         }
-    }
-
-    fn disarm(&self) {
-        self.finished.store(true, Ordering::Release);
     }
 }
 
@@ -2365,13 +2435,13 @@ impl Handle {
                 reply: reply_tx,
             })
             .map_err(|_| SignEventError::EngineClosed)?;
-        let id = reply_rx
+        let registration = reply_rx
             .recv()
             .map_err(|_| SignEventError::EngineClosed)??;
         Ok(SignEventCancel {
             inbox: self.inbox.clone(),
-            id,
-            finished: Arc::new(AtomicBool::new(false)),
+            id: registration.id,
+            terminal: registration.terminal,
         })
     }
 

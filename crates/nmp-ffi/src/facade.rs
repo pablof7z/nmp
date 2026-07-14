@@ -967,6 +967,22 @@ mod tests {
         }
     }
 
+    struct CountingFfiSigner {
+        keys: nostr::Keys,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl nmp_signer::SigningCapability for CountingFfiSigner {
+        fn public_key(&self) -> Option<nostr::PublicKey> {
+            Some(self.keys.public_key())
+        }
+
+        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            nmp_signer::SignerOp::ok(unsigned.sign_with_keys(&self.keys).unwrap())
+        }
+    }
+
     #[test]
     fn ffi_sign_event_cap_one_returns_the_exact_verified_event_without_publish_api_use() {
         let engine = NmpEngine::new(NmpEngineConfig {
@@ -1038,6 +1054,103 @@ mod tests {
         engine.shutdown();
     }
 
+    #[test]
+    fn ffi_sign_event_refuses_malformed_tags_before_callback_or_admission() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let author = engine.add_account(format!("{:064x}", 31u8)).unwrap();
+        engine.set_active_account(Some(author)).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let result = engine.sign_event(
+            FfiSignEventRequest {
+                created_at: 1,
+                kind: 1,
+                tags: vec![Vec::new()],
+                content: "malformed".to_string(),
+            },
+            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+        );
+        match result {
+            Err(error) => assert_eq!(error, FfiError::InvalidTag { got: Vec::new() }),
+            Ok(_) => panic!("malformed input must fail before operation admission"),
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn ffi_sign_event_capacity_refusal_precedes_signer_invocation_and_callback() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = nostr::Keys::generate();
+        let calls = Arc::new(AtomicUsize::new(0));
+        engine
+            .engine
+            .add_signer(CountingFfiSigner {
+                keys: keys.clone(),
+                calls: Arc::clone(&calls),
+            })
+            .unwrap();
+        engine
+            .engine
+            .set_active_account(Some(keys.public_key()))
+            .unwrap();
+        let held = engine
+            .engine
+            .reserve_native_task("capacity fixture")
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let result = engine.sign_event(
+            pending_ffi_request(),
+            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+        );
+        match result {
+            Err(error) => assert_eq!(
+                error,
+                FfiError::ExecutorSaturated {
+                    component: "sign-event".to_string(),
+                    capacity: 1,
+                }
+            ),
+            Ok(_) => panic!("capacity must refuse before operation admission"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(held);
+        engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn ffi_sign_event_after_engine_close_is_typed_and_never_calls_back() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        engine.shutdown();
+        let (tx, rx) = mpsc::channel();
+        let result = engine.sign_event(
+            pending_ffi_request(),
+            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+        );
+        match result {
+            Err(error) => assert_eq!(error, FfiError::EngineClosed),
+            Ok(_) => panic!("a closed engine must refuse before operation admission"),
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+    }
+
     struct MismatchedFfiSigner {
         reported: nostr::PublicKey,
         actual: nostr::Keys,
@@ -1106,7 +1219,7 @@ mod tests {
         }
 
         fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crossbeam_channel::unbounded();
             let cancellations = Arc::clone(&self.cancellations);
             nmp_signer::SignerOp::pending_with_cancel(rx, move || {
                 cancellations.fetch_add(1, Ordering::SeqCst);
@@ -1144,6 +1257,63 @@ mod tests {
             tags: Vec::new(),
             content: "pending ffi".to_string(),
         }
+    }
+
+    struct ReentrantSignObserver {
+        engine: Arc<NmpEngine>,
+        tx: Mutex<mpsc::Sender<(String, bool)>>,
+    }
+
+    impl SignEventObserver for ReentrantSignObserver {
+        fn on_signed(&self, event: FfiSignedEvent) {
+            let active_before_shutdown = self
+                .engine
+                .active_account()
+                .expect("callback can call an engine verb")
+                .expect("fixture has an active account");
+            self.engine.shutdown();
+            let closed_after_shutdown =
+                matches!(self.engine.active_account(), Err(FfiError::EngineClosed));
+            let _ = self.tx.lock().unwrap().send((
+                format!("{}:{}", active_before_shutdown, event.id),
+                closed_after_shutdown,
+            ));
+        }
+
+        fn on_failed(&self, failure: FfiSignEventFailure) {
+            panic!("unexpected sign failure: {failure:?}");
+        }
+    }
+
+    #[test]
+    fn ffi_sign_event_callback_can_reenter_verbs_and_shutdown_without_deadlock() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let author = engine.add_account(format!("{:064x}", 32u8)).unwrap();
+        engine.set_active_account(Some(author.clone())).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let handle = engine
+            .sign_event(
+                pending_ffi_request(),
+                Box::new(ReentrantSignObserver {
+                    engine: Arc::clone(&engine),
+                    tx: Mutex::new(tx),
+                }),
+            )
+            .expect("operation must start");
+
+        let (value, closed_after_shutdown) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reentrant callback must complete");
+        assert!(value.starts_with(&author));
+        assert!(closed_after_shutdown);
+        drop(handle);
+        engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
     }
 
     #[test]

@@ -44,6 +44,7 @@ nmp-content.workspace = true
 # genuinely undecodable row directly into a real `RedbStore` file, the same
 # technique `nmp-engine`'s own restart/corruption tests use -- test-only.
 [dev-dependencies]
+crossbeam-channel = "0.5"
 redb = "4.1"
 tempfile = "3"
 tungstenite = "0.29"

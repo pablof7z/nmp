@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crossbeam_channel as cb;
 use nmp_transport::{
     Pool, PoolConfig, PoolEvent, PoolEventSink, RelayFrame, RelayOpenError, WireFrame,
 };
@@ -673,7 +674,7 @@ struct RpcEnvelope {
 
 struct PendingRequest {
     frame: String,
-    reply: Sender<Result<String, SignerError>>,
+    reply: cb::Sender<Result<String, SignerError>>,
 }
 
 enum WorkerMsg {
@@ -682,7 +683,7 @@ enum WorkerMsg {
         id: String,
         method: String,
         params: Vec<String>,
-        reply: Sender<Result<String, SignerError>>,
+        reply: cb::Sender<Result<String, SignerError>>,
     },
     AcceptInvitation {
         expected_secret: String,
@@ -1265,7 +1266,7 @@ impl SessionWorker {
         id: String,
         method: String,
         params: Vec<String>,
-        reply: Sender<Result<String, SignerError>>,
+        reply: cb::Sender<Result<String, SignerError>>,
     ) {
         if self.handles.is_empty() {
             let _ = reply.send(Err(SignerError::Unavailable));
@@ -1322,7 +1323,7 @@ impl SessionWorker {
 
 fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> SignerOp<String> {
     let id = Keys::generate().public_key().to_hex();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = cb::unbounded();
     if session
         .commands
         .send(WorkerMsg::Request {
@@ -1351,7 +1352,7 @@ where
         SignerOp::Ready(Err(error)) => SignerOp::Ready(Err(error)),
         SignerOp::Pending(pending) => {
             let (rx, cancel) = pending.into_parts();
-            let (tx, mapped_rx) = mpsc::channel();
+            let (tx, mapped_rx) = cb::unbounded();
             let failure = tx.clone();
             let cancel = Arc::new(Mutex::new(cancel));
             let shutdown_cancel = Arc::clone(&cancel);
