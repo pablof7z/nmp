@@ -19,6 +19,33 @@ final class NMPUICoreTests: XCTestCase {
         XCTAssertEqual(installer.list().lines.map { $0.split(separator: "\t")[0] }, ["action-surface", "article-medium-card"])
     }
 
+    func testCheckedInSampleFixtureMatchesRegistryAndLinksOnlyPublicProducts() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = packageRoot.appendingPathComponent("Fixtures/SampleApp", isDirectory: true)
+        let installer = try NMPUIInstaller(catalog: .bundled(), projectRoot: fixture)
+
+        XCTAssertFalse(try installer.diff("action-surface").hasDifferences)
+        XCTAssertFalse(try installer.diff("article-medium-card").hasDifferences)
+
+        let lock = try ProjectFileSystem(root: fixture).loadLock(registryVersion: "2026.07.1")
+        XCTAssertEqual(Set(lock.components.keys), ["action-surface", "article-medium-card"])
+        XCTAssertEqual(lock.components["article-medium-card"]?.dependencies, ["action-surface"])
+
+        let manifest = try String(contentsOf: fixture.appendingPathComponent("Package.swift"))
+        XCTAssertTrue(manifest.contains(".product(name: \"NMPContent\", package: \"NMP\")"))
+        XCTAssertTrue(manifest.contains(".product(name: \"NMPUI\", package: \"NMP\")"))
+        XCTAssertFalse(manifest.contains("NMPFFI"))
+
+        let installed = try FileManager.default.contentsOfDirectory(
+            at: fixture.appendingPathComponent("Components/NMPUI"),
+            includingPropertiesForKeys: nil
+        ).map(\.lastPathComponent).sorted()
+        XCTAssertEqual(installed, ["ActionSurface.swift", "ArticleMediumCard.swift"])
+    }
+
     func testAddInstallsExactClosureAndInspectableLock() throws {
         let root = temporaryDirectory()
         let installer = try NMPUIInstaller(catalog: .bundled(), projectRoot: root)
