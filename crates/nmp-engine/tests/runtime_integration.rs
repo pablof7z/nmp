@@ -918,7 +918,8 @@ fn boot_catches_up_past_due_expiry() {
 
 /// Structural grep-guard (M3 plan §5 test 14, widened by M4/M5 and #3 U4):
 /// `Handle`'s public surface is the original verbs plus diagnostics and the
-/// two stable-receipt operations (`publish_tracked`/`reattach_receipt`) -- no
+/// two stable-receipt operations (`publish_tracked`/`reattach_receipt`) and
+/// the governed sign-only operation's blocking/completion doors -- no
 /// `relays:` parameter, no open-REQ method anywhere on it
 /// (ledger #2/#3 preserved at the top edge; `add_signer`/`remove_signer` are
 /// M4's deliberate lifecycle widening, closing the multi-account and remote
@@ -958,7 +959,8 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "remove_signer",
         "set_active_account",
         "shutdown",
-        "sign_only",
+        "sign_event",
+        "sign_event_with_completion",
         "subscribe",
         "unsubscribe",
     ];

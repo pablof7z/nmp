@@ -106,12 +106,13 @@ final class SigningTests: XCTestCase {
         let allowCallback = DispatchSemaphore(value: 0)
         let allowHandleReturn = DispatchSemaphore(value: 0)
         let cancellationCalls = LockedCounter()
+        let callbackEvent = signedEvent(for: request)
 
         let task = Task {
             try await performSignEvent(request) { _, observer in
                 DispatchQueue.global().async {
                     allowCallback.wait()
-                    observer.onSigned(event: self.signedEvent(for: request))
+                    observer.onSigned(event: callbackEvent)
                     callbackFinished.fulfill()
                 }
                 startEntered.fulfill()
@@ -142,6 +143,7 @@ final class SigningTests: XCTestCase {
             tags: [],
             content: "terminal race"
         )
+        let callbackEvent = signedEvent(for: request)
 
         for _ in 0..<100 {
             let bridge = SignEventBridge()
@@ -163,7 +165,7 @@ final class SigningTests: XCTestCase {
                     workers.enter()
                     DispatchQueue.global().async {
                         gate.wait()
-                        bridge.onSigned(event: self.signedEvent(for: request))
+                        bridge.onSigned(event: callbackEvent)
                         workers.leave()
                     }
                     gate.signal()
