@@ -166,7 +166,10 @@ pub fn describe_snapshot(snapshot: &DiagnosticsSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp::{Engine, EngineConfig};
+    use nmp::{
+        Engine, EngineConfig, SignEventError, SignEventRequest, SignerError, SignerOp,
+        SigningCapability,
+    };
 
     /// A fixed, valid secp256k1 secret key -- generated once via `openssl
     /// rand -hex 32`. Hardcoded rather than derived from `nostr::Keys`
@@ -174,6 +177,26 @@ mod tests {
     /// point of this crate).
     const TEST_SECRET_KEY_HEX: &str =
         "32f6df73ead850b6e13c0649846b7a1d9646d6a0b50c69361981176e817e70f8";
+
+    struct ExternalAsyncSigner {
+        public_key: PublicKey,
+    }
+
+    impl SigningCapability for ExternalAsyncSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.public_key)
+        }
+
+        fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<nmp::Event> {
+            let (completion, operation) = SignerOp::pending_channel();
+            std::thread::spawn(move || {
+                let _ = completion.resolve(Err(SignerError::Rejected(
+                    "external asynchronous refusal".to_string(),
+                )));
+            });
+            operation
+        }
+    }
 
     /// Drives `Engine::new`/`add_account`/`observe`/`publish`/
     /// `observe_diagnostics`/`shutdown` end-to-end from this `nmp`-only
@@ -205,6 +228,41 @@ mod tests {
             let _ = describe_snapshot(&snapshot);
         }
 
+        engine.shutdown();
+    }
+
+    /// An external crate can implement a genuinely asynchronous signer with
+    /// only its `nmp` dependency: no channel crate appears in this manifest
+    /// or source, and the engine observes the typed result at runtime.
+    #[test]
+    fn external_async_signer_needs_only_nmp() {
+        let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
+        let author: PublicKey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            .parse()
+            .expect("fixed public key must parse");
+        engine
+            .add_signer(ExternalAsyncSigner { public_key: author })
+            .expect("external signer must register");
+        engine
+            .set_active_account(Some(author))
+            .expect("external signer must become active");
+
+        let result = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(42),
+                kind: Kind::Custom(CALLER_CONTENT_KIND),
+                tags: Vec::new(),
+                content: "external asynchronous signing".to_string(),
+            })
+            .expect("sign operation must be accepted")
+            .recv();
+
+        assert_eq!(
+            result,
+            Err(SignEventError::SignerRejected {
+                reason: "external asynchronous refusal".to_string(),
+            })
+        );
         engine.shutdown();
     }
 }

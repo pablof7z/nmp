@@ -1211,6 +1211,7 @@ mod tests {
     struct PendingFfiSigner {
         public_key: nostr::PublicKey,
         cancellations: Arc<AtomicUsize>,
+        completion: Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>,
     }
 
     impl nmp_signer::SigningCapability for PendingFfiSigner {
@@ -1219,12 +1220,16 @@ mod tests {
         }
 
         fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            let (tx, rx) = crossbeam_channel::unbounded();
             let cancellations = Arc::clone(&self.cancellations);
-            nmp_signer::SignerOp::pending_with_cancel(rx, move || {
-                cancellations.fetch_add(1, Ordering::SeqCst);
-                drop(tx);
-            })
+            let (sender, operation) =
+                nmp_signer::SignerOp::pending_channel_with_cancel(move || {
+                    cancellations.fetch_add(1, Ordering::SeqCst);
+                });
+            *self
+                .completion
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
+            operation
         }
     }
 
@@ -1241,6 +1246,7 @@ mod tests {
             .add_signer(PendingFfiSigner {
                 public_key: keys.public_key(),
                 cancellations: Arc::clone(&cancellations),
+                completion: Mutex::new(None),
             })
             .unwrap();
         engine

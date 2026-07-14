@@ -647,9 +647,7 @@ mod tests {
 
     struct NoHookPendingSigner {
         public_key: PublicKey,
-        receiver: Mutex<
-            Option<crossbeam_channel::Receiver<Result<nostr::Event, nmp_signer::SignerError>>>,
-        >,
+        operation: Mutex<Option<nmp_signer::SignerOp<nostr::Event>>>,
     }
 
     impl nmp_signer::SigningCapability for NoHookPendingSigner {
@@ -658,13 +656,11 @@ mod tests {
         }
 
         fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            nmp_signer::SignerOp::pending(
-                self.receiver
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .take()
-                    .expect("fixture signs once"),
-            )
+            self.operation
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+                .expect("fixture signs once")
         }
     }
 
@@ -680,12 +676,25 @@ mod tests {
 
         fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
             let signed = unsigned.sign_with_keys(&self.keys).unwrap();
-            let (tx, rx) = crossbeam_channel::unbounded();
+            let completion: Arc<Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>> =
+                Arc::new(Mutex::new(None));
+            let completion_for_cancel = Arc::clone(&completion);
             let cancellations = Arc::clone(&self.cancellations);
-            nmp_signer::SignerOp::pending_with_cancel(rx, move || {
-                cancellations.fetch_add(1, Ordering::SeqCst);
-                let _ = tx.send(Ok(signed));
-            })
+            let (sender, operation) =
+                nmp_signer::SignerOp::pending_channel_with_cancel(move || {
+                    cancellations.fetch_add(1, Ordering::SeqCst);
+                    if let Some(sender) = completion_for_cancel
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take()
+                    {
+                        let _ = sender.resolve(Ok(signed));
+                    }
+                });
+            *completion
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
+            operation
         }
     }
 
@@ -746,12 +755,20 @@ mod tests {
         }
 
         fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            let (tx, rx) = crossbeam_channel::unbounded();
+            let producer: Arc<Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>> =
+                Arc::new(Mutex::new(None));
+            let producer_for_cancel = Arc::clone(&producer);
             let cancellations = Arc::clone(&self.cancellations);
-            nmp_signer::SignerOp::pending_with_cancel(rx, move || {
-                cancellations.fetch_add(1, Ordering::SeqCst);
-                drop(tx);
-            })
+            let (sender, operation) =
+                nmp_signer::SignerOp::pending_channel_with_cancel(move || {
+                    cancellations.fetch_add(1, Ordering::SeqCst);
+                    producer_for_cancel
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take();
+                });
+            *producer.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
+            operation
         }
     }
 
@@ -828,11 +845,11 @@ mod tests {
         })
         .expect("engine must build");
         let keys = Keys::generate();
-        let (producer, receiver) = crossbeam_channel::unbounded();
+        let (producer, operation) = nmp_signer::SignerOp::pending_channel();
         engine
             .add_signer(NoHookPendingSigner {
                 public_key: keys.public_key(),
-                receiver: Mutex::new(Some(receiver)),
+                operation: Mutex::new(Some(operation)),
             })
             .unwrap();
         engine.set_active_account(Some(keys.public_key())).unwrap();
@@ -851,9 +868,10 @@ mod tests {
         assert_eq!(engine.native_task_census().admitted, 0);
         assert_eq!(engine.native_task_census().running, 0);
         assert!(
-            producer
-                .send(Err(nmp_signer::SignerError::Unavailable))
-                .is_err(),
+            matches!(
+                producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
+                Err(nmp_signer::PendingSignerResolveError::ReceiverDropped(_))
+            ),
             "the worker receiver must be dropped even while the producer is retained"
         );
         engine.shutdown();
@@ -867,11 +885,11 @@ mod tests {
         })
         .expect("engine must build");
         let keys = Keys::generate();
-        let (producer, receiver) = crossbeam_channel::unbounded();
+        let (producer, operation) = nmp_signer::SignerOp::pending_channel();
         engine
             .add_signer(NoHookPendingSigner {
                 public_key: keys.public_key(),
-                receiver: Mutex::new(Some(receiver)),
+                operation: Mutex::new(Some(operation)),
             })
             .unwrap();
         engine.set_active_account(Some(keys.public_key())).unwrap();
@@ -889,9 +907,10 @@ mod tests {
         assert_eq!(engine.native_task_census().admitted, 0);
         assert_eq!(engine.native_task_census().running, 0);
         assert!(
-            producer
-                .send(Err(nmp_signer::SignerError::Unavailable))
-                .is_err(),
+            matches!(
+                producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
+                Err(nmp_signer::PendingSignerResolveError::ReceiverDropped(_))
+            ),
             "shutdown must drop the worker receiver while the producer is retained"
         );
     }
