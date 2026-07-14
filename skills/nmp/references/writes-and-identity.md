@@ -17,9 +17,10 @@ Recovery has sharp edges:
 - A pre-acceptance conflict or failure can return a stream-local correlation id with no durable receipt row; reattaching that id returns not found.
 - Reattachment replays retained receipt state, terminal attempt outcomes, and current persistence-blocked facts. It does not reconstruct transient `Routed` or `Sent` history, so journal live statuses if the product needs that history after restart.
 - NMP exposes no receipt enumeration. Persist the id as soon as it is returned, but acknowledge the crash window after engine acceptance and before app persistence.
+- Native tracked/composed publish reserves and starts the receipt observer before write acceptance (and before taking a composed intent). A synchronous `ExecutorSaturated` or `ThreadUnavailable` therefore leaves no accepted obligation on that call path.
 - Restore the signer and active account so accepted unsigned work can resume. Receipt-channel closure alone is never delivery success; retain the mixed terminal facts already observed.
 
-Swift/Kotlin `Receipt` has no cancel handle. Cancelling the task or collector stops that UI observer; it does not cancel the engine-owned obligation. A production native app must restore its secret through app-owned secure storage, call account add and activation again, then reattach receipts. Only the explicitly insecure file account store performs automatic credential restoration.
+Swift/Kotlin `Receipt` has no cancel/detach handle. Cancelling the task or collector stops app consumption; it does not demonstrably detach the native receipt observer, and it does not cancel the engine-owned obligation. The bridge remains until its channel/engine closes; Kotlin's channel is unbounded, so keep one owned collector draining and avoid repeated attachment to the same id. A production native app must restore its secret through app-owned secure storage, call account add and activation again, then reattach receipts. Only the explicitly insecure file account store performs automatic credential restoration.
 
 There is no public cancel-write or app-controlled retry method. Do not invent retry buttons that call an absent API. A product may let the user compose a new intent, but that is a new publication decision and must not be described as retrying the same obligation.
 

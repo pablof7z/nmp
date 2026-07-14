@@ -11,6 +11,13 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `docs/design/native-task-executor.md`
 - Source: `docs/architecture/supported-surface.md`
 - Source: `docs/surface-change-log.md`
+- Source: `docs/builder/19-offline-sync.md`
+- Source: `docs/builder/22-diagnostics.md`
+- Source: `docs/builder/23-threading-lifecycle.md`
+- Source: `docs/builder/25-testing.md`
+- Source: `docs/builder/31-gallery.md`
+- Source: `docs/builder/32-extending.md`
+- Source: `docs/design/protocol-modules-and-composition.md`
 
 ## Direct Rust facade and value types
 
@@ -32,6 +39,8 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-nip29/src/lib.rs`
 - Source: `crates/nmp-signer/src/nip46.rs`
 - Source: `crates/nmp-signer/tests/nip46_mock_relay.rs`
+- Source: `crates/nmp-ownership/src/lib.rs`
+- Source: `crates/nmp-content/src/article.rs`
 
 ## FFI and native wrappers
 
@@ -41,6 +50,9 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-ffi/src/signer.rs`
 - Source: `Packages/NMP/Sources/NMP/Engine.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPError.swift`
+- Source: `Packages/NMP/Sources/NMP/Query.swift`
+- Source: `Packages/NMP/Sources/NMP/DiagnosticsQuery.swift`
+- Source: `Packages/NMP/Sources/NMP/InsecureFileAccountStore.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPFilter.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPDemand.swift`
 - Source: `Packages/NMP/Sources/NMP/Row.swift`
@@ -52,6 +64,9 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Tests/NMPTests/DiagnosticsTests.swift`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Engine.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPError.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Query.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/DiagnosticsQuery.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/InsecureFileAccountStore.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPFilter.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPDemand.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Row.kt`
@@ -67,12 +82,14 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Package.swift`
 - Source: `Packages/NMP/README.md`
 - Source: `Packages/NMP/Sources/NMP/Following.swift`
+- Source: `Packages/NMP/Sources/NMP/NIP29.swift`
 - Source: `Packages/NMP/Sources/NMPContent`
 - Source: `Packages/NMP/Sources/NMPUI`
 - Source: `Packages/NMPKotlin/README.md`
 - Source: `Packages/NMPKotlin/build.gradle.kts`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Content.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/ContentSession.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt`
 - Source: `scripts/build-swift-xcframework.sh`
 - Source: `scripts/build-kotlin-jvm.sh`
 
