@@ -136,7 +136,11 @@ impl<T: Send + 'static> SignerOp<T> {
         Self::Pending(PendingSignerOp::new(receiver, None))
     }
 
-    pub(crate) fn pending_with_cancel(
+    /// Construct an asynchronous operation with an adapter-owned cancellation
+    /// hook. Governed callers invoke the hook when their exact operation is
+    /// cancelled or the owning engine shuts down.
+    #[must_use]
+    pub fn pending_with_cancel(
         receiver: Receiver<Result<T, SignerError>>,
         cancel: impl FnOnce() + Send + 'static,
     ) -> Self {
