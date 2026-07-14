@@ -10,8 +10,13 @@
 // this-shape-well finding for #40's write-up.
 package com.nmp.sdk
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -32,16 +37,6 @@ class LiveRelayTest {
         suspend fun firstNonEmptyBatch(flow: Flow<RowBatch>, timeoutMs: Long): List<Row>? =
             withTimeoutOrNull(timeoutMs) {
                 flow.first { it.rows.isNotEmpty() }.rows
-            }
-
-        suspend fun firstSnapshotWithReceivedKind1(
-            flow: Flow<DiagnosticsSnapshot>,
-            timeoutMs: Long,
-        ): DiagnosticsSnapshot? =
-            withTimeoutOrNull(timeoutMs) {
-                flow.first { snapshot ->
-                    snapshot.relays.any { relay -> relay.eventsByKind.any { it.kind == 1u.toUShort() && it.count > 0u } }
-                }
             }
 
         fun followFeed(): NMPFilter =
@@ -97,28 +92,57 @@ class LiveRelayTest {
                 engine.setActiveAccount(FIATJAF_HEX)
 
                 val queryFlow = engine.observe(followFeed())
-                val rows = firstNonEmptyBatch(queryFlow, timeoutMs = 30_000)
-                assumeTrue(
-                    rows != null,
-                    "Observed no follow-feed rows within 30s from $INDEXER_RELAYS alone -- " +
-                        "diagnostics has nothing real to report in this test environment.",
-                )
+                val rowsReady = CompletableDeferred<List<Row>>()
+                val queryJob =
+                    launch {
+                        queryFlow.collect { batch ->
+                            if (batch.rows.isNotEmpty()) rowsReady.complete(batch.rows)
+                        }
+                    }
+                var diagnosticsJob: Job? = null
+                try {
+                    val rows = withTimeoutOrNull(30_000) { rowsReady.await() }
+                    assumeTrue(
+                        rows != null,
+                        "Observed no follow-feed rows within 30s from $INDEXER_RELAYS alone -- " +
+                            "diagnostics has nothing real to report in this test environment.",
+                    )
 
-                val snapshot = firstSnapshotWithReceivedKind1(engine.observeDiagnostics(), timeoutMs = 10_000)
-                assertTrue(
-                    snapshot != null,
-                    "expected a diagnostics snapshot reporting a real kind:1 event count, once the " +
-                        "follow feed had already produced rows",
-                )
+                    // Keep collecting `queryFlow` while diagnostics is sampled. `Flow.first`
+                    // would cancel the callbackFlow (and its native query handle) as soon as
+                    // rows arrived, removing the relay from the current diagnostics plan.
+                    val snapshotReady = CompletableDeferred<DiagnosticsSnapshot>()
+                    diagnosticsJob =
+                        launch {
+                            engine.observeDiagnostics().collect { snapshot ->
+                                val hasReceivedKind1 =
+                                    snapshot.relays.any { relay ->
+                                        relay.eventsByKind.any { it.kind == 1u.toUShort() && it.count > 0u }
+                                    }
+                                if (hasReceivedKind1) snapshotReady.complete(snapshot)
+                            }
+                        }
+                    val snapshot = withTimeoutOrNull(10_000) { snapshotReady.await() }
+                    assertTrue(
+                        snapshot != null,
+                        "expected a diagnostics snapshot reporting a real kind:1 event count, once the " +
+                            "follow feed had already produced rows",
+                    )
 
-                assertTrue(snapshot!!.relays.isNotEmpty())
-                val hasReceivedKind1 =
-                    snapshot.relays.any { relay -> relay.eventsByKind.any { it.kind == 1u.toUShort() && it.count > 0u } }
-                assertTrue(
-                    hasReceivedKind1,
-                    "at least one relay must show a real received kind:1 count, matching the rows " +
-                        "already observed",
-                )
+                    assertTrue(snapshot!!.relays.isNotEmpty())
+                    val hasReceivedKind1 =
+                        snapshot.relays.any { relay ->
+                            relay.eventsByKind.any { it.kind == 1u.toUShort() && it.count > 0u }
+                        }
+                    assertTrue(
+                        hasReceivedKind1,
+                        "at least one relay must show a real received kind:1 count, matching the rows " +
+                            "already observed",
+                    )
+                } finally {
+                    diagnosticsJob?.cancelAndJoin()
+                    queryJob.cancelAndJoin()
+                }
             }
         }
 
