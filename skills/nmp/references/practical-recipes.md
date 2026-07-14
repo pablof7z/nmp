@@ -42,7 +42,7 @@ Goal: show identity metadata and authored content without creating an app cache 
 2. Open a replaceable metadata query and the content query as separate live demands. Each owns its source evidence and cancellation.
 3. Let the profile/content resource layer parse row content if using `NMPContent`, and claim only nested reference occurrences/targets that must remain live; otherwise parse raw event content in app-owned presentation code.
 4. Keep one current profile projection for display, but do not persist it as an authority beside NMP's canonical store.
-5. If opening nested references, keep each claim/session in the view-model or feature owner and close claims before closing the containing session.
+5. If opening nested references, keep each claim/session in the view-model or feature owner. Cancel Swift claims before `stop()` on their session; close Kotlin claims before closing their session.
 6. Test profile replacement and removal as live snapshot changes, not one-shot fetch completion.
 
 This deliberately avoids a magic `loadProfileAndPosts` noun. NMP exposes composable live queries; the app owns the screen composition.
@@ -69,7 +69,7 @@ Rules:
 - The composed intent is take-once. A new user decision requires a freshly composed intent.
 - Keep the receipt id and observe all relay outcomes. One ACK is not universal delivery.
 
-For rich rendering, use Swift `NMPContent` resources or Kotlin `NMPContentClient(engine).session(...) -> NostrContentSession` for only a bounded visible-plus-prefetch window keyed by stable event id. Session policy limits are per session, not engine-global. Enforce a separate aggregate app permit pool before claiming a distinct target: use the reference-demand plan's `1 + helpers.count` as that target's query cost (one canonical query plus its helper queries), and cap the number of open row sessions independently. `claim(referenceId)` accepts an occurrence id from that session's parsed document and may return `nil`/`null`; it is not a row id or target key. Record the permits with the claim, then close claims and release their permits before closing the row's session on eviction.
+For rich rendering, use Swift `NMPContent` resources or Kotlin `NMPContentClient(engine).session(...) -> NostrContentSession` for only a bounded visible-plus-prefetch window keyed by stable event id. Session policy limits are per session, not engine-global. Enforce a separate aggregate app permit pool before claiming a distinct target: use the reference-demand plan's `1 + helpers.count` as that target's query cost (one canonical query plus its helper queries), and cap the number of open row sessions independently. `claim(referenceID:)` in Swift / `claim(referenceId)` in Kotlin accepts an occurrence id from that session's parsed document and may return `nil`/`null`; it is not a row id or target key. Record the permits with the claim, then cancel/close claims and release their permits before stopping/closing the row's session on eviction.
 
 ## Follow button and relationship state
 
@@ -98,7 +98,7 @@ Goal: accept a post offline, show honest delivery, and resume after process loss
 6. Distinguish attached, not found, and retained-but-unreadable. Reattachment does not reproduce every transient `Routed`/`Sent` fact; journal those live facts separately if the product needs a complete historical activity log.
 7. Remove the app's receipt pointer only under explicit product retention policy after terminal evidence has been handled.
 
-There is one lost-id window because receipt enumeration does not exist: process loss after a successful return but before app persistence. Native receipt-drain admission now occurs before write acceptance, so synchronous `ExecutorSaturated` or `ThreadUnavailable` does not create an unknown accepted obligation. State the crash limitation rather than claiming perfect app-level recovery, and do not blindly publish a replacement when an earlier successful return may have been lost by the process.
+Receipt bridge admission now happens before core acceptance, so executor saturation or OS-thread refusal returns without an accepted obligation; composed publication also leaves its take-once intent unconsumed on this refusal path. One lost-id window remains because receipt enumeration does not exist: process loss after a successful return but before app persistence. State that limitation rather than claiming perfect app-level recovery, and do not blindly publish a replacement for an obligation whose id is unknown.
 
 ## Relay-debug sheet
 
@@ -127,7 +127,7 @@ Goal: render immediately while keeping work and UI bounded.
 
 Goal: connect a remote signer without treating OS launch as readiness.
 
-1. Create an invitation and begin `connectNip46` before launching the signer URI.
+1. Create an invitation and derive/cache its signer-specific URI or Android handoff while the invitation is still live. Invitation connection consumes it, so materializing the handoff afterward fails. Then begin `connectNip46`, start state observation, and only then launch the cached handoff.
 2. On iOS, query only declared schemes. On Android, use the exact package from `androidHandoff` and launch explicitly to that package.
 3. Observe connection states and wait for `ready`; a successful `open`/`startActivity` is only handoff evidence.
 4. Activate `ready`'s user pubkey with `setActiveAccount` before an unsigned operation such as `groupMessageIntent`. Signer registration does not select the active account.

@@ -1,6 +1,6 @@
 # Current surface and gaps
 
-Verified-Revision: `618573a63a6dbae6aa259e8327e32fd9157bd338`
+Verified-Revision: `25e85876c73fa30bea06d999bc1e2d39a004120a`
 
 Verified on 2026-07-14. This pins the declared product/source authorities, not the skill package commit. Recheck the [source map](source-map.md) when any declared authority changes; the validator accepts newer skill-only commits when those sources have not drifted.
 
@@ -29,7 +29,8 @@ Mechanism crates and generated `NMPFFI`/`uniffi.nmp_ffi` bindings are implementa
 | Arbitrary signer registration | Rust only, with public `add_signer` | NIP-46 helpers, not arbitrary Rust capabilities | NIP-46 helpers, not arbitrary Rust capabilities |
 | Diagnostics stream | yes | yes, narrower snapshot | yes, narrower snapshot |
 | Native task ceiling | `EngineConfig.max_native_tasks`, default 12 | `NMPConfig.maxNativeTasks`, default 12 | `NMPConfig.maxNativeTasks`, default 12 |
-| Engine/query observation refusal | ordinary `Engine::observe`: `ThreadUnavailable`; NIP-02 observation: `ExecutorSaturated` or `ThreadUnavailable` | synchronous `NMPError.executorSaturated` or `.threadUnavailable` | synchronous `NMPError.ExecutorSaturated` or `.ThreadUnavailable` |
+| Engine construction / ordinary query refusal | `EngineError::ThreadUnavailable`; ordinary `Engine::observe` uses no native-executor slot | native bridge: synchronous `NMPError.executorSaturated` or `.threadUnavailable` | collection-time `NMPError.ExecutorSaturated` or `.ThreadUnavailable` |
+| NIP-02 observation refusal | `EngineError::ExecutorSaturated` or `EngineError::ThreadUnavailable` | synchronous matching `NMPError` | following observation not exposed |
 | NIP-02 action-worker refusal | terminal `FollowActionStatus::Failed` with `ExecutorSaturated` or `ThreadUnavailable` | terminal `NMPFollowActionFailure.executorSaturated` or `.threadUnavailable` | following action not exposed |
 | Initial NIP-46 connection refusal | matching `Nip46Error` from `Nip46Invitation::connect*` / `Nip46Signer::connect_bunker*` | synchronous matching outer `NMPError`; post-handle inner `.failed` | synchronous matching outer `NMPError`; post-handle inner `Failed` then `Closed` |
 | NIP-02 following action | direct Rust protocol facade and Swift | yes | not on ergonomic Kotlin `NMPEngine` |
@@ -49,8 +50,8 @@ Mechanism crates and generated `NMPFFI`/`uniffi.nmp_ffi` bindings are implementa
 - Kotlin is a desktop JVM falsifier, not an Android AAR. Android OS handoff code belongs to the host; NIP-55 execution and Compose UI are not shipped.
 - NIP-02 follow/unfollow preserves an existing contact list and refuses a missing base. First contact-list creation is a separate, unshipped policy.
 - Every engine now owns a finite, zero-queue native-task executor for observer/action drains, signer waiters/mappers, and engine-associated NIP-46 work. The default `max_native_tasks`/`maxNativeTasks` is 12. Saturation is a typed `ExecutorSaturated` refusal before ownership transfer; OS spawn refusal remains the separate typed `ThreadUnavailable`. After a native NIP-46 connection handle exists, an inner session/relay-worker failure is instead an immediate streamed failure reason followed by closure; do not parse that string back into a typed error or call it a timeout. Direct-Rust NIP-46 sessions created without an engine each own a finite executor, but the application still controls how many such independent sessions exist, so this is not a process-global thread bound.
-- Content-session query multiplication is likewise not engine-global: session limits are per session, and each active target may open canonical and helper observations. Native receipt bridges use unbounded status channels and expose no detach handle.
-- Native publish and composed-publish reserve and start the receipt drain before accepting the write (and before consuming the composed intent). `ExecutorSaturated` or `ThreadUnavailable` therefore leaves no accepted obligation on that synchronous failure path. Receipt enumeration is still absent, so a process crash after a successful return but before app persistence can lose the id.
+- Content-session policy limits remain per session, and each active target may consume one canonical plus multiple helper observations from the shared engine executor. Keep a separate app-level aggregate permit budget. Native receipt bridges still expose no detach handle.
+- Native tracked/composed publish reserves and starts its receipt-observer bridge before core acceptance, and composed publish does so before consuming the take-once intent. Executor saturation or bridge-thread refusal therefore returns synchronously without accepting a write or consuming that composed intent; the remaining lost-id risk is process loss after a successful return but before app persistence because receipt enumeration is absent.
 
 ## Raw UniFFI parity seam
 

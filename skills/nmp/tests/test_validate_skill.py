@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -98,9 +99,12 @@ class SkillValidationTests(unittest.TestCase):
         self.assert_rejected(self.run_validator(), "declared source escapes repository root")
 
     def test_mismatched_verified_revisions_are_rejected(self) -> None:
+        skill_text = (self.skill / "SKILL.md").read_text(encoding="utf-8")
+        revision = re.search(r"Verified-Revision: `([0-9a-f]{40})`", skill_text)
+        self.assertIsNotNone(revision)
         self.replace(
             "SKILL.md",
-            "618573a63a6dbae6aa259e8327e32fd9157bd338",
+            revision.group(1),
             "0000000000000000000000000000000000000000",
         )
         self.assert_rejected(self.run_validator(), "Verified-Revision pins do not match")
