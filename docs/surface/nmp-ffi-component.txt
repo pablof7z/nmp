@@ -3390,13 +3390,13 @@ record Record {
             type_: UInt32,
             default: Some(
                 UInt(
-                    0,
+                    10,
                     Decimal,
                     UInt32,
                 ),
             ),
             docstring: Some(
-                "OPT-IN, defense-in-depth ceiling on concurrently-connected relays\n(issue #121). `0` imposes no cap; a non-zero value refuses relay dials\npast it and counts them in the diagnostics `relays_rejected_over_cap`.\nNOT the primary worker-exhaustion defense — fan-out is already bounded\nby `nmp-router`'s solver cap; this is a coarse absolute backstop.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror. The default VALUE itself is an\nopen owner decision (sane cap vs. uncapped, issue #121); `0` is the\ninterim uncapped placeholder.",
+                "The one whole-engine relay ceiling. It bounds the complete compiled\ndemand and the transport worker set with the same effective value.\nLegacy zero is normalized to the finite default, never uncapped.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror.",
             ),
         },
     ],

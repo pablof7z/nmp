@@ -138,7 +138,7 @@ pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
 impl core::clone::Clone for nmp::EngineConfig
 pub fn nmp::EngineConfig::clone(&self) -> nmp::EngineConfig
 impl core::default::Default for nmp::EngineConfig
-pub fn nmp::EngineConfig::default() -> nmp::EngineConfig
+pub fn nmp::EngineConfig::default() -> Self
 impl core::fmt::Debug for nmp::EngineConfig
 pub fn nmp::EngineConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for nmp::EngineConfig

@@ -139,9 +139,10 @@ pub enum ShortfallFact {
     /// `sources` list, which an app could misread as "nothing left to
     /// prove" rather than "nothing has been asked for yet".
     NoResolvedDemand,
-    /// An explicit local cap prevented full acquisition. Reserved: no path
-    /// on this frame constructs it yet (no local-limit source exists on
-    /// the read path today).
+    /// The one whole-demand relay ceiling removed at least one otherwise-
+    /// routable source for this atom. The atom may still have partial
+    /// `sources`; this fact prevents that subset from masquerading as the
+    /// complete requested acquisition.
     LocalLimit { atom: ConcreteFilter },
 }
 
@@ -192,6 +193,7 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
 
     for atom in subtree_atoms {
         let key = coverage_key(atom);
+        let locally_limited = plan.limited.contains(&key);
         let covering: Vec<&RelayUrl> = plan
             .reqs
             .iter()
@@ -202,10 +204,18 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
             })
             .collect();
 
-        if covering.is_empty() {
-            shortfall.push(ShortfallFact::NoPlannedSource {
+        if locally_limited {
+            shortfall.push(ShortfallFact::LocalLimit {
                 atom: atom.filter.clone(),
             });
+        }
+
+        if covering.is_empty() {
+            if !locally_limited {
+                shortfall.push(ShortfallFact::NoPlannedSource {
+                    atom: atom.filter.clone(),
+                });
+            }
             continue;
         }
 
@@ -243,4 +253,82 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         .collect();
 
     AcquisitionEvidence { sources, shortfall }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nmp_router::{SubId, WireReq};
+    use nmp_store::MemoryStore;
+
+    fn atom() -> ContextualAtom {
+        ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([1])),
+                authors: Some(BTreeSet::from(["aa".repeat(32)])),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::AuthorOutboxes,
+            access: AccessContext::Public,
+        }
+    }
+
+    #[test]
+    fn a_partially_planned_atom_keeps_local_limit_evidence() {
+        let atom = atom();
+        let key = coverage_key(&atom);
+        let relay = RelayUrl::parse("wss://relay.example").unwrap();
+        let req = WireReq {
+            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access),
+            filter: atom.filter.clone(),
+            provenance: Vec::new(),
+            absorbed: BTreeSet::from([key]),
+        };
+        let plan = RelayPlan {
+            reqs: BTreeMap::from([(relay.clone(), vec![req])]),
+            limited: BTreeSet::from([key]),
+            refused_relays: BTreeSet::from([RelayUrl::parse("wss://refused.example").unwrap()]),
+        };
+
+        let evidence = acquisition_evidence(
+            &BTreeSet::from([atom.clone()]),
+            &plan,
+            &MemoryStore::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(evidence.sources.len(), 1);
+        assert_eq!(evidence.sources[0].relay, relay);
+        assert_eq!(
+            evidence.shortfall,
+            vec![ShortfallFact::LocalLimit { atom: atom.filter }]
+        );
+    }
+
+    #[test]
+    fn a_fully_refused_atom_reports_limit_not_no_source() {
+        let atom = atom();
+        let key = coverage_key(&atom);
+        let plan = RelayPlan {
+            limited: BTreeSet::from([key]),
+            refused_relays: BTreeSet::from([RelayUrl::parse("wss://refused.example").unwrap()]),
+            ..RelayPlan::default()
+        };
+
+        let evidence = acquisition_evidence(
+            &BTreeSet::from([atom.clone()]),
+            &plan,
+            &MemoryStore::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        );
+
+        assert!(evidence.sources.is_empty());
+        assert_eq!(
+            evidence.shortfall,
+            vec![ShortfallFact::LocalLimit { atom: atom.filter }]
+        );
+    }
 }

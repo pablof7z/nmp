@@ -15,7 +15,7 @@
 //! worker — the pool already knows the outcome the instant it decides to
 //! tear a slot down, so there is nothing to learn from an async ack.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -30,7 +30,7 @@ use super::verify::{self, VerificationOutcome, VerifierPool};
 use super::worker::{
     pack_generation, worker_id_of, WorkerCommand, WorkerEvent, WorkerEventKind, WorkerHandle,
 };
-use super::{DisconnectReason, PoolConfig, PoolEvent, PoolEventSink};
+use super::{DisconnectReason, PoolConfig, PoolEvent, PoolEventSink, RelayOpenError};
 
 struct SlotState {
     url: RelayUrl,
@@ -71,14 +71,17 @@ pub(super) struct PoolInner {
     /// would have taken the pool past `config.max_relays` LIVE workers (issue
     /// #121, the worker-exhaustion half). Monotonic; read (never reset) by
     /// [`super::Pool::admission_rejections`] so the engine can fold it into
-    /// its diagnostics rejection counter. `config.max_relays == 0` disables
-    /// the cap entirely, so this only ever moves when an operator configured
-    /// a real ceiling.
+    /// its diagnostics rejection counter. Zero is normalized to the finite
+    /// default during construction.
     relays_rejected_over_cap: u64,
 }
 
 impl PoolInner {
     pub(super) fn new(config: PoolConfig, sink: Arc<dyn PoolEventSink>) -> Arc<Mutex<Self>> {
+        let mut config = config;
+        if config.max_relays == 0 {
+            config.max_relays = super::DEFAULT_MAX_RELAYS;
+        }
         let (worker_event_tx, worker_event_rx) =
             mpsc::sync_channel::<WorkerEvent>(config.ingest_queue_capacity.max(1));
         let translator_config = config.clone();
@@ -140,15 +143,35 @@ impl PoolInner {
         self.open_new(url.clone())
     }
 
+    pub(super) fn live_handle(&self, url: &RelayUrl) -> Option<RelayHandle> {
+        let slot = *self.url_to_slot.get(url)?;
+        let state = self.slots.get(slot as usize)?;
+        state.worker.as_ref()?;
+        Some(RelayHandle {
+            slot,
+            generation: state.generation,
+        })
+    }
+
+    /// Explain the invalid handle returned by [`Self::ensure_open`]. This is
+    /// kept next to the private sentinel implementation; the public facade
+    /// converts it into a typed result before the handle can escape.
+    pub(super) fn open_refusal(&self) -> RelayOpenError {
+        if self.shutdown {
+            RelayOpenError::ShuttingDown
+        } else {
+            RelayOpenError::AtCapacity {
+                max_relays: self.config.max_relays,
+            }
+        }
+    }
+
     /// The relay-count admission cap (issue #121): with a configured
-    /// `max_relays > 0`, refuse to bring a NEW live worker up once
-    /// `max_relays` workers are already live. `max_relays == 0` (the
-    /// [`PoolConfig::default`] value every existing call site uses) disables
-    /// the cap, so this is a pure no-op unless an operator sets a real
-    /// ceiling — the worker-exhaustion backstop stays dormant by default.
+    /// refuse to bring a NEW live worker up once `max_relays` workers are
+    /// already live. Construction normalizes zero to
+    /// [`super::DEFAULT_MAX_RELAYS`], so there is no uncapped sentinel.
     fn would_exceed_relay_cap(&self) -> bool {
-        let cap = self.config.max_relays;
-        cap != 0 && self.live_worker_count() >= cap
+        self.live_worker_count() >= self.config.max_relays
     }
 
     /// Distinct relays currently backed by a live worker (a slot whose
@@ -275,6 +298,27 @@ impl PoolInner {
             slot: h.slot,
             reason: DisconnectReason::Closed,
         })
+    }
+
+    /// Release every live slot not present in the caller-owned exact demand
+    /// set. Handles are snapshotted first so [`Self::close`] remains the one
+    /// generation-safe mutation door and produces the ordinary synchronous
+    /// disconnect fact for every released worker.
+    pub(super) fn close_unrequired(&mut self, required: &BTreeSet<RelayUrl>) -> Vec<PoolEvent> {
+        let obsolete: Vec<RelayHandle> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| state.worker.is_some() && !required.contains(&state.url))
+            .map(|(slot, state)| RelayHandle {
+                slot: u32::try_from(slot).expect("pool slot id already fit u32 at allocation"),
+                generation: state.generation,
+            })
+            .collect();
+        obsolete
+            .into_iter()
+            .filter_map(|handle| self.close(handle))
+            .collect()
     }
 
     /// Tear down every open worker, hand back the translator's `JoinHandle`
@@ -871,22 +915,30 @@ mod tests {
         );
     }
 
-    /// The default (`max_relays: 0`) must impose NO ceiling — every existing
-    /// call site constructs the pool with `PoolConfig::default()`, so the
-    /// cap must stay dormant until an operator opts in.
+    /// Zero is a legacy/default spelling, not an uncapped bypass. It is
+    /// normalized to the finite safe default at construction.
     #[test]
-    fn zero_max_relays_imposes_no_cap() {
-        let (inner, _rx) = test_pool();
+    fn zero_max_relays_normalizes_to_the_safe_default() {
+        let (tx, _rx) = mpsc::channel();
+        let inner = PoolInner::new(
+            PoolConfig {
+                max_relays: 0,
+                ..PoolConfig::default()
+            },
+            Arc::new(Collector(tx)),
+        );
         let mut guard = inner.lock().unwrap();
-        for i in 0..8 {
+        for i in 0..crate::DEFAULT_MAX_RELAYS {
             let url = RelayUrl::parse(&format!("wss://relay{i}.example")).unwrap();
             assert_ne!(
                 guard.ensure_open(&url).slot,
                 u32::MAX,
-                "max_relays: 0 must never refuse a relay"
+                "the finite default must admit its budget"
             );
         }
-        assert_eq!(guard.relays_rejected_over_cap(), 0);
+        let over = RelayUrl::parse("wss://over-default.example").unwrap();
+        assert_eq!(guard.ensure_open(&over).slot, u32::MAX);
+        assert_eq!(guard.relays_rejected_over_cap(), 1);
     }
 
     #[test]
@@ -1237,7 +1289,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), tx);
         let url = RelayUrl::parse("wss://relay.example").unwrap();
-        let h1 = pool.ensure_open(&url);
+        let h1 = pool.ensure_open(&url).expect("relay admitted");
         assert!(pool.close(h1).is_some());
 
         let correlation = AttemptCorrelation(42);
@@ -1248,6 +1300,32 @@ mod tests {
         );
         assert!(rx.try_recv().is_err(), "immediate resolution stays local");
         pool.shutdown();
+    }
+
+    #[test]
+    fn public_open_boundary_returns_typed_capacity_and_shutdown_refusals() {
+        let (tx, _rx) = mpsc::channel();
+        let pool = Pool::new(
+            PoolConfig {
+                max_relays: 1,
+                ..PoolConfig::default()
+            },
+            tx,
+        );
+        let admitted = RelayUrl::parse("wss://admitted.example").unwrap();
+        let refused = RelayUrl::parse("wss://refused.example").unwrap();
+
+        assert!(pool.ensure_open(&admitted).is_ok());
+        assert_eq!(
+            pool.ensure_open(&refused),
+            Err(crate::pool::RelayOpenError::AtCapacity { max_relays: 1 })
+        );
+
+        pool.shutdown();
+        assert_eq!(
+            pool.ensure_open(&admitted),
+            Err(crate::pool::RelayOpenError::ShuttingDown)
+        );
     }
 
     #[test]

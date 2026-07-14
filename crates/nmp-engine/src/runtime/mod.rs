@@ -73,7 +73,7 @@ use nmp_signer::{SignerOp, SigningCapability};
 use nmp_store::EventStore;
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp};
 
-use nmp_transport::{DurableSendOutcome, Pool, PoolConfig, PoolEvent, WireFrame};
+use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
@@ -337,13 +337,24 @@ impl EngineThread {
         store: S,
         directory: D,
         cap: usize,
-        pool_config: PoolConfig,
+        mut pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
     ) -> (Self, Handle)
     where
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
+        // One limit owns both compilation and connection admission. Legacy
+        // zero values select the finite default; conflicting mechanism-test
+        // inputs fail closed to the smaller non-zero ceiling.
+        let cap = match (cap, pool_config.max_relays) {
+            (0, 0) => nmp_transport::DEFAULT_MAX_RELAYS,
+            (0, pool) => pool,
+            (router, 0) => router,
+            (router, pool) => router.min(pool),
+        };
+        pool_config.max_relays = cap;
+
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let (pool_evt_tx, pool_evt_rx) =
@@ -650,6 +661,208 @@ mod pool_bridge_tests {
     }
 }
 
+#[cfg(test)]
+// The closed-surface falsifier scans this module's code lines for the token
+// `relays:`. Assigning the cap after `Default` keeps a pool fixture from
+// masquerading as a forbidden bare-relay method parameter in that scan.
+#[allow(clippy::field_reassign_with_default)]
+mod relay_worker_reconciliation_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+    use nostr::{Keys, Kind, UnsignedEvent};
+
+    struct NullReceiptSink;
+
+    impl ReceiptSink for NullReceiptSink {
+        fn on_status(&self, _status: WriteStatus) {}
+    }
+
+    fn query(author: &str) -> LiveQuery {
+        LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1])),
+            authors: Some(Binding::Literal(BTreeSet::from([author.to_string()]))),
+            ..Filter::default()
+        })
+    }
+
+    /// #20 churn falsifier: a cap-sized old plan must release its historical
+    /// worker set before a disjoint replacement plan dials. Before exact
+    /// reconciliation, the first worker stayed live after its last `CLOSE`,
+    /// so the replacement `ensure_open` was refused forever even though the
+    /// current router plan itself contained exactly one relay under cap=1.
+    #[test]
+    fn cap_sized_plan_can_replace_every_relay_without_stranding_new_demand() {
+        let author_a = "aa".repeat(32);
+        let author_b = "bb".repeat(32);
+        let relay_a = RelayUrl::parse("wss://relay-a.example").unwrap();
+        let relay_b = RelayUrl::parse("wss://relay-b.example").unwrap();
+        let directory = FixtureDirectory::new()
+            .with_write(author_a.clone(), [relay_a.clone()])
+            .with_write(author_b.clone(), [relay_b.clone()]);
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let mut config = PoolConfig::default();
+        config.max_relays = 1;
+        let pool = Pool::new(config, pool_tx);
+        let mut rows = HashMap::new();
+        let mut diagnostics = HashMap::new();
+        let mut preambles = Preambles::new();
+        let registry = SignerRegistry::default();
+        let (self_inbox, _inbox_rx) = mpsc::channel();
+
+        let first = core.handle(EngineMsg::Subscribe(
+            query(&author_a),
+            Box::new(NullRowSink),
+        ));
+        let first_id = first
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, ..) => Some(*id),
+                _ => None,
+            })
+            .expect("subscription emits its initial rows");
+        dispatch_core_effects(
+            &core,
+            first,
+            &pool,
+            &mut rows,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            &self_inbox,
+        );
+        assert!(pool.live_handle(&relay_a).is_some());
+
+        let withdrawn = core.handle(EngineMsg::Unsubscribe(first_id));
+        dispatch_core_effects(
+            &core,
+            withdrawn,
+            &pool,
+            &mut rows,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            &self_inbox,
+        );
+        assert!(
+            pool.live_handle(&relay_a).is_none(),
+            "a relay with no read or write owner must release its slot"
+        );
+
+        let replacement = core.handle(EngineMsg::Subscribe(
+            query(&author_b),
+            Box::new(NullRowSink),
+        ));
+        dispatch_core_effects(
+            &core,
+            replacement,
+            &pool,
+            &mut rows,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            &self_inbox,
+        );
+        assert!(
+            pool.live_handle(&relay_b).is_some(),
+            "the in-budget replacement relay must acquire the freed slot"
+        );
+        assert_eq!(
+            pool.admission_rejections(),
+            0,
+            "correct release ordering must avoid a transient cap refusal"
+        );
+
+        pool.shutdown();
+    }
+
+    /// Exact read reconciliation must not evict a worker owned only by a
+    /// durable write lane. A socket is shared transport state: releasing it
+    /// from the router plan is safe only after every nonterminal outbox lane
+    /// for that relay is also gone.
+    #[test]
+    fn durable_write_lane_retains_worker_without_read_demand() {
+        let author = Keys::generate();
+        let relay = RelayUrl::parse("wss://write-only.example").unwrap();
+        let directory =
+            FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+
+        let unsigned = UnsignedEvent::new(
+            author.public_key(),
+            Timestamp::from(1),
+            Kind::TextNote,
+            Vec::new(),
+            "write owns its worker",
+        );
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+            },
+            Box::new(NullReceiptSink),
+        ));
+        let (receipt_id, generation, unsigned) = accepted
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(id, generation, unsigned) => Some((id, generation, unsigned)),
+                _ => None,
+            })
+            .expect("durable unsigned write requests signing");
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let ready = core.handle(EngineMsg::SignerCompleted(
+            receipt_id,
+            generation,
+            Ok(signed),
+        ));
+
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let mut config = PoolConfig::default();
+        config.max_relays = 1;
+        let pool = Pool::new(config, pool_tx);
+        let mut rows = HashMap::new();
+        let mut diagnostics = HashMap::new();
+        let mut preambles = Preambles::new();
+        let registry = SignerRegistry::default();
+        let (self_inbox, _inbox_rx) = mpsc::channel();
+
+        dispatch_core_effects(
+            &core,
+            ready,
+            &pool,
+            &mut rows,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            &self_inbox,
+        );
+        assert!(pool.live_handle(&relay).is_some());
+
+        dispatch_core_effects(
+            &core,
+            Vec::new(),
+            &pool,
+            &mut rows,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            &self_inbox,
+        );
+        assert!(
+            pool.live_handle(&relay).is_some(),
+            "a nonterminal durable lane remains a worker owner"
+        );
+
+        pool.shutdown();
+    }
+}
+
 /// `PoolEvent` -> `EngineMsg` (plan §2/§3.4). Generation safety is already
 /// enforced BEFORE this point: `nmp_transport::Pool`'s own translator drops
 /// any frame/connect event tagged with a superseded generation before it
@@ -728,7 +941,8 @@ fn engine_loop<S, D>(
     // rows already live in the store; this only rebuilds ownership and may
     // replay exact durable attempt bytes whose Started fact was committed.
     let recovery_effects = core.recover_on_boot();
-    dispatch_effects(
+    dispatch_core_effects(
+        &core,
         recovery_effects,
         &pool,
         &mut row_channels,
@@ -753,7 +967,8 @@ fn engine_loop<S, D>(
                     // the mechanism, then re-arm from the NEW next_deadline
                     // rather than acting on the one that just fired.
                     let effects = core.handle(EngineMsg::Tick(Timestamp::now()));
-                    dispatch_effects(
+                    dispatch_core_effects(
+                        &core,
                         effects,
                         &pool,
                         &mut row_channels,
@@ -771,7 +986,8 @@ fn engine_loop<S, D>(
             Cmd::Shutdown => break,
             Cmd::RelayBatch { frames, applied } => {
                 let effects = core.handle(EngineMsg::RelayFrames(frames));
-                dispatch_effects(
+                dispatch_core_effects(
+                    &core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -787,7 +1003,8 @@ fn engine_loop<S, D>(
                 let _ = reply.send(result.clone());
                 if let Ok(registration) = result {
                     let effects = core.handle(EngineMsg::SignerAttached(registration.public_key()));
-                    dispatch_effects(
+                    dispatch_core_effects(
+                        &core,
                         effects,
                         &pool,
                         &mut row_channels,
@@ -813,7 +1030,9 @@ fn engine_loop<S, D>(
                 // the relay-cap rejection count too, not only the ones fanned
                 // out later.
                 let mut snapshot = core.diagnostics_snapshot();
-                snapshot.relays_rejected_over_cap = pool.admission_rejections();
+                snapshot.relays_rejected_over_cap = snapshot
+                    .relays_rejected_over_cap
+                    .saturating_add(pool.admission_rejections());
                 tx.send(snapshot);
                 if reply.send((id, rx)).is_err() {
                     // Caller already gave up -- nothing to register.
@@ -838,7 +1057,8 @@ fn engine_loop<S, D>(
                 let result = publish_result(&publish_effects);
                 let _ = reply.send(result);
                 effects.extend(publish_effects);
-                dispatch_effects(
+                dispatch_core_effects(
+                    &core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -868,10 +1088,21 @@ fn engine_loop<S, D>(
                     // immediately rather than leak a live demand atom nobody
                     // will ever read from.
                     row_channels.remove(&id);
-                    let _ = core.handle(EngineMsg::Unsubscribe(id));
+                    let withdraw = core.handle(EngineMsg::Unsubscribe(id));
+                    dispatch_core_effects(
+                        &core,
+                        withdraw,
+                        &pool,
+                        &mut row_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        self_inbox,
+                    );
                     continue;
                 }
-                dispatch_effects(
+                dispatch_core_effects(
+                    &core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -885,7 +1116,8 @@ fn engine_loop<S, D>(
                 let effects = core.handle(EngineMsg::Unsubscribe(id));
                 // Drop the sender: the app's `Receiver` observes disconnect.
                 row_channels.remove(&id);
-                dispatch_effects(
+                dispatch_core_effects(
+                    &core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -899,7 +1131,8 @@ fn engine_loop<S, D>(
                 // P3: active identity is a reactive read input. Accepted
                 // writes separately pin their exact author at acceptance.
                 let effects = core.handle(EngineMsg::SetActivePubkey(pk));
-                dispatch_effects(
+                dispatch_core_effects(
+                    &core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -916,7 +1149,8 @@ fn engine_loop<S, D>(
                 // clock would remain zero until its first unrelated deadline.
                 let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
                 effects.extend(core.handle(EngineMsg::Publish(intent, sink)));
-                dispatch_effects(
+                dispatch_core_effects(
+                    &core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -928,7 +1162,8 @@ fn engine_loop<S, D>(
             }
             Cmd::Engine(msg) => {
                 let effects = core.handle(msg);
-                dispatch_effects(
+                dispatch_core_effects(
+                    &core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -951,6 +1186,45 @@ fn engine_loop<S, D>(
     // pool shutdown joins the translator.
     drop(pool_stop_tx);
     pool.shutdown();
+}
+
+/// Release workers no longer owned by the reducer, then execute its effects.
+/// Release MUST happen first: when a cap-sized plan replaces every relay,
+/// keeping the old workers through `apply_wire_delta` would make every new
+/// `ensure_open` fail even though the new plan itself is within the cap.
+/// `required_relay_workers` includes nonterminal durable/ephemeral write work,
+/// so this cannot evict a worker merely because its last read REQ vanished.
+// Deliberately mirrors `dispatch_effects`' reviewed runtime destinations and
+// adds only the reducer reference needed for exact ownership reconciliation.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_core_effects<S: EventStore>(
+    core: &EngineCore<S>,
+    effects: Vec<Effect>,
+    pool: &Pool,
+    row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
+    preambles: &mut Preambles,
+    registry: &SignerRegistry,
+    self_inbox: &Sender<Cmd>,
+) {
+    if let Some(required) = core.required_relay_workers() {
+        for event in pool.close_unrequired(&required) {
+            if let Some(msg) = translate_pool_event(event) {
+                let _ = self_inbox.send(Cmd::Engine(msg));
+            }
+        }
+        preambles.retain(|relay, _| required.contains(relay));
+    }
+
+    dispatch_effects(
+        effects,
+        pool,
+        row_channels,
+        diag_channels,
+        preambles,
+        registry,
+        self_inbox,
+    );
 }
 
 /// Execute every `Effect` `EngineCore::handle` returned, in order.
@@ -989,7 +1263,13 @@ fn dispatch_effect(
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::Replay(url, reqs) => apply_replay(&url, reqs, pool, preambles),
         Effect::PublishEvent(url, event, correlation) => {
-            let handle = pool.ensure_open(&url);
+            let Ok(handle) = pool.ensure_open(&url) else {
+                let _ = self_inbox.send(Cmd::Engine(EngineMsg::EventHandoff(
+                    correlation,
+                    HandoffResult::NotHandedOff,
+                )));
+                return;
+            };
             let json = ClientMessage::event(event).as_json();
             if let DurableSendOutcome::Resolved(result) =
                 pool.send_durable(handle, correlation, WireFrame::Text(json))
@@ -998,7 +1278,11 @@ fn dispatch_effect(
             }
         }
         Effect::EnsureRelay(url) => {
-            pool.ensure_open(&url);
+            // The durable lane is already persisted as WaitingConnection.
+            // A typed cap refusal remains observable in pool diagnostics and
+            // must not be converted back into an invalid handle or a busy
+            // retry loop here.
+            let _refusal = pool.ensure_open(&url).err();
         }
         // The signer frozen into this exact accepted template is looked up
         // by pubkey on every request. A later active-account switch cannot
@@ -1068,7 +1352,9 @@ fn dispatch_effect(
             // both the core-built snapshot AND the `Pool`, so it stitches the
             // count in here before fan-out. Idempotent per snapshot (a fresh
             // read each time), monotonic across snapshots.
-            snapshot.relays_rejected_over_cap = pool.admission_rejections();
+            snapshot.relays_rejected_over_cap = snapshot
+                .relays_rejected_over_cap
+                .saturating_add(pool.admission_rejections());
             // Fan out to every currently-registered observer (M5 plan §1.2
             // step 4) -- each observer's own `LatestSender` overwrites its
             // own slot, so a slow consumer only ever sees the newest
@@ -1089,23 +1375,31 @@ fn dispatch_effect(
             // its synchronous reply. There is no receipt stream to fan out.
         }
         Effect::StartProbe(url, sub_id, filter, initial_hex) => {
-            let handle = pool.ensure_open(&url);
+            let Ok(handle) = pool.ensure_open(&url) else {
+                return;
+            };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegOpen(probed, sub_id, filter, initial_hex) => {
             let relay = probed.url().clone();
-            let handle = pool.ensure_open(&relay);
+            let Ok(handle) = pool.ensure_open(&relay) else {
+                return;
+            };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegMsg(relay, sub_id, message_hex) => {
-            let handle = pool.ensure_open(&relay);
+            let Ok(handle) = pool.ensure_open(&relay) else {
+                return;
+            };
             let text = neg_msg_frame_text(&sub_id, message_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegClose(relay, sub_id) => {
-            let handle = pool.ensure_open(&relay);
+            let Ok(handle) = pool.ensure_open(&relay) else {
+                return;
+            };
             let text = neg_close_frame_text(&sub_id);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
@@ -1158,7 +1452,22 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
 /// here.
 fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
     for (relay, ops) in &delta.ops {
-        let handle = pool.ensure_open(relay);
+        let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
+        let handle = if has_req {
+            let Ok(handle) = pool.ensure_open(relay) else {
+                continue;
+            };
+            handle
+        } else {
+            // A close-only delta must never reopen a worker already released
+            // by exact relay-demand reconciliation. Socket teardown already
+            // withdrew every subscription on that connection.
+            let Some(handle) = pool.live_handle(relay) else {
+                preambles.remove(relay);
+                continue;
+            };
+            handle
+        };
         let entry = preambles.entry(relay.clone()).or_default();
         for op in ops {
             match op {
@@ -1191,7 +1500,9 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
 /// idempotent overwrite (NIP-01: a REQ with an existing sub-id replaces that
 /// sub).
 fn apply_replay(url: &RelayUrl, reqs: Vec<WireReq>, pool: &Pool, preambles: &mut Preambles) {
-    let handle = pool.ensure_open(url);
+    let Ok(handle) = pool.ensure_open(url) else {
+        return;
+    };
     let entry = preambles.entry(url.clone()).or_default();
     entry.clear();
     for req in &reqs {

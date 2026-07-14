@@ -805,7 +805,9 @@ impl SessionWorker {
             if self.configured.contains_key(&relay) {
                 continue;
             }
-            let handle = self.pool.ensure_open(&relay);
+            let Ok(handle) = self.pool.ensure_open(&relay) else {
+                continue;
+            };
             self.set_preamble(handle);
             self.configured.insert(relay, handle);
         }

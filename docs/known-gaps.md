@@ -18,6 +18,19 @@ about current code:
   exact per-relay/filter intervals as a distinct type. `AwaitingAuth` and
   `AuthDenied` land with #8, and `Error` lands with #51. Full source-authority
   and access-context identity remains part of the descriptor gap above (#49).
+- **Whole-demand relay admission and fan-out limiting are built (#20).** One
+  finite ceiling now covers the fully assembled read plan and the live
+  transport worker set, including outbox, indexer, app, fallback, and explicit
+  pinned lanes. Deterministic plan-time refusals are absent from executable
+  wire work but remain visible as exact contextual `LocalLimit` query evidence
+  and diagnostics; the transport boundary returns typed admission errors and
+  preserves durable write lanes as explicit waiting work. Runtime
+  reconciliation releases workers that have no current read, write, or
+  ephemeral owner before dialing replacements, while nonterminal durable
+  lanes retain their shared socket ownership. Discovered local,
+  private, link-local, and `.onion` targets remain rejected by default, while
+  operator-configured and explicit contextual authority keep their separate
+  trusted path. Other non-relay limit classes remain open under ledger #17.
 - **Crash-safe acceptance, Rust restart reattachment, and the bounded retry
   scheduler are built; governed SDK observation remains #96.** One transaction
   owns the intent, stable receipt,

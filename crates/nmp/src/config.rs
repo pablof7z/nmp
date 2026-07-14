@@ -15,7 +15,7 @@ use nostr::RelayUrl;
 use crate::error::EngineError;
 
 /// Construction config for [`Engine::new`](crate::Engine::new).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct EngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
     /// -> a persistent on-disk store opened at that path, so the same file
@@ -45,20 +45,24 @@ pub struct EngineConfig {
     /// config, not discovery, and are admitted regardless. Default empty
     /// (fail closed).
     pub allowed_local_relay_hosts: Vec<String>,
-    /// OPT-IN, defense-in-depth ceiling on the number of relays the transport
-    /// pool will keep a live worker for at once (issue #121). `0` (the
-    /// default) imposes no cap — preserving prior behavior. A non-zero value
-    /// caps concurrent relay workers; dials past it are refused and counted
-    /// in `DiagnosticsSnapshot::relays_rejected_over_cap`.
-    ///
-    /// This is NOT the primary worker-exhaustion defense. Fan-out per query
-    /// is already bounded structurally by `nmp-router`'s greedy k-cover
-    /// solver (`crates/nmp-router/src/solver.rs`), whose selection is capped
-    /// and drawn only from each author's OWN relays (`route.rs`) — so the
-    /// number of relays a single (validly-signed) kind:10002 lists is
-    /// irrelevant to worker count. This pool cap is a coarse absolute
-    /// backstop an operator may opt into on top of that.
+    /// The one whole-engine relay ceiling. The same effective value bounds
+    /// the router's complete current demand and the transport's live workers;
+    /// zero is accepted only as a legacy spelling of the finite default.
+    /// Refused query candidates remain explicit `LocalLimit` evidence.
     pub max_relays: usize,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            store_path: None,
+            indexer_relays: Vec::new(),
+            app_relays: Vec::new(),
+            fallback_relays: Vec::new(),
+            allowed_local_relay_hosts: Vec::new(),
+            max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
+        }
+    }
 }
 
 fn parse_relay_url(url: &str) -> Result<RelayUrl, EngineError> {
