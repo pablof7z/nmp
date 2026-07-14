@@ -23,6 +23,7 @@ nmp-store.workspace = true
 nmp-router.workspace = true
 nmp-resolver.workspace = true
 nmp-transport.workspace = true
+nmp-executor.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

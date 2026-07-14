@@ -6,7 +6,6 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::thread;
 use std::time::Duration;
 
 use crate::convert::FfiError;
@@ -425,10 +424,16 @@ impl NmpEngine {
         timeout_millis: u64,
         observer: Box<dyn Nip46ConnectionObserver>,
     ) -> Result<Arc<Nip46Connection>, FfiError> {
+        let reservation = self
+            .engine
+            .reserve_native_task("NIP-46 bunker connection")?;
+        let executor = self.engine.native_task_executor();
         let engine = Arc::clone(&self.engine);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
         spawn_bunker_connection(
+            reservation,
+            executor,
             Arc::downgrade(&connection),
             connection.cancellation.clone(),
             bunker_uri,
@@ -443,6 +448,10 @@ impl NmpEngine {
         timeout_millis: u64,
         observer: Box<dyn Nip46ConnectionObserver>,
     ) -> Result<Arc<Nip46Connection>, FfiError> {
+        let reservation = self
+            .engine
+            .reserve_native_task("NIP-46 invitation connection")?;
+        let executor = self.engine.native_task_executor();
         let invitation = invitation
             .inner
             .lock()
@@ -457,6 +466,8 @@ impl NmpEngine {
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
         spawn_invitation_connection(
+            reservation,
+            executor,
             Arc::downgrade(&connection),
             connection.cancellation.clone(),
             invitation,
@@ -467,32 +478,38 @@ impl NmpEngine {
 }
 
 fn spawn_bunker_connection(
+    reservation: nmp::NativeTaskReservation,
+    executor: nmp::NativeTaskExecutor,
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     bunker_uri: String,
     timeout_millis: u64,
 ) -> Result<(), FfiError> {
-    thread::Builder::new()
-        .name("nmp-ffi-nip46-bunker".to_string())
-        .spawn(move || {
-            let events = lifecycle_sink(connection.clone());
-            let result = nmp::Nip46Signer::connect_bunker_observed_with_cancellation(
-                &bunker_uri,
-                None,
-                nmp::Nip46ClientMetadata::default(),
-                Duration::from_millis(timeout_millis),
-                events,
-                &cancellation,
-            );
-            let Some(connection) = connection.upgrade() else {
-                return;
-            };
-            match result {
-                Ok(signer) => connection.attach(signer),
-                Err(error) => connection.fail(error.to_string()),
-            }
-        })
-        .map(|_| ())
+    let shutdown = cancellation.clone();
+    reservation
+        .spawn_with_cancel(
+            move || shutdown.cancel(),
+            move || {
+                let events = lifecycle_sink(connection.clone());
+                let result =
+                    nmp::Nip46Signer::connect_bunker_observed_with_executor_and_cancellation(
+                        &bunker_uri,
+                        None,
+                        nmp::Nip46ClientMetadata::default(),
+                        Duration::from_millis(timeout_millis),
+                        events,
+                        &cancellation,
+                        executor,
+                    );
+                let Some(connection) = connection.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(signer) => connection.attach(signer),
+                    Err(error) => connection.fail(error.to_string()),
+                }
+            },
+        )
         .map_err(|error| FfiError::ThreadUnavailable {
             component: "NIP-46 bunker connection".to_string(),
             reason: error.to_string(),
@@ -500,29 +517,34 @@ fn spawn_bunker_connection(
 }
 
 fn spawn_invitation_connection(
+    reservation: nmp::NativeTaskReservation,
+    executor: nmp::NativeTaskExecutor,
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     invitation: nmp::Nip46Invitation,
     timeout_millis: u64,
 ) -> Result<(), FfiError> {
-    thread::Builder::new()
-        .name("nmp-ffi-nip46-invitation".to_string())
-        .spawn(move || {
-            let events = lifecycle_sink(connection.clone());
-            let result = invitation.connect_observed_with_cancellation(
-                Duration::from_millis(timeout_millis),
-                events,
-                &cancellation,
-            );
-            let Some(connection) = connection.upgrade() else {
-                return;
-            };
-            match result {
-                Ok(signer) => connection.attach(signer),
-                Err(error) => connection.fail(error.to_string()),
-            }
-        })
-        .map(|_| ())
+    let shutdown = cancellation.clone();
+    reservation
+        .spawn_with_cancel(
+            move || shutdown.cancel(),
+            move || {
+                let events = lifecycle_sink(connection.clone());
+                let result = invitation.connect_observed_with_executor_and_cancellation(
+                    Duration::from_millis(timeout_millis),
+                    events,
+                    &cancellation,
+                    executor,
+                );
+                let Some(connection) = connection.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(signer) => connection.attach(signer),
+                    Err(error) => connection.fail(error.to_string()),
+                }
+            },
+        )
         .map_err(|error| FfiError::ThreadUnavailable {
             component: "NIP-46 invitation connection".to_string(),
             reason: error.to_string(),
@@ -566,6 +588,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
+    use std::thread;
 
     use nostr::Keys;
 
@@ -770,8 +793,17 @@ mod tests {
             remote.public_key().to_hex(),
             url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
         );
-        spawn_bunker_connection(weak.clone(), connection.cancellation.clone(), uri, 60_000)
-            .expect("test NIP-46 bridge spawn");
+        spawn_bunker_connection(
+            engine
+                .reserve_native_task("NIP-46 bunker connection")
+                .unwrap(),
+            engine.native_task_executor(),
+            weak.clone(),
+            connection.cancellation.clone(),
+            uri,
+            60_000,
+        )
+        .expect("test NIP-46 bridge spawn");
         accepted_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("the pending handshake opens its socket");

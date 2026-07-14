@@ -96,6 +96,7 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
     case engineClosed
     case receiptUnavailable
     case threadUnavailable(component: String, reason: String)
+    case executorSaturated(component: String, capacity: UInt64)
 
     init(_ ffi: FfiFollowActionFailure) {
         switch ffi {
@@ -114,6 +115,8 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
         case .receiptUnavailable: self = .receiptUnavailable
         case .threadUnavailable(let component, let reason):
             self = .threadUnavailable(component: component, reason: reason)
+        case .executorSaturated(let component, let capacity):
+            self = .executorSaturated(component: component, capacity: capacity)
         }
     }
 }

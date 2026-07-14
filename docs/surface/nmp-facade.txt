@@ -63,6 +63,9 @@ pub use nmp::decode_nostr_entity
 pub use nmp::known_local_signers
 pub enum nmp::EngineError
 pub nmp::EngineError::EngineClosed
+pub nmp::EngineError::ExecutorSaturated
+pub nmp::EngineError::ExecutorSaturated::capacity: usize
+pub nmp::EngineError::ExecutorSaturated::component: alloc::string::String
 pub nmp::EngineError::InvalidRelayUrl
 pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
 pub nmp::EngineError::InvalidSecretKey
@@ -136,6 +139,7 @@ pub nmp::EngineConfig::allowed_local_relay_hosts: alloc::vec::Vec<alloc::string:
 pub nmp::EngineConfig::app_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::fallback_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::indexer_relays: alloc::vec::Vec<alloc::string::String>
+pub nmp::EngineConfig::max_native_tasks: usize
 pub nmp::EngineConfig::max_relays: usize
 pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
 impl core::clone::Clone for nmp::EngineConfig
@@ -20762,6 +20766,49 @@ reexport nmp::Nip46Error => nmp_signer::nip46::Nip46Error
             }
           },
           "name": "ThreadUnavailable",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "component",
+                      "visibility": "default"
+                    },
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "usize"
+                        }
+                      },
+                      "name": "capacity",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "ExecutorSaturated",
           "visibility": "default"
         }
       ]

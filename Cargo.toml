@@ -7,6 +7,7 @@ members = [
     "crates/nmp-resolver",
     "crates/nmp-router",
     "crates/nmp-transport",
+    "crates/nmp-executor",
     "crates/nmp-signer",
     "crates/nmp-engine",
     "crates/nmp",
@@ -43,6 +44,7 @@ nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
 nmp-router = { path = "crates/nmp-router" }
 nmp-transport = { path = "crates/nmp-transport" }
+nmp-executor = { path = "crates/nmp-executor" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-engine = { path = "crates/nmp-engine" }
 nmp = { path = "crates/nmp" }

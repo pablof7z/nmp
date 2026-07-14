@@ -25,6 +25,7 @@ nmp-resolver.workspace = true
 nmp-router.workspace = true
 nmp-transport.workspace = true
 nmp-signer.workspace = true
+nmp-executor.workspace = true
 # The negentropy reconciler is an engine MODULE (`src/negentropy/`), not a
 # crate (§1: reducer-coupled, driven turn-by-turn by `EngineCore`) — but it
 # wraps this external set-reconciliation crate. See

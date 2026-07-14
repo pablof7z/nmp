@@ -23,7 +23,7 @@
 //! tears down `EngineThread` cleanly rather than detaching it.
 
 use std::sync::mpsc::Receiver;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
@@ -57,6 +57,22 @@ struct Inner {
 /// `inner` implements.
 pub struct Engine {
     inner: Mutex<Option<Inner>>,
+    native_tasks: nmp_executor::Executor,
+}
+
+/// Executor-owned cancellation fallback for a blocking task whose producer
+/// is the engine runtime itself. It contains only a raw shutdown sender, not
+/// an `Arc<Engine>`, so task registration cannot create an ownership cycle.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct NativeTaskCancel {
+    action: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl NativeTaskCancel {
+    pub fn cancel(&self) {
+        (self.action)();
+    }
 }
 
 impl Engine {
@@ -96,21 +112,37 @@ impl Engine {
                 let store = RedbStore::open(path).map_err(|e| EngineError::StoreOpenFailed {
                     reason: e.to_string(),
                 })?;
-                EngineThread::spawn(store, directory, config.max_relays, pool_config, admission)
+                EngineThread::spawn_with_native_task_limit(
+                    store,
+                    directory,
+                    config.max_relays,
+                    pool_config,
+                    admission,
+                    config.max_native_tasks,
+                )
             }
             None => {
                 let store = MemoryStore::new();
-                EngineThread::spawn(store, directory, config.max_relays, pool_config, admission)
+                EngineThread::spawn_with_native_task_limit(
+                    store,
+                    directory,
+                    config.max_relays,
+                    pool_config,
+                    admission,
+                    config.max_native_tasks,
+                )
             }
         }
         .map_err(EngineError::from_thread_error)?;
 
+        let native_tasks = engine_thread.native_tasks();
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
                 active_pubkey: None,
             })),
+            native_tasks,
         })
     }
 
@@ -142,12 +174,14 @@ impl Engine {
         let (engine_thread, handle) =
             EngineThread::spawn(store, directory, cap, pool_config, admission)
                 .map_err(EngineError::from_thread_error)?;
+        let native_tasks = engine_thread.native_tasks();
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
                 active_pubkey: None,
             })),
+            native_tasks,
         })
     }
 
@@ -167,6 +201,47 @@ impl Engine {
             Some(inner) => Ok(f(&inner.handle)),
             None => Err(EngineError::EngineClosed),
         }
+    }
+
+    /// Reserve an immediately-startable native task slot before accepting
+    /// the stream or operation it will own. This is intentionally hidden
+    /// mechanism used by protocol/native adapters, not an app scheduling API.
+    #[doc(hidden)]
+    pub fn reserve_native_task(
+        &self,
+        component: impl Into<String>,
+    ) -> Result<nmp_executor::Reservation, EngineError> {
+        let component = component.into();
+        self.with_handle(|_| self.native_tasks.reserve(component))?
+            .map_err(|error| EngineError::ExecutorSaturated {
+                component: error.component,
+                capacity: error.capacity,
+            })
+    }
+
+    #[doc(hidden)]
+    pub fn native_task_census(&self) -> nmp_executor::Census {
+        self.native_tasks.census()
+    }
+
+    #[doc(hidden)]
+    pub fn wait_for_native_tasks_idle(&self) {
+        self.native_tasks.wait_for_idle();
+    }
+
+    #[doc(hidden)]
+    pub fn native_task_executor(&self) -> nmp_executor::Executor {
+        self.native_tasks.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn native_task_cancel(&self) -> Result<NativeTaskCancel, EngineError> {
+        self.with_handle(|handle| {
+            let handle = handle.clone();
+            NativeTaskCancel {
+                action: Arc::new(move || handle.shutdown()),
+            }
+        })
     }
 
     /// Noun 1: open a live query. The returned [`Subscription`] withdraws
