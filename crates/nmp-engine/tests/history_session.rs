@@ -101,6 +101,24 @@ fn apply(rows: &mut BTreeMap<nostr::EventId, Event>, batch: &HistoryBatch) {
     }
 }
 
+fn assert_canonical_snapshot(batch: &HistoryBatch, max_rows: usize) {
+    assert!(batch.rows.len() <= max_rows);
+    assert!(batch.rows.windows(2).all(|pair| {
+        pair[0].event.created_at > pair[1].event.created_at
+            || (pair[0].event.created_at == pair[1].event.created_at
+                && pair[0].event.id < pair[1].event.id)
+    }));
+    assert_eq!(
+        batch
+            .rows
+            .iter()
+            .map(|row| row.event.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        batch.rows.len()
+    );
+}
+
 #[test]
 fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() {
     let (mut core, keys, relay, events) = seeded(13);
@@ -110,6 +128,8 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
     ));
     let (id, first) = returned(&open);
     assert_eq!(first.deltas.len(), 5);
+    assert_eq!(first.rows.len(), 5);
+    assert_canonical_snapshot(&first, 13);
     let mut rows = BTreeMap::new();
     apply(&mut rows, &first);
     let first_continuation = first.continuation.clone().unwrap();
@@ -122,6 +142,8 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
     let second_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
     let (_, second) = returned(&second_effects);
     assert_eq!(second.load, HistoryLoadFact::Returned { added: 5 });
+    assert_eq!(second.rows.len(), 10);
+    assert_canonical_snapshot(&second, 13);
     apply(&mut rows, &second);
     assert_eq!(rows.len(), 10);
 
@@ -164,6 +186,8 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
     let third_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
     let (_, third) = returned(&third_effects);
     assert_eq!(third.load, HistoryLoadFact::Returned { added: 3 });
+    assert_eq!(third.rows.len(), 13);
+    assert_canonical_snapshot(&third, 13);
     apply(&mut rows, &third);
     assert_eq!(rows.len(), 13);
     assert_eq!(

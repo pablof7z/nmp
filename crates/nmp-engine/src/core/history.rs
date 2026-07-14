@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nmp_resolver::LiveQuery;
 use nmp_store::EventCursor;
 
-use super::{AcquisitionEvidence, RowDelta};
+use super::{AcquisitionEvidence, Row, RowDelta};
 
 pub(crate) const HISTORY_CONTINUATION_VERSION: u16 = 1;
 
@@ -190,10 +190,16 @@ impl std::fmt::Display for HistoryLoadError {
 
 impl std::error::Error for HistoryLoadError {}
 
-/// One reducer/runtime history frame. The wire remains incremental deltas;
-/// native wrappers fold them into their bounded current snapshot.
+/// One self-contained bounded history frame.
+///
+/// `rows` is the authoritative canonical current set, ordered newest-first.
+/// `deltas` describes the transition from the reducer's immediately prior
+/// state; the runtime history receiver re-derives it from its own last
+/// delivered `rows` after latest-wins coalescing, so skipped frames never
+/// create a lossy incremental contract.
 #[derive(Debug, Clone)]
 pub struct HistoryBatch {
+    pub rows: Vec<Row>,
     pub deltas: Vec<RowDelta>,
     pub continuation: Option<HistoryContinuation>,
     pub evidence: AcquisitionEvidence,

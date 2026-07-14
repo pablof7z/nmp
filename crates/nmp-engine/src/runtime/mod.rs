@@ -60,10 +60,10 @@
 mod diagnostics_channel;
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -86,7 +86,7 @@ use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEve
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, HistoryBatch,
     HistoryContinuation, HistoryLoadError, HistoryQuery, HistorySessionId, HistorySink,
-    PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, RowDelta, RowSink,
+    PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row, RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteStatus};
 use crate::relay_information::{
@@ -131,6 +131,200 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
 /// channels" note).
 pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
 pub type HistoryMsg = HistoryBatch;
+
+/// Receiver for one bounded, latest-wins history stream.
+///
+/// The single-slot mailbox stores a complete current frame. On receipt we
+/// derive `deltas` against this receiver's last delivered frame, rather than
+/// trusting the reducer-adjacent delta that may span an overwritten frame.
+/// Both retained maps are bounded by the session's declared `max_rows`.
+pub struct HistoryReceiver {
+    batches: LatestReceiver<HistoryBatch>,
+    delivered: Mutex<BTreeMap<EventId, Row>>,
+}
+
+impl HistoryReceiver {
+    fn new(batches: LatestReceiver<HistoryBatch>) -> Self {
+        Self {
+            batches,
+            delivered: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn recv(&self) -> Result<HistoryBatch, RecvError> {
+        let mut delivered = self.delivered.lock().unwrap();
+        self.batches
+            .recv()
+            .map(|batch| Self::reconcile(&mut delivered, batch))
+            .ok_or(RecvError)
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<HistoryBatch, RecvTimeoutError> {
+        let mut delivered = self.delivered.lock().unwrap();
+        self.batches
+            .recv_timeout(timeout)
+            .map(|batch| Self::reconcile(&mut delivered, batch))
+    }
+
+    fn reconcile(delivered: &mut BTreeMap<EventId, Row>, mut batch: HistoryBatch) -> HistoryBatch {
+        let current: BTreeMap<_, _> = batch
+            .rows
+            .iter()
+            .cloned()
+            .map(|row| (row.event.id, row))
+            .collect();
+        debug_assert_eq!(current.len(), batch.rows.len());
+
+        let mut deltas = Vec::new();
+        for row in &batch.rows {
+            match delivered.get(&row.event.id) {
+                None => deltas.push(RowDelta::Added(row.clone())),
+                Some(previous) if previous.sources != row.sources => {
+                    deltas.push(RowDelta::SourcesGrew {
+                        id: row.event.id,
+                        sources: row.sources.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        for event_id in delivered.keys() {
+            if !current.contains_key(event_id) {
+                deltas.push(RowDelta::Removed(*event_id));
+            }
+        }
+        *delivered = current;
+        batch.deltas = deltas;
+        batch
+    }
+}
+
+#[cfg(test)]
+mod history_mailbox_tests {
+    use std::collections::BTreeSet;
+    use std::thread;
+    use std::time::Duration;
+
+    use nostr::{Keys, Kind, UnsignedEvent};
+
+    use super::*;
+    use crate::core::HistoryLoadFact;
+
+    fn row(keys: &Keys, created_at: u64, content: &str) -> Row {
+        Row {
+            event: UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(created_at),
+                Kind::TextNote,
+                Vec::new(),
+                content,
+            )
+            .sign_with_keys(keys)
+            .unwrap(),
+            sources: BTreeSet::new(),
+        }
+    }
+
+    fn canonical(mut rows: Vec<Row>) -> Vec<Row> {
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows
+    }
+
+    fn batch(rows: Vec<Row>) -> HistoryBatch {
+        HistoryBatch {
+            rows,
+            deltas: Vec::new(),
+            continuation: None,
+            evidence: AcquisitionEvidence::default(),
+            load: HistoryLoadFact::Idle,
+        }
+    }
+
+    fn apply(rows: &mut BTreeMap<EventId, Row>, deltas: &[RowDelta]) {
+        for delta in deltas {
+            match delta {
+                RowDelta::Added(row) => {
+                    rows.insert(row.event.id, row.clone());
+                }
+                RowDelta::SourcesGrew { id, sources } => {
+                    rows.get_mut(id).unwrap().sources = sources.clone();
+                }
+                RowDelta::Removed(id) => {
+                    rows.remove(id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_consuming_history_receiver_gets_one_latest_exact_bounded_state() {
+        const MAX_ROWS: usize = 5;
+        let keys = Keys::generate();
+        let candidates: Vec<_> = (0..7)
+            .map(|index| row(&keys, 100 + index, &format!("row-{index}")))
+            .collect();
+        let (tx, rx) = latest_channel();
+        let rx = HistoryReceiver::new(rx);
+
+        let first = canonical(vec![candidates[0].clone(), candidates[1].clone()]);
+        tx.send(batch(first.clone()));
+        let first_batch = rx.recv().unwrap();
+        assert_eq!(first_batch.rows, first);
+        let mut delivered = BTreeMap::new();
+        apply(&mut delivered, &first_batch.deltas);
+
+        let mut expected = Vec::new();
+        for update in 0..10_000 {
+            let omitted = update % candidates.len();
+            expected = canonical(
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != omitted)
+                    .take(MAX_ROWS)
+                    .map(|(_, row)| row.clone())
+                    .collect(),
+            );
+            tx.send(batch(expected.clone()));
+        }
+
+        let latest = rx.recv().unwrap();
+        assert_eq!(latest.rows, expected);
+        assert!(latest.rows.len() <= MAX_ROWS);
+        apply(&mut delivered, &latest.deltas);
+        assert_eq!(
+            delivered,
+            expected
+                .iter()
+                .cloned()
+                .map(|row| (row.event.id, row))
+                .collect()
+        );
+        assert_eq!(rx.delivered.lock().unwrap().len(), expected.len());
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_millis(1)),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "the 9,999 overwritten frames must not remain queued"
+        );
+    }
+
+    #[test]
+    fn closing_history_mailbox_wakes_blocked_receiver() {
+        let (tx, rx) = latest_channel();
+        let rx = HistoryReceiver::new(rx);
+        let waiter = thread::spawn(move || rx.recv());
+        thread::sleep(Duration::from_millis(20));
+        drop(tx);
+        assert!(waiter.join().unwrap().is_err());
+    }
+}
 
 /// The app-facing handle to a live subscription (returned by
 /// [`Handle::subscribe`]). `Send`, `Copy`-cheap, carries nothing that
@@ -258,7 +452,7 @@ enum Cmd {
     },
     SubscribeHistory {
         query: HistoryQuery,
-        reply: Sender<Result<(HistorySessionId, Receiver<HistoryMsg>), EngineThreadError>>,
+        reply: Sender<Result<(HistorySessionId, HistoryReceiver), EngineThreadError>>,
     },
     LoadOlder {
         id: HistorySessionId,
@@ -1457,7 +1651,7 @@ fn engine_loop<S, D>(
     let native_tasks = &native_tasks;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
-    let mut history_channels: HashMap<HistorySessionId, Sender<HistoryMsg>> = HashMap::new();
+    let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
     let mut preambles: Preambles = Preambles::new();
@@ -1855,7 +2049,7 @@ fn engine_loop<S, D>(
                     );
                     continue;
                 };
-                let (history_tx, history_rx) = mpsc::channel();
+                let (history_tx, history_rx) = latest_channel();
                 history_channels.insert(id, history_tx);
                 if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
                     history_channels.remove(&id);
@@ -1874,7 +2068,10 @@ fn engine_loop<S, D>(
                     let _ = reply.send(Err(error));
                     continue;
                 }
-                if reply.send(Ok((id, history_rx))).is_err() {
+                if reply
+                    .send(Ok((id, HistoryReceiver::new(history_rx))))
+                    .is_err()
+                {
                     history_channels.remove(&id);
                     let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
                     dispatch_core_effects(
@@ -2094,7 +2291,7 @@ fn dispatch_core_effects<S: EventStore>(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
-    history_channels: &mut HashMap<HistorySessionId, Sender<HistoryMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -2303,7 +2500,7 @@ fn dispatch_effects(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
-    history_channels: &mut HashMap<HistorySessionId, Sender<HistoryMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -2330,7 +2527,7 @@ fn dispatch_effect(
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
-    history_channels: &mut HashMap<HistorySessionId, Sender<HistoryMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -2476,7 +2673,7 @@ fn dispatch_effect(
         }
         Effect::EmitHistory(id, batch) => {
             if let Some(tx) = history_channels.get(&id) {
-                let _ = tx.send(batch);
+                tx.send(batch);
             }
         }
         Effect::HistoryLoadResult(..) => {}
@@ -2909,7 +3106,7 @@ impl Handle {
     pub fn subscribe_history(
         &self,
         query: HistoryQuery,
-    ) -> Result<(HistoryHandle, Receiver<HistoryMsg>), EngineThreadError> {
+    ) -> Result<(HistoryHandle, HistoryReceiver), EngineThreadError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::SubscribeHistory {

@@ -542,7 +542,10 @@ struct HistoryState {
     target_rows: usize,
     generation: u64,
     acquired_tie_seconds: BTreeSet<u64>,
-    last_rows: BTreeMap<EventId, RememberedRow>,
+    /// The bounded canonical payload set. History delivery is latest-wins,
+    /// so every emitted frame must be able to stand alone after intermediate
+    /// deltas are overwritten.
+    last_rows: BTreeMap<EventId, Row>,
     /// Same membership as `last_rows`, ordered canonically newest-first.
     /// This makes top/bottom rebalance O(log max_rows), never an O(total)
     /// sort after every committed row mutation.
@@ -2386,7 +2389,9 @@ impl<S: EventStore> EngineCore<S> {
         }
         for event_id in pending.added_row_ids {
             if let Some(row) = state.last_rows.remove(&event_id) {
-                state.order.remove(&(Reverse(row.created_at), event_id));
+                state
+                    .order
+                    .remove(&(Reverse(row.event.created_at.as_secs()), event_id));
             }
         }
         state.target_rows = pending.prior_target_rows;
@@ -4437,11 +4442,17 @@ impl<S: EventStore> EngineCore<S> {
             .last_rows
             .iter()
             .max_by(|(a_id, a), (b_id, b)| {
-                nip01_newest_first((a.created_at, a_id), (b.created_at, b_id))
+                nip01_newest_first(
+                    (a.event.created_at.as_secs(), a_id),
+                    (b.event.created_at.as_secs(), b_id),
+                )
             })
-            .map(|(event_id, row)| {
-                nmp_store::EventCursor::new(Timestamp::from(row.created_at), *event_id)
-            });
+            .map(|(event_id, row)| nmp_store::EventCursor::new(row.event.created_at, *event_id));
+        let rows = state
+            .order
+            .iter()
+            .filter_map(|(_, event_id)| state.last_rows.get(event_id).cloned())
+            .collect();
         let continuation = boundary.map(|boundary| HistoryContinuation {
             version: history::HISTORY_CONTINUATION_VERSION,
             engine_identity: Arc::clone(&self.engine_identity),
@@ -4451,6 +4462,7 @@ impl<S: EventStore> EngineCore<S> {
             boundary,
         });
         HistoryBatch {
+            rows,
             deltas,
             continuation,
             evidence: state.last_evidence.clone().unwrap_or_default(),
@@ -4475,21 +4487,10 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         let state = self.histories.get_mut(&id)?;
-        let current_rows: BTreeMap<EventId, RememberedRow> = current
-            .iter()
-            .map(|(event_id, row)| {
-                (
-                    *event_id,
-                    RememberedRow {
-                        created_at: row.event.created_at.as_secs(),
-                        sources: row.sources.clone(),
-                    },
-                )
-            })
-            .collect();
+        let current_rows = current.clone();
         let current_order = current_rows
             .iter()
-            .map(|(event_id, row)| (Reverse(row.created_at), *event_id))
+            .map(|(event_id, row)| (Reverse(row.event.created_at.as_secs()), *event_id))
             .collect();
         let mut deltas = Vec::new();
         for (event_id, row) in current {
@@ -4693,13 +4694,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut deltas = Vec::with_capacity(ordered.len());
         for row in ordered {
             let event_id = row.event.id;
-            state.last_rows.insert(
-                event_id,
-                RememberedRow {
-                    created_at: row.event.created_at.as_secs(),
-                    sources: row.sources.clone(),
-                },
-            );
+            state.last_rows.insert(event_id, row.clone());
             state
                 .order
                 .insert((Reverse(row.event.created_at.as_secs()), event_id));
@@ -4778,7 +4773,7 @@ impl<S: EventStore> EngineCore<S> {
         filter.limit = None;
         let matches = |event: &nostr::Event| filter.match_event(event, MatchEventOptions::new());
         let target_rows = state.target_rows;
-        let mut before = BTreeMap::<EventId, Option<RememberedRow>>::new();
+        let mut before = BTreeMap::<EventId, Option<Row>>::new();
         let mut added_payload = BTreeMap::<EventId, Row>::new();
 
         {
@@ -4789,7 +4784,7 @@ impl<S: EventStore> EngineCore<S> {
             let remember =
                 |event_id: EventId,
                  state: &HistoryState,
-                 before: &mut BTreeMap<EventId, Option<RememberedRow>>| {
+                 before: &mut BTreeMap<EventId, Option<Row>>| {
                     before
                         .entry(event_id)
                         .or_insert_with(|| state.last_rows.get(&event_id).cloned());
@@ -4801,7 +4796,9 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 remember(event.id, state, &mut before);
                 if let Some(row) = state.last_rows.remove(&event.id) {
-                    state.order.remove(&(Reverse(row.created_at), event.id));
+                    state
+                        .order
+                        .remove(&(Reverse(row.event.created_at.as_secs()), event.id));
                 }
             }
             for row in &changes.inserted {
@@ -4813,15 +4810,15 @@ impl<S: EventStore> EngineCore<S> {
                 if let Some(previous) = state.last_rows.remove(&event_id) {
                     state
                         .order
-                        .remove(&(Reverse(previous.created_at), event_id));
+                        .remove(&(Reverse(previous.event.created_at.as_secs()), event_id));
                 }
-                let remembered = RememberedRow {
-                    created_at: row.event.created_at.as_secs(),
+                let remembered = Row {
+                    event: row.event.clone(),
                     sources: row.observed_relays.clone(),
                 };
                 state
                     .order
-                    .insert((Reverse(remembered.created_at), event_id));
+                    .insert((Reverse(remembered.event.created_at.as_secs()), event_id));
                 state.last_rows.insert(event_id, remembered);
                 added_payload.insert(
                     event_id,
@@ -4853,7 +4850,9 @@ impl<S: EventStore> EngineCore<S> {
                     .last_rows
                     .remove(&event_id)
                     .expect("history order and membership stay identical");
-                state.order.remove(&(Reverse(row.created_at), event_id));
+                state
+                    .order
+                    .remove(&(Reverse(row.event.created_at.as_secs()), event_id));
             }
         }
 
@@ -4883,10 +4882,14 @@ impl<S: EventStore> EngineCore<S> {
                         .expect("history remained live after failed backfill");
                     for (event_id, prior) in before {
                         if let Some(current) = state.last_rows.remove(&event_id) {
-                            state.order.remove(&(Reverse(current.created_at), event_id));
+                            state
+                                .order
+                                .remove(&(Reverse(current.event.created_at.as_secs()), event_id));
                         }
                         if let Some(prior) = prior {
-                            state.order.insert((Reverse(prior.created_at), event_id));
+                            state
+                                .order
+                                .insert((Reverse(prior.event.created_at.as_secs()), event_id));
                             state.last_rows.insert(event_id, prior);
                         }
                     }
@@ -4915,13 +4918,10 @@ impl<S: EventStore> EngineCore<S> {
                     event: stored.event,
                     sources: sources.clone(),
                 };
-                let remembered = RememberedRow {
-                    created_at: row.event.created_at.as_secs(),
-                    sources,
-                };
+                let remembered = row.clone();
                 state
                     .order
-                    .insert((Reverse(remembered.created_at), event_id));
+                    .insert((Reverse(remembered.event.created_at.as_secs()), event_id));
                 state.last_rows.insert(event_id, remembered);
                 added_payload.insert(event_id, row);
             }

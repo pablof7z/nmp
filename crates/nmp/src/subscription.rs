@@ -15,7 +15,7 @@ use std::time::Duration;
 use nmp_engine::core::DiagnosticsSnapshot;
 use nmp_engine::core::{HistoryBatch, HistoryContinuation, HistoryLoadError};
 use nmp_engine::runtime::{
-    DiagnosticsHandle, Handle, HistoryHandle, LatestReceiver, QueryHandle, RowsMsg,
+    DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle, RowsMsg,
 };
 
 /// The facade's single opaque cancellation capability (#52; codex-nova's
@@ -96,15 +96,11 @@ pub struct HistorySubscription {
     cancel: ObservationCancel,
     engine: Handle,
     handle: HistoryHandle,
-    batches: std::sync::mpsc::Receiver<HistoryBatch>,
+    batches: HistoryReceiver,
 }
 
 impl HistorySubscription {
-    pub(crate) fn new(
-        engine: Handle,
-        handle: HistoryHandle,
-        batches: std::sync::mpsc::Receiver<HistoryBatch>,
-    ) -> Self {
+    pub(crate) fn new(engine: Handle, handle: HistoryHandle, batches: HistoryReceiver) -> Self {
         let cancel_engine = engine.clone();
         Self {
             cancel: ObservationCancel::new(move || cancel_engine.unsubscribe_history(handle)),
@@ -114,10 +110,15 @@ impl HistorySubscription {
         }
     }
 
+    /// Block for the newest self-contained bounded history state.
+    /// Intermediate states may be conflated, while `rows` and the re-derived
+    /// `deltas` always describe an exact transition from this receiver's last
+    /// return.
     pub fn recv(&self) -> Result<HistoryBatch, RecvError> {
         self.batches.recv()
     }
 
+    /// The same latest-state stream as [`Self::recv`], with a bounded wait.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<HistoryBatch, RecvTimeoutError> {
         self.batches.recv_timeout(timeout)
     }
