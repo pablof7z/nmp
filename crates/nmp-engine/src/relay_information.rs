@@ -153,32 +153,172 @@ pub struct RelayInformationLimitations {
 }
 
 /// One last-good NIP-11 document plus acquisition metadata.
+///
+/// Cloning this mechanism value is deliberately shallow. The exact raw body,
+/// parsed document (including structured maps), and revision live in one
+/// immutable payload shared by the cache, a refreshing worker, every waiter,
+/// and the runtime's capability projection. Metadata-only transitions such as
+/// 304 revalidation and stale-on-error create another immutable version that
+/// cites the same payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelayInformationSnapshot {
-    pub relay: RelayUrl,
-    pub document: RelayInformationDocument,
-    pub raw_json: String,
+    inner: Arc<RelayInformationSnapshotVersion>,
+}
+
+#[derive(Debug, PartialEq)]
+struct RelayInformationSnapshotVersion {
+    payload: Arc<RelayInformationSnapshotPayload>,
+    fetched_at: u64,
+    fresh_until: u64,
+    freshness: RelayInformationFreshness,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    cache_control: Option<String>,
+    expires: Option<String>,
+    last_error: Option<RelayInformationError>,
+}
+
+#[derive(Debug, PartialEq)]
+struct RelayInformationSnapshotPayload {
+    relay: RelayUrl,
+    document: RelayInformationDocument,
+    raw_json: String,
     /// Stable BLAKE3 identity of the exact received JSON representation.
     /// Capability facts cite this revision rather than an unscoped boolean.
-    pub document_revision: String,
-    pub fetched_at: u64,
-    pub fresh_until: u64,
-    pub freshness: RelayInformationFreshness,
-    pub etag: Option<String>,
-    pub last_modified: Option<String>,
-    /// Raw HTTP freshness directives retained for inspection and later
-    /// persistence. Their interpreted deadline is `fresh_until`.
-    pub cache_control: Option<String>,
-    pub expires: Option<String>,
-    /// A stale-on-error result carries the failure here without replacing
-    /// the last good document. Fresh successful results always have `None`.
-    pub last_error: Option<RelayInformationError>,
+    document_revision: String,
 }
 
 impl RelayInformationSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        relay: RelayUrl,
+        document: RelayInformationDocument,
+        raw_json: String,
+        document_revision: String,
+        fetched_at: u64,
+        fresh_until: u64,
+        freshness: RelayInformationFreshness,
+        etag: Option<String>,
+        last_modified: Option<String>,
+        cache_control: Option<String>,
+        expires: Option<String>,
+        last_error: Option<RelayInformationError>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RelayInformationSnapshotVersion {
+                payload: Arc::new(RelayInformationSnapshotPayload {
+                    relay,
+                    document,
+                    raw_json,
+                    document_revision,
+                }),
+                fetched_at,
+                fresh_until,
+                freshness,
+                etag,
+                last_modified,
+                cache_control,
+                expires,
+                last_error,
+            }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_metadata(
+        &self,
+        fetched_at: u64,
+        fresh_until: u64,
+        freshness: RelayInformationFreshness,
+        etag: Option<String>,
+        last_modified: Option<String>,
+        cache_control: Option<String>,
+        expires: Option<String>,
+        last_error: Option<RelayInformationError>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RelayInformationSnapshotVersion {
+                payload: Arc::clone(&self.inner.payload),
+                fetched_at,
+                fresh_until,
+                freshness,
+                etag,
+                last_modified,
+                cache_control,
+                expires,
+                last_error,
+            }),
+        }
+    }
+
+    fn with_read_state(
+        &self,
+        freshness: RelayInformationFreshness,
+        last_error: Option<RelayInformationError>,
+    ) -> Self {
+        self.with_metadata(
+            self.fetched_at(),
+            self.fresh_until(),
+            freshness,
+            self.etag().map(str::to_owned),
+            self.last_modified().map(str::to_owned),
+            self.cache_control().map(str::to_owned),
+            self.expires().map(str::to_owned),
+            last_error,
+        )
+    }
+
+    pub fn relay(&self) -> &RelayUrl {
+        &self.inner.payload.relay
+    }
+
+    pub fn document(&self) -> &RelayInformationDocument {
+        &self.inner.payload.document
+    }
+
+    pub fn raw_json(&self) -> &str {
+        &self.inner.payload.raw_json
+    }
+
+    pub fn document_revision(&self) -> &str {
+        &self.inner.payload.document_revision
+    }
+
+    pub fn fetched_at(&self) -> u64 {
+        self.inner.fetched_at
+    }
+
+    pub fn fresh_until(&self) -> u64 {
+        self.inner.fresh_until
+    }
+
+    pub fn freshness(&self) -> RelayInformationFreshness {
+        self.inner.freshness
+    }
+
+    pub fn etag(&self) -> Option<&str> {
+        self.inner.etag.as_deref()
+    }
+
+    pub fn last_modified(&self) -> Option<&str> {
+        self.inner.last_modified.as_deref()
+    }
+
+    pub fn cache_control(&self) -> Option<&str> {
+        self.inner.cache_control.as_deref()
+    }
+
+    pub fn expires(&self) -> Option<&str> {
+        self.inner.expires.as_deref()
+    }
+
+    pub fn last_error(&self) -> Option<&RelayInformationError> {
+        self.inner.last_error.as_ref()
+    }
+
     /// Advertisement only. This never creates a behavioral capability token.
     pub fn advertises_nip(&self, nip: u16) -> Option<bool> {
-        self.document
+        self.document()
             .supported_nips
             .as_ref()
             .map(|nips| nips.contains(&nip))
@@ -186,11 +326,21 @@ impl RelayInformationSnapshot {
 
     pub(crate) fn capability_evidence(&self) -> RelayInformationCapabilityEvidence {
         RelayInformationCapabilityEvidence {
-            supported_nips: self.document.supported_nips.clone(),
-            document_revision: self.document_revision.clone(),
-            fresh_until: self.fresh_until,
-            last_error: self.last_error.clone(),
+            supported_nips: self.document().supported_nips.clone(),
+            document_revision: self.document_revision().to_owned(),
+            fresh_until: self.fresh_until(),
+            last_error: self.last_error().cloned(),
         }
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    fn payload_identity_value(&self) -> usize {
+        Arc::as_ptr(&self.inner.payload) as usize
+    }
+
+    #[cfg(test)]
+    fn payload_identity(&self) -> usize {
+        self.payload_identity_value()
     }
 }
 
@@ -221,6 +371,20 @@ struct Shared {
     next_waiter: AtomicU64,
     cache_capacity: usize,
     waiter_capacity: usize,
+}
+
+/// Mechanism-only retention evidence used to falsify cache/flight ownership.
+/// Caller-owned values materialized by the supported `nmp` facade are outside
+/// this census by design.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayInformationRetentionCensus {
+    pub cached_entries: usize,
+    pub cached_payloads: usize,
+    pub cached_raw_body_bytes: usize,
+    pub active_flights: usize,
+    pub admitted_waiters: usize,
 }
 
 struct State {
@@ -771,9 +935,9 @@ impl RelayInformationService {
         if policy == RelayInformationCachePolicy::UseCache {
             if let Some(cached) = &entry.cached {
                 if now_secs() < cached.fresh_until {
-                    let mut snapshot = cached.snapshot.clone();
-                    snapshot.freshness = RelayInformationFreshness::Fresh;
-                    snapshot.last_error = None;
+                    let snapshot = cached
+                        .snapshot
+                        .with_read_state(RelayInformationFreshness::Fresh, None);
                     drop(state);
                     waiter
                         .take()
@@ -825,9 +989,9 @@ impl RelayInformationService {
         if policy == RelayInformationCachePolicy::UseCache {
             if let Some(cached) = &entry.cached {
                 if now_secs() < cached.fresh_until {
-                    let mut snapshot = cached.snapshot.clone();
-                    snapshot.freshness = RelayInformationFreshness::Fresh;
-                    snapshot.last_error = None;
+                    let snapshot = cached
+                        .snapshot
+                        .with_read_state(RelayInformationFreshness::Fresh, None);
                     drop(state);
                     drop(reservation);
                     waiter
@@ -915,13 +1079,50 @@ impl RelayInformationService {
         let entry = state.entries.get_mut(relay)?;
         entry.last_access = access;
         let cached = entry.cached.as_ref()?;
-        let mut snapshot = cached.snapshot.clone();
-        snapshot.freshness = if now_secs() < cached.fresh_until {
+        let freshness = if now_secs() < cached.fresh_until {
             RelayInformationFreshness::Fresh
         } else {
             RelayInformationFreshness::Stale
         };
-        Some(snapshot)
+        Some(
+            cached
+                .snapshot
+                .with_read_state(freshness, cached.snapshot.last_error().cloned()),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(crate) fn retention_census(&self) -> RelayInformationRetentionCensus {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut payloads = std::collections::HashSet::new();
+        let mut cached_raw_body_bytes = 0usize;
+        let mut cached_entries = 0usize;
+        let mut active_flights = 0usize;
+        let mut admitted_waiters = 0usize;
+        for entry in state.entries.values() {
+            if let Some(cached) = &entry.cached {
+                cached_entries += 1;
+                if payloads.insert(cached.snapshot.payload_identity_value()) {
+                    cached_raw_body_bytes =
+                        cached_raw_body_bytes.saturating_add(cached.snapshot.raw_json().len());
+                }
+            }
+            if let Some(flight) = &entry.flight {
+                active_flights += 1;
+                admitted_waiters = admitted_waiters.saturating_add(flight.waiters.len());
+            }
+        }
+        RelayInformationRetentionCensus {
+            cached_entries,
+            cached_payloads: payloads.len(),
+            cached_raw_body_bytes,
+            active_flights,
+            admitted_waiters,
+        }
     }
 
     /// Refuse new acquisition and resolve every admitted waiter. Running
@@ -984,11 +1185,11 @@ fn worker(
     };
     let etag = cached
         .as_ref()
-        .and_then(|value| value.snapshot.etag.as_deref())
+        .and_then(|value| value.snapshot.etag())
         .unwrap_or("");
     let last_modified = cached
         .as_ref()
-        .and_then(|value| value.snapshot.last_modified.as_deref())
+        .and_then(|value| value.snapshot.last_modified())
         .unwrap_or("");
     let validators =
         (!etag.is_empty() || !last_modified.is_empty()).then_some((etag, last_modified));
@@ -1005,47 +1206,60 @@ fn finish_fetch(
 ) -> Result<RelayInformationSnapshot, RelayInformationError> {
     if let Some(raw_json) = fetched.raw_json {
         let document = parse_document(&raw_json)?;
+        let document_revision = blake3::hash(raw_json.as_bytes()).to_hex().to_string();
         let fresh_for = fetched.fresh_for.unwrap_or(DEFAULT_FRESH_FOR);
         let fetched_at = now_secs();
         let fresh_until = fetched_at.saturating_add(fresh_for.as_secs());
-        Ok(RelayInformationSnapshot {
-            relay: relay.clone(),
+        Ok(RelayInformationSnapshot::new(
+            relay.clone(),
             document,
-            document_revision: blake3::hash(raw_json.as_bytes()).to_hex().to_string(),
             raw_json,
+            document_revision,
             fetched_at,
             fresh_until,
-            freshness: freshness_at(fresh_until, fetched_at),
-            etag: fetched.etag,
-            last_modified: fetched.last_modified,
-            cache_control: fetched.cache_control,
-            expires: fetched.expires,
-            last_error: None,
-        })
+            freshness_at(fresh_until, fetched_at),
+            fetched.etag,
+            fetched.last_modified,
+            fetched.cache_control,
+            fetched.expires,
+            None,
+        ))
     } else {
         let cached = cached.ok_or_else(|| RelayInformationError::Http {
             reason: "relay returned 304 without a cached document".to_string(),
         })?;
-        let mut snapshot = cached.snapshot.clone();
-        snapshot.cache_control = fetched.cache_control.or(snapshot.cache_control);
-        snapshot.expires = fetched.expires.or(snapshot.expires);
+        let cache_control = fetched
+            .cache_control
+            .or_else(|| cached.snapshot.cache_control().map(str::to_owned));
+        let expires = fetched
+            .expires
+            .or_else(|| cached.snapshot.expires().map(str::to_owned));
         let fresh_for = fetched
             .fresh_for
             .or_else(|| {
                 fresh_for_headers(
-                    snapshot.cache_control.as_deref(),
-                    snapshot.expires.as_deref(),
+                    cache_control.as_deref(),
+                    expires.as_deref(),
                     SystemTime::now(),
                 )
             })
             .unwrap_or(DEFAULT_FRESH_FOR);
-        snapshot.fetched_at = now_secs();
-        snapshot.fresh_until = snapshot.fetched_at.saturating_add(fresh_for.as_secs());
-        snapshot.freshness = freshness_at(snapshot.fresh_until, snapshot.fetched_at);
-        snapshot.etag = fetched.etag.or(snapshot.etag);
-        snapshot.last_modified = fetched.last_modified.or(snapshot.last_modified);
-        snapshot.last_error = None;
-        Ok(snapshot)
+        let fetched_at = now_secs();
+        let fresh_until = fetched_at.saturating_add(fresh_for.as_secs());
+        Ok(cached.snapshot.with_metadata(
+            fetched_at,
+            fresh_until,
+            freshness_at(fresh_until, fetched_at),
+            fetched
+                .etag
+                .or_else(|| cached.snapshot.etag().map(str::to_owned)),
+            fetched
+                .last_modified
+                .or_else(|| cached.snapshot.last_modified().map(str::to_owned)),
+            cache_control,
+            expires,
+            None,
+        ))
     }
 }
 
@@ -1194,7 +1408,7 @@ fn complete(
                     entry.last_access = access;
                     entry.cached = Some(Cached {
                         snapshot: snapshot.clone(),
-                        fresh_until: snapshot.fresh_until,
+                        fresh_until: snapshot.fresh_until(),
                     });
                 }
                 Ok(snapshot)
@@ -1221,10 +1435,18 @@ fn complete(
                         // freshness deadline.
                         let stale_at = now_secs();
                         cached.fresh_until = 0;
-                        cached.snapshot.fresh_until = stale_at;
-                        cached.snapshot.freshness = RelayInformationFreshness::Stale;
-                        cached.snapshot.last_error = Some(error.clone());
-                        Ok(cached.snapshot.clone())
+                        let stale = cached.snapshot.with_metadata(
+                            cached.snapshot.fetched_at(),
+                            stale_at,
+                            RelayInformationFreshness::Stale,
+                            cached.snapshot.etag().map(str::to_owned),
+                            cached.snapshot.last_modified().map(str::to_owned),
+                            cached.snapshot.cache_control().map(str::to_owned),
+                            cached.snapshot.expires().map(str::to_owned),
+                            Some(error.clone()),
+                        );
+                        cached.snapshot = stale.clone();
+                        Ok(stale)
                     }
                     _ => Err(error),
                 }
@@ -1353,6 +1575,14 @@ mod tests {
         release: Receiver<()>,
     }
 
+    struct MaxBodyGatedFetcher {
+        started: Sender<()>,
+        release: Receiver<()>,
+        body: Arc<String>,
+        ungated_calls: usize,
+        calls: AtomicUsize,
+    }
+
     struct MalformedThenGoodFetcher {
         calls: AtomicUsize,
     }
@@ -1376,6 +1606,41 @@ mod tests {
                 fresh_for: Some(DEFAULT_FRESH_FOR),
             })
         }
+    }
+
+    impl Fetcher for MaxBodyGatedFetcher {
+        fn fetch(
+            &self,
+            _relay: &RelayUrl,
+            _validators: Option<(&str, &str)>,
+        ) -> Result<FetchResult, RelayInformationError> {
+            // Materialize the response before publishing `started`, so each
+            // gated worker is known to hold one complete maximum-size body.
+            let raw_json = (*self.body).clone();
+            if self.calls.fetch_add(1, Ordering::SeqCst) >= self.ungated_calls {
+                let _ = self.started.send(());
+                self.release
+                    .recv()
+                    .map_err(|_| RelayInformationError::ServiceClosed)?;
+            }
+            Ok(FetchResult {
+                raw_json: Some(raw_json),
+                etag: None,
+                last_modified: None,
+                cache_control: None,
+                expires: None,
+                fresh_for: Some(DEFAULT_FRESH_FOR),
+            })
+        }
+    }
+
+    fn maximum_valid_body() -> String {
+        let prefix = r#"{"description":""#;
+        let suffix = r#""}"#;
+        let content = "x".repeat(MAX_RESPONSE_BYTES as usize - prefix.len() - suffix.len());
+        let body = format!("{prefix}{content}{suffix}");
+        assert_eq!(body.len(), MAX_RESPONSE_BYTES as usize);
+        body
     }
 
     struct ChannelWake(std::sync::mpsc::Sender<()>);
@@ -1470,8 +1735,102 @@ mod tests {
         let a = a.recv().unwrap().unwrap();
         let b = b.recv().unwrap().unwrap();
         assert_eq!(a, b);
-        assert_eq!(a.document.name.as_deref(), Some("Async"));
-        assert_eq!(a.document_revision.len(), 64);
+        assert_eq!(a.payload_identity(), b.payload_identity());
+        assert_eq!(a.document().name.as_deref(), Some("Async"));
+        assert_eq!(a.document_revision().len(), 64);
+    }
+
+    #[test]
+    fn twelve_maximum_flights_fan_out_to_64_waiters_without_payload_copies() {
+        const FLIGHTS: usize = nmp_executor::DEFAULT_MAX_TASKS;
+        const WAITERS: usize = WAITER_CAPACITY;
+
+        let (started_tx, started_rx) = bounded(FLIGHTS);
+        let (release_tx, release_rx) = bounded(FLIGHTS);
+        let executor = nmp_executor::Executor::new(FLIGHTS).unwrap();
+        let service = RelayInformationService::with_executor_and_limits(
+            executor.clone(),
+            Arc::new(MaxBodyGatedFetcher {
+                started: started_tx,
+                release: release_rx,
+                body: Arc::new(maximum_valid_body()),
+                ungated_calls: CACHE_CAPACITY,
+                calls: AtomicUsize::new(0),
+            }),
+            CACHE_CAPACITY,
+            WAITERS,
+        );
+
+        let relays = (0..CACHE_CAPACITY)
+            .map(|index| RelayUrl::parse(&format!("wss://fanout-{index}.example")).unwrap())
+            .collect::<Vec<_>>();
+        for relay in &relays {
+            service
+                .get(relay.clone(), RelayInformationCachePolicy::Refresh)
+                .unwrap();
+        }
+        let full_cache = service.retention_census();
+        assert_eq!(full_cache.cached_entries, CACHE_CAPACITY);
+        assert_eq!(full_cache.cached_payloads, CACHE_CAPACITY);
+        assert_eq!(
+            full_cache.cached_raw_body_bytes,
+            CACHE_CAPACITY * MAX_RESPONSE_BYTES as usize
+        );
+
+        let mut receivers = Vec::with_capacity(FLIGHTS * WAITERS);
+        for relay in relays.iter().take(FLIGHTS) {
+            for _ in 0..WAITERS {
+                receivers.push(
+                    service
+                        .request(relay.clone(), RelayInformationCachePolicy::Refresh)
+                        .unwrap(),
+                );
+            }
+        }
+        for _ in 0..FLIGHTS {
+            started_rx.recv().unwrap();
+        }
+
+        let census = service.retention_census();
+        assert_eq!(census.active_flights, FLIGHTS);
+        assert_eq!(census.admitted_waiters, FLIGHTS * WAITERS);
+        assert_eq!(census.cached_entries, CACHE_CAPACITY);
+        assert_eq!(census.cached_payloads, CACHE_CAPACITY);
+        assert_eq!(
+            census.cached_raw_body_bytes + FLIGHTS * MAX_RESPONSE_BYTES as usize,
+            70_254_592,
+            "256 cached bodies plus 12 active response bodies are exactly 67 MiB"
+        );
+
+        for _ in 0..FLIGHTS {
+            release_tx.send(()).unwrap();
+        }
+
+        let mut identities = HashMap::<usize, usize>::new();
+        for receiver in receivers {
+            let snapshot = receiver.recv().unwrap().unwrap();
+            assert_eq!(snapshot.raw_json().len(), MAX_RESPONSE_BYTES as usize);
+            *identities.entry(snapshot.payload_identity()).or_default() += 1;
+        }
+        assert_eq!(identities.len(), FLIGHTS);
+        assert!(identities.values().all(|count| *count == WAITERS));
+        assert_eq!(
+            FLIGHTS * WAITERS * std::mem::size_of::<RelayInformationSnapshot>(),
+            6_144,
+            "768 waiter results retain one pointer each on this qualified 64-bit target"
+        );
+
+        let census = service.retention_census();
+        assert_eq!(census.cached_entries, CACHE_CAPACITY);
+        assert_eq!(census.cached_payloads, CACHE_CAPACITY);
+        assert_eq!(
+            census.cached_raw_body_bytes,
+            CACHE_CAPACITY * MAX_RESPONSE_BYTES as usize
+        );
+        assert_eq!(census.active_flights, 0);
+        assert_eq!(census.admitted_waiters, 0);
+        service.close();
+        executor.shutdown();
     }
 
     #[test]
@@ -1502,7 +1861,7 @@ mod tests {
             Poll::Ready(Ok(snapshot)) => snapshot,
             other => panic!("expected a completed async snapshot, got {other:?}"),
         };
-        assert_eq!(snapshot.document.name.as_deref(), Some("Async"));
+        assert_eq!(snapshot.document().name.as_deref(), Some("Async"));
     }
 
     #[test]
@@ -1520,7 +1879,7 @@ mod tests {
         let recovered = service
             .get(relay, RelayInformationCachePolicy::UseCache)
             .unwrap();
-        assert_eq!(recovered.document.name.as_deref(), Some("Recovered"));
+        assert_eq!(recovered.document().name.as_deref(), Some("Recovered"));
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
     }
 
@@ -1532,25 +1891,32 @@ mod tests {
         });
         let service = RelayInformationService::try_with_fetcher(fetcher.clone()).unwrap();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
-        service
+        let fresh = service
             .get(relay.clone(), RelayInformationCachePolicy::Refresh)
             .unwrap();
         let stale = service
             .get(relay.clone(), RelayInformationCachePolicy::Refresh)
             .unwrap();
-        assert_eq!(stale.document.name.as_deref(), Some("Example"));
-        assert_eq!(stale.freshness, RelayInformationFreshness::Stale);
+        assert_eq!(fresh.payload_identity(), stale.payload_identity());
+        assert_eq!(fresh.raw_json().as_ptr(), stale.raw_json().as_ptr());
+        assert_eq!(fresh.document() as *const _, stale.document() as *const _);
+        assert_eq!(
+            fresh.document_revision().as_ptr(),
+            stale.document_revision().as_ptr()
+        );
+        assert_eq!(stale.document().name.as_deref(), Some("Example"));
+        assert_eq!(stale.freshness(), RelayInformationFreshness::Stale);
         assert!(matches!(
-            stale.last_error,
+            stale.last_error(),
             Some(RelayInformationError::Http { .. })
         ));
 
         let still_stale = service
             .get(relay, RelayInformationCachePolicy::UseCache)
             .unwrap();
-        assert_eq!(still_stale.freshness, RelayInformationFreshness::Stale);
+        assert_eq!(still_stale.freshness(), RelayInformationFreshness::Stale);
         assert!(matches!(
-            still_stale.last_error,
+            still_stale.last_error(),
             Some(RelayInformationError::Http { .. })
         ));
         assert_eq!(
@@ -1655,11 +2021,11 @@ mod tests {
             .unwrap();
         server.join().unwrap();
 
-        assert_eq!(value.cache_control.as_deref(), Some("no-cache"));
-        assert!(value.fresh_until <= value.fetched_at);
-        assert_eq!(value.freshness, RelayInformationFreshness::Stale);
+        assert_eq!(value.cache_control(), Some("no-cache"));
+        assert!(value.fresh_until() <= value.fetched_at());
+        assert_eq!(value.freshness(), RelayInformationFreshness::Stale);
         assert_eq!(
-            service.cached(&relay).unwrap().freshness,
+            service.cached(&relay).unwrap().freshness(),
             RelayInformationFreshness::Stale
         );
         service.close();
@@ -1691,9 +2057,9 @@ mod tests {
             .unwrap();
         server.join().unwrap();
 
-        assert_eq!(value.expires.as_deref(), Some(expected_expires.as_str()));
-        assert!(value.fresh_until.saturating_sub(value.fetched_at) >= 115);
-        assert!(value.fresh_until.saturating_sub(value.fetched_at) <= 120);
+        assert_eq!(value.expires(), Some(expected_expires.as_str()));
+        assert!(value.fresh_until().saturating_sub(value.fetched_at()) >= 115);
+        assert!(value.fresh_until().saturating_sub(value.fetched_at()) <= 120);
         service.close();
         executor.shutdown();
     }
@@ -1717,10 +2083,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(first.freshness, RelayInformationFreshness::Stale);
+        assert_eq!(first.freshness(), RelayInformationFreshness::Stale);
+        let first_payload = first.payload_identity();
+        let first_raw = first.raw_json().as_ptr();
+        let first_document = first.document() as *const _;
+        let first_revision = first.document_revision().as_ptr();
 
         let cached = Cached {
-            fresh_until: first.fresh_until,
+            fresh_until: first.fresh_until(),
             snapshot: first,
         };
         let revalidated = finish_fetch(
@@ -1736,8 +2106,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(revalidated.freshness, RelayInformationFreshness::Stale);
-        assert!(revalidated.fresh_until <= revalidated.fetched_at);
+        assert_eq!(revalidated.payload_identity(), first_payload);
+        assert_eq!(revalidated.raw_json().as_ptr(), first_raw);
+        assert_eq!(revalidated.document() as *const _, first_document);
+        assert_eq!(revalidated.document_revision().as_ptr(), first_revision);
+        assert_eq!(revalidated.freshness(), RelayInformationFreshness::Stale);
+        assert!(revalidated.fresh_until() <= revalidated.fetched_at());
     }
 
     #[test]
@@ -1766,11 +2140,11 @@ mod tests {
         let maximum = service
             .get(relay.clone(), RelayInformationCachePolicy::Refresh)
             .unwrap();
-        assert_eq!(maximum.fresh_until, u64::MAX);
+        assert_eq!(maximum.fresh_until(), u64::MAX);
         let retried = service
             .get(relay, RelayInformationCachePolicy::Refresh)
             .unwrap();
-        assert_eq!(retried.document.name.as_deref(), Some("Retried"));
+        assert_eq!(retried.document().name.as_deref(), Some("Retried"));
 
         server.join().unwrap();
         service.close();
@@ -1800,7 +2174,7 @@ mod tests {
                 relay,
                 Entry {
                     cached: Some(Cached {
-                        fresh_until: snapshot.fresh_until,
+                        fresh_until: snapshot.fresh_until(),
                         snapshot,
                     }),
                     flight: Some(Flight {
@@ -1945,6 +2319,72 @@ mod tests {
     }
 
     #[test]
+    fn close_drains_twelve_full_waiter_sets_without_retaining_flights() {
+        const FLIGHTS: usize = nmp_executor::DEFAULT_MAX_TASKS;
+        const WAITERS: usize = WAITER_CAPACITY;
+
+        let (started_tx, started_rx) = bounded(FLIGHTS);
+        let (release_tx, release_rx) = bounded(FLIGHTS);
+        let executor = nmp_executor::Executor::new(FLIGHTS).unwrap();
+        let service = RelayInformationService::with_executor_and_limits(
+            executor.clone(),
+            Arc::new(GatedFetcher {
+                started: started_tx,
+                release: release_rx,
+            }),
+            CACHE_CAPACITY,
+            WAITERS,
+        );
+        let mut receivers = Vec::with_capacity(FLIGHTS * WAITERS);
+        for flight in 0..FLIGHTS {
+            let relay = RelayUrl::parse(&format!("wss://shutdown-{flight}.example")).unwrap();
+            for _ in 0..WAITERS {
+                receivers.push(
+                    service
+                        .request(relay.clone(), RelayInformationCachePolicy::Refresh)
+                        .unwrap(),
+                );
+            }
+        }
+        for _ in 0..FLIGHTS {
+            started_rx.recv().unwrap();
+        }
+        assert_eq!(
+            service.retention_census().admitted_waiters,
+            FLIGHTS * WAITERS
+        );
+
+        service.close();
+        for receiver in receivers {
+            assert_eq!(
+                receiver.recv().unwrap(),
+                Err(RelayInformationError::ServiceClosed)
+            );
+        }
+        let census = service.retention_census();
+        assert_eq!(census.cached_entries, 0);
+        assert_eq!(census.cached_payloads, 0);
+        assert_eq!(census.cached_raw_body_bytes, 0);
+        assert_eq!(census.active_flights, 0);
+        assert_eq!(census.admitted_waiters, 0);
+        assert!(matches!(
+            service.request(
+                RelayUrl::parse("wss://closed.example").unwrap(),
+                RelayInformationCachePolicy::Refresh
+            ),
+            Err(RelayInformationError::ServiceClosed)
+        ));
+
+        for _ in 0..FLIGHTS {
+            release_tx.send(()).unwrap();
+        }
+        executor.shutdown();
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+        assert!(!executor.census().accepting);
+    }
+
+    #[test]
     fn executor_saturation_refuses_without_publishing_a_flight() {
         let executor = nmp_executor::Executor::new(1).unwrap();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -2054,7 +2494,12 @@ mod tests {
             },
         )
         .unwrap();
+        let old_payload = Arc::downgrade(&old.inner.payload);
         complete(&shared, &relay, 1, Ok(old));
+        assert!(
+            old_payload.upgrade().is_none(),
+            "an ignored late generation must not retain its immutable payload"
+        );
         assert!(matches!(
             receiver.try_recv(),
             Err(crossbeam_channel::TryRecvError::Empty)
@@ -2089,7 +2534,7 @@ mod tests {
         .unwrap();
         complete(&shared, &relay, 2, Ok(new));
         assert_eq!(
-            receiver.recv().unwrap().unwrap().document.name.as_deref(),
+            receiver.recv().unwrap().unwrap().document().name.as_deref(),
             Some("new")
         );
     }

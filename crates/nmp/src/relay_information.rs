@@ -220,18 +220,25 @@ impl RelayInformationSnapshot {
         value: nmp_engine::relay_information::RelayInformationSnapshot,
     ) -> Self {
         Self {
-            relay: value.relay,
-            document: RelayInformationDocument::from_engine(value.document),
-            raw_json: value.raw_json,
-            document_revision: value.document_revision,
-            fetched_at: value.fetched_at,
-            fresh_until: value.fresh_until,
-            freshness: RelayInformationFreshness::from_engine(value.freshness),
-            etag: value.etag,
-            last_modified: value.last_modified,
-            cache_control: value.cache_control,
-            expires: value.expires,
-            last_error: value.last_error.map(RelayInformationError::from_engine),
+            // The mechanism layer shares this immutable payload through its
+            // cache/flight/waiter graph. The supported facade deliberately
+            // materializes one ordinary owned value here: callers retain and
+            // clone that value under the existing public value contract.
+            relay: value.relay().clone(),
+            document: RelayInformationDocument::from_engine(value.document().clone()),
+            raw_json: value.raw_json().to_owned(),
+            document_revision: value.document_revision().to_owned(),
+            fetched_at: value.fetched_at(),
+            fresh_until: value.fresh_until(),
+            freshness: RelayInformationFreshness::from_engine(value.freshness()),
+            etag: value.etag().map(str::to_owned),
+            last_modified: value.last_modified().map(str::to_owned),
+            cache_control: value.cache_control().map(str::to_owned),
+            expires: value.expires().map(str::to_owned),
+            last_error: value
+                .last_error()
+                .cloned()
+                .map(RelayInformationError::from_engine),
         }
     }
 }
