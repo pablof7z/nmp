@@ -54,6 +54,7 @@ pub enum FfiFollowActionFailure {
     EngineClosed,
     ReceiptUnavailable,
     ThreadUnavailable { component: String, reason: String },
+    ExecutorSaturated { component: String, capacity: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -142,6 +143,13 @@ fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
         FollowActionFailure::ThreadUnavailable { component, reason } => {
             FfiFollowActionFailure::ThreadUnavailable { component, reason }
         }
+        FollowActionFailure::ExecutorSaturated {
+            component,
+            capacity,
+        } => FfiFollowActionFailure::ExecutorSaturated {
+            component,
+            capacity: capacity as u64,
+        },
     }
 }
 

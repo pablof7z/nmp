@@ -8,7 +8,6 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp_transport::{
@@ -122,6 +121,7 @@ pub enum Nip46Error {
     Rejected(String),
     InvalidResponse(String),
     ThreadUnavailable { component: String, reason: String },
+    ExecutorSaturated { component: String, capacity: usize },
 }
 
 impl fmt::Display for Nip46Error {
@@ -151,6 +151,13 @@ impl fmt::Display for Nip46Error {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
+            Self::ExecutorSaturated {
+                component,
+                capacity,
+            } => write!(
+                f,
+                "{component} refused: native task executor is at capacity {capacity}"
+            ),
         }
     }
 }
@@ -291,7 +298,49 @@ impl Nip46Invitation {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let session = Session::spawn(self.relays, self.client_keys, None, cancellation)?;
+        let executor =
+            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
+                Nip46Error::ThreadUnavailable {
+                    component: "NIP-46 native task executor".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        self.connect_observed_inner_with_executor(timeout, event_sink, cancellation, executor, true)
+    }
+
+    #[doc(hidden)]
+    pub fn connect_observed_with_executor_and_cancellation(
+        self,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        executor: nmp_executor::Executor,
+    ) -> Result<Nip46Signer, Nip46Error> {
+        self.connect_observed_inner_with_executor(
+            timeout,
+            event_sink,
+            Some(cancellation),
+            executor,
+            false,
+        )
+    }
+
+    fn connect_observed_inner_with_executor(
+        self,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: Option<&Nip46Cancellation>,
+        executor: nmp_executor::Executor,
+        owns_executor: bool,
+    ) -> Result<Nip46Signer, Nip46Error> {
+        let session = Session::spawn(
+            self.relays,
+            self.client_keys,
+            None,
+            cancellation,
+            executor,
+            owns_executor,
+        )?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
         let remote_signer_public_key = session
@@ -392,6 +441,58 @@ impl Nip46Signer {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Self, Nip46Error> {
+        let executor =
+            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
+                Nip46Error::ThreadUnavailable {
+                    component: "NIP-46 native task executor".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        Self::connect_bunker_observed_inner_with_executor(
+            uri,
+            permissions,
+            metadata,
+            timeout,
+            event_sink,
+            cancellation,
+            executor,
+            true,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn connect_bunker_observed_with_executor_and_cancellation(
+        uri: &str,
+        permissions: Option<String>,
+        metadata: Nip46ClientMetadata,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        executor: nmp_executor::Executor,
+    ) -> Result<Self, Nip46Error> {
+        Self::connect_bunker_observed_inner_with_executor(
+            uri,
+            permissions,
+            metadata,
+            timeout,
+            event_sink,
+            Some(cancellation),
+            executor,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_bunker_observed_inner_with_executor(
+        uri: &str,
+        permissions: Option<String>,
+        metadata: Nip46ClientMetadata,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: Option<&Nip46Cancellation>,
+        executor: nmp_executor::Executor,
+        owns_executor: bool,
+    ) -> Result<Self, Nip46Error> {
         let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
         let remote_signer_public_key = parsed.remote_signer_public_key;
         let session = Session::spawn(
@@ -399,6 +500,8 @@ impl Nip46Signer {
             Keys::generate(),
             Some(remote_signer_public_key),
             cancellation,
+            executor,
+            owns_executor,
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
@@ -467,6 +570,7 @@ impl Nip46Signer {
 
     pub fn logout(&self) -> SignerOp<()> {
         map_string(
+            &self.session.executor,
             request_string(&self.session, "logout", Vec::new()),
             |result| {
                 (result == "ack").then_some(()).ok_or_else(|| {
@@ -497,6 +601,7 @@ impl SigningCapability for Nip46Signer {
         .to_string();
         let user_public_key = self.user_public_key;
         map_string(
+            &self.session.executor,
             request_string(&self.session, "sign_event", vec![body]),
             move |result| {
                 let event = Event::from_json(&result).map_err(|error| {
@@ -597,11 +702,22 @@ impl PoolEventSink for SessionPoolSink {
     }
 }
 
+fn session_pool_config() -> PoolConfig {
+    // Keep the owned transport pool's worker envelope equal to the same
+    // protocol/session relay ceiling enforced at every NIP-46 input door.
+    PoolConfig {
+        max_relays: MAX_NIP46_RELAYS,
+        ..PoolConfig::default()
+    }
+}
+
 struct Session {
     commands: Sender<WorkerMsg>,
     connected_relays: AtomicUsize,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
+    executor: nmp_executor::Executor,
+    owns_executor: bool,
 }
 
 impl Session {
@@ -610,6 +726,8 @@ impl Session {
         client_keys: Keys,
         remote: Option<PublicKey>,
         cancellation: Option<&Nip46Cancellation>,
+        executor: nmp_executor::Executor,
+        owns_executor: bool,
     ) -> Result<Arc<Self>, Nip46Error> {
         let (commands, inbox) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(Vec::new()));
@@ -619,22 +737,27 @@ impl Session {
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
             availability_error: Arc::clone(&availability_error),
+            executor: executor.clone(),
+            owns_executor,
         });
         if let Some(cancellation) = cancellation {
             cancellation.bind(session.commands.clone());
         }
         let weak = Arc::downgrade(&session);
-        let pool =
-            Pool::new(PoolConfig::default(), SessionPoolSink(commands)).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 transport".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let pool = Pool::new(session_pool_config(), SessionPoolSink(commands.clone())).map_err(
+            |error| Nip46Error::ThreadUnavailable {
+                component: "NIP-46 transport".to_string(),
+                reason: error.to_string(),
+            },
+        )?;
         let worker_pool = pool.clone();
-        let spawn = thread::Builder::new()
-            .name("nmp-nip46".to_string())
-            .spawn(move || {
+        let cancel_commands = commands.clone();
+        let spawn = executor.spawn_with_cancel(
+            "NIP-46 session",
+            move || {
+                let _ = cancel_commands.send(WorkerMsg::Shutdown);
+            },
+            move || {
                 let mut worker = SessionWorker::new(
                     worker_pool,
                     client_keys,
@@ -649,13 +772,11 @@ impl Session {
                     worker.emit(Nip46ConnectionEvent::Unavailable);
                 }
                 worker.run(inbox);
-            });
+            },
+        );
         if let Err(error) = spawn {
             pool.shutdown();
-            return Err(Nip46Error::ThreadUnavailable {
-                component: "NIP-46 session".to_string(),
-                reason: error.to_string(),
-            });
+            return Err(map_executor_error(error));
         }
         drop(pool);
         Ok(session)
@@ -734,9 +855,13 @@ impl Session {
     fn request_switch_relays(self: &Arc<Self>) {
         let op = request_string(self, "switch_relays", Vec::new());
         let session = Arc::downgrade(self);
-        let _ = thread::Builder::new()
-            .name("nmp-nip46-switch-relays".to_string())
-            .spawn(move || {
+        let cancel_commands = self.commands.clone();
+        let _ = self.executor.spawn_with_cancel(
+            "NIP-46 switch-relays",
+            move || {
+                let _ = cancel_commands.send(WorkerMsg::Shutdown);
+            },
+            move || {
                 let Ok(result) = op.wait(SWITCH_RELAYS_TIMEOUT) else {
                     return;
                 };
@@ -764,13 +889,21 @@ impl Session {
                     };
                     let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
                 }
-            });
+            },
+        );
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.commands.send(WorkerMsg::Shutdown);
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
+        if self.owns_executor {
+            self.executor.shutdown();
+        }
     }
 }
 
@@ -1208,7 +1341,7 @@ fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> 
     })
 }
 
-fn map_string<T, F>(op: SignerOp<String>, map: F) -> SignerOp<T>
+fn map_string<T, F>(executor: &nmp_executor::Executor, op: SignerOp<String>, map: F) -> SignerOp<T>
 where
     T: Send + 'static,
     F: FnOnce(String) -> Result<T, SignerError> + Send + 'static,
@@ -1220,20 +1353,56 @@ where
             let (rx, cancel) = pending.into_parts();
             let (tx, mapped_rx) = mpsc::channel();
             let failure = tx.clone();
-            let spawned = thread::Builder::new()
-                .name("nmp-nip46-result-map".to_string())
-                .spawn(move || {
+            let cancel = Arc::new(Mutex::new(cancel));
+            let shutdown_cancel = Arc::clone(&cancel);
+            let completion_cancel = Arc::clone(&cancel);
+            let spawned = executor.spawn_with_cancel(
+                "NIP-46 result-map",
+                move || {
+                    if let Some(cancel) = shutdown_cancel
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take()
+                    {
+                        cancel();
+                    }
+                },
+                move || {
                     let result = match rx.recv() {
                         Ok(Ok(value)) => map(value),
                         Ok(Err(error)) => Err(error),
                         Err(_) => Err(SignerError::Disconnected),
                     };
+                    completion_cancel
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take();
                     let _ = tx.send(result);
-                });
+                },
+            );
             if spawned.is_err() {
+                if let Some(cancel) = cancel
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .take()
+                {
+                    cancel();
+                }
                 let _ = failure.send(Err(SignerError::Unavailable));
             }
-            SignerOp::pending_from_parts(mapped_rx, cancel)
+            let mapped_cancel = Arc::clone(&cancel);
+            SignerOp::pending_from_parts(
+                mapped_rx,
+                Some(Box::new(move || {
+                    if let Some(cancel) = mapped_cancel
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take()
+                    {
+                        cancel();
+                    }
+                })),
+            )
         }
     }
 }
@@ -1259,23 +1428,45 @@ fn forward_events(
     event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
 ) -> Result<(), Nip46Error> {
     let events = session.subscribe();
-    thread::Builder::new()
-        .name("nmp-nip46-event-forwarder".to_string())
-        .spawn(move || {
-            while let Ok(event) = events.recv() {
-                event_sink(event);
-            }
-        })
-        .map(|_| ())
-        .map_err(|error| Nip46Error::ThreadUnavailable {
-            component: "NIP-46 event forwarder".to_string(),
+    let cancel_commands = session.commands.clone();
+    session
+        .executor
+        .spawn_with_cancel(
+            "NIP-46 event forwarder",
+            move || {
+                let _ = cancel_commands.send(WorkerMsg::Shutdown);
+            },
+            move || {
+                while let Ok(event) = events.recv() {
+                    event_sink(event);
+                }
+            },
+        )
+        .map_err(map_executor_error)
+}
+
+fn map_executor_error(error: nmp_executor::ExecutorError) -> Nip46Error {
+    match error {
+        nmp_executor::ExecutorError::Saturated(error) => Nip46Error::ExecutorSaturated {
+            component: error.component,
+            capacity: error.capacity,
+        },
+        nmp_executor::ExecutorError::Spawn(error) => Nip46Error::ThreadUnavailable {
+            component: "NIP-46 native task".to_string(),
             reason: error.to_string(),
-        })
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_transport_worker_budget_equals_the_protocol_relay_ceiling() {
+        assert_eq!(session_pool_config().max_relays, MAX_NIP46_RELAYS);
+        assert_eq!(MAX_NIP46_RELAYS, 8);
+    }
 
     #[test]
     fn injected_initial_relay_worker_refusal_reaches_the_waiting_caller_typed() {
@@ -1289,6 +1480,8 @@ mod tests {
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
             availability_error: Arc::clone(&availability_error),
+            executor: nmp_executor::Executor::new(4).unwrap(),
+            owns_executor: true,
         });
         let mut worker = SessionWorker::new(
             pool,
@@ -1322,6 +1515,72 @@ mod tests {
         assert_eq!(session.wait_available(Duration::from_secs(1)), Err(error));
         assert!(worker.configured.is_empty());
         worker.pool.shutdown();
+    }
+
+    #[test]
+    fn borrowed_engine_executor_survives_session_teardown() {
+        let executor = nmp_executor::Executor::new(2).unwrap();
+        let session = Session::spawn(
+            Vec::new(),
+            Keys::generate(),
+            None,
+            None,
+            executor.clone(),
+            false,
+        )
+        .unwrap();
+
+        drop(session);
+        executor.wait_for_idle();
+        assert!(executor.census().accepting);
+
+        let reservation = executor.reserve("post-session engine work").unwrap();
+        drop(reservation);
+        executor.shutdown();
+    }
+
+    #[test]
+    fn every_forwardable_engine_session_owns_two_slots() {
+        let executor = nmp_executor::Executor::new(5).unwrap();
+        let mut sessions = Vec::new();
+        for _ in 0..2 {
+            let session = Session::spawn(
+                Vec::new(),
+                Keys::generate(),
+                None,
+                None,
+                executor.clone(),
+                false,
+            )
+            .unwrap();
+            forward_events(&session, Arc::new(|_| {})).unwrap();
+            sessions.push(session);
+        }
+        assert_eq!(executor.census().admitted, 4);
+
+        let third = Session::spawn(
+            Vec::new(),
+            Keys::generate(),
+            None,
+            None,
+            executor.clone(),
+            false,
+        )
+        .unwrap();
+        let refusal = forward_events(&third, Arc::new(|_| {})).unwrap_err();
+        assert_eq!(
+            refusal,
+            Nip46Error::ExecutorSaturated {
+                component: "NIP-46 event forwarder".to_string(),
+                capacity: 5,
+            }
+        );
+
+        drop(third);
+        drop(sessions);
+        executor.wait_for_idle();
+        assert_eq!(executor.census().admitted, 0);
+        executor.shutdown();
     }
 
     #[test]

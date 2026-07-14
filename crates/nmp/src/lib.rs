@@ -53,7 +53,14 @@ mod subscription;
 
 pub use config::EngineConfig;
 pub use engine::Engine;
+#[doc(hidden)]
+pub use engine::NativeTaskCancel;
 pub use error::EngineError;
+#[doc(hidden)]
+pub use nmp_executor::{
+    Census as NativeTaskCensus, Executor as NativeTaskExecutor,
+    Reservation as NativeTaskReservation, StartedTask as StartedNativeTask,
+};
 pub use subscription::{DiagnosticsSubscription, ObservationCancel, Subscription};
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
