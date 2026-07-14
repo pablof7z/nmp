@@ -9,7 +9,8 @@ final class SigningTests: XCTestCase {
     func testSignEventReturnsExactBodyWithoutPublishingIt() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        XCTAssertEqual(try await engine.addAccount(secretKey: secret), author)
+        let addedAuthor = try await engine.addAccount(secretKey: secret)
+        XCTAssertEqual(addedAuthor, author)
         try engine.setActiveAccount(author)
         let request = NMPUnsignedEvent(
             createdAt: 1_723_456_789,
