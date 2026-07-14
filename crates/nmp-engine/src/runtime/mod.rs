@@ -1948,7 +1948,19 @@ fn engine_loop<S, D>(
                         );
                         continue;
                     }
-                    core.handle(EngineMsg::CommitHistoryLoad(id));
+                    let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+                    dispatch_core_effects(
+                        &core,
+                        committed,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    continue;
                 } else {
                     let _ = reply.send(result.unwrap_or(Err(HistoryLoadError::StoreUnavailable)));
                 }
@@ -2146,13 +2158,16 @@ fn preflight_query_relay_workers_with(
 ) -> Result<(), EngineThreadError> {
     let mut relays = BTreeSet::new();
     for effect in effects {
-        let Effect::Wire(delta) = effect else {
-            continue;
-        };
-        for (relay, ops) in &delta.ops {
-            if ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
-                relays.insert(relay.clone());
+        match effect {
+            Effect::Wire(delta) => {
+                for (relay, ops) in &delta.ops {
+                    if ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
+                        relays.insert(relay.clone());
+                    }
+                }
             }
+            Effect::PreflightHistoryRelays(planned) => relays.extend(planned.iter().cloned()),
+            _ => {}
         }
     }
 
@@ -2323,6 +2338,7 @@ fn dispatch_effect(
 ) {
     match effect {
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
+        Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(url, reqs) => apply_replay(&url, reqs, pool, preambles),
         Effect::FetchRelayInformation(url) => {
             let generation = runtime

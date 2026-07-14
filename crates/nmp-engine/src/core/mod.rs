@@ -54,8 +54,8 @@ use nmp_resolver::{
     LocalAcceptResult, QueryHandle,
 };
 use nmp_router::{
-    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, Router, RuleRegistry, SubId,
-    WireDelta, WireOp, WireReq,
+    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayPlan, Router, RuleRegistry,
+    SubId, WireDelta, WireOp, WireReq,
 };
 use nmp_signer::SignerError;
 use nmp_store::{
@@ -435,6 +435,11 @@ pub enum EngineMsg {
 pub enum Effect {
     /// -> `Pool::send` per (relay, current handle).
     Wire(WireDelta),
+    /// Prospective relay workers for a staged history advance. The runtime
+    /// may preflight these workers, but dispatch never sends protocol work
+    /// from this effect. The live router/attribution state changes only
+    /// after the synchronous caller has accepted the successful reply.
+    PreflightHistoryRelays(BTreeSet<RelayUrl>),
     /// Reconnect: resend the current wire subs on the NEW generation.
     Replay(RelayUrl, Vec<WireReq>),
     /// Acquire/revalidate NIP-11 without blocking the reducer thread.
@@ -557,7 +562,7 @@ struct PendingHistoryLoad {
     acquired_tie_second: Option<u64>,
     opened_handle_ids: Vec<HandleId>,
     added_row_ids: Vec<EventId>,
-    staged_batch: Option<HistoryBatch>,
+    staged_batches: Vec<HistoryBatch>,
 }
 
 /// The minimal retained projection state needed to apply a committed writer
@@ -2212,14 +2217,11 @@ impl<S: EventStore> EngineCore<S> {
                 acquired_tie_second: needs_tie.then_some(boundary.created_at.as_secs()),
                 opened_handle_ids: Vec::new(),
                 added_row_ids: Vec::new(),
-                staged_batch: None,
+                staged_batches: Vec::new(),
             });
         }
 
-        let mut effects = vec![Effect::EmitHistory(
-            id,
-            self.history_batch(id, Vec::new(), HistoryLoadFact::Requesting),
-        )];
+        let mut effects = Vec::new();
         let mut opened = Vec::new();
         if needs_tie {
             if let Some(tie) = query.tie_second_demand(boundary.created_at.as_secs()) {
@@ -2280,10 +2282,13 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        self.recompile(&mut effects);
-        self.refresh_all_handles(&mut effects);
-        self.refresh_all_histories_except(id, &mut effects);
-        let added = match self.advance_history_projection(id, boundary, old_len) {
+        // Build the prospective plan without touching live router,
+        // attribution, diagnostics, other projections, or any sink. The
+        // runtime may preflight its workers, but nothing becomes observable
+        // until its synchronous reply receiver accepts success.
+        let shadow_plan = self.history_shadow_plan();
+        let requesting = self.history_batch(id, Vec::new(), HistoryLoadFact::Requesting);
+        let added = match self.advance_history_projection(id, boundary, old_len, &shadow_plan) {
             Ok((batch, added)) => {
                 let added_row_ids = batch
                     .deltas
@@ -2301,8 +2306,7 @@ impl<S: EventStore> EngineCore<S> {
                     .as_mut()
                     .expect("load remains staged until runtime acknowledgement");
                 pending.added_row_ids = added_row_ids;
-                pending.staged_batch = Some(batch.clone());
-                effects.push(Effect::EmitHistory(id, batch));
+                pending.staged_batches = vec![requesting, batch];
                 added
             }
             Err(error) => {
@@ -2319,19 +2323,40 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         debug_assert!(added <= query.page_size());
+        effects.push(Effect::PreflightHistoryRelays(
+            shadow_plan.reqs.keys().cloned().collect(),
+        ));
         effects.push(Effect::HistoryLoadResult(id, Ok(())));
         effects
     }
 
     fn on_commit_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
-        if let Some(state) = self.histories.get_mut(&id) {
-            if let Some(pending) = state.pending_load.take() {
-                if let Some(batch) = pending.staged_batch {
-                    state.sink.on_history(batch);
-                }
-            }
+        if !self
+            .histories
+            .get(&id)
+            .is_some_and(|state| state.pending_load.is_some())
+        {
+            return Vec::new();
         }
-        Vec::new()
+
+        let mut effects = Vec::new();
+        self.recompile(&mut effects);
+        self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories_except(id, &mut effects);
+
+        let state = self
+            .histories
+            .get_mut(&id)
+            .expect("committed history remained live");
+        let pending = state
+            .pending_load
+            .take()
+            .expect("commit checked the staged history load");
+        for batch in pending.staged_batches {
+            state.sink.on_history(batch.clone());
+            effects.push(Effect::EmitHistory(id, batch));
+        }
+        effects
     }
 
     fn on_rollback_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
@@ -2370,9 +2395,7 @@ impl<S: EventStore> EngineCore<S> {
         state.last_evidence = pending.prior_evidence;
         state.projection_complete = pending.prior_projection_complete;
 
-        let mut effects = Vec::new();
-        self.recompile(&mut effects);
-        effects
+        Vec::new()
     }
 
     fn validate_history_continuation(
@@ -3893,6 +3916,30 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Compile the resolver's current (possibly staged-history) demand into
+    /// an isolated plan. A history advance changes only the outer time
+    /// window of an already-live descriptor, so every discovery dependency
+    /// is already represented by the initial session; shadow planning never
+    /// needs to mutate the widen-only discovery subscription.
+    fn history_shadow_plan(&self) -> RelayPlan {
+        let admitted = self
+            .resolver
+            .active_demand()
+            .into_iter()
+            .map(|mut atom| {
+                atom.routing_evidence
+                    .retain(|evidence| self.admission.admits_discovered(&evidence.relay));
+                atom
+            })
+            .collect();
+        let mut router = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        let _ = router.compile(&admitted, self.directory.as_ref(), self.cap);
+        router.plan().clone()
+    }
+
     /// Gate every network-sourced selector hint/provenance URL before it
     /// can become a router candidate. Operator-configured lanes remain
     /// trusted and bypass this path, matching kind:10002 admission policy.
@@ -4493,7 +4540,7 @@ impl<S: EventStore> EngineCore<S> {
             .first()
             .expect("history session always owns its initial resolver handle");
         let root_atoms = self.resolver.root_atoms(primary);
-        let subtree_atoms = self.resolver.subtree_atoms(primary);
+        let subtree_atoms = self.history_subtree_atoms(id);
         let pinned_relays = match (
             state.query.live_query().0.cache,
             &state.query.live_query().0.source,
@@ -4507,10 +4554,18 @@ impl<S: EventStore> EngineCore<S> {
             #[cfg(test)]
             self.history_store_queries
                 .set(self.history_store_queries.get().saturating_add(1));
-            let rows = self
-                .resolver
-                .store()
-                .query_newest(&atom.to_nostr(), state.target_rows)?;
+            let filter = atom.to_nostr();
+            let rows = match pinned_relays {
+                Some(relays) => self.resolver.store().query_newest_observed_by(
+                    &filter,
+                    relays,
+                    state.target_rows,
+                )?,
+                None => self
+                    .resolver
+                    .store()
+                    .query_newest(&filter, state.target_rows)?,
+            };
             #[cfg(test)]
             self.history_rows_examined.set(
                 self.history_rows_examined
@@ -4518,16 +4573,6 @@ impl<S: EventStore> EngineCore<S> {
                     .saturating_add(rows.len() as u64),
             );
             for stored in rows {
-                if let Some(relays) = pinned_relays {
-                    if !stored
-                        .provenance
-                        .seen
-                        .keys()
-                        .any(|relay| relays.contains(relay))
-                    {
-                        continue;
-                    }
-                }
                 by_id.entry(stored.event.id).or_insert_with(|| Row {
                     event: stored.event,
                     sources: stored.provenance.seen.into_keys().collect(),
@@ -4557,11 +4602,25 @@ impl<S: EventStore> EngineCore<S> {
         Ok((by_id, evidence))
     }
 
+    /// Every active acquisition atom owned by one coordinated history
+    /// partition: initial bounded root, exact unbounded tie seconds, bounded
+    /// older ranges, and every interior Derived dependency. Set union keeps
+    /// shared atoms deduplicated while preserving distinct scoped windows.
+    fn history_subtree_atoms(&self, id: HistorySessionId) -> BTreeSet<ContextualAtom> {
+        self.histories
+            .get(&id)
+            .into_iter()
+            .flat_map(|state| state.handle_ids.iter().copied())
+            .flat_map(|handle| self.resolver.subtree_atoms(handle))
+            .collect()
+    }
+
     fn advance_history_projection(
         &mut self,
         id: HistorySessionId,
         before: nmp_store::EventCursor,
         old_len: usize,
+        plan: &RelayPlan,
     ) -> Result<(HistoryBatch, usize), PersistenceError> {
         let state = self
             .histories
@@ -4572,7 +4631,7 @@ impl<S: EventStore> EngineCore<S> {
             .first()
             .expect("history session always owns its initial resolver handle");
         let root_atoms = self.resolver.root_atoms(primary);
-        let subtree_atoms = self.resolver.subtree_atoms(primary);
+        let subtree_atoms = self.history_subtree_atoms(id);
         let needed = state.target_rows.saturating_sub(state.last_rows.len());
         let pinned_relays = match (
             state.query.live_query().0.cache,
@@ -4587,10 +4646,17 @@ impl<S: EventStore> EngineCore<S> {
             #[cfg(test)]
             self.history_store_queries
                 .set(self.history_store_queries.get().saturating_add(1));
-            let rows =
-                self.resolver
+            let filter = atom.to_nostr();
+            let rows = match pinned_relays {
+                Some(relays) => self
+                    .resolver
                     .store()
-                    .query_newest_before(&atom.to_nostr(), before, needed)?;
+                    .query_newest_before_observed_by(&filter, relays, before, needed)?,
+                None => self
+                    .resolver
+                    .store()
+                    .query_newest_before(&filter, before, needed)?,
+            };
             #[cfg(test)]
             self.history_rows_examined.set(
                 self.history_rows_examined
@@ -4598,16 +4664,6 @@ impl<S: EventStore> EngineCore<S> {
                     .saturating_add(rows.len() as u64),
             );
             for stored in rows {
-                if let Some(relays) = pinned_relays {
-                    if !stored
-                        .provenance
-                        .seen
-                        .keys()
-                        .any(|relay| relays.contains(relay))
-                    {
-                        continue;
-                    }
-                }
                 candidates.entry(stored.event.id).or_insert_with(|| Row {
                     event: stored.event,
                     sources: stored.provenance.seen.into_keys().collect(),
@@ -4624,7 +4680,7 @@ impl<S: EventStore> EngineCore<S> {
         ordered.truncate(needed);
         let evidence = evidence::acquisition_evidence(
             &subtree_atoms,
-            self.router.plan(),
+            plan,
             self.resolver.store(),
             &self.connected_relays,
             &self.ever_connected_relays,
@@ -7712,6 +7768,15 @@ mod history_mutation_tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct CapturingRowSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
+
+    impl RowSink for CapturingRowSink {
+        fn on_rows(&self, rows: Vec<RowDelta>) {
+            self.0.lock().unwrap().push(rows);
+        }
+    }
+
     fn room_tag(room: usize) -> Tag {
         Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap()
     }
@@ -7931,6 +7996,72 @@ mod history_mutation_tests {
     }
 
     #[test]
+    fn strict_history_counts_only_pinned_provenance_before_applying_page_bounds() {
+        let keys = Keys::generate();
+        let wanted = RelayUrl::parse("wss://history-strict.example").unwrap();
+        let other = RelayUrl::parse("wss://history-other.example").unwrap();
+        let mut store = MemoryStore::new();
+        for (created_at, relay, ordinal) in [
+            (600, other.clone(), 0),
+            (500, other.clone(), 1),
+            (400, wanted.clone(), 2),
+            (300, wanted.clone(), 3),
+            (200, wanted.clone(), 4),
+            (100, wanted.clone(), 5),
+        ] {
+            store
+                .insert(
+                    room_event(&keys, 47, ordinal, created_at),
+                    RelayObserved::new(relay, Timestamp::from(1_000u64)),
+                )
+                .unwrap();
+        }
+        let selection = history_query(47, BTreeSet::from([9]))
+            .live_query()
+            .0
+            .selection
+            .clone();
+        let query = HistoryQuery::new(
+            LiveQuery(nmp_grammar::Demand {
+                selection,
+                source: SourceAuthority::Pinned(BTreeSet::from([wanted])),
+                access: AccessContext::Public,
+                cache: CacheMode::Strict,
+            }),
+            2,
+            4,
+        )
+        .unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let opened = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+        let (id, first) = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, batch) => Some((*id, batch.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            ordered_ids(&core, id)
+                .iter()
+                .map(|event_id| core.histories[&id].last_rows[event_id].created_at)
+                .collect::<Vec<_>>(),
+            vec![400, 300]
+        );
+
+        core.handle(EngineMsg::LoadOlder(id, first.continuation.unwrap()));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        assert_eq!(
+            ordered_ids(&core, id)
+                .iter()
+                .map(|event_id| core.histories[&id].last_rows[event_id].created_at)
+                .collect::<Vec<_>>(),
+            vec![400, 300, 200, 100]
+        );
+    }
+
+    #[test]
     fn replacement_and_expiry_rebalance_without_full_history_replay() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://history-replace-expire.example").unwrap();
@@ -8029,7 +8160,33 @@ mod history_mutation_tests {
                 _ => None,
             })
             .unwrap();
+        let row_sink = CapturingRowSink::default();
+        let ordinary = core.handle(EngineMsg::Subscribe(
+            history_query(47, BTreeSet::from([9])).live_query().clone(),
+            Box::new(row_sink.clone()),
+        ));
+        let ordinary_id = ordinary
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(handle, _, _) => Some(*handle),
+                _ => None,
+            })
+            .unwrap();
+        let second_sink = CapturingHistorySink::default();
+        let second_open = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9])),
+            Box::new(second_sink.clone()),
+        ));
+        let second_id = second_open
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(candidate, _) if *candidate != id => Some(*candidate),
+                _ => None,
+            })
+            .unwrap();
         sink.0.lock().unwrap().clear();
+        row_sink.0.lock().unwrap().clear();
+        second_sink.0.lock().unwrap().clear();
 
         let mut wrong_version = continuation.clone();
         wrong_version.version = wrong_version.version.saturating_add(1);
@@ -8057,6 +8214,12 @@ mod history_mutation_tests {
         let prior_evidence = core.histories[&id].last_evidence.clone();
         let prior_generation = core.histories[&id].generation;
         let prior_handles = core.histories[&id].handle_ids.clone();
+        let ordinary_prior_rows = core.handles[&ordinary_id].last_rows.clone();
+        let ordinary_prior_evidence = core.handles[&ordinary_id].last_evidence.clone();
+        let second_prior_rows = core.histories[&second_id].last_rows.clone();
+        let second_prior_evidence = core.histories[&second_id].last_evidence.clone();
+        let second_prior_generation = core.histories[&second_id].generation;
+        let second_prior_handles = core.histories[&second_id].handle_ids.clone();
         let staged = core.handle(EngineMsg::LoadOlder(id, continuation.clone()));
         assert!(staged.iter().any(|effect| matches!(
             effect,
@@ -8068,6 +8231,23 @@ mod history_mutation_tests {
             sink.0.lock().unwrap().is_empty(),
             "staged rows are not observable"
         );
+        assert!(row_sink.0.lock().unwrap().is_empty());
+        assert!(second_sink.0.lock().unwrap().is_empty());
+        assert_eq!(core.handles[&ordinary_id].last_rows, ordinary_prior_rows);
+        assert_eq!(
+            core.handles[&ordinary_id].last_evidence,
+            ordinary_prior_evidence
+        );
+        assert_eq!(core.histories[&second_id].last_rows, second_prior_rows);
+        assert_eq!(
+            core.histories[&second_id].last_evidence,
+            second_prior_evidence
+        );
+        assert_eq!(
+            core.histories[&second_id].generation,
+            second_prior_generation
+        );
+        assert_eq!(core.histories[&second_id].handle_ids, second_prior_handles);
 
         core.handle(EngineMsg::RollbackHistoryLoad(id));
         let state = &core.histories[&id];
@@ -8078,6 +8258,8 @@ mod history_mutation_tests {
         assert_eq!(state.target_rows, 3);
         assert_eq!(state.handle_ids, prior_handles);
         assert!(state.pending_load.is_none());
+        assert!(row_sink.0.lock().unwrap().is_empty());
+        assert!(second_sink.0.lock().unwrap().is_empty());
 
         let retried = core.handle(EngineMsg::LoadOlder(id, continuation));
         assert!(retried.iter().any(|effect| matches!(
@@ -8086,7 +8268,21 @@ mod history_mutation_tests {
         )));
         core.handle(EngineMsg::CommitHistoryLoad(id));
         assert_eq!(core.histories[&id].last_rows.len(), 6);
-        assert_eq!(sink.0.lock().unwrap().len(), 1);
+        let delivered = sink.0.lock().unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0].load, HistoryLoadFact::Requesting);
+        assert_eq!(delivered[1].load, HistoryLoadFact::Returned { added: 3 });
+        assert_eq!(
+            delivered[1]
+                .evidence
+                .shortfall
+                .iter()
+                .filter(|fact| matches!(fact, ShortfallFact::NoPlannedSource { .. }))
+                .count(),
+            3,
+            "initial, exact tie-second, and older handles all contribute evidence"
+        );
+        drop(delivered);
 
         let owned_handles = core.histories[&id].handle_ids.clone();
         core.handle(EngineMsg::UnsubscribeHistory(id));

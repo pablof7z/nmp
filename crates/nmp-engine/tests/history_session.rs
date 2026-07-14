@@ -114,12 +114,16 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
     apply(&mut rows, &first);
     let first_continuation = first.continuation.clone().unwrap();
 
-    let second_effects = core.handle(EngineMsg::LoadOlder(id, first_continuation.clone()));
+    let staged_second = core.handle(EngineMsg::LoadOlder(id, first_continuation.clone()));
+    assert!(staged_second.iter().any(|effect| matches!(
+        effect,
+        Effect::HistoryLoadResult(session, Ok(())) if *session == id
+    )));
+    let second_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
     let (_, second) = returned(&second_effects);
     assert_eq!(second.load, HistoryLoadFact::Returned { added: 5 });
     apply(&mut rows, &second);
     assert_eq!(rows.len(), 10);
-    core.handle(EngineMsg::CommitHistoryLoad(id));
 
     let reqs: Vec<_> = second_effects
         .iter()
@@ -149,10 +153,15 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
             if *session == id
     )));
 
-    let third_effects = core.handle(EngineMsg::LoadOlder(
+    let staged_third = core.handle(EngineMsg::LoadOlder(
         id,
         second.continuation.clone().unwrap(),
     ));
+    assert!(staged_third.iter().any(|effect| matches!(
+        effect,
+        Effect::HistoryLoadResult(session, Ok(())) if *session == id
+    )));
+    let third_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
     let (_, third) = returned(&third_effects);
     assert_eq!(third.load, HistoryLoadFact::Returned { added: 3 });
     apply(&mut rows, &third);
@@ -161,7 +170,6 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
         rows.keys().copied().collect::<BTreeSet<_>>(),
         events.iter().map(|e| e.id).collect()
     );
-    core.handle(EngineMsg::CommitHistoryLoad(id));
 
     let at_bound = core.handle(EngineMsg::LoadOlder(
         id,

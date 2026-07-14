@@ -453,6 +453,60 @@ fn query_newest_before_pages_same_second_rows_without_gaps_or_duplicates() {
 }
 
 #[test]
+fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
+    for_each_backend(|store| {
+        let k = keys();
+        let wanted = RelayUrl::parse("wss://wanted.example").unwrap();
+        let other = RelayUrl::parse("wss://other.example").unwrap();
+
+        for (created_at, relay, content) in [
+            (500, other.clone(), "newest-ineligible"),
+            (400, other.clone(), "next-ineligible"),
+            (300, wanted.clone(), "eligible-a"),
+            (200, wanted.clone(), "eligible-b"),
+            (100, wanted.clone(), "eligible-c"),
+        ] {
+            store
+                .insert(
+                    regular_event_at(&k, content, created_at),
+                    RelayObserved::new(relay, Timestamp::from(600u64)),
+                )
+                .unwrap();
+        }
+
+        let filter = Filter::new().kind(Kind::TextNote).author(k.public_key());
+        let eligible = BTreeSet::from([wanted]);
+        let first = store
+            .query_newest_observed_by(&filter, &eligible, 2)
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![300, 200],
+            "the output limit must apply after Strict provenance eligibility"
+        );
+
+        let older = store
+            .query_newest_before_observed_by(
+                &filter,
+                &eligible,
+                EventCursor::from_event(&first[0].event),
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            older
+                .iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![200, 100]
+        );
+    });
+}
+
+#[test]
 fn query_newest_before_preserves_filter_winner_and_provenance_semantics() {
     for_each_backend(|store| {
         let author = keys();

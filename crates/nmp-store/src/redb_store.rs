@@ -3759,6 +3759,7 @@ impl RedbStore {
         filter: &Filter,
         before: Option<EventCursor>,
         limit: Option<usize>,
+        observed_by: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let local = read_txn.open_table(EVENT_LOCAL).map_err(persist_err)?;
@@ -3766,6 +3767,7 @@ impl RedbStore {
             .open_table(EVENT_OBSERVATIONS)
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
+        let relay_keys = read_txn.open_table(RELAY_KEYS).map_err(persist_err)?;
         let outbox_suppress_by_id = read_txn
             .open_table(OUTBOX_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
@@ -3780,9 +3782,33 @@ impl RedbStore {
             before,
         };
         let mut relay_cache = HashMap::new();
+        let eligible_relay_keys = if let Some(eligible) = observed_by {
+            let mut keys = BTreeSet::new();
+            for relay in eligible {
+                if let Some(key) = relay_keys.get(relay.as_str()).map_err(persist_err)? {
+                    keys.insert(key.value());
+                }
+            }
+            Some(keys)
+        } else {
+            None
+        };
         let prepared_filter = PreparedFilter::new(filter);
         let mut materialize_if_visible =
             |event_key: EventKey| -> Result<Option<StoredEvent>, PersistenceError> {
+                if let Some(eligible) = &eligible_relay_keys {
+                    let mut observed = false;
+                    for relay_key in eligible {
+                        let key = observation_key(event_key, *relay_key);
+                        if observations.get(&key).map_err(persist_err)?.is_some() {
+                            observed = true;
+                            break;
+                        }
+                    }
+                    if !observed {
+                        return Ok(None);
+                    }
+                }
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_event_values.fetch_add(1, Ordering::Relaxed);
                 let Some(value) = events.get(event_key).map_err(persist_err)? else {
@@ -4222,7 +4248,7 @@ impl EventStore for RedbStore {
         }
 
         let plan = plan_ordered_query(&read_txn, filter)?;
-        self.query_ordered(&read_txn, &plan, filter, None, None)
+        self.query_ordered(&read_txn, &plan, filter, None, None, None)
     }
 
     fn query_newest(
@@ -4257,7 +4283,46 @@ impl EventStore for RedbStore {
         let read_txn = self.db.begin_read().map_err(persist_err)?;
 
         let plan = plan_ordered_query(&read_txn, filter)?;
-        self.query_ordered(&read_txn, &plan, filter, None, Some(limit))
+        self.query_ordered(&read_txn, &plan, filter, None, Some(limit), None)
+    }
+
+    fn query_newest_observed_by(
+        &self,
+        filter: &Filter,
+        relays: &BTreeSet<RelayUrl>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0
+            || relays.is_empty()
+            || filter
+                .since
+                .zip(filter.until)
+                .is_some_and(|(since, until)| since > until)
+            || filter.generic_tags.values().any(BTreeSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            let mut rows = self.query(filter)?;
+            rows.retain(|row| {
+                row.provenance
+                    .seen
+                    .keys()
+                    .any(|relay| relays.contains(relay))
+            });
+            rows.sort_by(|a, b| {
+                b.event
+                    .created_at
+                    .cmp(&a.event.created_at)
+                    .then_with(|| a.event.id.cmp(&b.event.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
+        }
+
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let plan = plan_ordered_query(&read_txn, filter)?;
+        self.query_ordered(&read_txn, &plan, filter, None, Some(limit), Some(relays))
     }
 
     fn query_newest_before(
@@ -4296,7 +4361,58 @@ impl EventStore for RedbStore {
 
         let read_txn = self.db.begin_read().map_err(persist_err)?;
         let plan = plan_ordered_query(&read_txn, filter)?;
-        self.query_ordered(&read_txn, &plan, filter, Some(before), Some(limit))
+        self.query_ordered(&read_txn, &plan, filter, Some(before), Some(limit), None)
+    }
+
+    fn query_newest_before_observed_by(
+        &self,
+        filter: &Filter,
+        relays: &BTreeSet<RelayUrl>,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0
+            || relays.is_empty()
+            || filter
+                .since
+                .zip(filter.until)
+                .is_some_and(|(since, until)| since > until)
+            || filter.generic_tags.values().any(BTreeSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            let mut rows = self.query(filter)?;
+            rows.retain(|row| {
+                (row.event.created_at < before.created_at
+                    || (row.event.created_at == before.created_at
+                        && row.event.id > before.event_id))
+                    && row
+                        .provenance
+                        .seen
+                        .keys()
+                        .any(|relay| relays.contains(relay))
+            });
+            rows.sort_by(|a, b| {
+                b.event
+                    .created_at
+                    .cmp(&a.event.created_at)
+                    .then_with(|| a.event.id.cmp(&b.event.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
+        }
+
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let plan = plan_ordered_query(&read_txn, filter)?;
+        self.query_ordered(
+            &read_txn,
+            &plan,
+            filter,
+            Some(before),
+            Some(limit),
+            Some(relays),
+        )
     }
 
     fn remove(
@@ -8291,6 +8407,61 @@ mod tests {
             concat!(
                 "the redb range must begin strictly after the exact cursor key; ",
                 "none of the 120 newer/equal-before rows may be scanned or skipped"
+            )
+        );
+    }
+
+    #[test]
+    fn strict_ordered_scan_stops_after_requested_eligible_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("strict-provenance-work.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let keys = nostr::Keys::generate();
+        let wanted = RelayUrl::parse("wss://wanted.example").unwrap();
+        let other = RelayUrl::parse("wss://other.example").unwrap();
+
+        for index in 0..20u64 {
+            store
+                .insert(
+                    room_event(
+                        &keys,
+                        "target",
+                        2_000 - index,
+                        &format!("ineligible-{index}"),
+                    ),
+                    RelayObserved::new(other.clone(), Timestamp::from(3_000 + index)),
+                )
+                .unwrap();
+        }
+        for index in 0..3u64 {
+            store
+                .insert(
+                    room_event(&keys, "target", 1_000 - index, &format!("eligible-{index}")),
+                    RelayObserved::new(wanted.clone(), Timestamp::from(4_000 + index)),
+                )
+                .unwrap();
+        }
+
+        let filter =
+            Filter::new().custom_tag(SingleLetterTag::lowercase(nostr::Alphabet::H), "target");
+        let eligible = BTreeSet::from([wanted]);
+        store.reset_query_work();
+        let rows = store
+            .query_newest_observed_by(&filter, &eligible, 3)
+            .unwrap();
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![1_000, 999, 998]
+        );
+        assert_eq!(
+            store.query_work(),
+            (23, 3, 3),
+            concat!(
+                "the ordered index may inspect the twenty newer ineligible keys, ",
+                "but event decoding/provenance materialization stops at the three eligible rows"
             )
         );
     }
