@@ -33,6 +33,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-engine/src/core/diagnostics.rs`
 - Source: `crates/nmp-engine/src/core/mod.rs`
 - Source: `crates/nmp-engine/src/runtime/mod.rs`
+- Source: `crates/nmp-engine/src/relay_information.rs`
 - Source: `crates/nmp-executor/src/lib.rs`
 - Source: `crates/nmp-nip02/src/lib.rs`
 - Source: `crates/nmp-nip02/src/service.rs`
@@ -62,9 +63,11 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Diagnostics.swift`
 - Source: `Packages/NMP/Sources/NMP/NostrEntity.swift`
 - Source: `Packages/NMP/Sources/NMP/RemoteSigner.swift`
+- Source: `Packages/NMP/Sources/NMP/RelayInformation.swift`
 - Source: `Packages/NMP/Tests/NMPTests/DiagnosticsTests.swift`
 - Source: `Packages/NMP/Tests/NMPTests/FollowingTests.swift`
 - Source: `Packages/NMP/Tests/NMPTests/RemoteSignerTests.swift`
+- Source: `Packages/NMP/Tests/NMPTests/RelayInformationTests.swift`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Engine.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPError.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Query.kt`
@@ -78,8 +81,10 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Diagnostics.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NostrEntity.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/RemoteSigner.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/RelayInformation.kt`
 - Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/DiagnosticsConcurrencyTest.kt`
 - Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/RemoteSignerTest.kt`
+- Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/RelayInformationTest.kt`
 
 ## Optional packages and build truth
 
