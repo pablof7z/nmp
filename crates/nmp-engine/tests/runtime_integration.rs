@@ -958,6 +958,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "remove_signer",
         "set_active_account",
         "shutdown",
+        "sign_only",
         "subscribe",
         "unsubscribe",
     ];

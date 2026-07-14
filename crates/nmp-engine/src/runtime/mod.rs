@@ -69,9 +69,11 @@ use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
-use nmp_signer::{SignerOp, SigningCapability};
+use nmp_signer::{SignerError, SignerOp, SigningCapability};
 use nmp_store::EventStore;
-use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp};
+use nostr::{
+    ClientMessage, Event, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent,
+};
 
 use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 
@@ -237,6 +239,10 @@ enum Cmd {
     AddSigner {
         signer: Box<dyn SigningCapability + Send>,
         reply: Sender<Result<SignerRegistration, AddSignerError>>,
+    },
+    SignOnly {
+        unsigned: UnsignedEvent,
+        reply: Sender<Result<Event, SignOnlyError>>,
     },
     RemoveSigner {
         registration: SignerRegistration,
@@ -1201,6 +1207,60 @@ fn engine_loop<S, D>(
                     );
                 }
             }
+            Cmd::SignOnly { unsigned, reply } => {
+                let Some(signer) = registry.signer_for(unsigned.pubkey) else {
+                    let _ = reply.send(Err(SignOnlyError::MissingSigner));
+                    continue;
+                };
+                let expected = unsigned.clone();
+                match signer.sign(unsigned) {
+                    SignerOp::Ready(result) => {
+                        let _ = reply.send(validate_sign_only(expected, result));
+                    }
+                    SignerOp::Pending(pending) => {
+                        let (pending_rx, cancel) = pending.into_parts();
+                        let cancel = Arc::new(std::sync::Mutex::new(cancel));
+                        let shutdown_cancel = Arc::clone(&cancel);
+                        let completion_cancel = Arc::clone(&cancel);
+                        let completion_reply = reply.clone();
+                        let spawn = native_tasks.spawn_with_cancel(
+                            "sign-only-waiter",
+                            move || {
+                                if let Some(cancel) = shutdown_cancel
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner())
+                                    .take()
+                                {
+                                    cancel();
+                                }
+                            },
+                            move || {
+                                let result =
+                                    pending_rx.recv().unwrap_or(Err(SignerError::Disconnected));
+                                completion_cancel
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner())
+                                    .take();
+                                let _ = completion_reply.send(validate_sign_only(expected, result));
+                            },
+                        );
+                        if let Err(error) = spawn {
+                            let mapped = match error {
+                                nmp_executor::ExecutorError::Saturated(error) => {
+                                    SignOnlyError::ExecutorSaturated {
+                                        component: error.component,
+                                        capacity: error.capacity,
+                                    }
+                                }
+                                nmp_executor::ExecutorError::Spawn(error) => {
+                                    SignOnlyError::RuntimeUnavailable(error.to_string())
+                                }
+                            };
+                            let _ = reply.send(Err(mapped));
+                        }
+                    }
+                }
+            }
             Cmd::RemoveSigner {
                 registration,
                 reply,
@@ -1928,6 +1988,62 @@ pub enum AddSignerError {
     MissingPublicKey,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignOnlyError {
+    MissingSigner,
+    Signer(SignerError),
+    InvalidResponse(String),
+    ExecutorSaturated { component: String, capacity: usize },
+    RuntimeUnavailable(String),
+}
+
+impl std::fmt::Display for SignOnlyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingSigner => f.write_str("no signer is registered for the active account"),
+            Self::Signer(error) => write!(f, "signer refused: {error}"),
+            Self::InvalidResponse(reason) => {
+                write!(f, "signer returned an invalid event: {reason}")
+            }
+            Self::ExecutorSaturated {
+                component,
+                capacity,
+            } => {
+                write!(
+                    f,
+                    "{component} refused: native task executor is at capacity {capacity}"
+                )
+            }
+            Self::RuntimeUnavailable(reason) => {
+                write!(f, "sign-only runtime unavailable: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SignOnlyError {}
+
+fn validate_sign_only(
+    expected: UnsignedEvent,
+    result: Result<Event, SignerError>,
+) -> Result<Event, SignOnlyError> {
+    let event = result.map_err(SignOnlyError::Signer)?;
+    if event.pubkey != expected.pubkey
+        || event.created_at != expected.created_at
+        || event.kind != expected.kind
+        || event.tags != expected.tags
+        || event.content != expected.content
+    {
+        return Err(SignOnlyError::InvalidResponse(
+            "signed fields differ from the requested event".to_string(),
+        ));
+    }
+    event
+        .verify()
+        .map_err(|error| SignOnlyError::InvalidResponse(error.to_string()))?;
+    Ok(event)
+}
+
 impl std::fmt::Display for AddSignerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2017,6 +2133,22 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine thread dropped the remove_signer reply")
+    }
+
+    /// Sign one exact event without accepting a write, routing it, storing it,
+    /// or opening a relay. Remote signers complete on the bounded native task
+    /// executor; the engine command loop never blocks on their response.
+    pub fn sign_only(&self, unsigned: UnsignedEvent) -> Result<Event, SignOnlyError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::SignOnly {
+                unsigned,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: sign_only() called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped the sign-only reply")
     }
 
     /// Re-root every reactive query and default unsigned-publish authority

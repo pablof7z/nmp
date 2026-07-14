@@ -34,7 +34,7 @@ use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
-use nostr::{Keys, PublicKey};
+use nostr::{Event, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::config::{build_admission_policy, build_directory, EngineConfig};
 use crate::error::EngineError;
@@ -58,6 +58,15 @@ struct Inner {
 pub struct Engine {
     inner: Mutex<Option<Inner>>,
     native_tasks: nmp_executor::Executor,
+}
+
+/// One event body to sign with the active account without publishing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignEventRequest {
+    pub created_at: Timestamp,
+    pub kind: Kind,
+    pub tags: Vec<Tag>,
+    pub content: String,
 }
 
 /// Executor-owned cancellation fallback for a blocking task whose producer
@@ -368,6 +377,29 @@ impl Engine {
         }
     }
 
+    /// Sign one exact event with the active account. The active author is
+    /// frozen under the lifecycle mutex before the request reaches the
+    /// signer. No publish, store, outbox, routing, or relay path is entered.
+    pub fn sign_event(&self, request: SignEventRequest) -> Result<Event, EngineError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let inner = guard.as_ref().ok_or(EngineError::EngineClosed)?;
+        let pubkey = inner.active_pubkey.ok_or(EngineError::NoActiveAccount)?;
+        let unsigned = UnsignedEvent::new(
+            pubkey,
+            request.created_at,
+            request.kind,
+            request.tags,
+            request.content,
+        );
+        inner
+            .handle
+            .sign_only(unsigned)
+            .map_err(EngineError::from_sign_only_error)
+    }
+
     /// Open a live diagnostics stream. Same `Drop` discipline as
     /// [`Self::observe`] -- see [`DiagnosticsSubscription`]'s doc.
     pub fn observe_diagnostics(&self) -> Result<DiagnosticsSubscription, EngineError> {
@@ -520,6 +552,47 @@ mod tests {
             engine.add_account("not-a-key"),
             Err(EngineError::InvalidSecretKey)
         );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn sign_event_uses_the_active_account_without_publishing() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        let pubkey = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("account must register");
+        engine
+            .set_active_account(Some(pubkey))
+            .expect("account must activate");
+
+        let signed = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(1_750_000_000),
+                kind: Kind::Custom(27_235),
+                tags: vec![Tag::parse(["client", "nip07-test"]).expect("valid tag")],
+                content: "sign without publish".to_string(),
+            })
+            .expect("active local signer must sign");
+
+        assert_eq!(signed.pubkey, pubkey);
+        assert_eq!(signed.created_at, Timestamp::from(1_750_000_000));
+        assert_eq!(signed.kind, Kind::Custom(27_235));
+        assert_eq!(signed.content, "sign without publish");
+        assert!(signed.verify().is_ok());
+        engine.shutdown();
+    }
+
+    #[test]
+    fn sign_event_without_an_active_account_fails_closed() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let result = engine.sign_event(SignEventRequest {
+            created_at: Timestamp::from(1_750_000_000),
+            kind: Kind::TextNote,
+            tags: Vec::new(),
+            content: "unsigned".to_string(),
+        });
+        assert_eq!(result, Err(EngineError::NoActiveAccount));
         engine.shutdown();
     }
 
