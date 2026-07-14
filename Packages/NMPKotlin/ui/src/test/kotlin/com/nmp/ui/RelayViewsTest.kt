@@ -1,7 +1,9 @@
 package com.nmp.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.painter.ColorPainter
 import com.nmp.sdk.AuthPhase
 import com.nmp.sdk.RelayInformationFreshness
 import com.nmp.sdk.SourceStatus
@@ -76,6 +78,39 @@ class RelayViewsTest {
     }
 
     @Test
+    fun loadingAndUnavailableDefaultFallbacksAreExplicit() {
+        val loading = NmpRelayInformationState.Loading("wss://loading.example")
+        val unavailableWithoutReason =
+            NmpRelayInformationState.Unavailable(
+                relay = "wss://missing.example",
+                reason = null,
+            )
+        val unavailableWithBlankReason =
+            NmpRelayInformationState.Unavailable(
+                relay = "wss://blank.example",
+                reason = "  \n ",
+            )
+
+        assertEquals("loading.example", loading.displayName)
+        assertEquals("Relay information is loading", loading.displayDescription)
+        assertEquals("Loading", loading.informationLabel)
+        assertEquals("LO", loading.initials)
+        assertNull(loading.availablePresentation)
+        assertNull(loading.lastError)
+
+        listOf(
+            unavailableWithoutReason to "missing.example",
+            unavailableWithBlankReason to "blank.example",
+        ).forEach { (state, name) ->
+            assertEquals(name, state.displayName)
+            assertEquals("Relay information unavailable", state.displayDescription)
+            assertEquals("Unavailable", state.informationLabel)
+            assertNull(state.availablePresentation)
+            assertNull(state.lastError)
+        }
+    }
+
+    @Test
     fun everyProjectedSourceStatusMapsWithoutInventingGlobalHealth() {
         val cases =
             listOf(
@@ -117,7 +152,7 @@ class RelayViewsTest {
                     lastError = "refresh failed",
                 ),
             )
-        val painter: Painter? = null
+        val painter: Painter = ColorPainter(Color.Red)
         val content: @Composable () -> Unit = {
             NmpRelayIcon(state = information, painter = painter)
             NmpRelayName(state = information)
@@ -130,7 +165,16 @@ class RelayViewsTest {
                 onClick = {},
             )
         }
+        assertNotNull(painter)
         assertNotNull(content)
+        assertEquals(
+            "Relay Relay. Description. Relay information Stale. Connecting. " +
+                "Relay information error: refresh failed",
+            relayListEntryAccessibilityLabel(
+                information,
+                NmpRelayRuntimePresentation.Connecting,
+            ),
+        )
     }
 
     @Test

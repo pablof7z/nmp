@@ -1,5 +1,5 @@
 import NMP
-import NMPUI
+@testable import NMPUI
 import SwiftUI
 import XCTest
 
@@ -60,6 +60,36 @@ final class RelayViewsTests: XCTestCase {
         XCTAssertEqual(unavailable.displayDescription, "document unavailable")
     }
 
+    func testLoadingAndUnavailableDefaultFallbacksAreExplicit() {
+        let loading = NMPRelayInformationState.loading(relay: "wss://loading.example")
+        let unavailableWithoutReason = NMPRelayInformationState.unavailable(
+            relay: "wss://missing.example",
+            reason: nil
+        )
+        let unavailableWithBlankReason = NMPRelayInformationState.unavailable(
+            relay: "wss://blank.example",
+            reason: "  \n "
+        )
+
+        XCTAssertEqual(loading.displayName, "loading.example")
+        XCTAssertEqual(loading.displayDescription, "Relay information is loading")
+        XCTAssertEqual(loading.informationLabel, "Loading")
+        XCTAssertEqual(loading.initials, "LO")
+        XCTAssertNil(loading.presentation)
+        XCTAssertNil(loading.lastError)
+
+        for (state, name) in [
+            (unavailableWithoutReason, "missing.example"),
+            (unavailableWithBlankReason, "blank.example"),
+        ] {
+            XCTAssertEqual(state.displayName, name)
+            XCTAssertEqual(state.displayDescription, "Relay information unavailable")
+            XCTAssertEqual(state.informationLabel, "Unavailable")
+            XCTAssertNil(state.presentation)
+            XCTAssertNil(state.lastError)
+        }
+    }
+
     func testEveryProjectedSourceStatusMapsWithoutInventingGlobalHealth() {
         let cases: [(SourceStatus?, NMPRelayRuntimePresentation, String)] = [
             (nil, .statusUnavailable, "Status unavailable"),
@@ -100,15 +130,25 @@ final class RelayViewsTests: XCTestCase {
         )
         let image = Image(systemName: "antenna.radiowaves.left.and.right")
 
-        _ = NMPRelayIcon(state: information, image: image)
+        let icon = NMPRelayIcon(state: information, image: image)
         _ = NMPRelayName(state: information)
         _ = NMPRelayDescription(state: information)
         _ = NMPRelayRuntimeStatus(status: .connecting)
-        _ = NMPRelayListEntry(
+        let entry = NMPRelayListEntry(
             information: information,
             runtime: .connecting,
             image: image,
             action: {}
+        )
+
+        XCTAssertEqual(icon.state, information)
+        XCTAssertNotNil(icon.image)
+        XCTAssertEqual(entry.information, information)
+        XCTAssertNotNil(entry.image)
+        XCTAssertEqual(
+            entry.accessibilityLabel,
+            "Relay Relay. Description. Relay information Stale. Connecting. "
+                + "Relay information error: refresh failed"
         )
     }
 

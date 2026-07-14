@@ -327,7 +327,7 @@ public struct NMPRelayListEntry: View {
         }
     }
 
-    private var accessibilityLabel: String {
+    var accessibilityLabel: String {
         let parts: [String?] = [
             "Relay \(information.displayName)",
             information.displayDescription,
