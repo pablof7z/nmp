@@ -1288,6 +1288,10 @@ mod tests {
             Some(EngineError::EngineClosed)
         );
         assert_eq!(
+            engine.observe_history(history_probe_query()).err(),
+            Some(EngineError::EngineClosed)
+        );
+        assert_eq!(
             engine.set_active_account(None).err(),
             Some(EngineError::EngineClosed)
         );
@@ -1465,6 +1469,48 @@ mod tests {
         );
 
         engine.shutdown();
+    }
+
+    #[test]
+    fn history_cancel_handle_unblocks_idle_recv_within_a_bound() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let subscription = engine
+            .observe_history(history_probe_query())
+            .expect("engine is open");
+        subscription
+            .recv()
+            .expect("a fresh history subscription delivers its current state");
+        let cancel = subscription.cancel_handle();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(subscription.recv().is_err());
+        });
+        cancel.cancel();
+        assert!(result_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("history cancellation must wake the blocked receiver"));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn shutdown_wakes_a_live_history_receiver_within_a_bound() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let subscription = engine
+            .observe_history(history_probe_query())
+            .expect("engine is open");
+        subscription
+            .recv()
+            .expect("a fresh history subscription delivers its current state");
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(subscription.recv().is_err());
+        });
+        engine.shutdown();
+        assert!(result_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("shutdown must wake the blocked history receiver"));
     }
 
     /// codex-nova's non-negotiable proof #3: an `Engine` with a LIVE query
@@ -1649,5 +1695,9 @@ mod tests {
             kinds: Some(std::collections::BTreeSet::from([9999u16])),
             ..nmp_grammar::Filter::default()
         })
+    }
+
+    fn history_probe_query() -> nmp_engine::core::HistoryQuery {
+        nmp_engine::core::HistoryQuery::new(probe_query(), 1, 2).unwrap()
     }
 }

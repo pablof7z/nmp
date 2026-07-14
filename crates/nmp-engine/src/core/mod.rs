@@ -8301,5 +8301,30 @@ mod history_mutation_tests {
         for handle in owned_handles {
             assert!(core.resolver.root_atoms(handle).is_empty());
         }
+
+        let active_sink = CapturingHistorySink::default();
+        let reopened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9])),
+            Box::new(active_sink),
+        ));
+        let (active_id, active_continuation) = reopened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, batch) => Some((*id, batch.continuation.clone().unwrap())),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::LoadOlder(active_id, active_continuation));
+        let active_handles = core.histories[&active_id].handle_ids.clone();
+        assert!(core.histories[&active_id].pending_load.is_some());
+        core.handle(EngineMsg::UnsubscribeHistory(active_id));
+        assert!(!core.histories.contains_key(&active_id));
+        assert!(core
+            .history_by_handle
+            .values()
+            .all(|owner| *owner != active_id));
+        for handle in active_handles {
+            assert!(core.resolver.root_atoms(handle).is_empty());
+        }
     }
 }
