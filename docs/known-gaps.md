@@ -121,11 +121,15 @@ about current code:
   render caller-supplied one-shot NIP-11 state and query-scoped `SourceStatus`;
   they own no engine, HTTP, polling, cache, timers, or image loading. The
   Compose proof is not broad content/session parity and does not qualify an
-  Android AAR. Still unbuilt at this checkpoint: broad Compose UI parity and a
-  Compose Gallery, the conflict-honest `nmp-ui` open-code registry/CLI,
-  NIP-25 live reaction
-  resources/write intents (#155), and broader product/photo/highlight/media
-  component families. The ordinary follow action also deliberately refuses
+  Android AAR. The conflict-honest `nmp-ui` source registry/CLI is now built
+  (#165 via PR #475): `list`/`view`/`add`/`diff`/`update`, exact app-owned
+  dependency closures, lock/merge-base hashes, three-way conflict evidence,
+  and a SampleApp prove the adoption/update contract for its current two
+  installable SwiftUI compositions. That is not a broad template catalog.
+  Still unbuilt at this checkpoint: broad Compose UI parity and a Compose
+  Gallery, broader registry/template breadth, NIP-25 live reaction resources/
+  write intents (#155), and broader product/photo/highlight/media component
+  families. The ordinary follow action also deliberately refuses
   first-contact-list creation; that requires a separately named policy/action
   before it can ship. See `docs/design/ui-components-strategy.md` and issue
   #75.

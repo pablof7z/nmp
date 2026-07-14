@@ -287,14 +287,7 @@ fun NmpRelayListEntry(
         modifier
             .fillMaxWidth()
             .semantics {
-                contentDescription =
-                    listOfNotNull(
-                        "Relay ${information.displayName}",
-                        information.displayDescription,
-                        "Relay information ${information.informationLabel}",
-                        runtime.label,
-                        information.lastError?.let { "Relay information error: $it" },
-                    ).joinToString(". ")
+                contentDescription = relayListEntryAccessibilityLabel(information, runtime)
             }
             .let { base -> if (onClick == null) base else base.clickable(onClick = onClick) }
 
@@ -340,5 +333,17 @@ fun NmpRelayListEntry(
         }
     }
 }
+
+internal fun relayListEntryAccessibilityLabel(
+    information: NmpRelayInformationState,
+    runtime: NmpRelayRuntimePresentation,
+): String =
+    listOfNotNull(
+        "Relay ${information.displayName}",
+        information.displayDescription,
+        "Relay information ${information.informationLabel}",
+        runtime.label,
+        information.lastError?.let { "Relay information error: $it" },
+    ).joinToString(". ")
 
 private fun String?.nonempty(): String? = this?.trim()?.takeIf { it.isNotEmpty() }
