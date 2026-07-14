@@ -1,6 +1,6 @@
 # Current surface and gaps
 
-Verified-Revision: `02e3509ae9a1df9263fadea916effc4c557d9f05`
+Verified-Revision: `12bd12ca6247f416cd6c24de322bb1b1aee6366b`
 
 Verified on 2026-07-14. Recheck the [source map](source-map.md) when any declared authority changes.
 
@@ -28,6 +28,9 @@ Mechanism crates and generated `NMPFFI`/`uniffi.nmp_ffi` bindings are implementa
 | Account add/activate/read | yes | yes | yes |
 | Arbitrary signer registration | Rust only, with public `add_signer` | NIP-46 helpers, not arbitrary Rust capabilities | NIP-46 helpers, not arbitrary Rust capabilities |
 | Diagnostics stream | yes | yes, narrower snapshot | yes, narrower snapshot |
+| Engine/query and NIP-02 observation refusal | `EngineError::ThreadUnavailable` | synchronous `NMPError.threadUnavailable` | synchronous `NMPError.ThreadUnavailable` |
+| NIP-02 action-worker refusal | terminal `FollowActionStatus::Failed(FollowActionFailure::ThreadUnavailable)` | terminal `NMPFollowActionFailure.threadUnavailable` | following action not exposed |
+| Initial NIP-46 connection refusal | `Nip46Error::ThreadUnavailable` from `Nip46Invitation::connect*` / `Nip46Signer::connect_bunker*` | synchronous outer `NMPError.threadUnavailable`; post-handle inner `.failed` | synchronous outer `NMPError.ThreadUnavailable`; post-handle inner `Failed` then `Closed` |
 | NIP-02 following action | direct Rust protocol facade and Swift | yes | not on ergonomic Kotlin `NMPEngine` |
 | NIP-29 composed group send | yes | yes | yes |
 | Content parser/reference sessions | Rust crates, Swift `NMPContent`, Kotlin SDK | yes | yes |
@@ -44,3 +47,8 @@ Mechanism crates and generated `NMPFFI`/`uniffi.nmp_ffi` bindings are implementa
 - Swift/Kotlin ship an opt-in plaintext file account store. Neither is encrypted or a standard secure-storage provider. Secret zeroization and standard native provider restoration remain incomplete.
 - Kotlin is a desktop JVM falsifier, not an Android AAR. Android OS handoff code belongs to the host; NIP-55 execution and Compose UI are not shipped.
 - NIP-02 follow/unfollow preserves an existing contact list and refuses a missing base. First contact-list creation is a separate, unshipped policy.
+- The finite engine worker budget does not yet bound every native observer drain, NIP-46 forwarder, or signer-result waiter; #446 owns that executor work. Spawn refusal does not panic. Swift NIP-46 connection methods are `throws`, and synchronous outer-bridge refusal maps to native `NMPError.ThreadUnavailable`. After a connection handle exists, an inner session/relay-worker refusal is instead an immediate streamed failure reason followed by closure; do not parse that string back into a typed error or call it a timeout.
+
+## Raw UniFFI parity seam
+
+Generated `NMPFFI` / `uniffi.nmp_ffi` bindings are not the supported ergonomic app tier, but they are the projection seam the native wrappers must preserve. At this revision `NmpEngineConfig` includes `allowed_local_relay_hosts` and `max_relays`; `NmpEngine` exposes filter/demand observation, publication, receipt reattachment, diagnostics, lifecycle, following, NIP-29 composition, and NIP-46 connections; and Rust's `FfiError::ThreadUnavailable { component, reason }` projects into the generated native exception shapes for fallible observer and signer bridges. Native code should use `NMP` or `com.nmp.sdk` and must not reach around a wrapper gap by importing these generated types.

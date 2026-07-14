@@ -18,6 +18,8 @@ Do not claim that diagnostics currently provide:
 - a global connection generation or populated AUTH lifecycle;
 - database row counts or GC telemetry.
 
+Thread refusal is a call/action fact, not a diagnostics snapshot field. Direct Rust engine/query and NIP-02 observation setup return `EngineError::ThreadUnavailable`; NIP-02 action-worker refusal is a terminal `FollowActionStatus::Failed(FollowActionFailure::ThreadUnavailable)`; initial direct-Rust NIP-46 connection setup returns `Nip46Error::ThreadUnavailable`. Native synchronous outer-bridge errors and post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
+
 `SourceStatus.awaitingAuth`/`authDenied` and `AuthPhase` exist as reserved public vocabulary but are not populated by the current engine. Label them reserved if they appear in exhaustive UI switches.
 
 For debugging, correlate the query's exact filter and evidence with diagnostics' exact wire JSON, lane, relay, event counts, coverage, and explicit local-limit shortfall. Preserve absence as absence: no coverage row is unproven, not zero or complete.
