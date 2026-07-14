@@ -27,6 +27,9 @@ repository today?
   ownership, NIP-42 AUTH, exact correlation, authorization URLs, relay
   switching, signing, NIP-44 crypto, local Primal discovery, and restart
   reattachment of a durable pending write through relay ACK.
+- The active registered signer can sign an exact event without accepting or
+  publishing a write; Rust/FFI/Swift/Kotlin validate the returned event and
+  preserve bounded, cancellable ownership.
 - Rust/FFI/Swift/Kotlin expose live queries, writes, and permanent diagnostics.
 - Rust/FFI/Swift/Kotlin expose an idempotent destructive reset for a closed
   persistent store without deleting a separate platform account checkpoint.
@@ -41,7 +44,7 @@ repository today?
 |---|---|---|
 | Canonical Rust product facade | facade, FFI, demo, direct-vs-FFI parity, surface snapshots, and append-only governance are built; v2 remains provisional while the broader promoted contracts below are open | [#52](https://github.com/pablof7z/nmp/issues/52) |
 | Durable acceptance and pending row | crash-atomic acceptance/promotion/cancellation are built; runtime restart recovery, receipt reattachment, and durable attempt resumption remain | [#2](https://github.com/pablof7z/nmp/issues/2), [#3](https://github.com/pablof7z/nmp/issues/3) |
-| Signer lifecycle | frozen-pubkey selection, remote NIP-46 reattachment, and local Primal handoff are built; per-write override, NIP-55 execution, platform vault restore, and permanent signer diagnostics remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#51](https://github.com/pablof7z/nmp/issues/51) |
+| Signer lifecycle | frozen-pubkey selection, governed sign-only, remote NIP-46 reattachment, and local Primal handoff are built; per-write override, NIP-55 execution, platform vault restore, and permanent signer diagnostics remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#51](https://github.com/pablof7z/nmp/issues/51) |
 | Query descriptor/evidence | query output now carries current-plan `AcquisitionEvidence` distinct from diagnostic intervals; descriptor identity is still filter-centric and lacks full source/access context | [#49](https://github.com/pablof7z/nmp/issues/49) |
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |

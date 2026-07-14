@@ -53,7 +53,7 @@ about current code:
   by `next_deadline()` is consumed before it can be rearmed, including bounded
   batch draining, so there is no zero-timeout busy-spin. #96 still owns the
   governed Rust/FFI/Swift/Kotlin projection of these lane states.
-- **The NIP-46 reconnect path is built; standard platform vault providers are not.**
+- **The NIP-46 reconnect and governed sign-only paths are built; standard platform vault providers are not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
   communication/user keys, NIP-44 crypto, and frozen-event validation. Missing
@@ -70,6 +70,11 @@ about current code:
   providers and automatic secure-vault restore, NIP-55 execution/Android AAR
   integration, and permanent signer connection/correlation counters in engine
   diagnostics.
+  The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
+  it binds an immutable request to the active registered signer, validates the
+  exact returned event, remains bounded/cancellable, and creates no
+  store/outbox/publication residue. NIP-07 origin prompts and browser
+  networking remain host policy rather than engine behavior.
 - **Protocol-module composition is unbuilt.** The existing ownership design
   incorrectly makes kind ownership gate all route authority. Modules must claim
   only exact NIP-defined schemas while typed contextual operations may add their

@@ -29,17 +29,16 @@ use std::thread;
 
 use crate::convert::{
     demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey,
-    row_delta_to_ffi, sign_event_request_from_ffi, signed_event_to_ffi, write_intent_from_ffi,
-    write_status_to_ffi, FfiError, WriteStatusRef,
+    row_delta_to_ffi, sign_event_failure, sign_event_request_from_ffi, sign_event_start_error,
+    signed_event_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
 };
 use crate::nip02::{
     action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
     FollowObserver, NmpFollowHandle,
 };
-use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
+use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
 use crate::types::{
-    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiSignEventRequest, FfiSignedEvent,
-    FfiWriteIntent,
+    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiSignEventRequest, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -387,10 +386,29 @@ impl NmpEngine {
         Ok(self.engine.active_account()?.map(|pubkey| pubkey.to_hex()))
     }
 
-    /// Sign exactly one event with the active NMP signer without publishing.
-    pub fn sign_event(&self, request: FfiSignEventRequest) -> Result<FfiSignedEvent, FfiError> {
-        let request = sign_event_request_from_ffi(request)?;
-        Ok(signed_event_to_ffi(self.engine.sign_event(request)?))
+    /// Sign one exact event through the active account without accepting a
+    /// write, persisting a row/receipt, planning relays, or publishing. The
+    /// returned handle cancels only this signer operation; completion fires
+    /// exactly once through `observer`.
+    pub fn sign_event(
+        &self,
+        event: FfiSignEventRequest,
+        observer: Box<dyn SignEventObserver>,
+    ) -> Result<Arc<NmpSignEventHandle>, FfiError> {
+        let request = sign_event_request_from_ffi(event)?;
+        let reservation = self.engine.reserve_native_task("sign-event-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "sign-event-observer")?;
+        let operation = self
+            .engine
+            .sign_event(request)
+            .map_err(sign_event_start_error)?;
+        let cancel = operation.cancel_handle();
+        starter.run(move || match operation.recv() {
+            Ok(event) => observer.on_signed(signed_event_to_ffi(event)),
+            Err(error) => observer.on_failed(sign_event_failure(error)),
+        });
+        Ok(Arc::new(NmpSignEventHandle { cancel }))
     }
 
     pub fn native_task_census(&self) -> FfiNativeTaskCensus {
@@ -716,6 +734,26 @@ pub struct NmpDiagnosticsHandle {
     cancel: nmp::ObservationCancel,
 }
 
+/// Scoped cancellation handle for one sign-only operation. It owns no
+/// signer registration and cannot affect accepted durable writes.
+#[derive(uniffi::Object)]
+pub struct NmpSignEventHandle {
+    cancel: nmp::SignEventCancel,
+}
+
+#[uniffi::export]
+impl NmpSignEventHandle {
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for NmpSignEventHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 #[uniffi::export]
 impl NmpDiagnosticsHandle {
     /// Withdraw this diagnostics observer now, rather than waiting for
@@ -734,7 +772,10 @@ impl Drop for NmpDiagnosticsHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FfiDurability, FfiWritePayload, FfiWriteRouting, FfiWriteStatus};
+    use crate::types::{
+        FfiDurability, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWritePayload,
+        FfiWriteRouting, FfiWriteStatus,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::Mutex;
@@ -902,6 +943,98 @@ mod tests {
 
     struct ChannelReceiptObserver {
         tx: Mutex<mpsc::Sender<FfiWriteStatus>>,
+    }
+
+    enum SignEventOutcome {
+        Signed(FfiSignedEvent),
+        Failed(FfiSignEventFailure),
+    }
+
+    struct ChannelSignEventObserver {
+        tx: Mutex<mpsc::Sender<SignEventOutcome>>,
+    }
+
+    impl SignEventObserver for ChannelSignEventObserver {
+        fn on_signed(&self, event: FfiSignedEvent) {
+            let _ = self
+                .tx
+                .lock()
+                .unwrap()
+                .send(SignEventOutcome::Signed(event));
+        }
+
+        fn on_failed(&self, failure: FfiSignEventFailure) {
+            let _ = self
+                .tx
+                .lock()
+                .unwrap()
+                .send(SignEventOutcome::Failed(failure));
+        }
+    }
+
+    #[test]
+    fn ffi_sign_event_returns_the_exact_verified_event_without_publish_api_use() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let author = engine
+            .add_account(format!("{:064x}", 17u8))
+            .expect("account must register");
+        engine
+            .set_active_account(Some(author.clone()))
+            .expect("account must activate");
+        let request = FfiSignEventRequest {
+            created_at: 1_723_456_789,
+            kind: 27_272,
+            tags: vec![vec!["t".to_string(), "ffi-sign-only".to_string()]],
+            content: "exact ffi body".to_string(),
+        };
+        let (tx, rx) = mpsc::channel();
+        let handle = engine
+            .sign_event(
+                request.clone(),
+                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+            )
+            .expect("sign operation must start");
+
+        let signed = match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            SignEventOutcome::Signed(event) => event,
+            SignEventOutcome::Failed(failure) => panic!("unexpected sign failure: {failure:?}"),
+        };
+        assert_eq!(signed.pubkey, author);
+        assert_eq!(signed.created_at, request.created_at);
+        assert_eq!(signed.kind, request.kind);
+        assert_eq!(signed.tags, request.tags);
+        assert_eq!(signed.content, request.content);
+        assert_eq!(signed.id.len(), 64);
+        assert_eq!(signed.sig.len(), 128);
+        drop(handle);
+        engine.await_native_tasks_idle();
+        engine.shutdown();
+    }
+
+    #[test]
+    fn ffi_sign_event_missing_active_signer_is_typed_and_starts_no_callback() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let keys = nostr::Keys::generate();
+        engine
+            .set_active_account(Some(keys.public_key().to_hex()))
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let result = engine.sign_event(
+            FfiSignEventRequest {
+                created_at: 1,
+                kind: 1,
+                tags: Vec::new(),
+                content: "body".to_string(),
+            },
+            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+        );
+        match result {
+            Err(error) => assert_eq!(error, FfiError::NoActiveSigner),
+            Ok(_) => panic!("missing signer must refuse synchronously"),
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        engine.await_native_tasks_idle();
+        engine.shutdown();
     }
 
     impl ReceiptObserver for ChannelReceiptObserver {

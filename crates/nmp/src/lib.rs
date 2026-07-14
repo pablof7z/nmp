@@ -110,7 +110,10 @@ pub fn admits_network_relay_hint(relay: &nostr::RelayUrl) -> bool {
 // facade surface.
 pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::WriteStatus;
-pub use nmp_engine::runtime::{ReceiptReattachment, ReceiptStream, SignerRegistration};
+pub use nmp_engine::runtime::{
+    ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
+    SignerRegistration,
+};
 pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
