@@ -1,5 +1,7 @@
-// #40: the Kotlin/Flow falsifier's Gradle root. Single module, JVM target
-// only -- the falsifier's job is to prove the two-noun surface ports to
-// `Flow` cleanly, not to ship an Android AAR (that's the M6 gate, see
-// README.md in this directory).
+// #40: the Kotlin/Flow facade remains this JVM-only root project. #198 adds an
+// optional desktop-JVM Compose library as a separate child project so Compose
+// never becomes a dependency of the core SDK. Neither project is an Android
+// AAR or an Android runtime qualification (see README.md).
 rootProject.name = "nmp-kotlin"
+
+include(":ui")

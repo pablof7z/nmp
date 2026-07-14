@@ -53,6 +53,11 @@ reattachable rather than relying on an unbounded `AsyncStream` backlog.
 Kotlin uses cold `Flow` and deterministic `awaitClose` cancellation. The app
 chooses coroutine scope, `stateIn`, and Compose/ViewModel structure.
 
+The optional desktop-JVM `:ui` child now proves controlled relay identity
+composables against the public SDK without adding Compose to the core module.
+It owns no engine, HTTP, timer, polling, cache, or image loader and is not an
+Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.md).
+
 The Android product must include a standard Keystore-backed provider and prove
 process-death receipt/signer reattachment, not merely JVM binding generation.
 Newest-state observation is bounded/conflated while receipt history remains
@@ -69,7 +74,7 @@ results through `installedAndroid(packageIds)` and produce an exact
 package visibility for the signer packages/schemes, start
 `connectNip46(invitation)` before launching the URI, and apply
 `Intent.setPackage(packageName)` so a shared scheme never selects the wrong
-app. Android AAR/Compose/Keystore and NIP-55 execution remain open work.
+app. Android AAR/runtime Compose/Keystore and NIP-55 execution remain open work.
 
 ## Other platforms
 
