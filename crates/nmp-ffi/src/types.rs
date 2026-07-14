@@ -431,11 +431,15 @@ pub enum FfiHistoryLoadFact {
     AtBound { max_rows: u64 },
 }
 
-/// One incremental history frame. Native wrappers fold `deltas` into the
-/// bounded current snapshot and must return only this frame's opaque
-/// continuation when asking for the next window.
+/// One self-contained bounded history frame. `rows` is the authoritative
+/// canonical current set after latest-wins coalescing; `deltas` describes the
+/// exact transition from this receiver's previously delivered frame. Native
+/// wrappers may validate/reduce the deltas, but never need to reconstruct a
+/// skipped intermediate frame. Only this frame's opaque continuation is valid
+/// for the next older request.
 #[derive(Debug, Clone, Record)]
 pub struct FfiHistoryBatch {
+    pub rows: Vec<FfiRow>,
     pub deltas: Vec<FfiRowDelta>,
     pub continuation: Option<Arc<NmpHistoryContinuation>>,
     pub evidence: FfiAcquisitionEvidence,

@@ -948,6 +948,7 @@ fn history_load_fact_to_ffi(load: HistoryLoadFact) -> FfiHistoryLoadFact {
 
 pub fn history_batch_to_ffi(batch: HistoryBatch) -> FfiHistoryBatch {
     FfiHistoryBatch {
+        rows: batch.rows.iter().map(row_to_ffi_row).collect(),
         deltas: batch.deltas.iter().map(row_delta_to_ffi).collect(),
         continuation: batch
             .continuation

@@ -997,6 +997,7 @@ mod tests {
             )
             .unwrap();
         let first = recv_history_fact(&batch_rx, |fact| fact == FfiHistoryLoadFact::Idle);
+        assert_eq!(first.rows.len(), 1);
         assert_eq!(first.deltas.len(), 1);
         let first_continuation = first.continuation.unwrap();
 
@@ -1004,6 +1005,7 @@ mod tests {
         let second = recv_history_fact(&batch_rx, |fact| {
             fact == FfiHistoryLoadFact::Returned { added: 1 }
         });
+        assert_eq!(second.rows.len(), 2);
         assert_eq!(second.deltas.len(), 1);
         let second_continuation = second.continuation.unwrap();
         assert_eq!(
