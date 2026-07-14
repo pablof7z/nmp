@@ -2,7 +2,7 @@
 
 Verified-Revision: `618573a63a6dbae6aa259e8327e32fd9157bd338`
 
-Verified on 2026-07-14. Recheck the [source map](source-map.md) when any declared authority changes.
+Verified on 2026-07-14. This pins the declared product/source authorities, not the skill package commit. Recheck the [source map](source-map.md) when any declared authority changes; the validator accepts newer skill-only commits when those sources have not drifted.
 
 ## Supported consumer tiers
 
@@ -49,6 +49,8 @@ Mechanism crates and generated `NMPFFI`/`uniffi.nmp_ffi` bindings are implementa
 - Kotlin is a desktop JVM falsifier, not an Android AAR. Android OS handoff code belongs to the host; NIP-55 execution and Compose UI are not shipped.
 - NIP-02 follow/unfollow preserves an existing contact list and refuses a missing base. First contact-list creation is a separate, unshipped policy.
 - Every engine now owns a finite, zero-queue native-task executor for observer/action drains, signer waiters/mappers, and engine-associated NIP-46 work. The default `max_native_tasks`/`maxNativeTasks` is 12. Saturation is a typed `ExecutorSaturated` refusal before ownership transfer; OS spawn refusal remains the separate typed `ThreadUnavailable`. After a native NIP-46 connection handle exists, an inner session/relay-worker failure is instead an immediate streamed failure reason followed by closure; do not parse that string back into a typed error or call it a timeout. Direct-Rust NIP-46 sessions created without an engine each own a finite executor, but the application still controls how many such independent sessions exist, so this is not a process-global thread bound.
+- Content-session query multiplication is likewise not engine-global: session limits are per session, and each active target may open canonical and helper observations. Native receipt bridges use unbounded status channels and expose no detach handle.
+- Native publish and composed-publish reserve and start the receipt drain before accepting the write (and before consuming the composed intent). `ExecutorSaturated` or `ThreadUnavailable` therefore leaves no accepted obligation on that synchronous failure path. Receipt enumeration is still absent, so a process crash after a successful return but before app persistence can lose the id.
 
 ## Raw UniFFI parity seam
 

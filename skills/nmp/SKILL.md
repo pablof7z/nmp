@@ -1,6 +1,6 @@
 ---
 name: nmp
-description: Build, review, debug, or plan applications that consume the Nostr Multi-Platform (NMP) Rust, Swift, or Kotlin public facade. Use for live queries, write intents and receipts, identity/signers, diagnostics, NMPContent/NMPUI, NIP-02/NIP-29/NIP-46 helpers, platform setup, lifecycle, and consumer-facing API verification. Do not use this as authority for NMP internals or future VISION contracts.
+description: Build, review, debug, test, or plan applications and protocol modules that use the Nostr Multi-Platform (NMP) Rust, Swift, or Kotlin public facade. Use for live queries, write intents and receipts, identity/signers, diagnostics, NMPContent/NMPUI, NIP-02/NIP-29/NIP-46 helpers, lifecycle and recovery, practical feature recipes, protocol extension, and consumer-facing API verification. Do not use this as authority for unverified internals or future VISION contracts.
 ---
 
 # NMP application development
@@ -10,6 +10,8 @@ Use NMP as an embeddable engine with two app-facing nouns: a live query and a wr
 ## Establish current truth first
 
 Verified-Revision: `618573a63a6dbae6aa259e8327e32fd9157bd338`
+
+This is the audited revision of the declared product/source authorities, not the skill package's own commit. A newer checkout is not automatically stale when only skill files changed; the bundled validator proves whether any declared source drifted.
 
 1. Find the NMP repo root and read `README.md`, `docs/known-gaps.md`, and `docs/architecture/supported-surface.md` when present.
 2. Record `git rev-parse HEAD`. If the checkout differs from the verified revision, inspect the current facade files listed in [Source map](references/source-map.md) before naming APIs.
@@ -21,13 +23,19 @@ If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue 
 ## Route the task
 
 - Architecture, ownership, lifecycle, or implementation plans: [Application workflow](references/application-workflow.md)
+- Concrete feed, profile, group, follow, publishing, offline, and debugging shapes: [Practical recipes](references/practical-recipes.md)
 - Filters, bindings, demand, rows, evidence, or pagination: [Queries](references/queries.md)
 - Publish, receipts, durability, accounts, local or remote signers: [Writes and identity](references/writes-and-identity.md)
+- Restart, sign-out, reset, reconnect, teardown, or resource pressure: [Lifecycle and recovery](references/lifecycle-and-recovery.md)
 - Relay proof screens, acquisition state, or debugging: [Diagnostics](references/diagnostics.md)
 - Rust/Swift/Kotlin setup, call maps, and test commands: [Platforms](references/platforms.md)
 - NMPContent, NMPUI, NIP-02, NIP-29, or NIP-46 helpers: [Content and protocols](references/content-and-protocols.md)
+- Adding or reviewing a protocol module or governed cross-platform surface: [Protocol authoring](references/protocol-authoring.md)
+- Test strategy, falsifiers, restart proof, or live smoke verification: [Verification](references/verification.md)
 - Exact implementation authority: [Source map](references/source-map.md)
 - Maintaining or forward-testing this skill: [Evaluation protocol](references/evaluation.md) and [raw prompts](references/evaluation-prompts.md)
+
+For a requested deliverable, copy and fill the appropriate reusable asset instead of inventing another format: [application plan](assets/application-plan.md), [protocol-module plan](assets/protocol-module-plan.md), [feature review](assets/feature-review.md), or [verification record](assets/verification-record.md).
 
 ## Non-negotiable guardrails
 
@@ -45,7 +53,7 @@ Before presenting code or a plan:
 
 1. Verify every named type, method, throwing boundary, and error case in the current supported facade.
 2. State platform-specific gaps that affect the design.
-3. Show deterministic query/content/signer/engine teardown and explicit receipt-observation ownership. A receipt has no cancel operation and cancelling observation does not cancel its obligation.
+3. Show deterministic query/content/signer/engine teardown and explicit receipt-consumption ownership. Swift/Kotlin receipts have no observer-detach handle: cancelling the app task/collector ends consumption, not the native bridge or write obligation.
 4. Include the exact build/test commands for the chosen tier.
 5. Separate what the app owns from what NMP owns.
 6. For runnable work, test the running consumer path; compilation alone is not proof of relay, signer, receipt, or lifecycle behavior.

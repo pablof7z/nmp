@@ -25,3 +25,11 @@ Prompt: "Plan a Swift and Kotlin NIP-46 sign-in flow that remains honest when th
 ## Brownfield audit
 
 Prompt: "Audit an existing NMP client that imports generated bindings, opens a new observation on every render, appends optimistic rows after publish, and treats EOSE as global sync. Give a staged correction using only current public facades."
+
+## Protocol module boundary
+
+Prompt: "Design an opt-in NMP protocol module that owns kinds 39000 and 39001, contextualizes but does not own kind 30023 articles at one host relay, and needs a semantic native publish operation. Separate current APIs, prerequisites, and target surface; include ownership, lifecycle, projection, and falsifiers."
+
+## Receipt and content pressure
+
+Prompt: "Review a Kotlin NMP design that creates content sessions for every timeline row, repeatedly reattaches receipt collectors, and assumes all native worker counts are engine-global. Produce an implementable bounded correction and identify any unrecoverable publication ambiguity."
