@@ -80,6 +80,30 @@ A persisted watermark helps NMP avoid redundant work and explain prior
 acquisition. If GC removes data within its proven interval, the store must
 shrink or remove that watermark in the same correctness path.
 
+## Durable history and resident bounds
+
+NMP retains fetched, verified events in its durable store by default. Ordinary
+engine startup, shutdown, local queries, bounded result projection, and memory
+pressure do not delete durable rows. A bound on a query result, delivery
+mailbox, worker pool, or other resident working set is a RAM bound; it is not a
+durable-history retention policy.
+
+Correctness mutations still change the canonical store. Replaceable events
+supersede prior winners, authorized NIP-09 deletions retract their targets,
+NIP-40 expiration removes expired rows, and a rejected pre-signature local
+write may be compensated. Those governed mutations are distinct from
+retention policy.
+
+Durable storage is not promised to be literally infinite. An operator or user
+may choose a quota, disk-pressure, or time-based retention policy, but that
+choice must be inspectable and explicit. The current engine ships no automatic
+retention policy. Its store-level `EventStore::gc` door is the explicit
+claim-based eviction operation: it reports what it evicted and lowers or
+removes every affected coverage interval in the same transaction as the row
+deletion. A future engine-facing policy must preserve that governed operation;
+it must never turn a RAM ceiling or an implicit maintenance pass into silent
+durable deletion.
+
 ## Access context matters
 
 Two requests with equal filters but different AUTH identities or visibility
