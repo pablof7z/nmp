@@ -25,17 +25,21 @@ public struct NMPConfig: Sendable {
     /// under the 2-relay-min, suppressed when `appRelays` is non-empty.
     /// Default empty.
     public var fallbackRelays: [String]
+    /// Finite zero-queue native observer/action/waiter ceiling.
+    public var maxNativeTasks: UInt32
 
     public init(
         storePath: String? = nil,
         indexerRelays: [String] = [],
         appRelays: [String] = [],
-        fallbackRelays: [String] = []
+        fallbackRelays: [String] = [],
+        maxNativeTasks: UInt32 = 12
     ) {
         self.storePath = storePath
         self.indexerRelays = indexerRelays
         self.appRelays = appRelays
         self.fallbackRelays = fallbackRelays
+        self.maxNativeTasks = maxNativeTasks
     }
 
     func toFfi() -> NmpEngineConfig {
@@ -43,7 +47,8 @@ public struct NMPConfig: Sendable {
             storePath: storePath,
             indexerRelays: indexerRelays,
             appRelays: appRelays,
-            fallbackRelays: fallbackRelays
+            fallbackRelays: fallbackRelays,
+            maxNativeTasks: maxNativeTasks
         )
     }
 }
@@ -118,6 +123,14 @@ public final class NMPEngine: Sendable {
     /// No secret or signer capability crosses this boundary.
     public func activeAccount() throws -> String? {
         try nmpRethrowing { try ffi.activeAccount() }
+    }
+
+    func nativeTaskCensus() -> FfiNativeTaskCensus {
+        ffi.nativeTaskCensus()
+    }
+
+    func awaitNativeTasksIdle() {
+        ffi.awaitNativeTasksIdle()
     }
 
     /// Remove the configured plaintext checkpoint. The live signer remains in

@@ -24,6 +24,7 @@
 //! write-relay map -- there is nothing for a caller to resolve up front.
 
 use std::sync::Arc;
+#[cfg(test)]
 use std::thread;
 
 use crate::convert::{
@@ -39,14 +40,28 @@ use crate::types::{FfiDemand, FfiFilter, FfiReceiptReattachment, FfiWriteIntent}
 use nmp::ReceiptReattachment;
 
 fn spawn_native_bridge(
+    reservation: nmp::NativeTaskReservation,
+    cancel: nmp::NativeTaskCancel,
     component: &'static str,
     task: impl FnOnce() + Send + 'static,
 ) -> Result<(), FfiError> {
-    spawn_native_bridge_with(component, Box::new(task), |builder, task| {
-        builder.spawn(task)
-    })
+    start_native_bridge(reservation, cancel, component).map(|starter| starter.run(task))
 }
 
+fn start_native_bridge(
+    reservation: nmp::NativeTaskReservation,
+    cancel: nmp::NativeTaskCancel,
+    component: &'static str,
+) -> Result<nmp::StartedNativeTask, FfiError> {
+    reservation
+        .start_with_cancel(move || cancel.cancel())
+        .map_err(|error| FfiError::ThreadUnavailable {
+            component: component.to_string(),
+            reason: error.to_string(),
+        })
+}
+
+#[cfg(test)]
 fn spawn_native_bridge_with(
     component: &'static str,
     task: Box<dyn FnOnce() + Send + 'static>,
@@ -163,12 +178,17 @@ fn start_following_action(
     change: nmp_nip02::FollowChange,
     observer: Box<dyn FollowActionObserver>,
 ) {
+    let bridge_engine = Arc::clone(&engine);
     start_following_action_with(
         engine,
         target,
         change,
         observer,
-        |task| spawn_native_bridge("follow-action-observer", task),
+        move |task| {
+            let reservation = bridge_engine.reserve_native_task("follow-action-observer")?;
+            let cancel = bridge_engine.native_task_cancel()?;
+            spawn_native_bridge(reservation, cancel, "follow-action-observer", task)
+        },
         nmp_nip02::FollowActionRunner::start,
     );
 }
@@ -202,19 +222,23 @@ fn start_following_action_with(
     })) {
         Ok(()) => start_runner(runner),
         Err(error) => {
-            let (component, reason) = match error {
-                FfiError::ThreadUnavailable { component, reason } => (component, reason),
-                other => (
-                    "follow-action-observer".to_string(),
-                    format!("unexpected bridge refusal: {other:?}"),
-                ),
-            };
-            observer.on_status(crate::nip02::FfiFollowActionStatus::Failed {
-                failure: crate::nip02::FfiFollowActionFailure::ThreadUnavailable {
+            let failure = match error {
+                FfiError::ThreadUnavailable { component, reason } => {
+                    crate::nip02::FfiFollowActionFailure::ThreadUnavailable { component, reason }
+                }
+                FfiError::ExecutorSaturated {
                     component,
-                    reason,
+                    capacity,
+                } => crate::nip02::FfiFollowActionFailure::ExecutorSaturated {
+                    component,
+                    capacity,
                 },
-            });
+                other => crate::nip02::FfiFollowActionFailure::ThreadUnavailable {
+                    component: "follow-action-observer".to_string(),
+                    reason: format!("unexpected bridge refusal: {other:?}"),
+                },
+            };
+            observer.on_status(crate::nip02::FfiFollowActionStatus::Failed { failure });
             observer.on_closed();
         }
     }
@@ -257,12 +281,18 @@ pub struct NmpEngineConfig {
     /// literal is its foreign-binding mirror.
     #[uniffi(default = 10)]
     pub max_relays: u32,
+    /// Maximum immediately-running native observer/action/waiter tasks.
+    /// Zero selects the finite default; saturation never queues an accepted
+    /// stream behind a long-lived drain.
+    #[uniffi(default = 12)]
+    pub max_native_tasks: u32,
 }
 
 /// The default relay-count ceiling for a freshly-constructed engine config
 /// (#20). Update BOTH this const AND the `#[uniffi(default = N)]` literal
 /// on [`NmpEngineConfig::max_relays`] above — they must match.
 pub const DEFAULT_MAX_RELAYS: u32 = 10;
+pub const DEFAULT_MAX_NATIVE_TASKS: u32 = 12;
 
 /// Destructively reset a closed persistent NMP store. This removes all
 /// canonical engine state at `store_path`, while leaving any separately
@@ -277,6 +307,18 @@ pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
 // Compile-time guard that the Rust `Default` derive for `NmpEngineConfig`
 // Keep the native-facing literal pinned to the canonical finite default.
 const _: () = assert!(DEFAULT_MAX_RELAYS == 10);
+const _: () = assert!(DEFAULT_MAX_NATIVE_TASKS == 12);
+
+/// Exact, lock-protected executor accounting for deterministic lifecycle and
+/// saturation falsifiers. `admitted` includes a reservation during its brief
+/// pre-handoff window; `running` counts OS task handles not yet joined.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiNativeTaskCensus {
+    pub capacity: u64,
+    pub admitted: u64,
+    pub running: u64,
+    pub accepting: bool,
+}
 
 impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {
@@ -287,6 +329,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             fallback_relays: config.fallback_relays,
             allowed_local_relay_hosts: config.allowed_local_relay_hosts,
             max_relays: config.max_relays as usize,
+            max_native_tasks: config.max_native_tasks as usize,
         }
     }
 }
@@ -340,6 +383,22 @@ impl NmpEngine {
         Ok(self.engine.active_account()?.map(|pubkey| pubkey.to_hex()))
     }
 
+    pub fn native_task_census(&self) -> FfiNativeTaskCensus {
+        let census = self.engine.native_task_census();
+        FfiNativeTaskCensus {
+            capacity: census.capacity as u64,
+            admitted: census.admitted as u64,
+            running: census.running as u64,
+            accepting: census.accepting,
+        }
+    }
+
+    /// Event-driven barrier for lifecycle tests and hosts that require proof
+    /// all cancelled native callbacks have returned before releasing state.
+    pub fn await_native_tasks_idle(&self) {
+        self.engine.wait_for_native_tasks_idle();
+    }
+
     /// Observe the active account's relationship to `target` through the
     /// NMP-owned NIP-02 resource. The returned handle only owns demand
     /// cancellation; contact-list semantics and acquisition state stay in
@@ -350,14 +409,17 @@ impl NmpEngine {
         observer: Box<dyn FollowObserver>,
     ) -> Result<Arc<NmpFollowHandle>, FfiError> {
         let target = parse_pubkey(&target)?;
+        let reservation = self.engine.reserve_native_task("follow-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "follow-observer")?;
         let observation = nmp_nip02::observe_following(self.engine.clone(), target)?;
         let cancel = observation.cancel_handle();
-        spawn_native_bridge("follow-observer", move || {
+        starter.run(move || {
             while let Some(snapshot) = observation.recv() {
                 observer.on_snapshot(snapshot_to_ffi(snapshot));
             }
             observer.on_closed();
-        })?;
+        });
         Ok(follow_handle(cancel))
     }
 
@@ -397,16 +459,19 @@ impl NmpEngine {
         observer: Box<dyn RowObserver>,
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let filter = filter_from_ffi(query)?;
+        let reservation = self.engine.reserve_native_task("row-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "row-observer")?;
         let subscription = self.engine.observe(nmp::LiveQuery::from_filter(filter))?;
         let cancel = subscription.cancel_handle();
 
-        spawn_native_bridge("row-observer", move || {
+        starter.run(move || {
             while let Ok((deltas, evidence)) = subscription.recv() {
                 let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
                 observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
             }
             observer.on_closed();
-        })?;
+        });
 
         Ok(Arc::new(NmpQueryHandle { cancel }))
     }
@@ -423,16 +488,19 @@ impl NmpEngine {
         observer: Box<dyn RowObserver>,
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let demand = demand_from_ffi(query)?;
+        let reservation = self.engine.reserve_native_task("demand-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "demand-observer")?;
         let subscription = self.engine.observe(nmp::LiveQuery(demand))?;
         let cancel = subscription.cancel_handle();
 
-        spawn_native_bridge("demand-observer", move || {
+        starter.run(move || {
             while let Ok((deltas, evidence)) = subscription.recv() {
                 let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
                 observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
             }
             observer.on_closed();
-        })?;
+        });
 
         Ok(Arc::new(NmpQueryHandle { cancel }))
     }
@@ -454,16 +522,19 @@ impl NmpEngine {
         observer: Box<dyn ReceiptObserver>,
     ) -> Result<u64, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
+        let reservation = self.engine.reserve_native_task("receipt-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "receipt-observer")?;
         let receipt = self.engine.publish_tracked(write_intent)?;
         let receipt_id = receipt.id.0;
         let receipt_rx = receipt.statuses;
 
-        spawn_native_bridge("receipt-observer", move || {
+        starter.run(move || {
             while let Ok(status) = receipt_rx.recv() {
                 observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
             }
             observer.on_closed();
-        })?;
+        });
 
         Ok(receipt_id)
     }
@@ -508,17 +579,22 @@ impl NmpEngine {
         intent: Arc<crate::nip29::FfiComposedWriteIntent>,
         observer: Box<dyn ReceiptObserver>,
     ) -> Result<u64, FfiError> {
+        let reservation = self
+            .engine
+            .reserve_native_task("composed-receipt-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "composed-receipt-observer")?;
         let write_intent = intent.take()?;
         let receipt = self.engine.publish_tracked(write_intent)?;
         let receipt_id = receipt.id.0;
         let receipt_rx = receipt.statuses;
 
-        spawn_native_bridge("composed-receipt-observer", move || {
+        starter.run(move || {
             while let Ok(status) = receipt_rx.recv() {
                 observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
             }
             observer.on_closed();
-        })?;
+        });
 
         Ok(receipt_id)
     }
@@ -530,18 +606,25 @@ impl NmpEngine {
         receipt_id: u64,
         observer: Box<dyn ReceiptObserver>,
     ) -> Result<FfiReceiptReattachment, FfiError> {
+        let reservation = self
+            .engine
+            .reserve_native_task("reattached-receipt-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "reattached-receipt-observer")?;
         let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
         let ffi_result = reattachment_to_ffi(&result);
         match result {
             ReceiptReattachment::Attached(receipt_rx) => {
-                spawn_native_bridge("reattached-receipt-observer", move || {
+                starter.run(move || {
                     while let Ok(status) = receipt_rx.recv() {
                         observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
                     }
                     observer.on_closed();
-                })?;
+                });
             }
-            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {}
+            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {
+                drop(starter);
+            }
         }
         Ok(ffi_result)
     }
@@ -558,15 +641,18 @@ impl NmpEngine {
         &self,
         observer: Box<dyn DiagnosticsObserver>,
     ) -> Result<Arc<NmpDiagnosticsHandle>, FfiError> {
+        let reservation = self.engine.reserve_native_task("diagnostics-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "diagnostics-observer")?;
         let subscription = self.engine.observe_diagnostics()?;
         let cancel = subscription.cancel_handle();
 
-        spawn_native_bridge("diagnostics-observer", move || {
+        starter.run(move || {
             while let Some(snapshot) = subscription.recv() {
                 observer.on_snapshot(diagnostics_snapshot_to_ffi(snapshot));
             }
             observer.on_closed();
-        })?;
+        });
 
         Ok(Arc::new(NmpDiagnosticsHandle { cancel }))
     }
@@ -639,9 +725,132 @@ impl Drop for NmpDiagnosticsHandle {
 mod tests {
     use super::*;
     use crate::types::{FfiDurability, FfiWritePayload, FfiWriteRouting, FfiWriteStatus};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    struct CensusDiagnosticsObserver {
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl DiagnosticsObserver for CensusDiagnosticsObserver {
+        fn on_snapshot(&self, _snapshot: crate::types::FfiDiagnosticsSnapshot) {}
+
+        fn on_closed(&self) {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct CensusRowObserver;
+
+    impl RowObserver for CensusRowObserver {
+        fn on_batch(
+            &self,
+            _deltas: Vec<crate::types::FfiRowDelta>,
+            _evidence: crate::types::FfiAcquisitionEvidence,
+        ) {
+        }
+
+        fn on_closed(&self) {}
+    }
+
+    struct CensusFollowObserver;
+
+    impl crate::nip02::FollowObserver for CensusFollowObserver {
+        fn on_snapshot(&self, _snapshot: crate::nip02::FfiFollowSnapshot) {}
+
+        fn on_closed(&self) {}
+    }
+
+    #[test]
+    fn simultaneous_query_demand_follow_and_receipt_drains_charge_five_tasks() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let query = engine
+            .observe(FfiFilter::default(), Box::new(CensusRowObserver))
+            .expect("query observer must start");
+        let demand = engine
+            .observe_demand(
+                crate::types::FfiDemand {
+                    selection: FfiFilter::default(),
+                    source: crate::types::FfiSourceAuthority::Public,
+                    access: crate::types::FfiAccessContext::Public,
+                    cache: crate::types::FfiCacheMode::Agnostic,
+                },
+                Box::new(CensusRowObserver),
+            )
+            .expect("demand observer must start");
+        let target = nostr::Keys::generate().public_key().to_hex();
+        let follow = engine
+            .observe_following(target, Box::new(CensusFollowObserver))
+            .expect("follow projection and bridge must start");
+
+        let (receipt_tx, receipt_rx) = mpsc::channel::<()>();
+        let reservation = engine
+            .engine
+            .reserve_native_task("receipt-observer")
+            .unwrap();
+        let cancel = engine.engine.native_task_cancel().unwrap();
+        spawn_native_bridge(reservation, cancel, "receipt-observer", move || {
+            while receipt_rx.recv().is_ok() {}
+        })
+        .unwrap();
+
+        assert_eq!(
+            engine.native_task_census().admitted,
+            5,
+            "query + demand + follow projection/bridge + receipt drain"
+        );
+        query.cancel();
+        demand.cancel();
+        follow.cancel();
+        drop(query);
+        drop(demand);
+        drop(follow);
+        drop(receipt_tx);
+        engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn finite_native_executor_refuses_before_acceptance_and_returns_exact_baseline() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handle = engine
+            .observe_diagnostics(Box::new(CensusDiagnosticsObserver {
+                closes: Arc::clone(&closes),
+            }))
+            .expect("cap-sized observer must start");
+        assert_eq!(engine.native_task_census().admitted, 1);
+
+        let refusal = match engine.observe_diagnostics(Box::new(CensusDiagnosticsObserver {
+            closes: Arc::new(AtomicUsize::new(0)),
+        })) {
+            Ok(_) => panic!("a cap-sized executor must refuse another observer"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            refusal,
+            FfiError::ExecutorSaturated {
+                component: "diagnostics-observer".to_string(),
+                capacity: 1,
+            }
+        );
+
+        handle.cancel();
+        drop(handle);
+        engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        engine.shutdown();
+    }
 
     #[test]
     fn ffi_persistent_store_reset_is_destructive_and_idempotent() {

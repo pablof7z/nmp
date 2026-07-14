@@ -50,6 +50,10 @@ pub struct EngineConfig {
     /// zero is accepted only as a legacy spelling of the finite default.
     /// Refused query candidates remain explicit `LocalLimit` evidence.
     pub max_relays: usize,
+    /// Maximum simultaneously admitted blocking native bridge/signer tasks.
+    /// Admission has no queue: saturation is returned before the associated
+    /// stream or operation is accepted. Zero selects the finite default.
+    pub max_native_tasks: usize,
 }
 
 impl Default for EngineConfig {
@@ -61,6 +65,7 @@ impl Default for EngineConfig {
             fallback_relays: Vec::new(),
             allowed_local_relay_hosts: Vec::new(),
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
+            max_native_tasks: nmp_executor::DEFAULT_MAX_TASKS,
         }
     }
 }

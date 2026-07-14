@@ -606,6 +606,27 @@ enum Enum {
             ),
         },
         Variant {
+            name: "ExecutorSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The finite native executor had no immediately-startable slot. The\nassociated stream or operation was not accepted.",
+            ),
+        },
+        Variant {
             name: "InvalidSignature",
             discr: None,
             fields: [
@@ -797,6 +818,25 @@ enum Enum {
                 Field {
                     name: "reason",
                     type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ExecutorSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
                     default: None,
                     docstring: None,
                 },
@@ -2875,6 +2915,41 @@ record Record {
 }
 
 record Record {
+    name: "FfiNativeTaskCensus",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "capacity",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "admitted",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "running",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "accepting",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Exact, lock-protected executor accounting for deterministic lifecycle and\nsaturation falsifiers. `admitted` includes a reservation during its brief\npre-handoff window; `running` counts OS task handles not yet joined.",
+    ),
+}
+
+record Record {
     name: "FfiNip46ClientMetadata",
     module_path: "nmp_ffi",
     remote: false,
@@ -3437,6 +3512,20 @@ record Record {
             ),
             docstring: Some(
                 "The one whole-engine relay ceiling. It bounds the complete compiled\ndemand and the transport worker set with the same effective value.\nLegacy zero is normalized to the finite default, never uncapped.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror.",
+            ),
+        },
+        Field {
+            name: "max_native_tasks",
+            type_: UInt32,
+            default: Some(
+                UInt(
+                    12,
+                    Decimal,
+                    UInt32,
+                ),
+            ),
+            docstring: Some(
+                "Maximum immediately-running native observer/action/waiter tasks.\nZero selects the finite default; saturation never queues an accepted\nstream behind a long-lived drain.",
             ),
         },
     ],
@@ -5165,6 +5254,39 @@ object Object {
             ),
         },
         Method {
+            name: "await_native_tasks_idle",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_await_native_tasks_idle",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Event-driven barrier for lifecycle tests and hosts that require proof\nall cancelled native callbacks have returned before releasing state.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_await_native_tasks_idle",
+            checksum: Some(
+                47867,
+            ),
+        },
+        Method {
             name: "connect_nip46_bunker",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -5518,6 +5640,51 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_group_message_intent",
             checksum: Some(
                 63838,
+            ),
+        },
+        Method {
+            name: "native_task_census",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiNativeTaskCensus",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_native_task_census",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiNativeTaskCensus",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_native_task_census",
+            checksum: Some(
+                14452,
             ),
         },
         Method {

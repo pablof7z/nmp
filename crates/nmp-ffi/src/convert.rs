@@ -92,6 +92,12 @@ pub enum FfiError {
         component: String,
         reason: String,
     },
+    /// The finite native executor had no immediately-startable slot. The
+    /// associated stream or operation was not accepted.
+    ExecutorSaturated {
+        component: String,
+        capacity: u64,
+    },
     /// A `FfiWritePayload::Signed`'s `sig` did not parse as a valid 64-byte
     /// hex schnorr signature.
     InvalidSignature {
@@ -145,6 +151,13 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::ThreadUnavailable { component, reason } => {
                 Self::ThreadUnavailable { component, reason }
             }
+            nmp::EngineError::ExecutorSaturated {
+                component,
+                capacity,
+            } => Self::ExecutorSaturated {
+                component,
+                capacity: capacity as u64,
+            },
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
@@ -175,6 +188,13 @@ impl std::fmt::Display for FfiError {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
+            Self::ExecutorSaturated {
+                component,
+                capacity,
+            } => write!(
+                f,
+                "{component} refused: native task executor is at capacity {capacity}"
+            ),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
             Self::InvalidNostrEntity { reason } => write!(f, "invalid nostr entity: {reason}"),

@@ -91,6 +91,11 @@ Fairness policy must prevent one relay, query, or outbox lane from permanently
 starving unrelated work. The precise algorithm is provisional; starvation and
 queue pressure must be measurable.
 
+Blocking native receiver drains use the zero-queue admission mechanism in
+`native-task-executor.md`. They never enter a conventional worker queue:
+capacity or OS-thread refusal is known before stream/write ownership transfers,
+and one admitted task preserves its receiver's FIFO order.
+
 ## 7. Diagnostics
 
 Diagnostics exposes at least:
@@ -117,4 +122,6 @@ Required proofs include:
 - an overwhelming relay cannot grow memory unboundedly and leaves a diagnostic
   reason when disconnected;
 - scheduler load remains bounded and fair without polling;
+- native task saturation refuses before ownership transfer, and cancellation
+  returns the join-backed census to its exact baseline without a timeout;
 - no test can obtain silent first-N truncation at any limit boundary.

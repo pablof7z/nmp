@@ -1358,6 +1358,7 @@ name = "nmp"
 version = "0.1.0"
 dependencies = [
  "nmp-engine",
+ "nmp-executor",
  "nmp-grammar",
  "nmp-resolver",
  "nmp-router",
@@ -1422,6 +1423,7 @@ dependencies = [
  "hex",
  "libc",
  "negentropy",
+ "nmp-executor",
  "nmp-grammar",
  "nmp-nip29",
  "nmp-nip51",
@@ -1442,6 +1444,10 @@ dependencies = [
  "tungstenite 0.29.0",
  "url",
 ]
+
+[[package]]
+name = "nmp-executor"
+version = "0.1.0"
 
 [[package]]
 name = "nmp-ffi"
@@ -1543,6 +1549,7 @@ dependencies = [
 name = "nmp-signer"
 version = "0.1.0"
 dependencies = [
+ "nmp-executor",
  "nmp-transport",
  "nostr 0.44.4",
  "serde",
