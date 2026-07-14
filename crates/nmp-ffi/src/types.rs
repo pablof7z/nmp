@@ -590,8 +590,26 @@ pub enum FfiWriteStatus {
     Routed {
         relays: Vec<String>,
     },
+    AwaitingRelay {
+        relay: String,
+    },
+    AwaitingAuth {
+        relay: String,
+    },
+    RetryEligible {
+        relay: String,
+        attempt: u64,
+        eligible_at: u64,
+    },
+    HandoffAmbiguous {
+        relay: String,
+        attempt: u64,
+        observed_at: u64,
+    },
     Sent {
         relay: String,
+        attempt: Option<u64>,
+        written_at: u64,
     },
     Acked {
         relay: String,

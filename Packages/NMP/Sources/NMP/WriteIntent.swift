@@ -95,7 +95,11 @@ public enum WriteStatus: Sendable, Hashable {
     case awaitingCapability
     case signed(eventId: String)
     case routed(relays: [String])
-    case sent(relay: String)
+    case awaitingRelay(relay: String)
+    case awaitingAuth(relay: String)
+    case retryEligible(relay: String, attempt: UInt64, eligibleAt: UInt64)
+    case handoffAmbiguous(relay: String, attempt: UInt64, observedAt: UInt64)
+    case sent(relay: String, attempt: UInt64?, writtenAt: UInt64)
     case acked(relay: String)
     case rejected(relay: String, reason: String)
     case gaveUp(relay: String)
@@ -111,7 +115,14 @@ public enum WriteStatus: Sendable, Hashable {
         case .awaitingCapability: self = .awaitingCapability
         case .signed(let eventId): self = .signed(eventId: eventId)
         case .routed(let relays): self = .routed(relays: relays)
-        case .sent(let relay): self = .sent(relay: relay)
+        case .awaitingRelay(let relay): self = .awaitingRelay(relay: relay)
+        case .awaitingAuth(let relay): self = .awaitingAuth(relay: relay)
+        case .retryEligible(let relay, let attempt, let eligibleAt):
+            self = .retryEligible(relay: relay, attempt: attempt, eligibleAt: eligibleAt)
+        case .handoffAmbiguous(let relay, let attempt, let observedAt):
+            self = .handoffAmbiguous(relay: relay, attempt: attempt, observedAt: observedAt)
+        case .sent(let relay, let attempt, let writtenAt):
+            self = .sent(relay: relay, attempt: attempt, writtenAt: writtenAt)
         case .acked(let relay): self = .acked(relay: relay)
         case .rejected(let relay, let reason): self = .rejected(relay: relay, reason: reason)
         case .gaveUp(let relay): self = .gaveUp(relay: relay)

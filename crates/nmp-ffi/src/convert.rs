@@ -754,8 +754,38 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::Routed(relays) => FfiWriteStatus::Routed {
             relays: relays.iter().map(RelayUrl::to_string).collect(),
         },
-        GWriteStatus::Sent(relay) => FfiWriteStatus::Sent {
+        GWriteStatus::AwaitingRelay { relay } => FfiWriteStatus::AwaitingRelay {
             relay: relay.to_string(),
+        },
+        GWriteStatus::AwaitingAuth { relay } => FfiWriteStatus::AwaitingAuth {
+            relay: relay.to_string(),
+        },
+        GWriteStatus::RetryEligible {
+            relay,
+            attempt,
+            eligible_at,
+        } => FfiWriteStatus::RetryEligible {
+            relay: relay.to_string(),
+            attempt: *attempt,
+            eligible_at: eligible_at.as_secs(),
+        },
+        GWriteStatus::HandoffAmbiguous {
+            relay,
+            attempt,
+            observed_at,
+        } => FfiWriteStatus::HandoffAmbiguous {
+            relay: relay.to_string(),
+            attempt: *attempt,
+            observed_at: observed_at.as_secs(),
+        },
+        GWriteStatus::Sent {
+            relay,
+            attempt,
+            written_at,
+        } => FfiWriteStatus::Sent {
+            relay: relay.to_string(),
+            attempt: *attempt,
+            written_at: written_at.as_secs(),
         },
         GWriteStatus::Acked(relay) => FfiWriteStatus::Acked {
             relay: relay.to_string(),
@@ -896,9 +926,55 @@ mod write_status_tests {
                 },
             ),
             (
-                GWriteStatus::Sent(relay.clone()),
+                GWriteStatus::AwaitingRelay {
+                    relay: relay.clone(),
+                },
+                FfiWriteStatus::AwaitingRelay {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::AwaitingAuth {
+                    relay: relay.clone(),
+                },
+                FfiWriteStatus::AwaitingAuth {
+                    relay: relay.to_string(),
+                },
+            ),
+            (
+                GWriteStatus::RetryEligible {
+                    relay: relay.clone(),
+                    attempt: 3,
+                    eligible_at: Timestamp::from(41),
+                },
+                FfiWriteStatus::RetryEligible {
+                    relay: relay.to_string(),
+                    attempt: 3,
+                    eligible_at: 41,
+                },
+            ),
+            (
+                GWriteStatus::HandoffAmbiguous {
+                    relay: relay.clone(),
+                    attempt: 4,
+                    observed_at: Timestamp::from(42),
+                },
+                FfiWriteStatus::HandoffAmbiguous {
+                    relay: relay.to_string(),
+                    attempt: 4,
+                    observed_at: 42,
+                },
+            ),
+            (
+                GWriteStatus::Sent {
+                    relay: relay.clone(),
+                    attempt: Some(5),
+                    written_at: Timestamp::from(43),
+                },
                 FfiWriteStatus::Sent {
                     relay: relay.to_string(),
+                    attempt: Some(5),
+                    written_at: 43,
                 },
             ),
             (

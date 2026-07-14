@@ -1,9 +1,8 @@
 # Durable writes, signing, and retry
 
-- **Status:** IMPLEMENTED IN THE RUST MECHANISM - crash-safe acceptance,
-  canonical pending rows, signer reattachment, and the one durable retry
-  scheduler satisfy this contract. Governed lane-state projection across
-  Rust/FFI/Swift/Kotlin remains #96.
+- **Status:** IMPLEMENTED - crash-safe acceptance, canonical pending rows,
+  signer reattachment, the one durable retry scheduler, and truthful governed
+  lane-state projection across Rust/FFI/Swift/Kotlin satisfy this contract.
 - **Owns:** the meaning of `Accepted`, pending-row semantics, signer selection,
   receipt persistence, and retry ownership.
 

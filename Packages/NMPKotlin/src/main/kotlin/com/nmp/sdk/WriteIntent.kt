@@ -102,7 +102,15 @@ sealed class WriteStatus {
 
     data class Routed(val relays: List<String>) : WriteStatus()
 
-    data class Sent(val relay: String) : WriteStatus()
+    data class AwaitingRelay(val relay: String) : WriteStatus()
+
+    data class AwaitingAuth(val relay: String) : WriteStatus()
+
+    data class RetryEligible(val relay: String, val attempt: ULong, val eligibleAt: ULong) : WriteStatus()
+
+    data class HandoffAmbiguous(val relay: String, val attempt: ULong, val observedAt: ULong) : WriteStatus()
+
+    data class Sent(val relay: String, val attempt: ULong?, val writtenAt: ULong) : WriteStatus()
 
     data class Acked(val relay: String) : WriteStatus()
 
@@ -127,7 +135,13 @@ sealed class WriteStatus {
                 is FfiWriteStatus.AwaitingCapability -> AwaitingCapability
                 is FfiWriteStatus.Signed -> Signed(ffi.eventId)
                 is FfiWriteStatus.Routed -> Routed(ffi.relays)
-                is FfiWriteStatus.Sent -> Sent(ffi.relay)
+                is FfiWriteStatus.AwaitingRelay -> AwaitingRelay(ffi.relay)
+                is FfiWriteStatus.AwaitingAuth -> AwaitingAuth(ffi.relay)
+                is FfiWriteStatus.RetryEligible ->
+                    RetryEligible(ffi.relay, ffi.attempt, ffi.eligibleAt)
+                is FfiWriteStatus.HandoffAmbiguous ->
+                    HandoffAmbiguous(ffi.relay, ffi.attempt, ffi.observedAt)
+                is FfiWriteStatus.Sent -> Sent(ffi.relay, ffi.attempt, ffi.writtenAt)
                 is FfiWriteStatus.Acked -> Acked(ffi.relay)
                 is FfiWriteStatus.Rejected -> Rejected(ffi.relay, ffi.reason)
                 is FfiWriteStatus.GaveUp -> GaveUp(ffi.relay)

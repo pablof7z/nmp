@@ -893,7 +893,11 @@ impl<S: EventStore> EngineCore<S> {
 
         let Some((intent_id, ordinal)) = target.lane else {
             if result == HandoffResult::Written && !target.ephemeral_sinks.is_empty() {
-                let status = WriteStatus::Sent(target.relay.clone());
+                let status = WriteStatus::Sent {
+                    relay: target.relay.clone(),
+                    attempt: None,
+                    written_at: self.clock,
+                };
                 for sink in &target.ephemeral_sinks {
                     sink.on_status(status.clone());
                 }
@@ -961,11 +965,24 @@ impl<S: EventStore> EngineCore<S> {
             (HandoffResult::Written, _) => {
                 self.emit_write_status(
                     target.receipt,
-                    WriteStatus::Sent(target.relay),
+                    WriteStatus::Sent {
+                        relay: target.relay,
+                        attempt: Some(ordinal),
+                        written_at: self.clock,
+                    },
                     &mut effects,
                 );
             }
             (HandoffResult::Ambiguous, Some(Durability::AtMostOnce)) => {
+                self.emit_write_status(
+                    target.receipt,
+                    WriteStatus::HandoffAmbiguous {
+                        relay: target.relay.clone(),
+                        attempt: ordinal,
+                        observed_at: self.clock,
+                    },
+                    &mut effects,
+                );
                 self.remove_active_lane(target.receipt, &target.relay);
                 self.emit_write_status(
                     target.receipt,
@@ -977,7 +994,25 @@ impl<S: EventStore> EngineCore<S> {
             (HandoffResult::NotHandedOff, _) => {
                 self.remove_active_lane(target.receipt, &target.relay);
                 self.connected_relays.remove(&target.relay);
+                self.emit_write_status(
+                    target.receipt,
+                    WriteStatus::AwaitingRelay {
+                        relay: target.relay.clone(),
+                    },
+                    &mut effects,
+                );
                 effects.push(Effect::EnsureRelay(target.relay));
+            }
+            (HandoffResult::Ambiguous, Some(Durability::Durable)) => {
+                self.emit_write_status(
+                    target.receipt,
+                    WriteStatus::HandoffAmbiguous {
+                        relay: target.relay,
+                        attempt: ordinal,
+                        observed_at: self.clock,
+                    },
+                    &mut effects,
+                );
             }
             (HandoffResult::Ambiguous, _) => {}
         }
@@ -1074,6 +1109,13 @@ impl<S: EventStore> EngineCore<S> {
                     .set_lane_waiting(&lane.key, lane.revision, false)
                     .is_ok()
                 {
+                    self.emit_write_status(
+                        id,
+                        WriteStatus::AwaitingRelay {
+                            relay: lane.key.relay.clone(),
+                        },
+                        &mut effects,
+                    );
                     effects.push(Effect::EnsureRelay(lane.key.relay));
                 } else {
                     self.retry_scheduler_blocked = true;
@@ -1152,7 +1194,7 @@ impl<S: EventStore> EngineCore<S> {
             self.retry_scheduler_blocked = true;
             return effects;
         };
-        for (_, lane) in lanes {
+        for (id, lane) in lanes {
             if &lane.key.relay != relay {
                 continue;
             }
@@ -1171,6 +1213,16 @@ impl<S: EventStore> EngineCore<S> {
                 .is_err()
             {
                 self.retry_scheduler_blocked = true;
+            } else if lane.last_ordinal > 0 {
+                self.emit_write_status(
+                    id,
+                    WriteStatus::RetryEligible {
+                        relay: lane.key.relay,
+                        attempt: lane.last_ordinal,
+                        eligible_at: self.clock,
+                    },
+                    &mut effects,
+                );
             }
         }
         effects.extend(self.schedule_ready(self.clock));
@@ -1272,6 +1324,15 @@ impl<S: EventStore> EngineCore<S> {
                             {
                                 if let Some(id) = id {
                                     self.remove_active_lane(id, &lane.key.relay);
+                                    self.emit_write_status(
+                                        id,
+                                        WriteStatus::RetryEligible {
+                                            relay: lane.key.relay.clone(),
+                                            attempt: ordinal,
+                                            eligible_at,
+                                        },
+                                        &mut effects,
+                                    );
                                 }
                             } else {
                                 self.retry_scheduler_blocked = true;
@@ -1469,10 +1530,18 @@ impl<S: EventStore> EngineCore<S> {
             // signer facts from an obligation whose destination is unknown.
             return ReattachOutcome::RetainedButUnreadable;
         }
-        let attempts = match receipt.intent_id {
+        let (attempts, details, lanes) = match receipt.intent_id {
             Some(intent_id) => {
                 let attempts = match self.resolver.store().recover_attempts(intent_id) {
                     Ok(attempts) => attempts,
+                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                };
+                let details = match self.resolver.store().recover_attempt_details(intent_id) {
+                    Ok(details) => details,
+                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                };
+                let lanes = match self.resolver.store().recover_outbox_lanes(intent_id) {
+                    Ok(lanes) => lanes,
                     Err(_) => return ReattachOutcome::RetainedButUnreadable,
                 };
                 if self
@@ -1483,9 +1552,9 @@ impl<S: EventStore> EngineCore<S> {
                 {
                     return ReattachOutcome::RetainedButUnreadable;
                 }
-                attempts
+                (attempts, details, lanes)
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new(), Vec::new()),
         };
         let status = match receipt.state {
             ReceiptState::Accepted => WriteStatus::Accepted,
@@ -1495,17 +1564,69 @@ impl<S: EventStore> EngineCore<S> {
                 WriteStatus::Failed("ephemeral write abandoned after restart".to_string())
             }
         };
-        sink.on_status(status);
+        let mut replay = vec![status];
         if receipt.state == ReceiptState::Accepted
             && self
                 .pending
                 .get(&id)
                 .is_some_and(|pending| !pending.already_signed)
         {
-            sink.on_status(WriteStatus::AwaitingCapability);
+            replay.push(WriteStatus::AwaitingCapability);
         }
         if receipt.intent_id.is_some() {
+            let mut details_by_attempt = details
+                .into_iter()
+                .map(|detail| ((detail.relay.clone(), detail.ordinal), detail))
+                .collect::<BTreeMap<_, _>>();
+            let mut awaiting_relay = BTreeSet::new();
+            let mut awaiting_auth = BTreeSet::new();
+            let mut retry_eligible = BTreeSet::new();
             for attempt in attempts {
+                if let Some(detail) =
+                    details_by_attempt.remove(&(attempt.relay.clone(), attempt.ordinal))
+                {
+                    if let Some(handoff) = detail.handoff {
+                        match handoff.result {
+                            HandoffEvidence::NotHandedOff => {
+                                awaiting_relay.insert((attempt.relay.clone(), attempt.ordinal));
+                                replay.push(WriteStatus::AwaitingRelay {
+                                    relay: attempt.relay.clone(),
+                                });
+                            }
+                            HandoffEvidence::Written => replay.push(WriteStatus::Sent {
+                                relay: attempt.relay.clone(),
+                                attempt: Some(attempt.ordinal),
+                                written_at: handoff.at,
+                            }),
+                            HandoffEvidence::Ambiguous => {
+                                replay.push(WriteStatus::HandoffAmbiguous {
+                                    relay: attempt.relay.clone(),
+                                    attempt: attempt.ordinal,
+                                    observed_at: handoff.at,
+                                });
+                            }
+                        }
+                    }
+                    if let Some(transient) = detail.transient {
+                        if transient.cause == TransientCause::AuthRequired {
+                            awaiting_auth.insert((attempt.relay.clone(), attempt.ordinal));
+                            replay.push(WriteStatus::AwaitingAuth {
+                                relay: attempt.relay.clone(),
+                            });
+                        } else {
+                            retry_eligible.insert((
+                                attempt.relay.clone(),
+                                attempt.ordinal,
+                                transient.eligible_at,
+                            ));
+                            replay.push(WriteStatus::RetryEligible {
+                                relay: attempt.relay.clone(),
+                                attempt: attempt.ordinal,
+                                eligible_at: transient.eligible_at,
+                            });
+                        }
+                    }
+                }
                 let status = match attempt.outcome {
                     // Started is only the crash-safe pre-wire fact. #93
                     // deliberately moved Sent to the later transport
@@ -1519,16 +1640,75 @@ impl<S: EventStore> EngineCore<S> {
                     AttemptOutcome::GaveUp => WriteStatus::GaveUp(attempt.relay),
                     AttemptOutcome::OutcomeUnknown => WriteStatus::OutcomeUnknown(attempt.relay),
                 };
-                sink.on_status(status);
+                replay.push(status);
+            }
+            if !details_by_attempt.is_empty() {
+                return ReattachOutcome::RetainedButUnreadable;
+            }
+            for lane in lanes {
+                match lane.state {
+                    LaneState::WaitingConnection
+                        if !awaiting_relay
+                            .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
+                    {
+                        replay.push(WriteStatus::AwaitingRelay {
+                            relay: lane.key.relay,
+                        });
+                    }
+                    LaneState::WaitingAuth
+                        if !awaiting_auth
+                            .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
+                    {
+                        replay.push(WriteStatus::AwaitingAuth {
+                            relay: lane.key.relay,
+                        });
+                    }
+                    LaneState::Eligible { since }
+                        if lane.last_ordinal > 0
+                            && !retry_eligible.contains(&(
+                                lane.key.relay.clone(),
+                                lane.last_ordinal,
+                                since,
+                            )) =>
+                    {
+                        replay.push(WriteStatus::RetryEligible {
+                            relay: lane.key.relay,
+                            attempt: lane.last_ordinal,
+                            eligible_at: since,
+                        });
+                    }
+                    LaneState::Transient {
+                        ordinal,
+                        eligible_at,
+                        cause,
+                        ..
+                    } if cause != TransientCause::AuthRequired
+                        && !retry_eligible.contains(&(
+                            lane.key.relay.clone(),
+                            ordinal,
+                            eligible_at,
+                        )) =>
+                    {
+                        replay.push(WriteStatus::RetryEligible {
+                            relay: lane.key.relay,
+                            attempt: ordinal,
+                            eligible_at,
+                        });
+                    }
+                    _ => {}
+                }
             }
         }
         if let Some(pending) = self.pending.get(&id) {
             for relay in &pending.unstarted_relays {
-                sink.on_status(WriteStatus::PersistenceBlocked(relay.clone()));
+                replay.push(WriteStatus::PersistenceBlocked(relay.clone()));
             }
             for relay in &pending.route_blocked_relays {
-                sink.on_status(WriteStatus::RoutePersistenceBlocked(relay.clone()));
+                replay.push(WriteStatus::RoutePersistenceBlocked(relay.clone()));
             }
+        }
+        for status in replay {
+            sink.on_status(status);
         }
         if let Some(pending) = self.pending.get_mut(&id) {
             pending.sinks.push(Rc::from(sink));
@@ -2315,6 +2495,13 @@ impl<S: EventStore> EngineCore<S> {
                         self.clock,
                     );
                 } else {
+                    self.emit_write_status(
+                        id,
+                        WriteStatus::AwaitingRelay {
+                            relay: lane.key.relay.clone(),
+                        },
+                        effects,
+                    );
                     effects.push(Effect::EnsureRelay(lane.key.relay));
                 }
             }
@@ -2708,6 +2895,15 @@ impl<S: EventStore> EngineCore<S> {
                         .is_ok()
                     {
                         self.remove_active_lane(id, relay);
+                        self.emit_write_status(
+                            id,
+                            WriteStatus::RetryEligible {
+                                relay: relay.clone(),
+                                attempt: ordinal,
+                                eligible_at,
+                            },
+                            effects,
+                        );
                     }
                 }
                 RelayAckClass::WaitingAuth => {
@@ -2726,6 +2922,13 @@ impl<S: EventStore> EngineCore<S> {
                         .is_ok()
                     {
                         self.remove_active_lane(id, relay);
+                        self.emit_write_status(
+                            id,
+                            WriteStatus::AwaitingAuth {
+                                relay: relay.clone(),
+                            },
+                            effects,
+                        );
                     }
                 }
             }
@@ -2743,10 +2946,20 @@ impl<S: EventStore> EngineCore<S> {
             }
             match lane.state {
                 LaneState::Eligible { .. } => {
-                    let _ =
-                        self.resolver
-                            .store_mut()
-                            .set_lane_waiting(&lane.key, lane.revision, false);
+                    if self
+                        .resolver
+                        .store_mut()
+                        .set_lane_waiting(&lane.key, lane.revision, false)
+                        .is_ok()
+                    {
+                        self.emit_write_status(
+                            id,
+                            WriteStatus::AwaitingRelay {
+                                relay: relay.clone(),
+                            },
+                            effects,
+                        );
+                    }
                 }
                 LaneState::InFlight {
                     ordinal,
@@ -2790,6 +3003,15 @@ impl<S: EventStore> EngineCore<S> {
                             .is_ok()
                         {
                             self.remove_active_lane(id, relay);
+                            self.emit_write_status(
+                                id,
+                                WriteStatus::RetryEligible {
+                                    relay: relay.clone(),
+                                    attempt: ordinal,
+                                    eligible_at,
+                                },
+                                effects,
+                            );
                         }
                     }
                 }
