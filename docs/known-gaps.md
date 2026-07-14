@@ -24,7 +24,10 @@ about current code:
   pinned lanes. Deterministic plan-time refusals are absent from executable
   wire work but remain visible as exact contextual `LocalLimit` query evidence
   and diagnostics; the transport boundary returns typed admission errors and
-  preserves durable write lanes as explicit waiting work. Discovered local,
+  preserves durable write lanes as explicit waiting work. Runtime
+  reconciliation releases workers that have no current read, write, or
+  ephemeral owner before dialing replacements, while nonterminal durable
+  lanes retain their shared socket ownership. Discovered local,
   private, link-local, and `.onion` targets remain rejected by default, while
   operator-configured and explicit contextual authority keep their separate
   trusted path. Other non-relay limit classes remain open under ledger #17.

@@ -13,6 +13,7 @@
 //! thread. See those modules' docs for the generation-safety scheme and the
 //! harvest-vs-rewrite breakdown.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -380,6 +381,16 @@ impl Pool {
         }
     }
 
+    /// Return the current live generation for `url` without opening or
+    /// reopening a worker. Used for best-effort close-only wire deltas: a
+    /// withdrawn read relay must never be re-created merely to send `CLOSE`.
+    pub fn live_handle(&self, url: &RelayUrl) -> Option<RelayHandle> {
+        match self.inner.lock() {
+            Ok(guard) => guard.live_handle(url),
+            Err(_) => None,
+        }
+    }
+
     /// Push one frame at one specific (URL, generation). A stale handle is
     /// a structural no-op (`false`) — the caller cannot accidentally target
     /// a superseded generation of the same URL.
@@ -453,6 +464,23 @@ impl Pool {
         match self.inner.lock() {
             Ok(mut guard) => guard.close(h),
             Err(_) => None,
+        }
+    }
+
+    /// Close every live worker whose URL is absent from `required` and
+    /// return each synchronous disconnect fact. This is the release half of
+    /// the finite admission contract: a caller that owns the exact current
+    /// relay-demand set can free obsolete slots before opening replacement
+    /// relays, while retaining every read or write lane that is still live.
+    ///
+    /// The pool does not infer demand from traffic. The engine supplies the
+    /// authoritative union of its current read plan and nonterminal write
+    /// lanes, so transport cannot accidentally evict an in-flight write or
+    /// keep historical read workers forever.
+    pub fn close_unrequired(&self, required: &BTreeSet<RelayUrl>) -> Vec<PoolEvent> {
+        match self.inner.lock() {
+            Ok(mut guard) => guard.close_unrequired(required),
+            Err(_) => Vec::new(),
         }
     }
 

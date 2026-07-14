@@ -15,7 +15,7 @@
 //! worker — the pool already knows the outcome the instant it decides to
 //! tear a slot down, so there is nothing to learn from an async ack.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -141,6 +141,16 @@ impl PoolInner {
             };
         }
         self.open_new(url.clone())
+    }
+
+    pub(super) fn live_handle(&self, url: &RelayUrl) -> Option<RelayHandle> {
+        let slot = *self.url_to_slot.get(url)?;
+        let state = self.slots.get(slot as usize)?;
+        state.worker.as_ref()?;
+        Some(RelayHandle {
+            slot,
+            generation: state.generation,
+        })
     }
 
     /// Explain the invalid handle returned by [`Self::ensure_open`]. This is
@@ -288,6 +298,27 @@ impl PoolInner {
             slot: h.slot,
             reason: DisconnectReason::Closed,
         })
+    }
+
+    /// Release every live slot not present in the caller-owned exact demand
+    /// set. Handles are snapshotted first so [`Self::close`] remains the one
+    /// generation-safe mutation door and produces the ordinary synchronous
+    /// disconnect fact for every released worker.
+    pub(super) fn close_unrequired(&mut self, required: &BTreeSet<RelayUrl>) -> Vec<PoolEvent> {
+        let obsolete: Vec<RelayHandle> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| state.worker.is_some() && !required.contains(&state.url))
+            .map(|(slot, state)| RelayHandle {
+                slot: u32::try_from(slot).expect("pool slot id already fit u32 at allocation"),
+                generation: state.generation,
+            })
+            .collect();
+        obsolete
+            .into_iter()
+            .filter_map(|handle| self.close(handle))
+            .collect()
     }
 
     /// Tear down every open worker, hand back the translator's `JoinHandle`

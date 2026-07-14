@@ -982,6 +982,42 @@ impl<S: EventStore> EngineCore<S> {
         Ok(lanes)
     }
 
+    /// Exact relay-worker demand owned by the reducer right now: current
+    /// read-plan URLs plus every nonterminal write lane and every correlated
+    /// ephemeral handoff. The runtime uses this set to release obsolete pool
+    /// workers before dispatching replacement wire work, so a finite cap
+    /// bounds live work without turning historical read connections into
+    /// permanent slot owners.
+    ///
+    /// A store read failure returns `None`. In that case the runtime retains
+    /// every worker rather than risking eviction of a durable lane whose
+    /// persisted state could not be inspected.
+    pub(crate) fn required_relay_workers(&self) -> Option<BTreeSet<RelayUrl>> {
+        let mut required: BTreeSet<RelayUrl> = self.router.plan().reqs.keys().cloned().collect();
+
+        required.extend(
+            self.attempt_correlations
+                .values()
+                .map(|target| target.relay.clone()),
+        );
+
+        for pending in self.pending.values() {
+            required.extend(pending.pending_relays.iter().cloned());
+            required.extend(pending.unstarted_relays.iter().cloned());
+            required.extend(pending.route_blocked_relays.iter().cloned());
+
+            let Some(intent_id) = pending.intent_id else {
+                continue;
+            };
+            let lanes = self.resolver.store().recover_outbox_lanes(intent_id).ok()?;
+            required.extend(lanes.into_iter().filter_map(|lane| {
+                (!matches!(lane.state, LaneState::Terminal { .. })).then_some(lane.key.relay)
+            }));
+        }
+
+        Some(required)
+    }
+
     /// The only path that allocates durable attempt ordinals. Eligibility is
     /// persisted first; this reducer then applies stable ordering and the
     /// ratified 32-global/1-per-relay caps before committing Started.
