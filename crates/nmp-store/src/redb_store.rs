@@ -3136,6 +3136,7 @@ enum RedbCrashPoint {
     LaneHandoffBeforeCommit,
     LaneCloseBeforeCommit,
     ObservationBeforeCommit,
+    GcBeforeCommit,
 }
 
 pub struct RedbStore {
@@ -4456,6 +4457,8 @@ impl EventStore for RedbStore {
             }
             canonical.flush_pending()?;
         }
+        #[cfg(test)]
+        self.crash_if(RedbCrashPoint::GcBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
 
         Ok(report)

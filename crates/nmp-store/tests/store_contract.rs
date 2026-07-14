@@ -615,7 +615,7 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn gc_evicts_unclaimed_regular_event_and_shrinks_covering_watermark() {
+fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
     for_each_backend(|store| {
         let k = keys();
         let e = regular_event_at(&k, "hello", 150);

@@ -1116,7 +1116,8 @@ pub trait EventStore {
     /// makes no wider claim.
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval>;
 
-    /// Claim-based bounded GC (ruling §5): evicts every regular
+    /// Apply an EXPLICIT durable-retention policy by running claim-based GC
+    /// (ruling §5): evicts every regular
     /// (non-replaceable, non-addressable) event matched by NO claim in
     /// `claims`. A claimed event, and every replaceable/addressable current
     /// winner, are ALWAYS retained — winners are never GC candidates at all,
@@ -1132,6 +1133,18 @@ pub trait EventStore {
     /// winners, so an unsigned pending row can never be evicted before it
     /// ever signs. Once `promote_signed` flips it to `Signed`, it is an
     /// ordinary event again, GC-able like any other under `claims`.
+    ///
+    /// This is never an ordinary startup, query, shutdown, or implicit
+    /// memory-pressure maintenance step. The production engine does not call
+    /// this door: verified durable rows are retained by default. A host that
+    /// deliberately adopts a quota, disk-pressure, or user-selected retention
+    /// policy must make that policy inspectable and invoke this destructive
+    /// door explicitly. Query/result/delivery bounds limit resident work; they
+    /// are not permission to call `gc` or delete durable history.
+    ///
+    /// This contract does not promise infinite disk. It makes the transition
+    /// from retained history to policy-evicted history explicit, reportable,
+    /// and coverage-safe.
     fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError>;
 
     /// Accept a durably-owned local write intent (issues #2/#3): runs the
