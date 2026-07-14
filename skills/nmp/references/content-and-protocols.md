@@ -22,8 +22,10 @@ A composed intent is take-once. Compose a fresh intent for a new publication dec
 
 ## NIP-46 and local signers
 
-Swift and Kotlin expose NIP-46 invitations/connections and local-signer discovery metadata. The host owns OS handoff, package/scheme visibility, and UI. Start listening before handoff, wait for the connection's ready state, and close the connection explicitly.
+Swift and Kotlin expose NIP-46 invitations/connections and local-signer discovery metadata. The host owns OS handoff, package/scheme visibility, and UI. Start listening before handoff, wait for the connection's ready state, and close the connection explicitly. Swift's `connectNip46` overloads are `throws`; Kotlin maps the same synchronous raw bridge refusal through `NMPError.ThreadUnavailable`. If the outer bridge exists but the inner session/initial relay worker fails, Swift streams `.failed(reason:)` then finishes and Kotlin streams `Failed(reason)` then `Closed`; the public wrappers do not reconstruct `ThreadUnavailable` from that reason. Both paths are immediate failures, not signer-readiness timeouts.
 
 Amber is NIP-55-only and is not a NIP-46 signer. Kotlin exposes Android handoff values, but the current JVM package does not execute NIP-55 or ship an Android integration layer.
 
 When implementing a protocol feature not already projected, do not assemble it from mechanism crates in app code. First determine whether it belongs in an opt-in protocol crate and whether Rust/FFI/native surface governance is required.
+
+Direct Rust NIP-02 observation setup returns `EngineError::ThreadUnavailable`, but action-worker refusal is not a synchronous `EngineError`: read it from `FollowAction` as `FollowActionStatus::Failed(FollowActionFailure::ThreadUnavailable { component, reason })`. Raw UniFFI carries the same terminal action fact, Swift projects it as `NMPFollowActionFailure.threadUnavailable(component:reason:)`, and Kotlin still has no ergonomic following action.

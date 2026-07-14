@@ -1,3 +1,4 @@
 interface:
-  display_name: "NMP app development"
-  short_description: "Build against NMP's verified Rust, Swift, and Kotlin facade"
+  display_name: "NMP"
+  short_description: "Build source-accurate NMP app integrations"
+  default_prompt: "Use $nmp to build a source-accurate Nostr app with the current public facade."
