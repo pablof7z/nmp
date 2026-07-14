@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, DiagnosticsSnapshot, Durability, Engine, EngineConfig,
-    Filter, Lane, LiveQuery, ReceiptId, ReceiptReattachment, Row, RowDelta, ShortfallFact,
-    SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting, WriteStatus,
+    Filter, Lane, LiveQuery, ObservationCancel, ReceiptId, ReceiptReattachment, Row, RowDelta,
+    ShortfallFact, SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    WriteStatus,
 };
 use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
-use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
+use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpQueryHandle};
 use nmp_ffi::nip02::{
     FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
     FollowActionObserver, FollowObserver,
@@ -785,7 +786,7 @@ fn stage_direct_discovery(
     pubkey: &str,
     relay: &ScriptedRelay,
     diagnostics: &mpsc::Receiver<DiagnosticsSnapshot>,
-) -> u64 {
+) -> (u64, ObservationCancel) {
     let subscription = engine
         .observe(LiveQuery::from_filter(direct_filter(
             pubkey,
@@ -811,8 +812,7 @@ fn stage_direct_discovery(
         }
     }
     let baseline = wait_for_direct_preflight_quiescence(diagnostics, relay);
-    cancel.cancel();
-    baseline
+    (baseline, cancel)
 }
 
 fn stage_ffi_discovery(
@@ -820,7 +820,7 @@ fn stage_ffi_discovery(
     pubkey: &str,
     relay: &ScriptedRelay,
     diagnostics: &mpsc::Receiver<FfiDiagnosticsSnapshot>,
-) -> u64 {
+) -> (u64, Arc<NmpQueryHandle>) {
     let (tx, rx) = mpsc::channel();
     let handle = engine
         .observe(
@@ -838,8 +838,7 @@ fn stage_ffi_discovery(
         }
     }
     let baseline = wait_for_ffi_preflight_quiescence(diagnostics, relay);
-    handle.cancel();
-    baseline
+    (baseline, handle)
 }
 
 impl ReceiptObserver for FfiReceipts {
@@ -1362,7 +1361,8 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         }
     });
 
-    let nip65_baseline = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay, &diag_rx);
+    let (nip65_baseline, discovery_cancel) =
+        stage_direct_discovery(&engine, &pubkey.to_hex(), &relay, &diag_rx);
 
     let subscription = engine
         .observe(LiveQuery::from_filter(direct_filter(
@@ -1379,6 +1379,11 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             }
         }
     });
+    // Exact worker ownership (#235) may legitimately close this relay when
+    // demand reaches zero. Open the content query before withdrawing
+    // discovery so the exact-one assertions below prove there was no replay
+    // while the relay remained continuously owned.
+    discovery_cancel.cancel();
 
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
@@ -1392,12 +1397,22 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     };
 
     let diagnostics_deadline = Instant::now() + WAIT;
+    let mut last_diagnostics = None;
     let diagnostics = loop {
-        let snapshot = recv_before(&diag_rx, diagnostics_deadline, "direct diagnostics");
+        let remaining = diagnostics_deadline.saturating_duration_since(Instant::now());
+        let snapshot = diag_rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "direct diagnostics did not settle within the total {WAIT:?} bound: {error}; \
+                 last snapshot: {last_diagnostics:?}; relay query counts: discovery={}, content={}",
+                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                relay.query_count_for_kind(QUERY_KIND),
+            )
+        });
         let normalized = normalize_direct_diagnostics(snapshot, &relay_url);
         if content_phase_is_quiescent(&normalized, nip65_baseline, &relay) {
             break normalized;
         }
+        last_diagnostics = Some(normalized);
     };
     assert_content_phase_diagnostics(&diagnostics, nip65_baseline, &relay, "direct");
 
@@ -1484,7 +1499,8 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             tx: Mutex::new(diag_tx),
         }))
         .expect("FFI diagnostics must open");
-    let nip65_baseline = stage_ffi_discovery(&engine, &pubkey, &relay, &diag_rx);
+    let (nip65_baseline, discovery_handle) =
+        stage_ffi_discovery(&engine, &pubkey, &relay, &diag_rx);
     let (rows_tx, rows_rx) = mpsc::channel();
     let query_handle = engine
         .observe(
@@ -1494,6 +1510,8 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             }),
         )
         .expect("FFI query must open");
+    // Same continuous-ownership proof as the direct facade above.
+    discovery_handle.cancel();
 
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
@@ -1507,12 +1525,22 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     };
 
     let diagnostics_deadline = Instant::now() + WAIT;
+    let mut last_diagnostics = None;
     let diagnostics = loop {
-        let snapshot = recv_before(&diag_rx, diagnostics_deadline, "FFI diagnostics");
+        let remaining = diagnostics_deadline.saturating_duration_since(Instant::now());
+        let snapshot = diag_rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "FFI diagnostics did not settle within the total {WAIT:?} bound: {error}; \
+                 last snapshot: {last_diagnostics:?}; relay query counts: discovery={}, content={}",
+                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                relay.query_count_for_kind(QUERY_KIND),
+            )
+        });
         let normalized = normalize_ffi_diagnostics(snapshot, &relay_url);
         if content_phase_is_quiescent(&normalized, nip65_baseline, &relay) {
             break normalized;
         }
+        last_diagnostics = Some(normalized);
     };
     assert_content_phase_diagnostics(&diagnostics, nip65_baseline, &relay, "FFI");
 
