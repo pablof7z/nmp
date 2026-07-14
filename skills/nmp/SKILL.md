@@ -9,8 +9,10 @@ Use NMP as an embeddable engine with two app-facing nouns: a live query and a wr
 
 ## Establish current truth first
 
+Verified-Revision: `12bd12ca6247f416cd6c24de322bb1b1aee6366b`
+
 1. Find the NMP repo root and read `README.md`, `docs/known-gaps.md`, and `docs/architecture/supported-surface.md` when present.
-2. Record `git rev-parse HEAD`. This skill was verified at `02e3509ae9a1df9263fadea916effc4c557d9f05` on 2026-07-14; if the checkout differs, inspect the current facade files listed in [Source map](references/source-map.md) before naming APIs.
+2. Record `git rev-parse HEAD`. If the checkout differs from the verified revision, inspect the current facade files listed in [Source map](references/source-map.md) before naming APIs.
 3. Identify the consumer tier: direct Rust (`nmp`), Swift (`NMP`), Kotlin/JVM (`com.nmp.sdk`), or optional content/UI packages. Never substitute an internal crate or raw generated UniFFI type for its supported wrapper.
 4. Check [Current surface and gaps](references/current-surface.md). Treat `docs/VISION.md` as the north star, not proof that a public method exists.
 
@@ -25,7 +27,7 @@ If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue 
 - Rust/Swift/Kotlin setup, call maps, and test commands: [Platforms](references/platforms.md)
 - NMPContent, NMPUI, NIP-02, NIP-29, or NIP-46 helpers: [Content and protocols](references/content-and-protocols.md)
 - Exact implementation authority: [Source map](references/source-map.md)
-- Maintaining or forward-testing this skill: [Evaluation](references/evaluation.md)
+- Maintaining or forward-testing this skill: [Evaluation protocol](references/evaluation.md) and [raw prompts](references/evaluation-prompts.md)
 
 ## Non-negotiable guardrails
 
@@ -35,12 +37,13 @@ If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue 
 - A publish call is not convergence. Retain and observe the receipt; persist its id when restart reattachment matters.
 - Do not expose secret keys in logs, fixtures, screenshots, or source. The bundled file account stores are explicitly insecure development conveniences, not Keychain/Keystore providers.
 - Do not promise write cancellation, app-controlled retries, typed pending-row metadata, populated AUTH phases, native `maxRelays`, or secure native signer persistence: those are not current cross-platform public capabilities.
+- Treat OS-thread refusal as a recoverable public failure without collapsing its ownership boundaries. Direct Rust returns `EngineError::ThreadUnavailable` from engine/query and NIP-02 observation setup, streams NIP-02 action-worker refusal as `FollowActionStatus::Failed(FollowActionFailure::ThreadUnavailable { .. })`, and returns `Nip46Error::ThreadUnavailable` from initial NIP-46 connection setup. Raw UniFFI exposes `FfiError::ThreadUnavailable`, and native wrappers map synchronous FFI-call refusal to `NMPError`; once a native NIP-46 handle exists, inner session/relay-worker refusal may instead arrive as streamed `failed(reason)`/`Failed` followed by closure. Never match one boundary's type at another or relabel a refusal as a timeout or panic.
 
 ## Completion gate
 
 Before presenting code or a plan:
 
-1. Verify every named type and method in the current supported facade.
+1. Verify every named type, method, throwing boundary, and error case in the current supported facade.
 2. State platform-specific gaps that affect the design.
 3. Show deterministic query/content/signer/engine teardown and explicit receipt-observation ownership. A receipt has no cancel operation and cancelling observation does not cancel its obligation.
 4. Include the exact build/test commands for the chosen tier.
