@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp_transport::{Pool, PoolConfig, PoolEvent, PoolEventSink, RelayFrame, WireFrame};
+use nmp_transport::{
+    Pool, PoolConfig, PoolEvent, PoolEventSink, RelayFrame, RelayOpenError, WireFrame,
+};
 use nostr::nips::nip44;
 use nostr::{
     ClientMessage, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, PublicKey, RelayMessage,
@@ -599,6 +601,7 @@ struct Session {
     commands: Sender<WorkerMsg>,
     connected_relays: AtomicUsize,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    availability_error: Arc<Mutex<Option<Nip46Error>>>,
 }
 
 impl Session {
@@ -610,10 +613,12 @@ impl Session {
     ) -> Result<Arc<Self>, Nip46Error> {
         let (commands, inbox) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let availability_error = Arc::new(Mutex::new(None));
         let session = Arc::new(Self {
             commands: commands.clone(),
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
+            availability_error: Arc::clone(&availability_error),
         });
         if let Some(cancellation) = cancellation {
             cancellation.bind(session.commands.clone());
@@ -630,10 +635,19 @@ impl Session {
         let spawn = thread::Builder::new()
             .name("nmp-nip46".to_string())
             .spawn(move || {
-                let mut worker =
-                    SessionWorker::new(worker_pool, client_keys, remote, weak, subscribers);
-                worker.open_relays(relays);
+                let mut worker = SessionWorker::new(
+                    worker_pool,
+                    client_keys,
+                    remote,
+                    weak,
+                    subscribers,
+                    availability_error,
+                );
                 worker.emit(Nip46ConnectionEvent::Connecting);
+                if let Err(error) = worker.open_relays(relays) {
+                    worker.record_availability_error(error);
+                    worker.emit(Nip46ConnectionEvent::Unavailable);
+                }
                 worker.run(inbox);
             });
         if let Err(error) = spawn {
@@ -667,12 +681,21 @@ impl Session {
         if self.is_available() {
             return Ok(());
         }
+        if let Some(error) = self.availability_error() {
+            return Err(error);
+        }
         let events = self.subscribe();
         if self.is_available() {
             return Ok(());
         }
+        if let Some(error) = self.availability_error() {
+            return Err(error);
+        }
         let deadline = Instant::now() + timeout;
         loop {
+            if let Some(error) = self.availability_error() {
+                return Err(error);
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(Nip46Error::Timeout);
@@ -684,6 +707,13 @@ impl Session {
                 Err(RecvTimeoutError::Disconnected) => return Err(Nip46Error::Disconnected),
             }
         }
+    }
+
+    fn availability_error(&self) -> Option<Nip46Error> {
+        self.availability_error
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     fn accept_invitation(&self, expected_secret: &str) -> Receiver<Result<PublicKey, Nip46Error>> {
@@ -750,6 +780,7 @@ struct SessionWorker {
     remote: Option<PublicKey>,
     session: std::sync::Weak<Session>,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    availability_error: Arc<Mutex<Option<Nip46Error>>>,
     handles: HashMap<u32, (nmp_transport::RelayHandle, RelayUrl)>,
     configured: HashMap<RelayUrl, nmp_transport::RelayHandle>,
     pending: HashMap<String, PendingRequest>,
@@ -764,6 +795,7 @@ impl SessionWorker {
         remote: Option<PublicKey>,
         session: std::sync::Weak<Session>,
         subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+        availability_error: Arc<Mutex<Option<Nip46Error>>>,
     ) -> Self {
         static NEXT_SUB: AtomicU64 = AtomicU64::new(1);
         Self {
@@ -772,6 +804,7 @@ impl SessionWorker {
             remote,
             session,
             subscribers,
+            availability_error,
             handles: HashMap::new(),
             configured: HashMap::new(),
             pending: HashMap::new(),
@@ -821,26 +854,78 @@ impl SessionWorker {
         emit_to(&self.subscribers, event);
     }
 
-    fn open_relays(&mut self, relays: Vec<RelayUrl>) {
+    fn record_availability_error(&self, error: Nip46Error) {
+        *self
+            .availability_error
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+    }
+
+    fn open_relays(&mut self, relays: Vec<RelayUrl>) -> Result<(), Nip46Error> {
+        self.open_relays_with(relays, |pool, relay| pool.ensure_open(relay))
+    }
+
+    fn open_relays_with(
+        &mut self,
+        relays: Vec<RelayUrl>,
+        mut ensure_open: impl FnMut(
+            &Pool,
+            &RelayUrl,
+        ) -> Result<nmp_transport::RelayHandle, RelayOpenError>,
+    ) -> Result<(), Nip46Error> {
+        let mut usable = 0usize;
+        let mut thread_refusal = None;
         for relay in relays {
             if self.configured.contains_key(&relay) {
+                usable += 1;
                 continue;
             }
-            let Ok(handle) = self.pool.ensure_open(&relay) else {
-                continue;
+            let handle = match ensure_open(&self.pool, &relay) {
+                Ok(handle) => handle,
+                Err(RelayOpenError::ThreadUnavailable(error)) => {
+                    thread_refusal.get_or_insert(Nip46Error::ThreadUnavailable {
+                        component: error.role.to_string(),
+                        reason: error.reason,
+                    });
+                    continue;
+                }
+                Err(_) => continue,
             };
             self.set_preamble(handle);
             self.configured.insert(relay, handle);
+            usable += 1;
         }
+        if usable == 0 {
+            if let Some(error) = thread_refusal {
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     fn replace_relays(&mut self, relays: Vec<RelayUrl>) {
-        let old = std::mem::take(&mut self.configured);
-        self.open_relays(relays);
-        for (url, handle) in old {
-            if !self.configured.contains_key(&url) {
-                let _ = self.pool.close(handle);
+        let retained = relays.clone();
+        if let Err(error) = self.open_relays(relays) {
+            self.record_availability_error(error);
+            self.emit(Nip46ConnectionEvent::Unavailable);
+            return;
+        }
+        self.availability_error
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        self.configured.retain(|url, handle| {
+            if retained.contains(url) {
+                true
+            } else {
+                let _ = self.pool.close(*handle);
+                false
             }
+        });
+        if let Some(session) = self.session.upgrade() {
+            session
+                .connected_relays
+                .store(self.handles.len(), Ordering::Release);
         }
     }
 
@@ -881,6 +966,10 @@ impl SessionWorker {
                     return;
                 }
                 let was_empty = self.handles.is_empty();
+                self.availability_error
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .take();
                 self.handles.insert(handle.slot, (handle, url));
                 if let Some(session) = self.session.upgrade() {
                     session
@@ -1189,6 +1278,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn injected_initial_relay_worker_refusal_reaches_the_waiting_caller_typed() {
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
+        let (commands, _inbox) = mpsc::channel();
+        let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let availability_error = Arc::new(Mutex::new(None));
+        let session = Arc::new(Session {
+            commands,
+            connected_relays: AtomicUsize::new(0),
+            subscribers: Arc::clone(&subscribers),
+            availability_error: Arc::clone(&availability_error),
+        });
+        let mut worker = SessionWorker::new(
+            pool,
+            Keys::generate(),
+            None,
+            Arc::downgrade(&session),
+            subscribers,
+            availability_error,
+        );
+        let error = worker
+            .open_relays_with(
+                vec![RelayUrl::parse("wss://relay.example").unwrap()],
+                |_, _| {
+                    Err(RelayOpenError::ThreadUnavailable(
+                        nmp_transport::ThreadSpawnError {
+                            role: nmp_transport::ThreadRole::RelayWorker,
+                            reason: "injected NIP-46 relay pressure".to_string(),
+                        },
+                    ))
+                },
+            )
+            .unwrap_err();
+        worker.record_availability_error(error.clone());
+        assert_eq!(
+            error,
+            Nip46Error::ThreadUnavailable {
+                component: "relay worker".to_string(),
+                reason: "injected NIP-46 relay pressure".to_string(),
+            }
+        );
+        assert_eq!(session.wait_available(Duration::from_secs(1)), Err(error));
+        assert!(worker.configured.is_empty());
+        worker.pool.shutdown();
+    }
+
+    #[test]
+    fn one_usable_initial_relay_keeps_a_later_spawn_refusal_nonterminal() {
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
+        let mut worker = SessionWorker::new(
+            pool,
+            Keys::generate(),
+            None,
+            std::sync::Weak::new(),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        );
+        let relays = vec![
+            RelayUrl::parse("wss://one.example").unwrap(),
+            RelayUrl::parse("wss://two.example").unwrap(),
+        ];
+        let mut attempt = 0usize;
+        worker
+            .open_relays_with(relays, |_, _| {
+                attempt += 1;
+                if attempt == 1 {
+                    Ok(nmp_transport::RelayHandle {
+                        slot: 99,
+                        generation: 1,
+                    })
+                } else {
+                    Err(RelayOpenError::ThreadUnavailable(
+                        nmp_transport::ThreadSpawnError {
+                            role: nmp_transport::ThreadRole::RelayWorker,
+                            reason: "injected NIP-46 relay pressure".to_string(),
+                        },
+                    ))
+                }
+            })
+            .expect("one usable requested relay keeps the session viable");
+        assert_eq!(worker.configured.len(), 1);
+        worker.pool.shutdown();
+    }
+
+    #[test]
     fn stale_auth_frame_cannot_mutate_reopened_nip46_generation() {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
@@ -1200,6 +1375,7 @@ mod tests {
             None,
             std::sync::Weak::new(),
             Arc::clone(&subscribers),
+            Arc::new(Mutex::new(None)),
         );
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let old = nmp_transport::RelayHandle {

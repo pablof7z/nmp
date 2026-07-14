@@ -69,6 +69,23 @@ fn spawn_native_bridge_with(
 #[cfg(test)]
 mod thread_spawn_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    struct RecordingFollowActionObserver {
+        statuses: Arc<Mutex<Vec<crate::nip02::FfiFollowActionStatus>>>,
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl FollowActionObserver for RecordingFollowActionObserver {
+        fn on_status(&self, status: crate::nip02::FfiFollowActionStatus) {
+            self.statuses.lock().unwrap().push(status);
+        }
+
+        fn on_closed(&self) {
+            self.closes.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 
     #[test]
     fn injected_native_bridge_refusal_is_typed_and_preserves_safe_reason() {
@@ -91,6 +108,45 @@ mod thread_spawn_tests {
             }
         );
     }
+
+    #[test]
+    fn follow_bridge_refusal_reports_once_before_the_action_can_start() {
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicBool::new(false));
+        let start_flag = Arc::clone(&started);
+        start_following_action_with(
+            engine,
+            nostr::Keys::generate().public_key().to_hex(),
+            nmp_nip02::FollowChange::Follow,
+            Box::new(RecordingFollowActionObserver {
+                statuses: Arc::clone(&statuses),
+                closes: Arc::clone(&closes),
+            }),
+            |task| {
+                drop(task);
+                Err(FfiError::ThreadUnavailable {
+                    component: "follow-action-observer".to_string(),
+                    reason: "injected bridge pressure".to_string(),
+                })
+            },
+            move |_| {
+                start_flag.store(true, Ordering::Release);
+            },
+        );
+        assert!(!started.load(Ordering::Acquire));
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            *statuses.lock().unwrap(),
+            vec![crate::nip02::FfiFollowActionStatus::Failed {
+                failure: crate::nip02::FfiFollowActionFailure::ThreadUnavailable {
+                    component: "follow-action-observer".to_string(),
+                    reason: "injected bridge pressure".to_string(),
+                },
+            }]
+        );
+    }
 }
 
 fn reattachment_to_ffi(value: &ReceiptReattachment) -> FfiReceiptReattachment {
@@ -107,6 +163,24 @@ fn start_following_action(
     change: nmp_nip02::FollowChange,
     observer: Box<dyn FollowActionObserver>,
 ) {
+    start_following_action_with(
+        engine,
+        target,
+        change,
+        observer,
+        |task| spawn_native_bridge("follow-action-observer", task),
+        nmp_nip02::FollowActionRunner::start,
+    );
+}
+
+fn start_following_action_with(
+    engine: Arc<nmp::Engine>,
+    target: String,
+    change: nmp_nip02::FollowChange,
+    observer: Box<dyn FollowActionObserver>,
+    spawn_bridge: impl FnOnce(Box<dyn FnOnce() + Send + 'static>) -> Result<(), FfiError>,
+    start_runner: impl FnOnce(nmp_nip02::FollowActionRunner),
+) {
     let target = match parse_pubkey(&target) {
         Ok(target) => target,
         Err(_) => {
@@ -117,21 +191,32 @@ fn start_following_action(
             return;
         }
     };
-    let action = nmp_nip02::set_following(engine, target, change);
+    let (action, runner) = nmp_nip02::prepare_set_following(engine, target, change);
     let observer: Arc<dyn FollowActionObserver> = Arc::from(observer);
     let bridge = Arc::clone(&observer);
-    if let Err(FfiError::ThreadUnavailable { component, reason }) =
-        spawn_native_bridge("follow-action-observer", move || {
-            while let Ok(status) = action.recv() {
-                bridge.on_status(action_status_to_ffi(status));
-            }
-            bridge.on_closed();
-        })
-    {
-        observer.on_status(crate::nip02::FfiFollowActionStatus::Failed {
-            failure: crate::nip02::FfiFollowActionFailure::ThreadUnavailable { component, reason },
-        });
-        observer.on_closed();
+    match spawn_bridge(Box::new(move || {
+        while let Ok(status) = action.recv() {
+            bridge.on_status(action_status_to_ffi(status));
+        }
+        bridge.on_closed();
+    })) {
+        Ok(()) => start_runner(runner),
+        Err(error) => {
+            let (component, reason) = match error {
+                FfiError::ThreadUnavailable { component, reason } => (component, reason),
+                other => (
+                    "follow-action-observer".to_string(),
+                    format!("unexpected bridge refusal: {other:?}"),
+                ),
+            };
+            observer.on_status(crate::nip02::FfiFollowActionStatus::Failed {
+                failure: crate::nip02::FfiFollowActionFailure::ThreadUnavailable {
+                    component,
+                    reason,
+                },
+            });
+            observer.on_closed();
+        }
     }
 }
 
