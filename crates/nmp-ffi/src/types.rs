@@ -199,6 +199,39 @@ pub struct FfiRow {
     pub sources: Vec<String>,
 }
 
+/// Immutable NIP-01 event body accepted by the governed sign-only operation.
+/// The author is deliberately absent and is frozen from engine identity state.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiSignEventRequest {
+    pub created_at: u64,
+    pub kind: u16,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+}
+
+/// Exact verified result of a sign-only operation. This is an event value,
+/// not a canonical store row: it has no relay provenance and was not
+/// published or persisted by signing.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiSignedEvent {
+    pub id: String,
+    pub pubkey: String,
+    pub created_at: u64,
+    pub kind: u16,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+    pub sig: String,
+}
+
+/// Failures that may resolve after a sign-only operation was accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiSignEventFailure {
+    SignerUnavailable { reason: String },
+    SignerRejected { reason: String },
+    InvalidSignerOutput { reason: String },
+    Cancelled,
+}
+
 /// A remembered NIP-29 group reference (#108, `nmp_nip29::GroupRef`
 /// mirror) -- group id, host relay, and optional display name.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
@@ -379,28 +412,6 @@ pub enum FfiWritePayload {
         content: String,
         sig: String,
     },
-}
-
-/// Event fields a native app may ask the active NMP signer to sign. The
-/// author is deliberately absent and is frozen from engine identity state.
-#[derive(Debug, Clone, PartialEq, Eq, Record)]
-pub struct FfiSignEventRequest {
-    pub created_at: u64,
-    pub kind: u16,
-    pub tags: Vec<Vec<String>>,
-    pub content: String,
-}
-
-/// A fully signed Nostr event returned by the governed sign-only operation.
-#[derive(Debug, Clone, PartialEq, Eq, Record)]
-pub struct FfiSignedEvent {
-    pub id: String,
-    pub pubkey: String,
-    pub created_at: u64,
-    pub kind: u16,
-    pub tags: Vec<Vec<String>>,
-    pub content: String,
-    pub sig: String,
 }
 
 /// A caller's publish request (`nmp::WriteIntent` mirror).

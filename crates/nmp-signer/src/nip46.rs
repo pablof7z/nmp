@@ -23,8 +23,9 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::{
-    parse_bunker_uri, BunkerParseError, CryptoCapability, SignerError, SignerOp, SigningCapability,
-    MAX_BUNKER_URI_LEN, MAX_NIP46_RELAYS,
+    parse_bunker_uri, pending_signer_cancellation, BunkerParseError, CryptoCapability,
+    PendingSignerSender, SignerError, SignerOp, SigningCapability, MAX_BUNKER_URI_LEN,
+    MAX_NIP46_RELAYS,
 };
 
 const DEFAULT_PERMISSIONS: &str = "sign_event,nip44_encrypt,nip44_decrypt";
@@ -673,7 +674,7 @@ struct RpcEnvelope {
 
 struct PendingRequest {
     frame: String,
-    reply: Sender<Result<String, SignerError>>,
+    reply: PendingSignerSender<String>,
 }
 
 enum WorkerMsg {
@@ -682,7 +683,7 @@ enum WorkerMsg {
         id: String,
         method: String,
         params: Vec<String>,
-        reply: Sender<Result<String, SignerError>>,
+        reply: PendingSignerSender<String>,
     },
     AcceptInvitation {
         expected_secret: String,
@@ -971,7 +972,7 @@ impl SessionWorker {
             }
         }
         for (_, pending) in self.pending.drain() {
-            let _ = pending.reply.send(Err(SignerError::Disconnected));
+            let _ = pending.reply.resolve(Err(SignerError::Disconnected));
         }
         if let Some((_, reply)) = self.invitation.take() {
             let _ = reply.send(Err(Nip46Error::Disconnected));
@@ -1136,7 +1137,7 @@ impl SessionWorker {
                 }
                 if self.handles.is_empty() {
                     for (_, pending) in self.pending.drain() {
-                        let _ = pending.reply.send(Err(SignerError::Disconnected));
+                        let _ = pending.reply.resolve(Err(SignerError::Disconnected));
                     }
                     self.emit(Nip46ConnectionEvent::Unavailable);
                 }
@@ -1245,7 +1246,7 @@ impl SessionWorker {
             .remove(&envelope.id)
             .expect("pending entry was just observed");
         if let Some(error) = envelope.error {
-            let _ = pending.reply.send(Err(SignerError::Rejected(error)));
+            let _ = pending.reply.resolve(Err(SignerError::Rejected(error)));
             return;
         }
         let result = match envelope.result {
@@ -1257,7 +1258,7 @@ impl SessionWorker {
                 "response contains neither result nor error".to_string(),
             )),
         };
-        let _ = pending.reply.send(result);
+        let _ = pending.reply.resolve(result);
     }
 
     fn on_request(
@@ -1265,18 +1266,18 @@ impl SessionWorker {
         id: String,
         method: String,
         params: Vec<String>,
-        reply: Sender<Result<String, SignerError>>,
+        reply: PendingSignerSender<String>,
     ) {
         if self.handles.is_empty() {
-            let _ = reply.send(Err(SignerError::Unavailable));
+            let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         }
         if self.pending.len() >= MAX_PENDING_REQUESTS {
-            let _ = reply.send(Err(SignerError::Unavailable));
+            let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         }
         let Some(remote) = self.remote else {
-            let _ = reply.send(Err(SignerError::Unavailable));
+            let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         };
         let request = RpcRequest {
@@ -1285,7 +1286,7 @@ impl SessionWorker {
             params: &params,
         };
         let Ok(plaintext) = serde_json::to_string(&request) else {
-            let _ = reply.send(Err(SignerError::InvalidResponse(
+            let _ = reply.resolve(Err(SignerError::InvalidResponse(
                 "could not encode request".to_string(),
             )));
             return;
@@ -1296,14 +1297,14 @@ impl SessionWorker {
             plaintext,
             nip44::Version::default(),
         ) else {
-            let _ = reply.send(Err(SignerError::Unavailable));
+            let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         };
         let Ok(event) = EventBuilder::new(Kind::NostrConnect, ciphertext)
             .tag(Tag::public_key(remote))
             .sign_with_keys(&self.client_keys)
         else {
-            let _ = reply.send(Err(SignerError::Unavailable));
+            let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         };
         let frame = ClientMessage::event(event).as_json();
@@ -1322,23 +1323,25 @@ impl SessionWorker {
 
 fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> SignerOp<String> {
     let id = Keys::generate().public_key().to_hex();
-    let (tx, rx) = mpsc::channel();
+    let commands = session.commands.clone();
+    let cancel_commands = commands.clone();
+    let cancel_id = id.clone();
+    let (reply, operation) = SignerOp::pending_channel_with_cancel(move || {
+        let _ = cancel_commands.send(WorkerMsg::CancelRequest(cancel_id));
+    });
     if session
         .commands
         .send(WorkerMsg::Request {
-            id: id.clone(),
+            id,
             method: method.to_string(),
             params,
-            reply: tx,
+            reply,
         })
         .is_err()
     {
         return SignerOp::err(SignerError::Disconnected);
     }
-    let commands = session.commands.clone();
-    SignerOp::pending_with_cancel(rx, move || {
-        let _ = commands.send(WorkerMsg::CancelRequest(id));
-    })
+    operation
 }
 
 fn map_string<T, F>(executor: &nmp_executor::Executor, op: SignerOp<String>, map: F) -> SignerOp<T>
@@ -1350,59 +1353,28 @@ where
         SignerOp::Ready(Ok(value)) => SignerOp::Ready(map(value)),
         SignerOp::Ready(Err(error)) => SignerOp::Ready(Err(error)),
         SignerOp::Pending(pending) => {
-            let (rx, cancel) = pending.into_parts();
-            let (tx, mapped_rx) = mpsc::channel();
-            let failure = tx.clone();
-            let cancel = Arc::new(Mutex::new(cancel));
-            let shutdown_cancel = Arc::clone(&cancel);
-            let completion_cancel = Arc::clone(&cancel);
+            let (cancel, cancelled) = pending_signer_cancellation();
+            let mapped_cancel = cancel.clone();
+            let (completion, mapped) = SignerOp::pending_channel_with_cancel(move || {
+                mapped_cancel.cancel();
+            });
+            let failure = completion.clone();
             let spawned = executor.spawn_with_cancel(
                 "NIP-46 result-map",
+                move || cancel.cancel(),
                 move || {
-                    if let Some(cancel) = shutdown_cancel
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take()
-                    {
-                        cancel();
-                    }
-                },
-                move || {
-                    let result = match rx.recv() {
-                        Ok(Ok(value)) => map(value),
-                        Ok(Err(error)) => Err(error),
-                        Err(_) => Err(SignerError::Disconnected),
+                    let result = match pending.recv_or_cancel(cancelled) {
+                        Some(Ok(value)) => map(value),
+                        Some(Err(error)) => Err(error),
+                        None => Err(SignerError::Disconnected),
                     };
-                    completion_cancel
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take();
-                    let _ = tx.send(result);
+                    let _ = completion.resolve(result);
                 },
             );
             if spawned.is_err() {
-                if let Some(cancel) = cancel
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .take()
-                {
-                    cancel();
-                }
-                let _ = failure.send(Err(SignerError::Unavailable));
+                let _ = failure.resolve(Err(SignerError::Unavailable));
             }
-            let mapped_cancel = Arc::clone(&cancel);
-            SignerOp::pending_from_parts(
-                mapped_rx,
-                Some(Box::new(move || {
-                    if let Some(cancel) = mapped_cancel
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take()
-                    {
-                        cancel();
-                    }
-                })),
-            )
+            mapped
         }
     }
 }

@@ -32,4 +32,7 @@ pub use nip46::{
     Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Error, Nip46Invitation,
     Nip46Signer,
 };
-pub use op::{PendingSignerOp, SignerError, SignerOp};
+pub use op::{
+    pending_signer_cancellation, PendingSignerCancel, PendingSignerCancelled, PendingSignerOp,
+    PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
+};

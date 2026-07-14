@@ -60,6 +60,7 @@
 mod diagnostics_channel;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -69,10 +70,14 @@ use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
-use nmp_signer::{SignerError, SignerOp, SigningCapability};
+use nmp_signer::{
+    pending_signer_cancellation, PendingSignerCancel, PendingSignerCancelled, PendingSignerOp,
+    SignerOp, SigningCapability,
+};
 use nmp_store::EventStore;
 use nostr::{
-    ClientMessage, Event, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent,
+    ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, SubscriptionId,
+    Timestamp, UnsignedEvent,
 };
 
 use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
@@ -240,14 +245,20 @@ enum Cmd {
         signer: Box<dyn SigningCapability + Send>,
         reply: Sender<Result<SignerRegistration, AddSignerError>>,
     },
-    SignOnly {
-        unsigned: UnsignedEvent,
-        reply: Sender<Result<Event, SignOnlyError>>,
-    },
     RemoveSigner {
         registration: SignerRegistration,
         reply: Sender<bool>,
     },
+    /// Sign one exact event through the active account's registered
+    /// capability without entering the write/store/outbox reducer.
+    SignEvent {
+        unsigned: UnsignedEvent,
+        reservation: nmp_executor::Reservation,
+        completion: SignEventCompletion,
+        reply: Sender<Result<SignEventRegistration, SignEventError>>,
+    },
+    CancelSignEvent(u64),
+    SignEventFinished(u64),
     /// Register a new diagnostics observer (M5 plan §1.2 step 4). The reply
     /// carries the id (used only by `Cmd::UnobserveDiagnostics` to withdraw
     /// later) and a mailbox already primed with the CURRENT snapshot — an
@@ -272,6 +283,163 @@ enum Cmd {
 #[derive(Default)]
 struct SignerRegistry {
     signers: HashMap<PublicKey, RegisteredSigner>,
+}
+
+/// Typed outcome vocabulary for the governed sign-only operation. This is
+/// deliberately separate from write receipts: signing here never accepts a
+/// write intent, mutates canonical storage, creates an outbox lane, or
+/// publishes to a relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignEventError {
+    NoActiveSigner,
+    InvalidRequest { reason: String },
+    SignerUnavailable { reason: String },
+    SignerRejected { reason: String },
+    InvalidSignerOutput { reason: String },
+    ExecutorSaturated { capacity: usize },
+    ThreadUnavailable { component: String, reason: String },
+    EngineClosed,
+    Cancelled,
+}
+
+type SignEventCompletion = Box<dyn FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static>;
+
+const SIGN_EVENT_OPEN: u8 = 0;
+const SIGN_EVENT_CANCELLED: u8 = 1;
+const SIGN_EVENT_RESOLVED: u8 = 2;
+
+/// One linearization point shared by caller cancellation, engine shutdown,
+/// executor shutdown, and signer completion. Only the admitted worker owns
+/// the foreign completion; cancellation merely claims `Open -> Cancelled`,
+/// wakes that worker, and releases an optional adapter RPC.
+struct SignEventTerminal {
+    state: AtomicU8,
+    cancel: PendingSignerCancel,
+}
+
+impl SignEventTerminal {
+    fn new() -> (Arc<Self>, PendingSignerCancelled) {
+        let (cancel, cancelled) = pending_signer_cancellation();
+        (
+            Arc::new(Self {
+                state: AtomicU8::new(SIGN_EVENT_OPEN),
+                cancel,
+            }),
+            cancelled,
+        )
+    }
+
+    fn cancel(&self) -> bool {
+        if self
+            .state
+            .compare_exchange(
+                SIGN_EVENT_OPEN,
+                SIGN_EVENT_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        self.cancel.cancel();
+        true
+    }
+
+    fn resolve(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SIGN_EVENT_OPEN,
+                SIGN_EVENT_RESOLVED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+struct SignEventRegistration {
+    id: u64,
+    terminal: Arc<SignEventTerminal>,
+}
+
+impl std::fmt::Display for SignEventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoActiveSigner => f.write_str("the active account has no registered signer"),
+            Self::InvalidRequest { reason } => write!(f, "invalid sign request: {reason}"),
+            Self::SignerUnavailable { reason } => write!(f, "signer unavailable: {reason}"),
+            Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
+            Self::InvalidSignerOutput { reason } => {
+                write!(f, "signer returned invalid output: {reason}")
+            }
+            Self::ExecutorSaturated { capacity } => {
+                write!(
+                    f,
+                    "sign-event refused: native task executor is at capacity {capacity}"
+                )
+            }
+            Self::ThreadUnavailable { component, reason } => {
+                write!(f, "{component} thread unavailable: {reason}")
+            }
+            Self::EngineClosed => f.write_str("engine already shut down"),
+            Self::Cancelled => f.write_str("sign operation cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for SignEventError {}
+
+fn signer_error(error: nmp_signer::SignerError) -> SignEventError {
+    match error {
+        nmp_signer::SignerError::InvalidResponse(reason) => {
+            SignEventError::InvalidSignerOutput { reason }
+        }
+        nmp_signer::SignerError::Rejected(reason) => SignEventError::SignerRejected { reason },
+        other => SignEventError::SignerUnavailable {
+            reason: other.to_string(),
+        },
+    }
+}
+
+fn validate_sign_request(unsigned: &UnsignedEvent) -> Result<EventId, SignEventError> {
+    let computed = EventId::new(
+        &unsigned.pubkey,
+        &unsigned.created_at,
+        &unsigned.kind,
+        &unsigned.tags,
+        &unsigned.content,
+    );
+    if unsigned.id.is_some_and(|declared| declared != computed) {
+        return Err(SignEventError::InvalidRequest {
+            reason: "declared event id does not match the immutable body".to_string(),
+        });
+    }
+    Ok(computed)
+}
+
+fn validate_signer_output(
+    unsigned: &UnsignedEvent,
+    expected_id: EventId,
+    signed: SignedEvent,
+) -> Result<SignedEvent, SignEventError> {
+    if signed.id != expected_id
+        || signed.pubkey != unsigned.pubkey
+        || signed.created_at != unsigned.created_at
+        || signed.kind != unsigned.kind
+        || signed.tags != unsigned.tags
+        || signed.content != unsigned.content
+    {
+        return Err(SignEventError::InvalidSignerOutput {
+            reason: "signed event does not match the frozen body, author, or id".to_string(),
+        });
+    }
+    signed
+        .verify()
+        .map_err(|error| SignEventError::InvalidSignerOutput {
+            reason: format!("signature verification failed: {error}"),
+        })?;
+    Ok(signed)
 }
 
 struct RegisteredSigner {
@@ -534,13 +702,17 @@ impl EngineThread {
             };
         drop(pool);
 
+        let handle_native_tasks = native_tasks.clone();
         Ok((
             Self {
                 engine_join: Some(engine_join),
                 bridge_join: Some(bridge_join),
                 native_tasks,
             },
-            Handle { inbox: cmd_tx },
+            Handle {
+                inbox: cmd_tx,
+                native_tasks: handle_native_tasks,
+            },
         ))
     }
 
@@ -1124,6 +1296,9 @@ fn engine_loop<S, D>(
     let mut next_diag_id: u64 = 0;
     let mut preambles: Preambles = Preambles::new();
     let mut registry = SignerRegistry::default();
+    let mut active_pubkey = None;
+    let mut next_sign_event_id = 1u64;
+    let mut sign_event_cancellations: HashMap<u64, Arc<SignEventTerminal>> = HashMap::new();
 
     // Recovery happens before the first externally-issued command. Pending
     // rows already live in the store; this only rebuilds ownership and may
@@ -1207,65 +1382,110 @@ fn engine_loop<S, D>(
                     );
                 }
             }
-            Cmd::SignOnly { unsigned, reply } => {
-                let Some(signer) = registry.signer_for(unsigned.pubkey) else {
-                    let _ = reply.send(Err(SignOnlyError::MissingSigner));
-                    continue;
-                };
-                let expected = unsigned.clone();
-                match signer.sign(unsigned) {
-                    SignerOp::Ready(result) => {
-                        let _ = reply.send(validate_sign_only(expected, result));
-                    }
-                    SignerOp::Pending(pending) => {
-                        let (pending_rx, cancel) = pending.into_parts();
-                        let cancel = Arc::new(std::sync::Mutex::new(cancel));
-                        let shutdown_cancel = Arc::clone(&cancel);
-                        let completion_cancel = Arc::clone(&cancel);
-                        let completion_reply = reply.clone();
-                        let spawn = native_tasks.spawn_with_cancel(
-                            "sign-only-waiter",
-                            move || {
-                                if let Some(cancel) = shutdown_cancel
-                                    .lock()
-                                    .unwrap_or_else(|poison| poison.into_inner())
-                                    .take()
-                                {
-                                    cancel();
-                                }
-                            },
-                            move || {
-                                let result =
-                                    pending_rx.recv().unwrap_or(Err(SignerError::Disconnected));
-                                completion_cancel
-                                    .lock()
-                                    .unwrap_or_else(|poison| poison.into_inner())
-                                    .take();
-                                let _ = completion_reply.send(validate_sign_only(expected, result));
-                            },
-                        );
-                        if let Err(error) = spawn {
-                            let mapped = match error {
-                                nmp_executor::ExecutorError::Saturated(error) => {
-                                    SignOnlyError::ExecutorSaturated {
-                                        component: error.component,
-                                        capacity: error.capacity,
-                                    }
-                                }
-                                nmp_executor::ExecutorError::Spawn(error) => {
-                                    SignOnlyError::RuntimeUnavailable(error.to_string())
-                                }
-                            };
-                            let _ = reply.send(Err(mapped));
-                        }
-                    }
-                }
-            }
             Cmd::RemoveSigner {
                 registration,
                 reply,
             } => {
                 let _ = reply.send(registry.remove(&registration));
+            }
+            Cmd::SignEvent {
+                unsigned,
+                reservation,
+                completion,
+                reply,
+            } => {
+                let Some(author) = active_pubkey else {
+                    let _ = reply.send(Err(SignEventError::NoActiveSigner));
+                    continue;
+                };
+                if unsigned.pubkey != author {
+                    let _ = reply.send(Err(SignEventError::InvalidRequest {
+                        reason: "request author does not match the active account".to_string(),
+                    }));
+                    continue;
+                }
+                let expected_id = match validate_sign_request(&unsigned) {
+                    Ok(expected_id) => expected_id,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                let Some(signer) = registry.signer_for(author) else {
+                    let _ = reply.send(Err(SignEventError::NoActiveSigner));
+                    continue;
+                };
+
+                let (terminal, cancelled) = SignEventTerminal::new();
+                let shutdown_terminal = Arc::clone(&terminal);
+                let starter = match reservation.start_with_cancel(move || {
+                    shutdown_terminal.cancel();
+                }) {
+                    Ok(starter) => starter,
+                    Err(error) => {
+                        let error = match error {
+                            nmp_executor::SpawnError::ThreadUnavailable { component, error } => {
+                                SignEventError::ThreadUnavailable {
+                                    component,
+                                    reason: error.to_string(),
+                                }
+                            }
+                            nmp_executor::SpawnError::ExecutorShutDown { .. } => {
+                                SignEventError::EngineClosed
+                            }
+                        };
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+
+                let operation_id = next_sign_event_id;
+                next_sign_event_id = next_sign_event_id.wrapping_add(1).max(1);
+                let signer_result = match signer.sign(unsigned.clone()) {
+                    SignerOp::Ready(result) => SignEventSignerResult::Ready(Box::new(result)),
+                    SignerOp::Pending(pending) => SignEventSignerResult::Pending(pending),
+                };
+
+                sign_event_cancellations.insert(operation_id, Arc::clone(&terminal));
+                if reply
+                    .send(Ok(SignEventRegistration {
+                        id: operation_id,
+                        terminal: Arc::clone(&terminal),
+                    }))
+                    .is_err()
+                {
+                    sign_event_cancellations.remove(&operation_id);
+                    terminal.cancel();
+                    continue;
+                }
+
+                let inbox = self_inbox.clone();
+                starter.run(move || {
+                    let signer_result = match signer_result {
+                        SignEventSignerResult::Ready(result) => Some(*result),
+                        SignEventSignerResult::Pending(pending) => {
+                            pending.recv_or_cancel(cancelled)
+                        }
+                    };
+                    let result = match signer_result {
+                        Some(result) if terminal.resolve() => {
+                            result.map_err(signer_error).and_then(|signed| {
+                                validate_signer_output(&unsigned, expected_id, signed)
+                            })
+                        }
+                        Some(_) | None => Err(SignEventError::Cancelled),
+                    };
+                    let _ = inbox.send(Cmd::SignEventFinished(operation_id));
+                    completion(result);
+                });
+            }
+            Cmd::CancelSignEvent(id) => {
+                if let Some(terminal) = sign_event_cancellations.remove(&id) {
+                    terminal.cancel();
+                }
+            }
+            Cmd::SignEventFinished(id) => {
+                sign_event_cancellations.remove(&id);
             }
             Cmd::ObserveDiagnostics { reply } => {
                 let id = next_diag_id;
@@ -1401,6 +1621,7 @@ fn engine_loop<S, D>(
                 // P3: active identity is a reactive read input. Accepted
                 // writes separately pin their exact author at acceptance.
                 let effects = core.handle(EngineMsg::SetActivePubkey(pk));
+                active_pubkey = pk;
                 dispatch_core_effects(
                     &core,
                     effects,
@@ -1447,6 +1668,10 @@ fn engine_loop<S, D>(
                 );
             }
         }
+    }
+
+    for (_, terminal) in sign_event_cancellations.drain() {
+        terminal.cancel();
     }
 
     // Tear down this thread's OWN `Pool` clone. If no other `Pool` clone
@@ -1645,29 +1870,14 @@ fn dispatch_effect(
                     // and keeps the engine thread itself from ever blocking
                     // on a remote signer round-trip.
                     let inbox = self_inbox.clone();
-                    let (pending_rx, cancel) = pending.into_parts();
-                    let cancel = std::sync::Arc::new(std::sync::Mutex::new(cancel));
-                    let shutdown_cancel = std::sync::Arc::clone(&cancel);
-                    let completion_cancel = std::sync::Arc::clone(&cancel);
+                    let (cancel, cancelled) = pending_signer_cancellation();
                     let result = native_tasks.spawn_with_cancel(
                         "engine-signer-waiter",
+                        move || cancel.cancel(),
                         move || {
-                            if let Some(cancel) = shutdown_cancel
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner())
-                                .take()
-                            {
-                                cancel();
-                            }
-                        },
-                        move || {
-                            let result = pending_rx
-                                .recv()
+                            let result = pending
+                                .recv_or_cancel(cancelled)
                                 .unwrap_or(Err(nmp_signer::SignerError::Disconnected));
-                            completion_cancel
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner())
-                                .take();
                             let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
                                 id, generation, result,
                             )));
@@ -1928,17 +2138,17 @@ impl DiagnosticsHandle {
     }
 }
 
-/// The cheap, `Clone + Send` app-facing handle. Exactly five verbs plus
-/// `shutdown` (ledger #2/#3 preserved at the top edge — plan §5 test 14
-/// grep-guards this structural property; M4 §5 adds `add_signer` to close
-/// the multi-account gap; M5 adds `observe_diagnostics`, the one other
-/// deliberate widening — read-only, off the data path, never influences
-/// routing/delivery):
+/// The cheap, `Clone + Send` app-facing handle. Its deliberately narrow
+/// vocabulary preserves ledger #2/#3 at the top edge. M4 §5 added signer
+/// registration to close the multi-account gap; M5 added read-only
+/// diagnostics; #464 adds governed sign-only without creating a third
+/// workload noun or bypassing the active-signer boundary:
 ///
 /// - `subscribe(LiveQuery) -> (QueryHandle, Receiver<RowsMsg>)`
 /// - `unsubscribe(QueryHandle)`
 /// - `add_signer(impl SigningCapability) -> Result<SignerRegistration, AddSignerError>`
 /// - `remove_signer(SignerRegistration) -> bool`
+/// - `sign_event(UnsignedEvent) -> SignEventOperation`
 /// - `set_active_account(Option<PublicKey>)`
 /// - `publish(WriteIntent) -> Receiver<WriteStatus>`
 /// - `observe_diagnostics() -> (DiagnosticsHandle, LatestReceiver<DiagnosticsSnapshot>)`
@@ -1949,6 +2159,58 @@ impl DiagnosticsHandle {
 #[derive(Clone)]
 pub struct Handle {
     inbox: Sender<Cmd>,
+    native_tasks: nmp_executor::Executor,
+}
+
+/// One accepted sign-only operation. It owns no write receipt or durable
+/// obligation: dropping it before completion cancels the exact signer RPC.
+pub struct SignEventOperation {
+    result: Option<Receiver<Result<SignedEvent, SignEventError>>>,
+    cancel: SignEventCancel,
+}
+
+enum SignEventSignerResult {
+    Ready(Box<Result<SignedEvent, nmp_signer::SignerError>>),
+    Pending(PendingSignerOp<SignedEvent>),
+}
+
+impl SignEventOperation {
+    pub fn recv(mut self) -> Result<SignedEvent, SignEventError> {
+        self.result
+            .take()
+            .expect("sign-event result is consumed exactly once")
+            .recv()
+            .unwrap_or(Err(SignEventError::Cancelled))
+    }
+
+    #[must_use]
+    pub fn cancel_handle(&self) -> SignEventCancel {
+        self.cancel.clone()
+    }
+}
+
+impl Drop for SignEventOperation {
+    fn drop(&mut self) {
+        if self.result.is_some() {
+            self.cancel.cancel();
+        }
+    }
+}
+
+/// Idempotent cancellation token for one exact sign-only operation.
+#[derive(Clone)]
+pub struct SignEventCancel {
+    inbox: Sender<Cmd>,
+    id: u64,
+    terminal: Arc<SignEventTerminal>,
+}
+
+impl SignEventCancel {
+    pub fn cancel(&self) {
+        if self.terminal.cancel() {
+            let _ = self.inbox.send(Cmd::CancelSignEvent(self.id));
+        }
+    }
 }
 
 /// Opaque ownership proof for one exact signer-registry installation.
@@ -1986,62 +2248,6 @@ impl Eq for SignerRegistration {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddSignerError {
     MissingPublicKey,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignOnlyError {
-    MissingSigner,
-    Signer(SignerError),
-    InvalidResponse(String),
-    ExecutorSaturated { component: String, capacity: usize },
-    RuntimeUnavailable(String),
-}
-
-impl std::fmt::Display for SignOnlyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingSigner => f.write_str("no signer is registered for the active account"),
-            Self::Signer(error) => write!(f, "signer refused: {error}"),
-            Self::InvalidResponse(reason) => {
-                write!(f, "signer returned an invalid event: {reason}")
-            }
-            Self::ExecutorSaturated {
-                component,
-                capacity,
-            } => {
-                write!(
-                    f,
-                    "{component} refused: native task executor is at capacity {capacity}"
-                )
-            }
-            Self::RuntimeUnavailable(reason) => {
-                write!(f, "sign-only runtime unavailable: {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SignOnlyError {}
-
-fn validate_sign_only(
-    expected: UnsignedEvent,
-    result: Result<Event, SignerError>,
-) -> Result<Event, SignOnlyError> {
-    let event = result.map_err(SignOnlyError::Signer)?;
-    if event.pubkey != expected.pubkey
-        || event.created_at != expected.created_at
-        || event.kind != expected.kind
-        || event.tags != expected.tags
-        || event.content != expected.content
-    {
-        return Err(SignOnlyError::InvalidResponse(
-            "signed fields differ from the requested event".to_string(),
-        ));
-    }
-    event
-        .verify()
-        .map_err(|error| SignOnlyError::InvalidResponse(error.to_string()))?;
-    Ok(event)
 }
 
 impl std::fmt::Display for AddSignerError {
@@ -2135,20 +2341,53 @@ impl Handle {
             .expect("nmp-engine: engine thread dropped the remove_signer reply")
     }
 
-    /// Sign one exact event without accepting a write, routing it, storing it,
-    /// or opening a relay. Remote signers complete on the bounded native task
-    /// executor; the engine command loop never blocks on their response.
-    pub fn sign_only(&self, unsigned: UnsignedEvent) -> Result<Event, SignOnlyError> {
+    /// Ask the currently active registered signer to sign one exact event,
+    /// without accepting a write or touching the canonical store/outbox.
+    /// Admission reserves a finite native-task slot before the signer is
+    /// invoked; a pending remote operation is cancellable through the
+    /// returned handle and engine shutdown.
+    pub fn sign_event(
+        &self,
+        unsigned: UnsignedEvent,
+    ) -> Result<SignEventOperation, SignEventError> {
+        let (completion_tx, completion_rx) = mpsc::channel();
+        let cancel = self.sign_event_with_completion(unsigned, move |result| {
+            let _ = completion_tx.send(result);
+        })?;
+        Ok(SignEventOperation {
+            result: Some(completion_rx),
+            cancel,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn sign_event_with_completion(
+        &self,
+        unsigned: UnsignedEvent,
+        completion: impl FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static,
+    ) -> Result<SignEventCancel, SignEventError> {
+        let reservation = self.native_tasks.reserve("sign-event").map_err(|error| {
+            SignEventError::ExecutorSaturated {
+                capacity: error.capacity,
+            }
+        })?;
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
-            .send(Cmd::SignOnly {
+            .send(Cmd::SignEvent {
                 unsigned,
+                reservation,
+                completion: Box::new(completion),
                 reply: reply_tx,
             })
-            .expect("nmp-engine: sign_only() called after shutdown");
-        reply_rx
+            .map_err(|_| SignEventError::EngineClosed)?;
+        let registration = reply_rx
             .recv()
-            .expect("nmp-engine: engine dropped the sign-only reply")
+            .map_err(|_| SignEventError::EngineClosed)??;
+        Ok(SignEventCancel {
+            inbox: self.inbox.clone(),
+            id: registration.id,
+            terminal: registration.terminal,
+        })
     }
 
     /// Re-root every reactive query and default unsigned-publish authority

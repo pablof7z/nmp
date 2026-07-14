@@ -1549,6 +1549,7 @@ dependencies = [
 name = "nmp-signer"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "nmp-executor",
  "nmp-transport",
  "nostr 0.44.4",

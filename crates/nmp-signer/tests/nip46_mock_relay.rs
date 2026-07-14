@@ -1,11 +1,11 @@
 use std::net::TcpListener;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
 use nmp_signer::{
-    CryptoCapability, Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent,
-    Nip46Invitation, Nip46Signer, SignerError, SignerOp, SigningCapability,
+    pending_signer_cancellation, CryptoCapability, Nip46Cancellation, Nip46ClientMetadata,
+    Nip46ConnectionEvent, Nip46Invitation, Nip46Signer, SignerError, SignerOp, SigningCapability,
 };
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -433,10 +433,10 @@ fn client_invitation_ignores_forged_secret_then_accepts_valid_signer() {
 
 #[test]
 fn unavailable_signer_operation_is_retryable() {
-    let (tx, rx) = mpsc::channel::<Result<String, nmp_signer::SignerError>>();
-    drop(tx);
+    let (sender, operation) = SignerOp::<String>::pending_channel();
+    drop(sender);
     assert_eq!(
-        SignerOp::pending(rx).wait(Duration::from_millis(10)),
+        operation.wait(Duration::from_millis(10)),
         Err(nmp_signer::SignerError::Disconnected)
     );
 }
@@ -496,19 +496,16 @@ fn engine_associated_connection_and_signing_peak_is_six_executor_tasks() {
         .recv_timeout(Duration::from_secs(2))
         .expect("mock signer must receive the held sign request");
 
-    let (pending_rx, cancel) = pending.into_parts();
-    let cancel = Arc::new(Mutex::new(cancel));
-    let shutdown_cancel = Arc::clone(&cancel);
+    let (cancel, cancelled) = pending_signer_cancellation();
+    let shutdown_cancel = cancel.clone();
     executor
         .spawn_with_cancel(
             "engine signer waiter",
             move || {
-                if let Some(cancel) = shutdown_cancel.lock().unwrap().take() {
-                    cancel();
-                }
+                shutdown_cancel.cancel();
             },
             move || {
-                let _ = pending_rx.recv();
+                let _ = pending.recv_or_cancel(cancelled);
             },
         )
         .unwrap();
