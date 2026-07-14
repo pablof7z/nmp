@@ -9,11 +9,13 @@
 //! (plan §2/§6).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, CoverageInterval, DiagnosticsSnapshot,
-    Durability as GDurability, FilterCoverageEntry, Lane, RelayDiagnosticsSnapshot, Row, RowDelta,
-    ShortfallFact, SourceEvidence, SourceStatus, WriteIntent as GWriteIntent,
+    Durability as GDurability, FilterCoverageEntry, HistoryBatch, HistoryLoadError,
+    HistoryLoadFact, HistoryQuery, HistoryQueryError, Lane, RelayDiagnosticsSnapshot, Row,
+    RowDelta, ShortfallFact, SourceEvidence, SourceStatus, WriteIntent as GWriteIntent,
     WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
@@ -30,10 +32,11 @@ use nostr::{
 use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCacheMode,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
-    FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
-    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiFilterCoverage, FfiHistoryBatch, FfiHistoryLoadFact, FfiHistoryQuery, FfiIdentityField,
+    FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow, FfiRowDelta, FfiSelector,
+    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
+    FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiWriteIntent,
+    FfiWritePayload, FfiWriteRouting, FfiWriteStatus, NmpHistoryContinuation,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -140,6 +143,19 @@ pub enum FfiError {
     /// (`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,
     /// #107 Contract: "the pinned relay set must be nonempty").
     EmptyPinnedRelaySet,
+    HistoryPageSizeOutOfRange {
+        value: u64,
+    },
+    HistoryMaxRowsOutOfRange {
+        value: u64,
+    },
+    HistoryZeroPageSize,
+    HistoryZeroMaxRows,
+    HistoryPageExceedsMaxRows {
+        page_size: u64,
+        max_rows: u64,
+    },
+    HistorySelectionHasLimit,
     /// #156: `NmpEngine::group_message_intent` requires an active account
     /// because NMP, not the native caller, owns the unsigned event author.
     NoActiveAccount,
@@ -157,6 +173,23 @@ pub enum FfiError {
     RelayInformationWaitersSaturated {
         capacity: u64,
     },
+}
+
+/// Exact failure returned by `NmpHistoryHandle::load_older`. Continuations
+/// stay opaque, but misuse never collapses into a string or a generic engine
+/// failure.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiHistoryLoadError {
+    WrongVersion,
+    WrongEngine,
+    WrongSession,
+    WrongDescriptor,
+    StaleGeneration,
+    LoadInProgress,
+    AtBound { max_rows: u64 },
+    NoBoundary,
+    StoreUnavailable,
+    TransportUnavailable { reason: String },
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -228,6 +261,24 @@ impl std::fmt::Display for FfiError {
             ),
             Self::EmptyPinnedRelaySet => {
                 write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
+            }
+            Self::HistoryPageSizeOutOfRange { value } => {
+                write!(f, "history page_size {value} does not fit this platform")
+            }
+            Self::HistoryMaxRowsOutOfRange { value } => {
+                write!(f, "history max_rows {value} does not fit this platform")
+            }
+            Self::HistoryZeroPageSize => write!(f, "history page_size must be non-zero"),
+            Self::HistoryZeroMaxRows => write!(f, "history max_rows must be non-zero"),
+            Self::HistoryPageExceedsMaxRows {
+                page_size,
+                max_rows,
+            } => write!(
+                f,
+                "history page_size {page_size} exceeds max_rows {max_rows}"
+            ),
+            Self::HistorySelectionHasLimit => {
+                write!(f, "history selection must not also declare a limit")
             }
             Self::NoActiveAccount => write!(f, "group messages require an active account"),
             Self::IntentAlreadyConsumed => {
@@ -336,6 +387,54 @@ pub fn sign_event_failure(error: nmp::SignEventError) -> FfiSignEventFailure {
 
 impl std::error::Error for FfiError {}
 
+impl From<HistoryLoadError> for FfiHistoryLoadError {
+    fn from(error: HistoryLoadError) -> Self {
+        match error {
+            HistoryLoadError::WrongVersion => Self::WrongVersion,
+            HistoryLoadError::WrongEngine => Self::WrongEngine,
+            HistoryLoadError::WrongSession => Self::WrongSession,
+            HistoryLoadError::WrongDescriptor => Self::WrongDescriptor,
+            HistoryLoadError::StaleGeneration => Self::StaleGeneration,
+            HistoryLoadError::LoadInProgress => Self::LoadInProgress,
+            HistoryLoadError::AtBound { max_rows } => Self::AtBound {
+                max_rows: max_rows as u64,
+            },
+            HistoryLoadError::NoBoundary => Self::NoBoundary,
+            HistoryLoadError::StoreUnavailable => Self::StoreUnavailable,
+            HistoryLoadError::TransportUnavailable { reason } => {
+                Self::TransportUnavailable { reason }
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for FfiHistoryLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongVersion => f.write_str("history continuation version is unsupported"),
+            Self::WrongEngine => f.write_str("history continuation belongs to another engine"),
+            Self::WrongSession => f.write_str("history continuation belongs to another session"),
+            Self::WrongDescriptor => {
+                f.write_str("history continuation belongs to another demand descriptor")
+            }
+            Self::StaleGeneration => f.write_str("history continuation is stale"),
+            Self::LoadInProgress => f.write_str("history session already has a staged load"),
+            Self::AtBound { max_rows } => {
+                write!(f, "history session is at its max_rows bound {max_rows}")
+            }
+            Self::NoBoundary => f.write_str("history session has no row boundary to advance"),
+            Self::StoreUnavailable => {
+                f.write_str("history advance could not read or resolve the canonical store")
+            }
+            Self::TransportUnavailable { reason } => {
+                write!(f, "history advance transport unavailable: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FfiHistoryLoadError {}
+
 impl From<GDemandError> for FfiError {
     fn from(err: GDemandError) -> Self {
         match err {
@@ -367,6 +466,82 @@ mod engine_error_tests {
         assert_eq!(
             error.to_string(),
             "receipt correlation id namespace exhausted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod history_conversion_tests {
+    use super::*;
+
+    fn query(page_size: u64, max_rows: u64, limit: Option<u32>) -> FfiHistoryQuery {
+        FfiHistoryQuery {
+            demand: FfiDemand {
+                selection: FfiFilter {
+                    limit,
+                    ..FfiFilter::default()
+                },
+                source: FfiSourceAuthority::Public,
+                access: FfiAccessContext::Public,
+                cache: FfiCacheMode::Agnostic,
+            },
+            page_size,
+            max_rows,
+        }
+    }
+
+    #[test]
+    fn history_query_validation_stays_typed_at_the_ffi_boundary() {
+        assert_eq!(
+            history_query_from_ffi(query(0, 10, None)).unwrap_err(),
+            FfiError::HistoryZeroPageSize
+        );
+        assert_eq!(
+            history_query_from_ffi(query(1, 0, None)).unwrap_err(),
+            FfiError::HistoryZeroMaxRows
+        );
+        assert_eq!(
+            history_query_from_ffi(query(11, 10, None)).unwrap_err(),
+            FfiError::HistoryPageExceedsMaxRows {
+                page_size: 11,
+                max_rows: 10,
+            }
+        );
+        assert_eq!(
+            history_query_from_ffi(query(1, 10, Some(1))).unwrap_err(),
+            FfiError::HistorySelectionHasLimit
+        );
+    }
+
+    #[test]
+    fn history_load_errors_preserve_every_misuse_axis() {
+        assert_eq!(
+            FfiHistoryLoadError::from(HistoryLoadError::WrongEngine),
+            FfiHistoryLoadError::WrongEngine
+        );
+        assert_eq!(
+            FfiHistoryLoadError::from(HistoryLoadError::WrongSession),
+            FfiHistoryLoadError::WrongSession
+        );
+        assert_eq!(
+            FfiHistoryLoadError::from(HistoryLoadError::WrongDescriptor),
+            FfiHistoryLoadError::WrongDescriptor
+        );
+        assert_eq!(
+            FfiHistoryLoadError::from(HistoryLoadError::StaleGeneration),
+            FfiHistoryLoadError::StaleGeneration
+        );
+        assert_eq!(
+            FfiHistoryLoadError::from(HistoryLoadError::AtBound { max_rows: 20 }),
+            FfiHistoryLoadError::AtBound { max_rows: 20 }
+        );
+        assert_eq!(
+            FfiHistoryLoadError::from(HistoryLoadError::TransportUnavailable {
+                reason: "offline".to_string(),
+            }),
+            FfiHistoryLoadError::TransportUnavailable {
+                reason: "offline".to_string(),
+            }
         );
     }
 }
@@ -731,6 +906,54 @@ pub fn evidence_to_ffi(e: AcquisitionEvidence) -> FfiAcquisitionEvidence {
     FfiAcquisitionEvidence {
         sources: e.sources.into_iter().map(source_evidence_to_ffi).collect(),
         shortfall: e.shortfall.into_iter().map(shortfall_fact_to_ffi).collect(),
+    }
+}
+
+pub fn history_query_from_ffi(query: FfiHistoryQuery) -> Result<HistoryQuery, FfiError> {
+    let page_size =
+        usize::try_from(query.page_size).map_err(|_| FfiError::HistoryPageSizeOutOfRange {
+            value: query.page_size,
+        })?;
+    let max_rows =
+        usize::try_from(query.max_rows).map_err(|_| FfiError::HistoryMaxRowsOutOfRange {
+            value: query.max_rows,
+        })?;
+    let demand = demand_from_ffi(query.demand)?;
+    HistoryQuery::new(nmp::LiveQuery(demand), page_size, max_rows).map_err(|error| match error {
+        HistoryQueryError::ZeroPageSize => FfiError::HistoryZeroPageSize,
+        HistoryQueryError::ZeroMaxRows => FfiError::HistoryZeroMaxRows,
+        HistoryQueryError::PageExceedsMaxRows {
+            page_size,
+            max_rows,
+        } => FfiError::HistoryPageExceedsMaxRows {
+            page_size: page_size as u64,
+            max_rows: max_rows as u64,
+        },
+        HistoryQueryError::SelectionHasLimit => FfiError::HistorySelectionHasLimit,
+    })
+}
+
+fn history_load_fact_to_ffi(load: HistoryLoadFact) -> FfiHistoryLoadFact {
+    match load {
+        HistoryLoadFact::Idle => FfiHistoryLoadFact::Idle,
+        HistoryLoadFact::Requesting => FfiHistoryLoadFact::Requesting,
+        HistoryLoadFact::Returned { added } => FfiHistoryLoadFact::Returned {
+            added: added as u64,
+        },
+        HistoryLoadFact::AtBound { max_rows } => FfiHistoryLoadFact::AtBound {
+            max_rows: max_rows as u64,
+        },
+    }
+}
+
+pub fn history_batch_to_ffi(batch: HistoryBatch) -> FfiHistoryBatch {
+    FfiHistoryBatch {
+        deltas: batch.deltas.iter().map(row_delta_to_ffi).collect(),
+        continuation: batch
+            .continuation
+            .map(|inner| Arc::new(NmpHistoryContinuation { inner })),
+        evidence: evidence_to_ffi(batch.evidence),
+        load: history_load_fact_to_ffi(batch.load),
     }
 }
 

@@ -244,6 +244,16 @@ pub struct FfiDemand {
     pub cache: FfiCacheMode,
 }
 
+/// One coordinated bounded-history declaration. The ordinary demand remains
+/// the complete selection/source/access/cache identity; these two sizes bound
+/// only the session-owned visible window and each explicit advance.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiHistoryQuery {
+    pub demand: FfiDemand,
+    pub page_size: u64,
+    pub max_rows: u64,
+}
+
 /// One delivered row -- RAW tokens only (ledger #12). Mirrors
 /// `nostr::Event`'s wire shape, never a formatted/localized field, plus
 /// `nmp::Row::sources` (#105): the sorted, deduplicated relay-observation
@@ -400,6 +410,36 @@ pub struct FfiAcquisitionEvidence {
 pub struct FfiRowBatch {
     pub deltas: Vec<FfiRowDelta>,
     pub evidence: FfiAcquisitionEvidence,
+}
+
+/// Opaque process-local capability minted for one exact history generation.
+/// It has no constructor or getters: native callers can only return a value
+/// NMP delivered, and engine/session/descriptor/generation misuse remains a
+/// typed load failure.
+#[derive(Debug, uniffi::Object)]
+pub struct NmpHistoryContinuation {
+    pub(crate) inner: nmp::HistoryContinuation,
+}
+
+/// Mechanical state of the most recent local history advance. This is kept
+/// separate from acquisition evidence and never claims a global network end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiHistoryLoadFact {
+    Idle,
+    Requesting,
+    Returned { added: u64 },
+    AtBound { max_rows: u64 },
+}
+
+/// One incremental history frame. Native wrappers fold `deltas` into the
+/// bounded current snapshot and must return only this frame's opaque
+/// continuation when asking for the next window.
+#[derive(Debug, Clone, Record)]
+pub struct FfiHistoryBatch {
+    pub deltas: Vec<FfiRowDelta>,
+    pub continuation: Option<Arc<NmpHistoryContinuation>>,
+    pub evidence: FfiAcquisitionEvidence,
+    pub load: FfiHistoryLoadFact,
 }
 
 /// `nmp::Durability` mirror (a typed PROPERTY of a write, not a routing

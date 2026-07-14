@@ -1513,6 +1513,94 @@ mod tests {
             .expect("shutdown must wake the blocked history receiver"));
     }
 
+    #[test]
+    fn history_advance_and_blocking_recv_have_safe_split_ownership() {
+        use nmp_store::EventStore;
+
+        let fixture = tempfile::tempdir().expect("temporary directory");
+        let path = fixture.path().join("history-advance.redb");
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-facade.example").unwrap();
+        {
+            let mut store = RedbStore::open(&path).expect("history store must open");
+            for index in 0..3 {
+                let event = UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(100),
+                    Kind::Custom(7_777),
+                    Vec::new(),
+                    format!("history-{index}"),
+                )
+                .sign_with_keys(&keys)
+                .unwrap();
+                store
+                    .insert(
+                        event,
+                        nmp_store::RelayObserved::new(relay.clone(), Timestamp::from(200)),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let engine = Engine::new(EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let query = nmp_engine::core::HistoryQuery::new(
+            LiveQuery::from_filter(nmp_grammar::Filter {
+                kinds: Some(std::collections::BTreeSet::from([7_777])),
+                authors: Some(nmp_grammar::Binding::Literal(
+                    std::collections::BTreeSet::from([keys.public_key().to_hex()]),
+                )),
+                ..nmp_grammar::Filter::default()
+            }),
+            1,
+            3,
+        )
+        .unwrap();
+        let subscription = engine.observe_history(query).expect("history must open");
+        let first = subscription.recv().expect("initial frame must arrive");
+        let continuation = first.continuation.expect("one visible row has a boundary");
+        let advance = subscription.advance_handle();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (batch_tx, batch_rx) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            loop {
+                let batch = subscription.recv();
+                let returned = matches!(
+                    batch.as_ref().map(|batch| batch.load),
+                    Ok(nmp_engine::core::HistoryLoadFact::Returned { .. })
+                );
+                if returned || batch.is_err() {
+                    batch_tx.send(batch).unwrap();
+                    break;
+                }
+            }
+        });
+        ready_rx.recv().unwrap();
+        advance
+            .load_older(continuation)
+            .expect("separate capability must advance while recv owns delivery");
+        let batch = batch_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("advance must unblock the independently-owned receiver")
+            .expect("history channel stays open");
+        assert_eq!(
+            batch.load,
+            nmp_engine::core::HistoryLoadFact::Returned { added: 1 }
+        );
+        drain.join().unwrap();
+
+        // The drain's subscription has already dropped and cancelled the
+        // shared session. A retained advance clone converges on that same
+        // idempotent guard rather than issuing a second withdrawal.
+        advance.cancel();
+        engine.shutdown();
+    }
+
     /// codex-nova's non-negotiable proof #3: an `Engine` with a LIVE query
     /// subscription AND a live diagnostics subscription -- neither
     /// cancelled, both still holding an outstanding `cancel_handle()` clone

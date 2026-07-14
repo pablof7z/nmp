@@ -68,7 +68,7 @@ pub use relay_information::{
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
 pub use subscription::{
-    DiagnosticsSubscription, HistorySubscription, ObservationCancel, Subscription,
+    DiagnosticsSubscription, HistoryAdvance, HistorySubscription, ObservationCancel, Subscription,
 };
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s

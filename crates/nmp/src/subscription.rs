@@ -94,18 +94,45 @@ pub struct Subscription {
 /// session.
 pub struct HistorySubscription {
     cancel: ObservationCancel,
+    advance: HistoryAdvance,
+    batches: std::sync::mpsc::Receiver<HistoryBatch>,
+}
+
+/// Opaque, cloneable capability for advancing one exact history session.
+///
+/// It intentionally owns no receiver: a blocking consumer can retain
+/// exclusive delivery ownership while another thread requests the next older
+/// window. The embedded cancellation guard is the same guard owned by the
+/// corresponding [`HistorySubscription`], so either side can withdraw the
+/// whole session exactly once.
+#[derive(Clone)]
+pub struct HistoryAdvance {
+    cancel: ObservationCancel,
     engine: Handle,
     handle: HistoryHandle,
-    batches: HistoryReceiver,
+}
+
+impl HistoryAdvance {
+    pub fn load_older(&self, continuation: HistoryContinuation) -> Result<(), HistoryLoadError> {
+        self.engine.load_older(self.handle, continuation)
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
 }
 
 impl HistorySubscription {
     pub(crate) fn new(engine: Handle, handle: HistoryHandle, batches: HistoryReceiver) -> Self {
         let cancel_engine = engine.clone();
+        let cancel = ObservationCancel::new(move || cancel_engine.unsubscribe_history(handle));
         Self {
-            cancel: ObservationCancel::new(move || cancel_engine.unsubscribe_history(handle)),
-            engine,
-            handle,
+            cancel: cancel.clone(),
+            advance: HistoryAdvance {
+                cancel,
+                engine,
+                handle,
+            },
             batches,
         }
     }
@@ -124,7 +151,12 @@ impl HistorySubscription {
     }
 
     pub fn load_older(&self, continuation: HistoryContinuation) -> Result<(), HistoryLoadError> {
-        self.engine.load_older(self.handle, continuation)
+        self.advance.load_older(continuation)
+    }
+
+    #[must_use]
+    pub fn advance_handle(&self) -> HistoryAdvance {
+        self.advance.clone()
     }
 
     #[must_use]
