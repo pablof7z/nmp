@@ -163,7 +163,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             .lock()
             .unwrap()
             .iter()
-            .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)),
+            .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)),
         "a recovered Started attempt predates transport Written and cannot replay as Sent"
     );
     let relay_retry = core.handle(EngineMsg::RelayConnected(

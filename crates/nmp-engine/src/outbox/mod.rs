@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 
-use nostr::{EventId, RelayUrl};
+use nostr::{EventId, RelayUrl, Timestamp};
 
 use crate::core::ReceiptId;
 
@@ -35,7 +35,41 @@ pub enum WriteStatus {
     AwaitingCapability,
     Signed(EventId),
     Routed(BTreeSet<RelayUrl>),
-    Sent(RelayUrl),
+    /// This relay lane has no in-flight EVENT attempt because its connection
+    /// is unavailable. Offline time consumes no attempt ordinal.
+    AwaitingRelay {
+        relay: RelayUrl,
+    },
+    /// This relay explicitly requires AUTH before the lane may try again.
+    /// AUTH-blocked time has no retry deadline and consumes no new attempt.
+    AwaitingAuth {
+        relay: RelayUrl,
+    },
+    /// The last attempt made this lane retryable at `eligible_at`. `attempt`
+    /// is the persisted ordinal whose outcome established this eligibility;
+    /// the next wire attempt, if one is made, receives a fresh ordinal.
+    RetryEligible {
+        relay: RelayUrl,
+        attempt: u64,
+        eligible_at: Timestamp,
+    },
+    /// Transport accepted a write for this persisted attempt but could not
+    /// prove that it flushed. This is never a `Sent` fact. Durable delivery
+    /// waits for ACK/timeout; AtMostOnce additionally becomes
+    /// [`Self::OutcomeUnknown`].
+    HandoffAmbiguous {
+        relay: RelayUrl,
+        attempt: u64,
+        observed_at: Timestamp,
+    },
+    /// Transport proved socket write + flush for this persisted relay attempt.
+    /// An ephemeral write has no outbox attempt and therefore cannot mint this
+    /// durable receipt fact.
+    Sent {
+        relay: RelayUrl,
+        attempt: u64,
+        written_at: Timestamp,
+    },
     Acked(RelayUrl),
     Rejected(RelayUrl, String),
     GaveUp(RelayUrl),

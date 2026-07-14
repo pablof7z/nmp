@@ -2259,12 +2259,100 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "AwaitingRelay",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "AwaitingAuth",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "RetryEligible",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "attempt",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "eligible_at",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "HandoffAmbiguous",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "attempt",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "observed_at",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
             name: "Sent",
             discr: None,
             fields: [
                 Field {
                     name: "relay",
                     type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "attempt",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "written_at",
+                    type_: UInt64,
                     default: None,
                     docstring: None,
                 },
