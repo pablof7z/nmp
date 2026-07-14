@@ -31,8 +31,8 @@ about current code:
   private, link-local, and `.onion` targets remain rejected by default, while
   operator-configured and explicit contextual authority keep their separate
   trusted path. Other non-relay limit classes remain open under ledger #17.
-- **Crash-safe acceptance, Rust restart reattachment, and the bounded retry
-  scheduler are built; governed SDK observation remains #96.** One transaction
+- **Crash-safe acceptance, restart reattachment, bounded retry, and governed
+  SDK observation are built.** One transaction
   owns the intent, stable receipt,
   frozen body, canonical pending row and displaced state. Rust boot recovery
   rebuilds ownership without reinsertion, resumes the frozen signer, persists
@@ -51,8 +51,10 @@ about current code:
   arm no polling deadline; Durable retry advances the persisted ordinal, while
   AtMostOnce ambiguity becomes terminal `OutcomeUnknown`. The deadline exposed
   by `next_deadline()` is consumed before it can be rearmed, including bounded
-  batch draining, so there is no zero-timeout busy-spin. #96 still owns the
-  governed Rust/FFI/Swift/Kotlin projection of these lane states.
+  batch draining, so there is no zero-timeout busy-spin. Rust, UniFFI, Swift,
+  and Kotlin receipts distinguish relay/AUTH waits, retry eligibility with the
+  persisted attempt ordinal and time, ambiguous handoff, and proven socket
+  write/flush; `Sent` is never emitted for queue acceptance or ambiguity.
 - **The NIP-46 reconnect and governed sign-only paths are built; standard platform vault providers are not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct

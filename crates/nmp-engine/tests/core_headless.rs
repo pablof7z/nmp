@@ -2519,12 +2519,16 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             Box::new(FixtureDirectory::new()),
             10,
         );
-        let (_, event, offline) = publish_private(
-            &mut core,
-            &author,
-            [relay.clone()],
-            CapturingReceiptSink::default(),
-        );
+        let sink = CapturingReceiptSink::default();
+        let (receipt, event, offline) =
+            publish_private(&mut core, &author, [relay.clone()], sink.clone());
+        assert!(sink
+            .0
+            .lock()
+            .unwrap()
+            .contains(&WriteStatus::AwaitingRelay {
+                relay: relay.clone(),
+            }));
         assert!(offline
             .iter()
             .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay)));
@@ -2544,6 +2548,17 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             10,
         );
         core.recover_on_boot();
+        let recovered = CapturingReceiptSink::default();
+        assert!(core
+            .reattach_receipt(receipt, Box::new(recovered.clone()))
+            .is_attached());
+        assert!(recovered
+            .0
+            .lock()
+            .unwrap()
+            .contains(&WriteStatus::AwaitingRelay {
+                relay: relay.clone(),
+            }));
         let first = connect(&mut core, 0, &relay);
         mark_written(&mut core, &first, &relay);
         let auth = core.handle(EngineMsg::RelayFrame(
@@ -2560,6 +2575,25 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         assert!(!auth
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        assert!(auth.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay: waiting })
+                if waiting == &relay
+        )));
+        let auth_replay = CapturingReceiptSink::default();
+        assert!(core
+            .reattach_receipt(receipt, Box::new(auth_replay.clone()))
+            .is_attached());
+        let auth_replay = auth_replay.0.lock().unwrap();
+        assert!(auth_replay.contains(&WriteStatus::Sent {
+            relay: relay.clone(),
+            attempt: Some(1),
+            written_at: Timestamp::from(0),
+        }));
+        assert!(auth_replay.contains(&WriteStatus::AwaitingAuth {
+            relay: relay.clone(),
+        }));
+        drop(auth_replay);
         assert_eq!(
             core.next_deadline(),
             None,
@@ -2571,6 +2605,17 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
         let second = core.handle(EngineMsg::RelayAuthReady(relay.clone()));
+        assert!(second.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                _,
+                WriteStatus::RetryEligible {
+                    relay: eligible,
+                    attempt: 1,
+                    eligible_at,
+                }
+            ) if eligible == &relay && *eligible_at == Timestamp::from(100_000)
+        )));
         assert_eq!(
             second
                 .iter()
@@ -2600,12 +2645,9 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     let relay = RelayUrl::parse("wss://transient-retry.example").unwrap();
     let mut core = new_core(FixtureDirectory::new());
     connect(&mut core, 0, &relay);
-    let (_, event, first) = publish_private(
-        &mut core,
-        &author,
-        [relay.clone()],
-        CapturingReceiptSink::default(),
-    );
+    let sink = CapturingReceiptSink::default();
+    let (receipt, event, first) =
+        publish_private(&mut core, &author, [relay.clone()], sink.clone());
     mark_written(&mut core, &first, &relay);
     let classified = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -2621,6 +2663,28 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
         .next_deadline()
         .expect("transient retry must arm one deadline");
     assert!((3..8).contains(&due.as_secs()));
+    assert!(sink
+        .0
+        .lock()
+        .unwrap()
+        .contains(&WriteStatus::RetryEligible {
+            relay: relay.clone(),
+            attempt: 1,
+            eligible_at: due,
+        }));
+    let replay = CapturingReceiptSink::default();
+    assert!(core
+        .reattach_receipt(receipt, Box::new(replay.clone()))
+        .is_attached());
+    assert!(replay
+        .0
+        .lock()
+        .unwrap()
+        .contains(&WriteStatus::RetryEligible {
+            relay: relay.clone(),
+            attempt: 1,
+            eligible_at: due,
+        }));
 
     assert!(!core
         .handle(EngineMsg::Tick(Timestamp::from(due.as_secs() - 1)))
@@ -3695,7 +3759,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     assert!(
         !effects
             .iter()
-            .any(|e| matches!(e, Effect::EmitReceipt(_, WriteStatus::Sent(_)))),
+            .any(|e| matches!(e, Effect::EmitReceipt(_, WriteStatus::Sent { .. }))),
         "Sent must never fire synchronously at enqueue time, got {effects:?}"
     );
     assert!(
@@ -3704,7 +3768,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
             .lock()
             .unwrap()
             .iter()
-            .any(|s| matches!(s, WriteStatus::Sent(_))),
+            .any(|s| matches!(s, WriteStatus::Sent { .. })),
         "the sink must not have observed Sent before any handoff result arrives"
     );
 
@@ -3726,15 +3790,23 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
             .lock()
             .unwrap()
             .iter()
-            .any(|status| matches!(status, WriteStatus::Sent(_))),
+            .any(|status| matches!(status, WriteStatus::Sent { .. })),
         "a persisted Started row is pre-wire and must not replay as Sent"
     );
 
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(10)));
     let handoff_effects = core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
     assert!(
         handoff_effects.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(receipt, WriteStatus::Sent(r)) if *receipt == id && r == &relay
+            Effect::EmitReceipt(
+                receipt,
+                WriteStatus::Sent {
+                    relay: r,
+                    attempt: Some(1),
+                    written_at,
+                }
+            ) if *receipt == id && r == &relay && *written_at == Timestamp::from(10)
         )),
         "a Written handoff must emit exactly one Sent, got {handoff_effects:?}"
     );
@@ -3743,13 +3815,13 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
         .lock()
         .unwrap()
         .iter()
-        .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+        .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)));
     assert!(reattached
         .0
         .lock()
         .unwrap()
         .iter()
-        .any(|s| matches!(s, WriteStatus::Sent(r) if r == &relay)));
+        .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)));
 
     // The SAME correlation resolving a second time (a defensive duplicate
     // delivery, which transport itself never actually produces) must be a
@@ -3787,7 +3859,7 @@ fn ephemeral_observer_survives_until_every_handoff_result_then_sees_written_sent
         .lock()
         .unwrap()
         .iter()
-        .any(|status| matches!(status, WriteStatus::Sent(_))));
+        .any(|status| matches!(status, WriteStatus::Sent { .. })));
     let correlation_for = |relay: &RelayUrl| {
         effects
             .iter()
@@ -3810,7 +3882,7 @@ fn ephemeral_observer_survives_until_every_handoff_result_then_sees_written_sent
     ));
     assert!(written.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(found, WriteStatus::Sent(relay))
+        Effect::EmitReceipt(found, WriteStatus::Sent { relay, .. })
             if *found == id && relay == &relay_b
     )));
     assert_eq!(
@@ -3818,19 +3890,17 @@ fn ephemeral_observer_survives_until_every_handoff_result_then_sees_written_sent
             .lock()
             .unwrap()
             .iter()
-            .filter(|status| matches!(status, WriteStatus::Sent(relay) if relay == &relay_b))
+            .filter(|status| matches!(status, WriteStatus::Sent { relay, .. } if relay == &relay_b))
             .count(),
         1
     );
 }
 
-/// `NotHandedOff`/`Ambiguous` are typed INTERNAL facts only (issue #93
-/// scope): neither ever emits `WriteStatus::Sent`, any other receipt
-/// status, or any effect at all -- #96 wires governed visibility, #95
-/// wires the scheduler that acts on them; this unit's job stops at
-/// correlating the fact correctly.
+/// The exact handoff class is public receipt truth: `NotHandedOff` waits for
+/// the relay without claiming an attempt is sent, while `Ambiguous` carries
+/// the persisted ordinal/time and is never collapsed into `Sent`.
 #[test]
-fn not_handed_off_and_ambiguous_never_emit_any_receipt_status() {
+fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
     let author = Keys::generate();
     let relay_a = RelayUrl::parse("wss://relay-a.example.com").unwrap();
     let relay_b = RelayUrl::parse("wss://relay-b.example.com").unwrap();
@@ -3843,7 +3913,7 @@ fn not_handed_off_and_ambiguous_never_emit_any_receipt_status() {
     connect(&mut core, 0, &relay_a);
     connect(&mut core, 1, &relay_b);
 
-    let (_id, _signed, effects) = publish_private(
+    let (id, _signed, effects) = publish_private(
         &mut core,
         &author,
         [relay_a.clone(), relay_b.clone()],
@@ -3863,23 +3933,36 @@ fn not_handed_off_and_ambiguous_never_emit_any_receipt_status() {
         correlation_for(&relay_a),
         HandoffResult::NotHandedOff,
     ));
-    assert!(!not_handed_off
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitReceipt(..))));
+    assert!(not_handed_off.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(
+            receipt,
+            WriteStatus::AwaitingRelay { relay }
+        ) if *receipt == id && relay == &relay_a
+    )));
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(10)));
     let ambiguous = core.handle(EngineMsg::EventHandoff(
         correlation_for(&relay_b),
         HandoffResult::Ambiguous,
     ));
-    assert!(!ambiguous
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitReceipt(..))));
+    assert!(ambiguous.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(
+            receipt,
+            WriteStatus::HandoffAmbiguous {
+                relay,
+                attempt: 1,
+                observed_at,
+            }
+        ) if *receipt == id && relay == &relay_b && *observed_at == Timestamp::from(10)
+    )));
     assert!(
         !sink
             .0
             .lock()
             .unwrap()
             .iter()
-            .any(|s| matches!(s, WriteStatus::Sent(_))),
+            .any(|s| matches!(s, WriteStatus::Sent { .. })),
         "neither NotHandedOff nor Ambiguous may ever surface as Sent"
     );
 }
