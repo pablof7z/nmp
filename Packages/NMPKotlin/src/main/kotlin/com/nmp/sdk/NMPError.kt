@@ -77,6 +77,9 @@ sealed class NMPError(message: String) : Exception(message) {
     object IntentAlreadyConsumed :
         NMPError("this composed write intent was already published once")
 
+    data class RelayInformationUnavailable(val reason: String) :
+        NMPError("relay information unavailable: $reason")
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -102,6 +105,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.EmptyPinnedRelaySet -> EmptyPinnedRelaySet
                 is FfiException.NoActiveAccount -> NoActiveAccount
                 is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
+                is FfiException.RelayInformationUnavailable -> RelayInformationUnavailable(ffi.reason)
             }
     }
 }
@@ -110,6 +114,16 @@ sealed class NMPError(message: String) : Exception(message) {
  * `NMPError` -- the one seam every call into `uniffi.nmp_ffi` passes
  * through. */
 internal inline fun <T> nmpRethrowing(body: () -> T): T =
+    try {
+        body()
+    } catch (e: FfiException) {
+        throw NMPError.from(e)
+    }
+
+/** Async counterpart for generated UniFFI suspend operations. */
+internal suspend inline fun <T> nmpRethrowingAsync(
+    crossinline body: suspend () -> T,
+): T =
     try {
         body()
     } catch (e: FfiException) {

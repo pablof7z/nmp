@@ -38,7 +38,9 @@ use crate::nip02::{
 };
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
 use crate::types::{
-    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiSignEventRequest, FfiWriteIntent,
+    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiRelayInformation,
+    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
+    FfiRelayInformationLimitations, FfiSignEventRequest, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -350,6 +352,64 @@ pub struct NmpEngine {
 
 #[uniffi::export]
 impl NmpEngine {
+    /// Explicit one-shot NIP-11 acquisition. Fresh reads are cache hits;
+    /// concurrent misses/refreshes share one bounded engine-owned flight.
+    pub async fn relay_information(
+        &self,
+        relay: String,
+        policy: FfiRelayInformationCachePolicy,
+    ) -> Result<FfiRelayInformation, FfiError> {
+        let policy = match policy {
+            FfiRelayInformationCachePolicy::UseCache => nmp::RelayInformationCachePolicy::UseCache,
+            FfiRelayInformationCachePolicy::Refresh => nmp::RelayInformationCachePolicy::Refresh,
+        };
+        let value = self.engine.relay_information(&relay, policy).await?;
+        Ok(FfiRelayInformation {
+            relay: value.relay.to_string(),
+            document: FfiRelayInformationDocument {
+                name: value.document.name,
+                description: value.document.description,
+                banner: value.document.banner,
+                icon: value.document.icon,
+                pubkey: value.document.pubkey,
+                self_pubkey: value.document.self_pubkey,
+                contact: value.document.contact,
+                supported_nips: value.document.supported_nips,
+                software: value.document.software,
+                version: value.document.version,
+                terms_of_service: value.document.terms_of_service,
+                limitation: FfiRelayInformationLimitations {
+                    max_message_length: value.document.limitation.max_message_length,
+                    max_subscriptions: value.document.limitation.max_subscriptions,
+                    max_filters: value.document.limitation.max_filters,
+                    max_limit: value.document.limitation.max_limit,
+                    max_subid_length: value.document.limitation.max_subid_length,
+                    max_event_tags: value.document.limitation.max_event_tags,
+                    max_content_length: value.document.limitation.max_content_length,
+                    min_pow_difficulty: value.document.limitation.min_pow_difficulty,
+                    auth_required: value.document.limitation.auth_required,
+                    payment_required: value.document.limitation.payment_required,
+                    created_at_lower_limit: value.document.limitation.created_at_lower_limit,
+                    created_at_upper_limit: value.document.limitation.created_at_upper_limit,
+                },
+                structured: value.document.structured.into_iter().collect(),
+            },
+            raw_json: value.raw_json,
+            document_revision: value.document_revision,
+            fetched_at: value.fetched_at,
+            fresh_until: value.fresh_until,
+            freshness: match value.freshness {
+                nmp::RelayInformationFreshness::Fresh => FfiRelayInformationFreshness::Fresh,
+                nmp::RelayInformationFreshness::Stale => FfiRelayInformationFreshness::Stale,
+            },
+            etag: value.etag,
+            last_modified: value.last_modified,
+            cache_control: value.cache_control,
+            expires: value.expires,
+            last_error: value.last_error.map(|error| error.to_string()),
+        })
+    }
+
     #[uniffi::constructor]
     pub fn new(config: NmpEngineConfig) -> Result<Arc<Self>, FfiError> {
         let engine = Arc::new(nmp::Engine::new(config.into())?);

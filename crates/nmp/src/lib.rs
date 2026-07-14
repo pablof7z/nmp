@@ -55,6 +55,7 @@ pub use config::EngineConfig;
 #[doc(hidden)]
 pub use engine::NativeTaskCancel;
 pub use engine::{Engine, SignEventRequest};
+pub use engine::RelayInformationRequestError;
 pub use error::EngineError;
 #[doc(hidden)]
 pub use nmp_executor::{
@@ -113,6 +114,10 @@ pub use nmp_engine::outbox::WriteStatus;
 pub use nmp_engine::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,
+};
+pub use nmp_engine::relay_information::{
+    RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
+    RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
 pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
