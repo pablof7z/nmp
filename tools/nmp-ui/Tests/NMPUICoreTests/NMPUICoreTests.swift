@@ -3,6 +3,10 @@ import XCTest
 @testable import NMPUICore
 
 final class NMPUICoreTests: XCTestCase {
+    private enum InjectedFailure: Error, Equatable {
+        case mutation(ProjectFileSystem.MutationPoint)
+    }
+
     private var temporaryDirectories: [URL] = []
 
     override func tearDownWithError() throws {
@@ -95,6 +99,105 @@ final class NMPUICoreTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("Components/Root.swift")), "unmanaged\n")
     }
 
+    func testCLIRejectsSymlinkedManagedDirectoryWithoutAnyMutation() throws {
+        let root = temporaryDirectory()
+        let outside = temporaryDirectory()
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("Components"),
+            withDestinationURL: outside
+        )
+
+        let result = try runCLI(root: root, arguments: ["add", "article-medium-card"])
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.standardError.contains("unsafe path: Components/NMPUI/ActionSurface.swift"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["Components"])
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("Components").path),
+            outside.path
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(ProjectFileSystem.lockPath).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("NMPUI/ActionSurface.swift").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("NMPUI/ArticleMediumCard.swift").path))
+    }
+
+    func testDirectorySwapBetweenPlanningAndCommitCannotEscapeRoot() throws {
+        let root = temporaryDirectory()
+        let outside = temporaryDirectory()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Components"), withIntermediateDirectories: true)
+        var swapped = false
+        let installer = try NMPUIInstaller(
+            catalog: pairedCatalog(registry: "v1", dependency: "dep\n", root: "root\n", version: "1"),
+            projectRoot: root
+        ) { point in
+            guard point == .write("Components/Dep.swift"), !swapped else { return }
+            swapped = true
+            try FileManager.default.removeItem(at: root.appendingPathComponent("Components"))
+            try FileManager.default.createSymbolicLink(
+                at: root.appendingPathComponent("Components"),
+                withDestinationURL: outside
+            )
+        }
+
+        XCTAssertThrowsError(try installer.add("root")) { error in
+            XCTAssertEqual(error as? NMPUIError, .unsafePath("Components/Dep.swift"))
+        }
+        XCTAssertTrue(swapped)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(ProjectFileSystem.lockPath).path))
+    }
+
+    func testEveryManagedFileOperationRejectsFinalSymlink() throws {
+        let root = temporaryDirectory()
+        let outside = temporaryDirectory().appendingPathComponent("outside.swift")
+        try Data("outside\n".utf8).write(to: outside)
+        let link = root.appendingPathComponent("Managed.swift")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        let fileSystem = try ProjectFileSystem(root: root)
+
+        for operation in [
+            { _ = try fileSystem.exists("Managed.swift") },
+            { _ = try fileSystem.read("Managed.swift") },
+            { try fileSystem.write("replacement\n", to: "Managed.swift") },
+            { try fileSystem.remove("Managed.swift") },
+        ] {
+            XCTAssertThrowsError(try operation()) { error in
+                XCTAssertEqual(error as? NMPUIError, .unsafePath("Managed.swift"))
+            }
+        }
+        XCTAssertEqual(try String(contentsOf: outside), "outside\n")
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), outside.path)
+    }
+
+    func testLateAddFileFailureRollsBackWholeClosureAndCreatedDirectories() throws {
+        let root = temporaryDirectory()
+        let installer = try failingInstaller(
+            catalog: pairedCatalog(registry: "v1", dependency: "dep\n", root: "root\n", version: "1"),
+            root: root,
+            at: .write("Components/Root.swift")
+        )
+
+        XCTAssertThrowsError(try installer.add("root")) { error in
+            XCTAssertEqual(error as? InjectedFailure, .mutation(.write("Components/Root.swift")))
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
+    func testLateAddLockFailureRollsBackWholeClosureAndCreatedDirectories() throws {
+        let root = temporaryDirectory()
+        let installer = try failingInstaller(
+            catalog: pairedCatalog(registry: "v1", dependency: "dep\n", root: "root\n", version: "1"),
+            root: root,
+            at: .write(ProjectFileSystem.lockPath)
+        )
+
+        XCTAssertThrowsError(try installer.add("root")) { error in
+            XCTAssertEqual(error as? InjectedFailure, .mutation(.write(ProjectFileSystem.lockPath)))
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
     func testDiffReportsCleanModifiedAndMissingFiles() throws {
         let root = temporaryDirectory()
         let installer = try NMPUIInstaller(catalog: .bundled(), projectRoot: root)
@@ -125,6 +228,27 @@ final class NMPUICoreTests: XCTestCase {
         let lock = try ProjectFileSystem(root: root).loadLock(registryVersion: "v2")
         XCTAssertEqual(lock.components["card"]?.version, "2")
         XCTAssertEqual(lock.components["card"]?.files["Components/Card.swift"]?.upstreamBase, "two\n")
+    }
+
+    func testUpdateOnUninstalledComponentIsTypedAndDoesNotInstall() throws {
+        let root = temporaryDirectory()
+        let installer = try NMPUIInstaller(
+            catalog: singleFileCatalog(registry: "v1", componentVersion: "1", content: "one\n"),
+            projectRoot: root
+        )
+
+        XCTAssertThrowsError(try installer.update("card")) { error in
+            XCTAssertEqual(error as? NMPUIError, .notInstalled("card"))
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
+    func testLateUpdateFileFailureRestoresEveryFileAndLockAndRemovesNewFiles() throws {
+        try assertUpdateRollback(at: .write("Components/Root.swift"))
+    }
+
+    func testLateUpdateLockFailureRestoresEveryFileAndLockAndRemovesNewFiles() throws {
+        try assertUpdateRollback(at: .write(ProjectFileSystem.lockPath))
     }
 
     func testDisjointLocalAndUpstreamEditsMerge() throws {
@@ -191,6 +315,81 @@ final class NMPUICoreTests: XCTestCase {
         try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         temporaryDirectories.append(url)
         return url
+    }
+
+    private func failingInstaller(
+        catalog: ComponentCatalog,
+        root: URL,
+        at failurePoint: ProjectFileSystem.MutationPoint
+    ) throws -> NMPUIInstaller {
+        try NMPUIInstaller(catalog: catalog, projectRoot: root) { point in
+            if point == failurePoint { throw InjectedFailure.mutation(point) }
+        }
+    }
+
+    private func assertUpdateRollback(at failurePoint: ProjectFileSystem.MutationPoint) throws {
+        let root = temporaryDirectory()
+        let v1 = pairedCatalog(registry: "v1", dependency: "dep one\n", root: "root one\n", version: "1")
+        _ = try NMPUIInstaller(catalog: v1, projectRoot: root).add("root")
+        let dependencyURL = root.appendingPathComponent("Components/Dep.swift")
+        let rootURL = root.appendingPathComponent("Components/Root.swift")
+        let lockURL = root.appendingPathComponent(ProjectFileSystem.lockPath)
+        let dependencyBefore = try Data(contentsOf: dependencyURL)
+        let rootBefore = try Data(contentsOf: rootURL)
+        let lockBefore = try Data(contentsOf: lockURL)
+
+        let dependency = RegistryComponent(
+            name: "dependency",
+            version: "2",
+            summary: "dependency",
+            files: [
+                RegistryFile(source: "dep.swift", destination: "Components/Dep.swift"),
+                RegistryFile(source: "extra.swift", destination: "Components/Extra.swift"),
+            ]
+        )
+        let rootComponent = component(
+            "root",
+            version: "2",
+            source: "root.swift",
+            destination: "Components/Root.swift",
+            dependencies: ["dependency"]
+        )
+        let v2 = catalog(
+            version: "v2",
+            components: [dependency, rootComponent],
+            templates: ["dep.swift": "dep two\n", "extra.swift": "extra\n", "root.swift": "root two\n"]
+        )
+        let installer = try failingInstaller(catalog: v2, root: root, at: failurePoint)
+
+        XCTAssertThrowsError(try installer.update("root")) { error in
+            XCTAssertEqual(error as? InjectedFailure, .mutation(failurePoint))
+        }
+        XCTAssertEqual(try Data(contentsOf: dependencyURL), dependencyBefore)
+        XCTAssertEqual(try Data(contentsOf: rootURL), rootBefore)
+        XCTAssertEqual(try Data(contentsOf: lockURL), lockBefore)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Components/Extra.swift").path))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Components").path).sorted(),
+            ["Dep.swift", "Root.swift"]
+        )
+    }
+
+    private func runCLI(root: URL, arguments: [String]) throws -> (status: Int32, standardError: String) {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let executable = packageRoot.appendingPathComponent(".build/debug/nmp-ui")
+        let errorPipe = Pipe()
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--root", root.path] + arguments
+        process.standardOutput = Pipe()
+        process.standardError = errorPipe
+        try process.run()
+        process.waitUntilExit()
+        let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (process.terminationStatus, error)
     }
 
     private func singleFileCatalog(registry: String, componentVersion: String, content: String) -> ComponentCatalog {

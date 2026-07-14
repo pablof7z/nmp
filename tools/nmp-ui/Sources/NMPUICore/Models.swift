@@ -84,6 +84,7 @@ public enum NMPUIError: Error, CustomStringConvertible, Equatable {
     case notInstalled(String)
     case missingManagedFile(String)
     case mergeFailed(String)
+    case transactionFailed(String)
     case updateConflict([String])
 
     public var description: String {
@@ -96,6 +97,7 @@ public enum NMPUIError: Error, CustomStringConvertible, Equatable {
         case .notInstalled(let name): return "component is not installed: \(name)"
         case .missingManagedFile(let path): return "managed file is missing: \(path)"
         case .mergeFailed(let message): return "three-way merge failed: \(message)"
+        case .transactionFailed(let message): return "transaction rollback failed: \(message)"
         case .updateConflict(let paths):
             return "update has conflicts in: \(paths.sorted().joined(separator: ", "))"
         }

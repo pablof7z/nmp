@@ -80,6 +80,18 @@ locked base. A conflict exits non-zero, leaves ordinary conflict markers plus
 `.nmp-ui-conflicts.json`, and leaves `.nmp-ui-lock.json` at the last honestly
 installed version. Resolve the evidence before attempting another update.
 
+`update` only operates on an installed component and its already-installed
+dependency closure. It exits with `component is not installed` instead of
+turning an update into an implicit install; use `add` for installation.
+
+Managed paths are opened relative to the canonical project root without
+following symlinked path components. `add` and conflict-free `update` commit the
+entire dependency closure and lock as one rollback-protected transaction: a
+late file or lock failure restores every prior file and the lock byte-for-byte
+and removes newly created files. Deliberate merge conflicts are the exception:
+their markers and `.nmp-ui-conflicts.json` remain as visible evidence while the
+lock stays unchanged.
+
 `Fixtures/SampleApp` is the build fixture for this contract. Its package target
 links the real `NMPContent` and `NMPUI` products and compiles the two installed
 files as ordinary app source.

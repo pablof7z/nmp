@@ -33,6 +33,18 @@ struct ConflictedComponent: Codable, Equatable {
 }
 
 extension ProjectFileSystem {
+    func transactionWrites(_ writes: [(String, String)], lock: LockState) throws -> [String: Data] {
+        var result = Dictionary(uniqueKeysWithValues: writes.map { ($0.0, Data($0.1.utf8)) })
+        result[Self.lockPath] = try encodedLock(lock)
+        return result
+    }
+
+    func transactionWrites(_ writes: [String: String], lock: LockState) throws -> [String: Data] {
+        var result = writes.mapValues { Data($0.utf8) }
+        result[Self.lockPath] = try encodedLock(lock)
+        return result
+    }
+
     func loadLock(registryVersion: String) throws -> LockState {
         guard let data = try readDataIfPresent(Self.lockPath) else {
             return .empty(registryVersion: registryVersion)
@@ -41,11 +53,15 @@ extension ProjectFileSystem {
     }
 
     func saveLock(_ lock: LockState) throws {
+        try write(encodedLock(lock), to: Self.lockPath)
+    }
+
+    private func encodedLock(_ lock: LockState) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         var data = try encoder.encode(lock)
         data.append(0x0a)
-        try write(data, to: Self.lockPath)
+        return data
     }
 
     func loadConflicts() throws -> ConflictState {
