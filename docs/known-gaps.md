@@ -116,10 +116,20 @@ about current code:
   a relay-less NIP-23 `naddr` using only the two configured indexers and normal
   NMP outbox discovery. A real loopback parity proof drives follow, duplicate
   no-op, unrelated-contact preservation, and unfollow through direct Rust and
-  the iOS FFI surface. Still unbuilt at this checkpoint: Compose UI parity and Gallery,
-  the conflict-honest `nmp-ui` open-code registry/CLI, NIP-25 live reaction
-  resources/write intents (#155), and broader product/photo/highlight/media
-  component families. The ordinary follow action also deliberately refuses
+  the iOS FFI surface. Controlled relay identity/list primitives now ship in
+  SwiftUI and a narrow optional desktop-JVM Compose subproject (#198). Both
+  render caller-supplied one-shot NIP-11 state and query-scoped `SourceStatus`;
+  they own no engine, HTTP, polling, cache, timers, or image loading. The
+  Compose proof is not broad content/session parity and does not qualify an
+  Android AAR. The conflict-honest `nmp-ui` source registry/CLI is now built
+  (#165 via PR #475): `list`/`view`/`add`/`diff`/`update`, exact app-owned
+  dependency closures, lock/merge-base hashes, three-way conflict evidence,
+  and a SampleApp prove the adoption/update contract for its current two
+  installable SwiftUI compositions. That is not a broad template catalog.
+  Still unbuilt at this checkpoint: broad Compose UI parity and a Compose
+  Gallery, broader registry/template breadth, NIP-25 live reaction resources/
+  write intents (#155), and broader product/photo/highlight/media component
+  families. The ordinary follow action also deliberately refuses
   first-contact-list creation; that requires a separately named policy/action
   before it can ship. See `docs/design/ui-components-strategy.md` and issue
   #75.
@@ -147,7 +157,12 @@ about current code:
   is deliberately in memory for this first contract; a cold process does not
   reuse the prior process's relay document.
   Runtime connection/AUTH state also remains separate: NIP-11 acquisition does
-  not invent a polling stream or claim that HTTP metadata is link state. The
+  not invent a polling stream or claim that HTTP metadata is link state.
+  Optional relay UI preserves stale last-good content with freshness and
+  last-error evidence, represents no-snapshot failure as unavailable, and
+  displays only caller-supplied query-scoped runtime status. Advertised icon
+  text is exposed without dereferencing it; applications apply their own media
+  policy and pass a SwiftUI `Image` or Compose `Painter`. The
   Swift wrapper tests run on the macOS host and the generated XCFramework's
   simulator slices compile, but an iOS Simulator runtime test target is not yet
   present ([#465](https://github.com/pablof7z/nmp/issues/465)). The Kotlin

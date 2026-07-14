@@ -30,6 +30,7 @@
   - [Protocol modules](32-extending.md)
   - [Mixed Nostr content](34-content.md)
   - [SwiftUI content and components](35-swiftui-ui.md)
+  - [Controlled relay identity UI](36-relay-ui.md)
   - [Kind-diverse examples](31-gallery.md)
 - **Integrate**
   - [Native platform shapes](06-first-app.md)

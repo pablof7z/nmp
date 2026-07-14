@@ -363,6 +363,8 @@ Candidate primitive families include:
   `Product.Actions`;
 - `Media.Grid`, `Media.Image`, `Media.VideoSlot`, `Media.Overflow`;
 - `Profile.Avatar`, `Profile.Name`, `Profile.Nip05`, `Profile.About`;
+- `Relay.Icon`, `Relay.Name`, `Relay.Description`, `Relay.RuntimeStatus`,
+  `Relay.ListEntry`;
 - `Follow.Button`, consuming a protocol-owned relationship/action resource;
 - `UnknownEvent` and `RawEventDisclosure`.
 
@@ -406,6 +408,23 @@ components. The current NIP-25 reaction visuals accept selected/count/action
 from the host until their separately tracked protocol resource exists. The
 test is ownership, not visual similarity: reusable Nostr correctness belongs
 in an optional NMP module; product state and appearance remain app-owned.
+
+### 7.1.2 Controlled relay identity and runtime evidence
+
+Relay presentation is a controlled visual boundary over two already-public,
+separate facts. The caller invokes the engine-owned one-shot NIP-11 API and
+passes its latest result as fresh, stale-last-good, loading, or unavailable.
+A stale snapshot remains renderable while its freshness and last acquisition
+error stay separate. Query-scoped `SourceStatus` is supplied independently;
+the component must not fabricate URL-global connected, authenticated, healthy,
+or reconnecting state.
+
+The primitive owns no engine handle, HTTP client, timer, polling loop, cache,
+or image loader. Advertised icon text may be exposed for app policy, but the
+view accepts only an already-resolved SwiftUI `Image` or Compose `Painter`.
+Issue #198 implements this family in SwiftUI and in a narrow optional
+desktop-JVM Compose subproject. That subproject is an API-parity proof, not an
+Android/AAR qualification or broad Compose content-session implementation.
 
 ### 7.2 Resource-owning slots
 
@@ -773,8 +792,10 @@ Implementation should be split into issue-backed vertical proofs:
    NMP queries with claim/release, evidence, cycle, and budget falsifiers.
 3. **One platform primitive proof — built (#154):** SwiftUI content/embed primitives consuming
    scripted and real sessions, with no app-root provider.
-4. **Second platform parity proof:** equivalent Compose primitives and the same
-   fixture/session contract.
+4. **Second platform parity proof — narrow relay family built (#198), broad
+   content/session proof open:** controlled Compose relay primitives establish
+   native construction and fallback parity without claiming the shared
+   fixture/session contract is complete.
 5. **Hybrid distribution proof:** install one styled component whose linked
    primitives can update independently; prove local edits survive registry
    updates honestly.
@@ -800,7 +821,8 @@ than a one-time milestone.
 The architecture above settles ownership and distribution boundaries. The
 following still require implementation issues or owner selection:
 
-- final Compose package names;
+- final broad Compose content/package shape (the narrow relay proof uses
+  `com.nmp.ui` without freezing the rest of the ecosystem);
 - exact default theme direction;
 - the first protocol renderer set after the kind-diverse proof;
 - the default reference-acquisition fallback timings and budgets;

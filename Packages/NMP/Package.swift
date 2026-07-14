@@ -13,8 +13,9 @@
 //                   deinit-tied teardown, and @Observable sugar over NMPFFI.
 //   NMPContent   -- optional semantic parsing + bounded live references over
 //                   an existing NMP engine.
-//   NMPUI        -- optional native SwiftUI primitives, content renderer, and
-//                   ready-made compositions over NMPContent.
+//   NMPUI        -- optional native SwiftUI primitives, controlled relay
+//                   identity views, content renderer, and ready-made
+//                   compositions over NMPContent.
 //   NMPTests     -- XCTest target exercising NMP's public surface, including
 //                   one bounded live-relay test (§ below).
 //
