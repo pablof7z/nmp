@@ -190,6 +190,7 @@ class RelayInformationTest {
                                     error
                                 }
                             }
+                        }
 
                     val refusal = requests.last().await()
                     assertTrue(refusal is NMPError.RelayInformationWaitersSaturated)
