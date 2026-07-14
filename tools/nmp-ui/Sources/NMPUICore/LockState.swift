@@ -36,6 +36,9 @@ extension ProjectFileSystem {
     func transactionWrites(_ writes: [(String, String)], lock: LockState) throws -> [String: Data] {
         var result: [String: Data] = [:]
         for (path, content) in writes {
+            guard !Self.reservedPaths.contains(path) else {
+                throw NMPUIError.invalidRegistry("reserved destination \(path)")
+            }
             guard result[path] == nil else {
                 throw NMPUIError.invalidRegistry("duplicate planned destination \(path)")
             }
@@ -46,6 +49,9 @@ extension ProjectFileSystem {
     }
 
     func transactionWrites(_ writes: [String: String], lock: LockState) throws -> [String: Data] {
+        if let path = writes.keys.sorted().first(where: Self.reservedPaths.contains) {
+            throw NMPUIError.invalidRegistry("reserved destination \(path)")
+        }
         var result = writes.mapValues { Data($0.utf8) }
         result[Self.lockPath] = try encodedLock(lock)
         return result
