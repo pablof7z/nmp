@@ -14,6 +14,7 @@ reattach_receipt
 add_account
 add_signer
 remove_signer
+sign_event
 set_active_account
 active_account
 observe_diagnostics
@@ -24,6 +25,8 @@ shutdown
 `from_parts` is hidden behind `unstable-mechanism` for in-repo tests and is not an application assembly path. `cargo test -p nmp-consumer-check` is the focused supported-facade proof. Test any other touched Rust crate with `cargo test -p <crate>`; `cargo test --workspace` is the merge gate.
 
 `EngineConfig.max_native_tasks` is the finite zero-queue ceiling for engine-owned observer/action/signer tasks; its default is 12 and zero selects that finite default. A full executor returns `ExecutorSaturated { component, capacity }` before it accepts the associated stream or operation. An OS spawn refusal remains the distinct `ThreadUnavailable { component, reason }`.
+
+`Engine::sign_event(SignEventRequest)` freezes the active author and returns a cancellable `SignEventOperation`; `recv` yields one fully verified event or a typed `SignEventError`. It never accepts or publishes a write. Asynchronous `SigningCapability` implementations create pending work with `SignerOp::pending_channel` or `pending_channel_with_cancel` and resolve the returned opaque `PendingSignerSender`; consumers do not receive or decompose NMP's internal channel.
 
 `Engine::relay_information(relay, policy)` is an async one-shot returning `RelayInformationSnapshot` or `RelayInformationRequestError`. `UseCache` returns an unexpired last-good representation; `Refresh` requests a generation-guarded single flight. Inspect `RelayInformationRequestError::Acquisition` without collapsing `ExecutorSaturated`, `WaiterSaturated`, `ThreadUnavailable`, `ServiceClosed`, `Http`, `ResponseTooLarge`, or `InvalidDocument`. A stale-on-error success has `freshness: Stale` and `last_error`; `advertises_nip` is document evidence, not behavioral proof.
 
@@ -37,7 +40,7 @@ These are typed operational failures, not interchangeable error cases, a hidden 
 
 ## Swift
 
-Import `NMP`, not `NMPFFI`. `NMPEngine` exposes persistent reset; construction; account add/activate/read/clear-persisted; filter/demand observation; diagnostics; async one-shot relay information; publish; composed publish; receipt reattachment; NIP-29 composition; NIP-46 helpers; and shutdown. Optional products are `NMPContent` and `NMPUI`.
+Import `NMP`, not `NMPFFI`. `NMPEngine` exposes persistent reset; construction; account add/activate/read/clear-persisted; filter/demand observation; diagnostics; async governed sign-only; async one-shot relay information; publish; composed publish; receipt reattachment; NIP-29 composition; NIP-46 helpers; and shutdown. Optional products are `NMPContent` and `NMPUI`.
 
 From a clean clone, generate the ignored FFI artifacts from the repo root, then run SwiftPM in its package directory:
 
@@ -57,9 +60,11 @@ Construction, observation, receipt attachment, and both `connectNip46` overloads
 
 `relayInformation(for:policy:)` suspends and throws. Its engine-flight admission maps to `NMPError.executorSaturated`, its per-relay waiter refusal maps to `NMPError.relayInformationWaitersSaturated`, and OS spawn refusal maps to `NMPError.threadUnavailable`; credentialed URL, HTTP, document, size, and closed-service failures map to `NMPError.relayInformationUnavailable`. Treat `RelayInformation.rawJSON` as forward-compatible authority and `lastError` as stale-on-error evidence.
 
+`signEvent(NMPUnsignedEvent)` is `async throws`. Task cancellation cancels the exact admitted native operation; completion and cancellation share one terminal state. The returned `NMPSignedEvent` is verified but carries no storage, receipt, routing, or publication claim.
+
 ## Kotlin/JVM
 
-Import `com.nmp.sdk.*`, not `uniffi.nmp_ffi`. `NMPEngine` implements `AutoCloseable`; prefer `use {}`. Its public methods cover persistent reset; account add/activate/read/clear-persisted; filter/demand observation; diagnostics; suspending one-shot relay information; publish; NIP-29 composition and composed publish; receipt reattachment; NIP-46 helpers; shutdown/close.
+Import `com.nmp.sdk.*`, not `uniffi.nmp_ffi`. `NMPEngine` implements `AutoCloseable`; prefer `use {}`. Its public methods cover persistent reset; account add/activate/read/clear-persisted; filter/demand observation; diagnostics; suspending governed sign-only; suspending one-shot relay information; publish; NIP-29 composition and composed publish; receipt reattachment; NIP-46 helpers; shutdown/close.
 
 From a clean clone:
 
@@ -77,6 +82,8 @@ Kotlin has no checked-exception syntax, but the wrapper maps a full executor to 
 
 The suspending `relayInformation(relay, policy)` call maps engine-flight, per-relay waiter, and OS spawn admission to `NMPError.ExecutorSaturated`, `NMPError.RelayInformationWaitersSaturated`, and `NMPError.ThreadUnavailable`. Remaining acquisition failures are `NMPError.RelayInformationUnavailable`. Preserve `RelayInformation.rawJson`, freshness, and separate `lastError`; do not turn this one-shot into an unbounded polling flow.
 
+The suspending `signEvent(NMPUnsignedEvent)` call is cancellable and uses one terminal state across callback completion and coroutine cancellation. Its `NMPSignedEvent` is verified sign-only output, not evidence of storage or publication.
+
 ## Raw UniFFI
 
-Raw UniFFI uses `NmpEngineConfig`, `NmpEngine`, observer callbacks, and `FfiReceiptReattachment`; Rust's distinct `FfiError::ExecutorSaturated`, `FfiError::RelayInformationWaitersSaturated`, and `FfiError::ThreadUnavailable` become generated Swift/Kotlin exception cases. The raw projection includes async `relayInformation`, `allowedLocalRelayHosts`/`maxRelays`/`maxNativeTasks` configuration, `FfiNativeTaskCensus` plus an event-driven idle barrier for lifecycle proof, and the private-rejection/over-cap/store-degraded diagnostic fields omitted by the ergonomic native wrappers. Treat this as parity authority for wrapper maintainers, not an alternate app API; Swift apps import `NMP`, and Kotlin apps import `com.nmp.sdk`.
+Raw UniFFI uses `NmpEngineConfig`, `NmpEngine`, observer callbacks, and `FfiReceiptReattachment`; Rust's distinct `FfiError::ExecutorSaturated`, `FfiError::RelayInformationWaitersSaturated`, and `FfiError::ThreadUnavailable` become generated Swift/Kotlin exception cases. The raw projection includes cancellable sign-only observation, async `relayInformation`, `allowedLocalRelayHosts`/`maxRelays`/`maxNativeTasks` configuration, `FfiNativeTaskCensus` plus an event-driven idle barrier for lifecycle proof, and the private-rejection/over-cap/store-degraded diagnostic fields omitted by the ergonomic native wrappers. Treat this as parity authority for wrapper maintainers, not an alternate app API; Swift apps import `NMP`, and Kotlin apps import `com.nmp.sdk`.
