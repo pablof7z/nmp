@@ -65,7 +65,7 @@ private class LocalAckRelay : AutoCloseable {
             socket.tcpNoDelay = true
             val input = socket.getInputStream()
             val output = socket.getOutputStream()
-            completeHandshake(input, output)
+            if (!completeHandshake(input, output)) return
             while (!socket.isClosed) {
                 val frame = readFrame(input) ?: break
                 when (frame.opcode) {
@@ -137,10 +137,14 @@ private class LocalAckRelay : AutoCloseable {
         writeFrame(output, 0x1, text.toByteArray(StandardCharsets.UTF_8))
     }
 
+    /** Serve NIP-11 HTTP on the same origin as the WebSocket test relay, or
+     * complete the RFC 6455 upgrade. Production opens the NIP-11 request
+     * independently, so the relay must not misclassify it as a broken
+     * WebSocket handshake. */
     private fun completeHandshake(
         input: InputStream,
         output: OutputStream,
-    ) {
+    ): Boolean {
         val bytes = ByteArrayOutputStream()
         var matched = 0
         val terminator = byteArrayOf(13, 10, 13, 10)
@@ -158,7 +162,22 @@ private class LocalAckRelay : AutoCloseable {
                 .firstOrNull { it.startsWith("Sec-WebSocket-Key:", ignoreCase = true) }
                 ?.substringAfter(':')
                 ?.trim()
-                ?: error("WebSocket handshake omitted Sec-WebSocket-Key")
+        if (key == null) {
+            check(request.startsWith("GET ") && request.contains("application/nostr+json")) {
+                "request was neither NIP-11 HTTP nor a WebSocket upgrade"
+            }
+            val body = "{\"supported_nips\":[29]}"
+            output.write(
+                ("HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/nostr+json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n" +
+                    "Connection: close\r\n\r\n" +
+                    body)
+                    .toByteArray(StandardCharsets.US_ASCII),
+            )
+            output.flush()
+            return false
+        }
         val accept =
             Base64.getEncoder().encodeToString(
                 MessageDigest.getInstance("SHA-1")
@@ -172,6 +191,7 @@ private class LocalAckRelay : AutoCloseable {
                 .toByteArray(StandardCharsets.US_ASCII),
         )
         output.flush()
+        return true
     }
 
     private data class Frame(

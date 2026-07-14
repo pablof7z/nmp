@@ -128,6 +128,15 @@ class NMPEngine(
      * `observe`. */
     fun observeDiagnostics(): Flow<DiagnosticsSnapshot> = observeDiagnostics(ffi)
 
+    /** Acquire one NIP-11 representation through the shared engine cache. */
+    suspend fun relayInformation(
+        relay: String,
+        policy: RelayInformationCachePolicy = RelayInformationCachePolicy.UseCache,
+    ): RelayInformation =
+        RelayInformation.from(
+            nmpRethrowingAsync { ffi.relayInformation(relay, policy.toFfi()) },
+        )
+
     // MARK: - Write noun
 
     /** Enqueue a write and return its stable id plus status stream. */

@@ -956,6 +956,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "publish",
         "publish_tracked",
         "reattach_receipt",
+        "relay_information",
         "remove_signer",
         "set_active_account",
         "shutdown",

@@ -124,6 +124,16 @@ about current code:
   and router caps exist, but graph, derived-set, wire, relay, result, receipt,
   ingestion, and scheduler bounds do not yet share an explicit shortfall
   contract. Silent first-N behavior is forbidden.
+- **NIP-11 cache is process-local.** The engine now owns bounded one-shot
+  acquisition, per-relay single-flight, HTTP validators/freshness directives,
+  typed advisory limitation claims, raw JSON,
+  stale-on-error, explicit refresh, least-recently-used eviction at a fixed
+  256-relay bound, refusal of every HTTP redirect before its target is
+  contacted, and advertisement-vs-behavior capability evidence. The cache is
+  deliberately in memory for this first contract; a cold process does not
+  reuse the prior process's relay document. Runtime connection/AUTH state also
+  remains a separate concern: NIP-11 acquisition does not invent a polling
+  stream or claim that HTTP metadata is link state.
 - **~~Destructive trust-domain reset is missing as a defined contract~~ CLOSED
   (#232).** `Engine::reset_persistent_store`, the UniFFI operation, and the
   Swift/Kotlin `NMPEngine.resetPersistentStore` projections idempotently remove

@@ -15,6 +15,71 @@ use std::sync::Arc;
 
 use uniffi::{Enum, Record};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiRelayInformationCachePolicy {
+    UseCache,
+    Refresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiRelayInformationFreshness {
+    Fresh,
+    Stale,
+}
+
+/// Advisory limitation claims understood today. The enclosing document's
+/// exact raw JSON remains authoritative for future fields.
+#[derive(Debug, Clone, PartialEq, Record)]
+pub struct FfiRelayInformationLimitations {
+    pub max_message_length: Option<u64>,
+    pub max_subscriptions: Option<u64>,
+    pub max_filters: Option<u64>,
+    pub max_limit: Option<u64>,
+    pub max_subid_length: Option<u64>,
+    pub max_event_tags: Option<u64>,
+    pub max_content_length: Option<u64>,
+    pub min_pow_difficulty: Option<u64>,
+    pub auth_required: Option<bool>,
+    pub payment_required: Option<bool>,
+    pub created_at_lower_limit: Option<u64>,
+    pub created_at_upper_limit: Option<u64>,
+}
+
+/// Typed NIP-11 fields understood today. The enclosing record's `raw_json`
+/// remains authoritative for fields added by future NIP-11 revisions.
+#[derive(Debug, Clone, PartialEq, Record)]
+pub struct FfiRelayInformationDocument {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub banner: Option<String>,
+    pub icon: Option<String>,
+    pub pubkey: Option<String>,
+    pub self_pubkey: Option<String>,
+    pub contact: Option<String>,
+    pub supported_nips: Option<Vec<u16>>,
+    pub software: Option<String>,
+    pub version: Option<String>,
+    pub terms_of_service: Option<String>,
+    pub limitation: FfiRelayInformationLimitations,
+    pub structured: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Record)]
+pub struct FfiRelayInformation {
+    pub relay: String,
+    pub document: FfiRelayInformationDocument,
+    pub raw_json: String,
+    pub document_revision: String,
+    pub fetched_at: u64,
+    pub fresh_until: u64,
+    pub freshness: FfiRelayInformationFreshness,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub cache_control: Option<String>,
+    pub expires: Option<String>,
+    pub last_error: Option<String>,
+}
+
 /// The reactive identity root (VISION §2 P3). Extensible -- UniFFI enums are
 /// NOT `#[non_exhaustive]` across the FFI boundary by default, but adding a
 /// variant here is a mechanical, additive change on both sides whenever the
@@ -479,6 +544,12 @@ pub struct FfiRelayDiagnostics {
     pub filters: Vec<String>,
     pub events_by_kind: Vec<FfiKindCount>,
     pub coverage: Vec<FfiFilterCoverage>,
+    pub nip11_supported_nips: Option<Vec<u16>>,
+    pub nip11_document_revision: Option<String>,
+    pub nip11_freshness: Option<String>,
+    pub nip11_last_error: Option<String>,
+    pub nip77_advertisement: String,
+    pub nip77_behavior: String,
 }
 
 /// The engine-global diagnostics snapshot (M5 plan §1.1) -- "the acceptance

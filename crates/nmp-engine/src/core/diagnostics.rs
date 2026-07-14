@@ -59,6 +59,19 @@ pub struct RelayDiagnosticsSnapshot {
     pub events_by_kind: Vec<(u16, u64)>,
     /// Per-filter coverage, same order/count as `filters`.
     pub coverage: Vec<FilterCoverageEntry>,
+    /// Latest advertised NIP list. `None` is unknown/not advertised.
+    pub nip11_supported_nips: Option<Vec<u16>>,
+    /// BLAKE3 revision of the exact document that supplied the advertisement.
+    pub nip11_document_revision: Option<String>,
+    /// `fresh` or `stale` for the cited document; `None` when unknown.
+    pub nip11_freshness: Option<&'static str>,
+    /// Most recent refresh failure retained beside stale last-good evidence.
+    pub nip11_last_error: Option<String>,
+    /// `unknown`, `advertised_supported`, or `advertised_unsupported`.
+    pub nip77_advertisement: &'static str,
+    /// `unknown`, `probing`, `behaviorally_proven`, or
+    /// `behaviorally_rejected`. Kept separate from advertisement evidence.
+    pub nip77_behavior: &'static str,
 }
 
 /// The engine-global diagnostics snapshot (M5 plan §1.1) — "the acceptance
@@ -152,6 +165,12 @@ pub(crate) fn build(
             filters,
             events_by_kind,
             coverage,
+            nip11_supported_nips: None,
+            nip11_document_revision: None,
+            nip11_freshness: None,
+            nip11_last_error: None,
+            nip77_advertisement: "unknown",
+            nip77_behavior: "unknown",
         });
     }
 

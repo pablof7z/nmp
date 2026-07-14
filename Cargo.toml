@@ -38,6 +38,8 @@ nostr = "0.44.4"
 # watermark key -- a forged collision there would attach source evidence to
 # the wrong filter).
 blake3 = "1"
+futures-channel = "0.3"
+httpdate = "1"
 nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-ownership = { path = "crates/nmp-ownership" }
 nmp-store = { path = "crates/nmp-store" }
@@ -57,3 +59,6 @@ nmp-content = { path = "crates/nmp-content" }
 nmp-test-support = { path = "crates/nmp-test-support" }
 proptest = "1"
 uniffi = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
