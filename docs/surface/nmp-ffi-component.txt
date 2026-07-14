@@ -547,6 +547,32 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "SigningFailed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidSignedEvent",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
             name: "ReceiptCorrelationIdExhausted",
             discr: None,
             fields: [],
@@ -3349,6 +3375,102 @@ record Record {
     ],
     docstring: Some(
         "One delivered batch: raw row deltas + the query's scoped acquisition\nevidence (mirrors `nmp::RowsMsg`).",
+    ),
+}
+
+record Record {
+    name: "FfiSignEventRequest",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "created_at",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "kind",
+            type_: UInt16,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "tags",
+            type_: Sequence {
+                inner_type: Sequence {
+                    inner_type: String,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "content",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Event fields a native app may ask the active NMP signer to sign. The\nauthor is deliberately absent and is frozen from engine identity state.",
+    ),
+}
+
+record Record {
+    name: "FfiSignedEvent",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "pubkey",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "created_at",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "kind",
+            type_: UInt16,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "tags",
+            type_: Sequence {
+                inner_type: Sequence {
+                    inner_type: String,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "content",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "sig",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "A fully signed Nostr event returned by the governed sign-only operation.",
     ),
 }
 
@@ -6407,6 +6529,80 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_shutdown",
             checksum: Some(
                 40424,
+            ),
+        },
+        Method {
+            name: "sign_event",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "request",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSignEventRequest",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiSignedEvent",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_sign_event",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "request",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiSignEventRequest",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiSignedEvent",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Sign exactly one event with the active NMP signer without publishing.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_sign_event",
+            checksum: Some(
+                30936,
             ),
         },
         Method {

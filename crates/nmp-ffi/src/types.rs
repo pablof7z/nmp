@@ -381,6 +381,28 @@ pub enum FfiWritePayload {
     },
 }
 
+/// Event fields a native app may ask the active NMP signer to sign. The
+/// author is deliberately absent and is frozen from engine identity state.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiSignEventRequest {
+    pub created_at: u64,
+    pub kind: u16,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+}
+
+/// A fully signed Nostr event returned by the governed sign-only operation.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiSignedEvent {
+    pub id: String,
+    pub pubkey: String,
+    pub created_at: u64,
+    pub kind: u16,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+    pub sig: String,
+}
+
 /// A caller's publish request (`nmp::WriteIntent` mirror).
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiWriteIntent {

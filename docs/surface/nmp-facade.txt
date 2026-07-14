@@ -69,8 +69,13 @@ pub nmp::EngineError::ExecutorSaturated::component: alloc::string::String
 pub nmp::EngineError::InvalidRelayUrl
 pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
 pub nmp::EngineError::InvalidSecretKey
+pub nmp::EngineError::InvalidSignedEvent
+pub nmp::EngineError::InvalidSignedEvent::reason: alloc::string::String
+pub nmp::EngineError::NoActiveAccount
 pub nmp::EngineError::ReceiptCorrelationIdExhausted
 pub nmp::EngineError::SignerMissingPublicKey
+pub nmp::EngineError::SigningFailed
+pub nmp::EngineError::SigningFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreOpenFailed
 pub nmp::EngineError::StoreOpenFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreResetFailed
@@ -125,6 +130,7 @@ pub fn nmp::Engine::remove_signer(&self, nmp_engine::runtime::SignerRegistration
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
+pub fn nmp::Engine::sign_event(&self, nmp::SignEventRequest) -> core::result::Result<nostr::event::Event, nmp::EngineError>
 impl core::ops::drop::Drop for nmp::Engine
 pub fn nmp::Engine::drop(&mut self)
 impl !core::marker::Freeze for nmp::Engine
@@ -167,6 +173,26 @@ impl core::marker::Unpin for nmp::ObservationCancel
 impl core::marker::UnsafeUnpin for nmp::ObservationCancel
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::ObservationCancel
 impl !core::panic::unwind_safe::UnwindSafe for nmp::ObservationCancel
+pub struct nmp::SignEventRequest
+pub nmp::SignEventRequest::content: alloc::string::String
+pub nmp::SignEventRequest::created_at: nostr::types::time::Timestamp
+pub nmp::SignEventRequest::kind: nostr::event::kind::Kind
+pub nmp::SignEventRequest::tags: alloc::vec::Vec<nostr::event::tag::Tag>
+impl core::clone::Clone for nmp::SignEventRequest
+pub fn nmp::SignEventRequest::clone(&self) -> nmp::SignEventRequest
+impl core::cmp::Eq for nmp::SignEventRequest
+impl core::cmp::PartialEq for nmp::SignEventRequest
+pub fn nmp::SignEventRequest::eq(&self, &nmp::SignEventRequest) -> bool
+impl core::fmt::Debug for nmp::SignEventRequest
+pub fn nmp::SignEventRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SignEventRequest
+impl core::marker::Freeze for nmp::SignEventRequest
+impl core::marker::Send for nmp::SignEventRequest
+impl core::marker::Sync for nmp::SignEventRequest
+impl core::marker::Unpin for nmp::SignEventRequest
+impl core::marker::UnsafeUnpin for nmp::SignEventRequest
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignEventRequest
+impl core::panic::unwind_safe::UnwindSafe for nmp::SignEventRequest
 pub struct nmp::Subscription
 impl nmp::Subscription
 pub fn nmp::Subscription::cancel(self)

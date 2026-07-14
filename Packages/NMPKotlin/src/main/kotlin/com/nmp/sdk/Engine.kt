@@ -89,6 +89,10 @@ class NMPEngine(
     /** The Rust-owned account currently rooting reactive identity and writes. */
     fun activeAccount(): String? = nmpRethrowing { ffi.activeAccount() }
 
+    /** Sign one exact event without publishing, storing, or routing it. */
+    fun signEvent(event: NMPUnsignedEvent): NMPSignedEvent =
+        NMPSignedEvent(nmpRethrowing { ffi.signEvent(event.toFfi()) })
+
     internal fun nativeTaskCensus() = ffi.nativeTaskCensus()
 
     internal fun awaitNativeTasksIdle() = ffi.awaitNativeTasksIdle()

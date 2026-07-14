@@ -39,6 +39,13 @@ pub enum EngineError {
     InvalidSecretKey,
     /// A custom capability did not expose a stable registry identity.
     SignerMissingPublicKey,
+    /// Signing was requested while no account was active.
+    NoActiveAccount,
+    /// The active account has no available signer or its signer refused.
+    SigningFailed { reason: String },
+    /// A signer returned an event that did not exactly match and verify
+    /// against the requested unsigned event.
+    InvalidSignedEvent { reason: String },
     /// The upper-half namespace reserved for failures rejected before
     /// durable acceptance has been completely consumed.
     ReceiptCorrelationIdExhausted,
@@ -67,6 +74,11 @@ impl std::fmt::Display for EngineError {
             ),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
+            Self::NoActiveAccount => write!(f, "no active account"),
+            Self::SigningFailed { reason } => write!(f, "signing failed: {reason}"),
+            Self::InvalidSignedEvent { reason } => {
+                write!(f, "signer returned an invalid event: {reason}")
+            }
             Self::ReceiptCorrelationIdExhausted => {
                 write!(f, "receipt correlation id namespace exhausted")
             }
@@ -98,6 +110,33 @@ impl EngineError {
         match err {
             nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted => {
                 Self::ReceiptCorrelationIdExhausted
+            }
+        }
+    }
+
+    pub(crate) fn from_sign_only_error(err: nmp_engine::runtime::SignOnlyError) -> Self {
+        match err {
+            nmp_engine::runtime::SignOnlyError::MissingSigner => Self::SigningFailed {
+                reason: "no signer is registered for the active account".to_string(),
+            },
+            nmp_engine::runtime::SignOnlyError::Signer(error) => Self::SigningFailed {
+                reason: error.to_string(),
+            },
+            nmp_engine::runtime::SignOnlyError::InvalidResponse(reason) => {
+                Self::InvalidSignedEvent { reason }
+            }
+            nmp_engine::runtime::SignOnlyError::ExecutorSaturated {
+                component,
+                capacity,
+            } => Self::ExecutorSaturated {
+                component,
+                capacity,
+            },
+            nmp_engine::runtime::SignOnlyError::RuntimeUnavailable(reason) => {
+                Self::ThreadUnavailable {
+                    component: "sign-only-waiter".to_string(),
+                    reason,
+                }
             }
         }
     }
