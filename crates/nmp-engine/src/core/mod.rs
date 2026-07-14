@@ -369,8 +369,8 @@ pub enum EngineMsg {
     SetActivePubkey(Option<PublicKey>),
     Publish(WriteIntent, Box<dyn ReceiptSink>),
     RelayConnected(TransportRelayHandle, RelayUrl),
-    RelayDisconnected(u32),
-    RelayHealth(u32, RelayHealth),
+    RelayDisconnected(TransportRelayHandle),
+    RelayHealth(TransportRelayHandle, RelayHealth),
     RelayFrame(TransportRelayHandle, RelayFrame),
     RelayFrames(Vec<(TransportRelayHandle, RelayFrame)>),
     SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
@@ -578,15 +578,16 @@ pub struct EngineCore<S: EventStore> {
     cap: usize,
     handles: HashMap<HandleId, HandleState>,
     attribution: AttributionState,
-    /// `PoolEvent::Connected`/`Disconnected` carry a bare slot number, not a
-    /// `RelayUrl` — this is EngineCore's own memory of which URL currently
-    /// occupies which pool slot, populated on `RelayConnected`.
-    slot_to_url: HashMap<u32, RelayUrl>,
+    /// EngineCore's memory of the exact connection generation and URL that
+    /// currently occupy each pool slot. Disconnects are asynchronous; the
+    /// generation prevents a delayed old disconnect from erasing a slot that
+    /// has already reopened.
+    slot_to_relay: HashMap<u32, (TransportRelayHandle, RelayUrl)>,
     /// Relays CURRENTLY connected — feeds `AcquisitionEvidence.sources[_]
     /// .status` (`Requesting` iff a member here covers the atom;
     /// `Disconnected` iff it was a member of `ever_connected_relays` but
     /// isn't a member here; `Connecting` otherwise). Additive bookkeeping:
-    /// `slot_to_url`'s own semantics (populated on connect, never cleared on
+    /// `slot_to_relay`'s own semantics (populated on connect, never cleared on
     /// disconnect) are untouched by this.
     connected_relays: BTreeSet<RelayUrl>,
     /// Every relay that has connected at least once, ever — distinguishes
@@ -739,7 +740,7 @@ impl<S: EventStore> EngineCore<S> {
             cap,
             handles: HashMap::new(),
             attribution: AttributionState::new(),
-            slot_to_url: HashMap::new(),
+            slot_to_relay: HashMap::new(),
             connected_relays: BTreeSet::new(),
             ever_connected_relays: BTreeSet::new(),
             clock: Timestamp::from(0u64),
@@ -1700,8 +1701,8 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::SetActivePubkey(pk) => self.on_set_active_pubkey(pk),
             EngineMsg::Publish(intent, sink) => self.on_publish(intent, sink),
             EngineMsg::RelayConnected(handle, url) => self.on_relay_connected(handle, url),
-            EngineMsg::RelayDisconnected(slot) => self.on_relay_disconnected(slot),
-            EngineMsg::RelayHealth(slot, health) => self.on_relay_health(slot, health),
+            EngineMsg::RelayDisconnected(handle) => self.on_relay_disconnected(handle),
+            EngineMsg::RelayHealth(handle, health) => self.on_relay_health(handle, health),
             EngineMsg::RelayFrame(handle, frame) => self.on_relay_frame(handle, frame),
             EngineMsg::RelayFrames(frames) => self.on_relay_frames(frames),
             EngineMsg::SignerCompleted(id, generation, result) => {
@@ -1724,12 +1725,23 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    fn on_relay_health(&mut self, slot: u32, health: RelayHealth) -> Vec<Effect> {
+    fn on_relay_health(
+        &mut self,
+        handle: TransportRelayHandle,
+        health: RelayHealth,
+    ) -> Vec<Effect> {
+        if self
+            .slot_to_relay
+            .get(&handle.slot)
+            .is_some_and(|(current, _)| *current != handle)
+        {
+            return Vec::new();
+        }
         self.transport_degraded = health.last_error.or_else(|| {
             (health.invalid_signature_count > 0).then(|| {
                 format!(
-                    "relay slot {slot} rejected {} invalid signature frame(s)",
-                    health.invalid_signature_count
+                    "relay slot {} rejected {} invalid signature frame(s)",
+                    handle.slot, health.invalid_signature_count
                 )
             })
         });
@@ -2770,7 +2782,15 @@ impl<S: EventStore> EngineCore<S> {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
 
     fn on_relay_connected(&mut self, handle: TransportRelayHandle, url: RelayUrl) -> Vec<Effect> {
-        self.slot_to_url.insert(handle.slot, url.clone());
+        if self
+            .slot_to_relay
+            .get(&handle.slot)
+            .is_some_and(|(current, _)| current.generation > handle.generation)
+        {
+            return Vec::new();
+        }
+        self.slot_to_relay
+            .insert(handle.slot, (handle, url.clone()));
         // A connection can also exist solely for a compiled/persisted write
         // route. It is live for the durable write scheduler and ACK
         // attribution, but it must never receive read replay/probing unless
@@ -2819,9 +2839,12 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    fn on_relay_disconnected(&mut self, slot: u32) -> Vec<Effect> {
+    fn on_relay_disconnected(&mut self, handle: TransportRelayHandle) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if let Some(url) = self.slot_to_url.get(&slot).cloned() {
+        if let Some((current, url)) = self.slot_to_relay.get(&handle.slot).cloned() {
+            if current != handle {
+                return effects;
+            }
             self.attribution.clear_relay(&url);
             self.suspend_disconnected_lanes(&url, &mut effects);
             // Any reconciliation open against this relay dies with the
@@ -2935,10 +2958,15 @@ impl<S: EventStore> EngineCore<S> {
         for (handle, frame) in frames {
             match frame.into_event() {
                 Ok(event) => {
-                    let Some(relay) = self.slot_to_url.get(&handle.slot).cloned() else {
+                    let Some((current, relay)) = self.slot_to_relay.get(&handle.slot).cloned()
+                    else {
                         self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
                         continue;
                     };
+                    if current != handle {
+                        self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                        continue;
+                    }
                     events.push((event, RelayObserved::new(relay, self.clock)));
                 }
                 Err(frame) => {
@@ -2954,9 +2982,12 @@ impl<S: EventStore> EngineCore<S> {
     fn on_relay_frame(&mut self, handle: TransportRelayHandle, frame: RelayFrame) -> Vec<Effect> {
         let mut effects = Vec::new();
         let msg = frame.into_message();
-        let Some(relay) = self.slot_to_url.get(&handle.slot).cloned() else {
+        let Some((current, relay)) = self.slot_to_relay.get(&handle.slot).cloned() else {
             return effects; // frame from a slot we never saw RelayConnected for.
         };
+        if current != handle {
+            return effects;
+        }
 
         match msg {
             RelayMessage::Event { event, .. } => {
@@ -4875,7 +4906,13 @@ mod relay_health_tests {
             ..RelayHealth::default()
         };
 
-        let effects = core.handle(EngineMsg::RelayHealth(7, health));
+        let effects = core.handle(EngineMsg::RelayHealth(
+            TransportRelayHandle {
+                slot: 7,
+                generation: 1,
+            },
+            health,
+        ));
         assert!(effects.iter().any(|effect| {
             matches!(effect, Effect::EmitDiagnostics(snapshot)
                 if snapshot.transport_degraded.as_deref()
