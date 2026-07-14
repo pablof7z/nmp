@@ -16,9 +16,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 /// Mobile/hosted default: enough for several simultaneous views plus a NIP-46
-/// session and receipts, while keeping the executor's contribution below the
-/// default relay envelope's worst-case live+retiring worker count. Hosts with
-/// a measured need can raise it explicitly; it is never inferred from CPUs.
+/// session and receipts, plus one concurrent NIP-11 acquisition, while
+/// keeping the executor's contribution below the default relay envelope's
+/// worst-case live+retiring worker count. Additional NIP-11 flights are
+/// synchronously and safely refused at the same zero-queue boundary. Hosts
+/// with a measured need can raise it explicitly; it is never inferred from
+/// CPUs.
 pub const DEFAULT_MAX_TASKS: usize = 12;
 
 static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
@@ -548,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn default_fits_representative_transient_peak_with_one_slot_headroom() {
+    fn default_fits_representative_transient_peak_plus_one_nip11_flight() {
         assert_eq!(DEFAULT_MAX_TASKS, 12);
         let executor = Executor::new(0).unwrap();
         for component in REPRESENTATIVE_COMPOSED_PEAK {
@@ -556,7 +559,7 @@ mod tests {
         }
         assert_eq!(executor.census().admitted, 11);
 
-        hold_task(&executor, "headroom");
+        hold_task(&executor, "NIP-11 acquisition");
         assert_eq!(executor.census().admitted, DEFAULT_MAX_TASKS);
         assert!(matches!(
             executor.reserve("beyond default"),

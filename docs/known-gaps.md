@@ -125,15 +125,21 @@ about current code:
   ingestion, and scheduler bounds do not yet share an explicit shortfall
   contract. Silent first-N behavior is forbidden.
 - **NIP-11 cache is process-local.** The engine now owns bounded one-shot
-  acquisition, per-relay single-flight, HTTP validators/freshness directives,
-  typed advisory limitation claims, raw JSON,
-  stale-on-error, explicit refresh, least-recently-used eviction at a fixed
-  256-relay bound, refusal of every HTTP redirect before its target is
-  contacted, and advertisement-vs-behavior capability evidence. The cache is
-  deliberately in memory for this first contract; a cold process does not
-  reuse the prior process's relay document. Runtime connection/AUTH state also
-  remains a separate concern: NIP-11 acquisition does not invent a polling
-  stream or claim that HTTP metadata is link state.
+  acquisition, per-relay single-flight, finite typed waiter admission, HTTP
+  validators/freshness directives, typed advisory limitation claims, raw JSON,
+  stale-on-error, explicit refresh, and least-recently-used retention at a
+  strict 256-document bound. Refreshing last-good documents count toward that
+  bound and remain available for stale-on-error; if all 256 are refreshing, a
+  257th fresh result is delivered but not retained. Fetches consume the shared
+  zero-queue native-task ceiling and use cancellable Hickory DNS plus HTTP under
+  one three-second deadline; engine shutdown closes every waiter and joins the
+  task even when app handles survive. Every redirect is refused before its
+  target is contacted. The cache is deliberately in memory for this first
+  contract; a cold process does not reuse the prior process's relay document.
+  Runtime connection/AUTH state also remains separate: NIP-11 acquisition does
+  not invent a polling stream or claim that HTTP metadata is link state. The
+  Kotlin package remains a desktop-JVM projection; this work does not add or
+  qualify an Android AAR.
 - **~~Destructive trust-domain reset is missing as a defined contract~~ CLOSED
   (#232).** `Engine::reset_persistent_store`, the UniFFI operation, and the
   Swift/Kotlin `NMPEngine.resetPersistentStore` projections idempotently remove

@@ -62,6 +62,8 @@ public enum NMPError: Error, Sendable, Equatable {
     case intentAlreadyConsumed
     /// No last-good NIP-11 document exists and acquisition failed.
     case relayInformationUnavailable(String)
+    /// One relay's in-flight NIP-11 waiter set is at its finite bound.
+    case relayInformationWaitersSaturated(capacity: UInt64)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -90,6 +92,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .NoActiveAccount: self = .noActiveAccount
         case .IntentAlreadyConsumed: self = .intentAlreadyConsumed
         case .RelayInformationUnavailable(let reason): self = .relayInformationUnavailable(reason)
+        case .RelayInformationWaitersSaturated(let capacity):
+            self = .relayInformationWaitersSaturated(capacity: capacity)
         }
     }
 }

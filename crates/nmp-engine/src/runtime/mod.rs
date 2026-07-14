@@ -59,12 +59,13 @@
 
 mod diagnostics_channel;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
@@ -224,6 +225,11 @@ mod publish_result_tests {
 /// down its own `Pool` clone on the way out (see `spawn`).
 enum Cmd {
     Engine(EngineMsg),
+    RelayInformationFetched {
+        url: RelayUrl,
+        generation: u64,
+        result: Box<Result<RelayInformationSnapshot, RelayInformationError>>,
+    },
     /// One ordered relay batch plus an applied acknowledgement. The bridge
     /// waits for this acknowledgement before draining another frame batch,
     /// propagating store/engine pressure back into the bounded pool queues.
@@ -635,13 +641,7 @@ impl EngineThread {
         pool_config.max_relays = cap;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-        let relay_information = RelayInformationService::try_new().map_err(|error| {
-            native_tasks.shutdown();
-            EngineThreadError::ThreadUnavailable {
-                component: "NIP-11 worker pool".to_string(),
-                reason: error.to_string(),
-            }
-        })?;
+        let relay_information = RelayInformationService::new(native_tasks.clone());
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let (pool_evt_tx, pool_evt_rx) =
             cb::bounded::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
@@ -1083,11 +1083,13 @@ mod relay_worker_reconciliation_tests {
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
         let native_tasks = nmp_executor::Executor::new(1).unwrap();
-        let relay_information = RelayInformationService::try_new().unwrap();
+        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
             native_tasks: &native_tasks,
+            nip11_decisions: &nip11_decisions,
         };
 
         let first = core.handle(EngineMsg::Subscribe(
@@ -1209,11 +1211,13 @@ mod relay_worker_reconciliation_tests {
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
         let native_tasks = nmp_executor::Executor::new(1).unwrap();
-        let relay_information = RelayInformationService::try_new().unwrap();
+        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
             native_tasks: &native_tasks,
+            nip11_decisions: &nip11_decisions,
         };
 
         dispatch_core_effects(
@@ -1284,6 +1288,103 @@ struct DispatchRuntime<'a> {
     self_inbox: &'a Sender<Cmd>,
     relay_information: &'a RelayInformationService,
     native_tasks: &'a nmp_executor::Executor,
+    nip11_decisions: &'a RefCell<Nip11DecisionState>,
+}
+
+#[derive(Default)]
+struct Nip11DecisionState {
+    next_generation: u64,
+    pending: HashMap<RelayUrl, Nip11Decision>,
+}
+
+struct Nip11Decision {
+    generation: u64,
+    deadline: Instant,
+    fallback_sent: bool,
+}
+
+impl Nip11DecisionState {
+    fn begin(&mut self, url: RelayUrl, now: Instant) -> u64 {
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let generation = self.next_generation;
+        self.pending.insert(
+            url,
+            Nip11Decision {
+                generation,
+                deadline: now + NIP11_DECISION_GRACE,
+                fallback_sent: false,
+            },
+        );
+        generation
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.pending
+            .values()
+            .filter(|decision| !decision.fallback_sent)
+            .map(|decision| decision.deadline)
+            .min()
+    }
+
+    fn take_due_fallbacks(&mut self, now: Instant) -> Vec<RelayUrl> {
+        let mut due = Vec::new();
+        for (url, decision) in &mut self.pending {
+            if !decision.fallback_sent && decision.deadline <= now {
+                decision.fallback_sent = true;
+                due.push(url.clone());
+            }
+        }
+        due
+    }
+
+    fn complete(&mut self, url: &RelayUrl, generation: u64) -> bool {
+        if !self
+            .pending
+            .get(url)
+            .is_some_and(|decision| decision.generation == generation)
+        {
+            return false;
+        }
+        self.pending.remove(url);
+        true
+    }
+
+    fn refuse(&mut self, url: &RelayUrl, generation: u64) {
+        if self
+            .pending
+            .get(url)
+            .is_some_and(|decision| decision.generation == generation)
+        {
+            self.pending.remove(url);
+        }
+    }
+}
+
+#[cfg(test)]
+mod nip11_decision_tests {
+    use super::*;
+
+    #[test]
+    fn grace_fallback_is_independent_and_eventual_completion_is_generation_guarded() {
+        let relay = RelayUrl::parse("wss://decision.example").unwrap();
+        let now = Instant::now();
+        let mut state = Nip11DecisionState::default();
+        let generation = state.begin(relay.clone(), now);
+
+        assert!(state
+            .take_due_fallbacks(now + NIP11_DECISION_GRACE - Duration::from_millis(1))
+            .is_empty());
+        assert_eq!(
+            state.take_due_fallbacks(now + NIP11_DECISION_GRACE),
+            vec![relay.clone()]
+        );
+        assert!(state
+            .take_due_fallbacks(now + NIP11_DECISION_GRACE + Duration::from_secs(1))
+            .is_empty());
+        assert!(!state.complete(&relay, generation.wrapping_add(1)));
+        assert!(state.complete(&relay, generation));
+        assert!(state.pending.is_empty());
+    }
 }
 
 /// The engine thread's body: construct `EngineCore` (this is the ONLY place
@@ -1335,10 +1436,12 @@ fn engine_loop<S, D>(
     let mut active_pubkey = None;
     let mut next_sign_event_id = 1u64;
     let mut sign_event_cancellations: HashMap<u64, Arc<SignEventTerminal>> = HashMap::new();
+    let nip11_decisions = RefCell::new(Nip11DecisionState::default());
     let dispatch_runtime = DispatchRuntime {
         self_inbox,
         relay_information: &relay_information,
         native_tasks,
+        nip11_decisions: &nip11_decisions,
     };
 
     // Recovery happens before the first externally-issued command. Pending
@@ -1357,30 +1460,62 @@ fn engine_loop<S, D>(
     );
 
     loop {
-        let cmd = match core.next_deadline() {
+        let core_wait = core
+            .next_deadline()
+            .map(|deadline| duration_until(deadline, Timestamp::now()));
+        let nip11_wait = nip11_decisions
+            .borrow()
+            .next_deadline()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let wait = match (core_wait, nip11_wait) {
+            (Some(core), Some(nip11)) => Some(core.min(nip11)),
+            (Some(wait), None) | (None, Some(wait)) => Some(wait),
+            (None, None) => None,
+        };
+        let cmd = match wait {
             None => match cmd_rx.recv() {
                 Ok(cmd) => cmd,
                 Err(_) => break, // every `Sender` (incl. `self_inbox`) is gone.
             },
-            Some(deadline) => match cmd_rx.recv_timeout(duration_until(deadline, Timestamp::now()))
-            {
+            Some(wait) => match cmd_rx.recv_timeout(wait) {
                 Ok(cmd) => cmd,
                 Err(RecvTimeoutError::Timeout) => {
-                    // Woke EXACTLY at the deadline (or it was already past,
-                    // e.g. boot-time catch-up on a persisted index) -- fire
-                    // the mechanism, then re-arm from the NEW next_deadline
-                    // rather than acting on the one that just fired.
-                    let effects = core.handle(EngineMsg::Tick(Timestamp::now()));
-                    dispatch_core_effects(
-                        &core,
-                        effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut diag_channels,
-                        &mut preambles,
-                        &registry,
-                        dispatch_runtime,
-                    );
+                    // The engine's wall-clock deadlines and NIP-11's
+                    // sub-second behavioral grace share this one event-driven
+                    // wait. Fire only the sources actually due, then re-arm.
+                    for url in nip11_decisions
+                        .borrow_mut()
+                        .take_due_fallbacks(Instant::now())
+                    {
+                        let effects = core.handle(EngineMsg::RelayInformationResolved(url, None));
+                        dispatch_core_effects(
+                            &core,
+                            effects,
+                            &pool,
+                            &mut row_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                    }
+                    let wall_now = Timestamp::now();
+                    if core
+                        .next_deadline()
+                        .is_some_and(|deadline| deadline <= wall_now)
+                    {
+                        let effects = core.handle(EngineMsg::Tick(wall_now));
+                        dispatch_core_effects(
+                            &core,
+                            effects,
+                            &pool,
+                            &mut row_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                    }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -1388,6 +1523,29 @@ fn engine_loop<S, D>(
         };
         match cmd {
             Cmd::Shutdown => break,
+            Cmd::RelayInformationFetched {
+                url,
+                generation,
+                result,
+            } => {
+                if !nip11_decisions.borrow_mut().complete(&url, generation) {
+                    continue;
+                }
+                let information = (*result)
+                    .ok()
+                    .map(|snapshot| snapshot.capability_evidence());
+                let effects = core.handle(EngineMsg::RelayInformationResolved(url, information));
+                dispatch_core_effects(
+                    &core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
             Cmd::RelayBatch { frames, applied } => {
                 let effects = core.handle(EngineMsg::RelayFrames(frames));
                 dispatch_core_effects(
@@ -1711,6 +1869,7 @@ fn engine_loop<S, D>(
     // Disconnecting the stop channel wakes the bridge if it is blocked on a
     // relay batch acknowledgement and wakes any bounded sink producer before
     // pool shutdown joins the translator.
+    relay_information.close();
     drop(pool_stop_tx);
     pool.shutdown();
 }
@@ -1853,35 +2012,31 @@ fn dispatch_effect(
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::Replay(url, reqs) => apply_replay(&url, reqs, pool, preambles),
         Effect::FetchRelayInformation(url) => {
-            let request = runtime
-                .relay_information
-                .request(url.clone(), RelayInformationCachePolicy::UseCache);
-            let Ok(receiver) = request else {
+            let generation = runtime
+                .nip11_decisions
+                .borrow_mut()
+                .begin(url.clone(), Instant::now());
+            let inbox = runtime.self_inbox.clone();
+            let callback_url = url.clone();
+            let result = runtime.relay_information.request_callback(
+                url.clone(),
+                RelayInformationCachePolicy::UseCache,
+                move |result| {
+                    let _ = inbox.send(Cmd::RelayInformationFetched {
+                        url: callback_url,
+                        generation,
+                        result: Box::new(result),
+                    });
+                },
+            );
+            if result.is_err() {
+                runtime
+                    .nip11_decisions
+                    .borrow_mut()
+                    .refuse(&url, generation);
                 let _ = runtime
                     .self_inbox
                     .send(Cmd::Engine(EngineMsg::RelayInformationResolved(url, None)));
-                return;
-            };
-            let (cancel_tx, cancel_rx) = cb::bounded::<()>(1);
-            let task_inbox = runtime.self_inbox.clone();
-            let refused_inbox = runtime.self_inbox.clone();
-            let refused_url = url.clone();
-            let result = runtime.native_tasks.spawn_with_cancel(
-                "engine-nip11-decision",
-                move || {
-                    let _ = cancel_tx.try_send(());
-                },
-                move || forward_relay_information_decision(receiver, cancel_rx, task_inbox, url),
-            );
-            if result.is_err() {
-                // The HTTP work remains bounded and may still populate the
-                // engine-owned cache, but zero-queue executor saturation must
-                // not delay the safe behavioral NIP-77 fallback or create an
-                // unowned waiter thread.
-                let _ = refused_inbox.send(Cmd::Engine(EngineMsg::RelayInformationResolved(
-                    refused_url,
-                    None,
-                )));
             }
         }
         Effect::PublishEvent(url, event, correlation) => {
@@ -2048,44 +2203,6 @@ fn dispatch_effect(
             };
             let text = neg_close_frame_text(&sub_id);
             let _ = pool.send(handle, WireFrame::Text(text));
-        }
-    }
-}
-
-fn forward_relay_information_decision(
-    receiver: cb::Receiver<Result<RelayInformationSnapshot, RelayInformationError>>,
-    cancelled: cb::Receiver<()>,
-    inbox: Sender<Cmd>,
-    url: RelayUrl,
-) {
-    let grace = cb::after(NIP11_DECISION_GRACE);
-    cb::select_biased! {
-        recv(cancelled) -> _ => return,
-        recv(receiver) -> result => {
-            let information = result
-                .ok()
-                .and_then(Result::ok)
-                .map(|snapshot| snapshot.capability_evidence());
-            let _ = inbox.send(Cmd::Engine(EngineMsg::RelayInformationResolved(url, information)));
-            return;
-        }
-        recv(grace) -> _ => {}
-    }
-
-    let _ = inbox.send(Cmd::Engine(EngineMsg::RelayInformationResolved(
-        url.clone(),
-        None,
-    )));
-    // Preserve the eventual advertisement/cache result; only the capability
-    // decision stopped waiting. Executor shutdown cancels this second wait
-    // immediately, so engine teardown never waits for the HTTP timeout.
-    cb::select_biased! {
-        recv(cancelled) -> _ => {}
-        recv(receiver) -> result => {
-            if let Ok(result) = result {
-                let information = result.ok().map(|snapshot| snapshot.capability_evidence());
-                let _ = inbox.send(Cmd::Engine(EngineMsg::RelayInformationResolved(url, information)));
-            }
         }
     }
 }

@@ -80,6 +80,9 @@ sealed class NMPError(message: String) : Exception(message) {
     data class RelayInformationUnavailable(val reason: String) :
         NMPError("relay information unavailable: $reason")
 
+    data class RelayInformationWaitersSaturated(val capacity: ULong) :
+        NMPError("relay information refused: per-relay waiter capacity $capacity is full")
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -106,6 +109,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.NoActiveAccount -> NoActiveAccount
                 is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
                 is FfiException.RelayInformationUnavailable -> RelayInformationUnavailable(ffi.reason)
+                is FfiException.RelayInformationWaitersSaturated ->
+                    RelayInformationWaitersSaturated(ffi.capacity)
             }
     }
 }
