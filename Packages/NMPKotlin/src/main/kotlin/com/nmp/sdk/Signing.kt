@@ -1,6 +1,5 @@
 package com.nmp.sdk
 
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -9,6 +8,12 @@ import uniffi.nmp_ffi.FfiSignedEvent
 import uniffi.nmp_ffi.FfiSignEventRequest
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.SignEventObserver
+
+private enum class SignEventTerminal {
+    OPEN,
+    COMPLETED,
+    CANCELLED,
+}
 
 /** Immutable sign-only event body; NMP freezes its author from active identity. */
 data class NMPUnsignedEvent(
@@ -56,11 +61,19 @@ internal suspend fun signEvent(
 ): NMPSignedEvent =
     suspendCancellableCoroutine { continuation ->
         val cancelOperation = AtomicReference<(() -> Unit)?>(null)
-        val cancellationRequested = AtomicBoolean(false)
+        val terminal = AtomicReference(SignEventTerminal.OPEN)
+
+        fun complete(result: Result<NMPSignedEvent>) {
+            if (terminal.compareAndSet(SignEventTerminal.OPEN, SignEventTerminal.COMPLETED)) {
+                cancelOperation.set(null)
+                continuation.resumeWith(result)
+            }
+        }
+
         val observer =
             object : SignEventObserver {
                 override fun onSigned(event: FfiSignedEvent) {
-                    continuation.tryResume(NMPSignedEvent(event))?.let(continuation::completeResume)
+                    complete(Result.success(NMPSignedEvent(event)))
                 }
 
                 override fun onFailed(failure: FfiSignEventFailure) {
@@ -75,22 +88,25 @@ internal suspend fun signEvent(
                             is FfiSignEventFailure.Cancelled ->
                                 CancellationException("sign operation cancelled")
                         }
-                    continuation.tryResumeWithException(error)?.let(continuation::completeResume)
+                    complete(Result.failure(error))
                 }
             }
 
         continuation.invokeOnCancellation {
-            cancellationRequested.set(true)
-            cancelOperation.get()?.invoke()
+            if (terminal.compareAndSet(SignEventTerminal.OPEN, SignEventTerminal.CANCELLED)) {
+                cancelOperation.getAndSet(null)?.invoke()
+            }
         }
 
         try {
             val cancel = start(event.toFfi(), observer)
             cancelOperation.set(cancel)
-            if (cancellationRequested.get()) {
-                cancel()
+            when (terminal.get()) {
+                SignEventTerminal.OPEN -> Unit
+                SignEventTerminal.COMPLETED -> cancelOperation.set(null)
+                SignEventTerminal.CANCELLED -> cancelOperation.getAndSet(null)?.invoke()
             }
         } catch (error: Throwable) {
-            continuation.tryResumeWithException(error)?.let(continuation::completeResume)
+            complete(Result.failure(error))
         }
     }

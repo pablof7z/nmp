@@ -1472,7 +1472,7 @@ fn engine_loop<S, D>(
                 let operation_id = next_sign_event_id;
                 next_sign_event_id = next_sign_event_id.wrapping_add(1).max(1);
                 let signer_result = match signer.sign(unsigned.clone()) {
-                    SignerOp::Ready(result) => SignEventSignerResult::Ready(result),
+                    SignerOp::Ready(result) => SignEventSignerResult::Ready(Box::new(result)),
                     SignerOp::Pending(pending) => {
                         let (receiver, cancel) = pending.into_parts();
                         terminal.install_adapter_cancel(cancel);
@@ -1496,7 +1496,7 @@ fn engine_loop<S, D>(
                 let inbox = self_inbox.clone();
                 starter.run(move || {
                     let signer_result = match signer_result {
-                        SignEventSignerResult::Ready(result) => Some(result),
+                        SignEventSignerResult::Ready(result) => Some(*result),
                         SignEventSignerResult::Pending(receiver) => cb::select! {
                             recv(cancelled) -> _ => None,
                             recv(receiver) -> result => Some(
@@ -2223,19 +2223,17 @@ pub struct SignEventOperation {
 }
 
 enum SignEventSignerResult {
-    Ready(Result<SignedEvent, nmp_signer::SignerError>),
+    Ready(Box<Result<SignedEvent, nmp_signer::SignerError>>),
     Pending(cb::Receiver<Result<SignedEvent, nmp_signer::SignerError>>),
 }
 
 impl SignEventOperation {
     pub fn recv(mut self) -> Result<SignedEvent, SignEventError> {
-        let result = self
-            .result
+        self.result
             .take()
             .expect("sign-event result is consumed exactly once")
             .recv()
-            .unwrap_or(Err(SignEventError::Cancelled));
-        result
+            .unwrap_or(Err(SignEventError::Cancelled))
     }
 
     #[must_use]
