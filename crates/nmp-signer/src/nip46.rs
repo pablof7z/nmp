@@ -1191,7 +1191,7 @@ mod tests {
     #[test]
     fn stale_auth_frame_cannot_mutate_reopened_nip46_generation() {
         let (pool_tx, _pool_rx) = mpsc::channel();
-        let pool = Pool::new(PoolConfig::default(), pool_tx);
+        let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
         let (event_tx, event_rx) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(vec![event_tx]));
         let mut worker = SessionWorker::new(
