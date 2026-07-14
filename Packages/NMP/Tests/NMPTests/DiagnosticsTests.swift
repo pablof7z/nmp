@@ -10,6 +10,25 @@ import XCTest
 @testable import NMP
 
 final class DiagnosticsTests: XCTestCase {
+    func testNativeExecutorSaturationIsTypedAndCancellationReturnsExactBaseline() throws {
+        let engine = try NMPEngine(config: NMPConfig(maxNativeTasks: 1))
+        defer { engine.shutdown() }
+
+        let held = try engine.observeDiagnostics()
+        XCTAssertEqual(engine.nativeTaskCensus().admitted, 1)
+        XCTAssertThrowsError(try engine.observeDiagnostics()) { error in
+            XCTAssertEqual(
+                error as? NMPError,
+                .executorSaturated(component: "diagnostics-observer", capacity: 1)
+            )
+        }
+
+        held.cancel()
+        engine.awaitNativeTasksIdle()
+        XCTAssertEqual(engine.nativeTaskCensus().admitted, 0)
+        XCTAssertEqual(engine.nativeTaskCensus().running, 0)
+    }
+
     /// #442: construction/shutdown is an exact join barrier. Repeating the
     /// full native path must not accumulate verifier, relay, bridge, or
     /// runtime threads between engine lifetimes.

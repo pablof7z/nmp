@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
 use std::time::Duration;
 
 use nmp::{
@@ -60,6 +59,7 @@ pub enum FollowActionFailure {
     EngineClosed,
     ReceiptUnavailable,
     ThreadUnavailable { component: String, reason: String },
+    ExecutorSaturated { component: String, capacity: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,24 +288,27 @@ pub fn observe_following(
     engine: Arc<Engine>,
     target: PublicKey,
 ) -> Result<FollowObservation, nmp::EngineError> {
-    observe_following_with_spawn(engine, target, |builder, task| builder.spawn(task))
+    let task_cancel = engine.native_task_cancel()?;
+    observe_following_with_spawn(engine, target, move |reservation, task| {
+        reservation
+            .spawn_with_cancel(move || task_cancel.cancel(), task)
+            .map_err(|error| io::Error::other(error.to_string()))
+    })
 }
 
 fn observe_following_with_spawn(
     engine: Arc<Engine>,
     target: PublicKey,
-    spawn: impl FnOnce(
-        thread::Builder,
-        Box<dyn FnOnce() + Send + 'static>,
-    ) -> io::Result<thread::JoinHandle<()>>,
+    spawn: impl FnOnce(nmp::NativeTaskReservation, Box<dyn FnOnce() + Send + 'static>) -> io::Result<()>,
 ) -> Result<FollowObservation, nmp::EngineError> {
+    let reservation = engine.reserve_native_task("NIP-02 follow observer")?;
     let subscription = engine.observe(nmp::LiveQuery(active_account_demand()))?;
     let cancel = subscription.cancel_handle();
     let latest = Arc::new(LatestSlot::default());
     let producer = latest.clone();
 
     if let Err(error) = spawn(
-        thread::Builder::new().name("nmp-nip02-follow-observer".to_string()),
+        reservation,
         Box::new(move || {
             let mut accumulator = Accumulator::default();
             while let Ok((deltas, evidence)) = subscription.recv() {
@@ -336,25 +339,48 @@ pub struct FollowAction {
 pub struct FollowActionRunner {
     task: Box<dyn FnOnce() + Send + 'static>,
     failures: Sender<FollowActionStatus>,
+    reservation: Result<nmp::NativeTaskReservation, nmp::EngineError>,
+    cancellation: Result<nmp::NativeTaskCancel, nmp::EngineError>,
 }
 
 impl FollowActionRunner {
     pub fn start(self) {
-        self.start_with(|builder, task| builder.spawn(task));
+        self.start_with(|reservation, cancellation, task| {
+            reservation
+                .spawn_with_cancel(move || cancellation.cancel(), task)
+                .map_err(|error| io::Error::other(error.to_string()))
+        });
     }
 
     fn start_with(
         self,
         spawn: impl FnOnce(
-            thread::Builder,
+            nmp::NativeTaskReservation,
+            nmp::NativeTaskCancel,
             Box<dyn FnOnce() + Send + 'static>,
-        ) -> io::Result<thread::JoinHandle<()>>,
+        ) -> io::Result<()>,
     ) {
-        let Self { task, failures } = self;
-        if let Err(error) = spawn(
-            thread::Builder::new().name("nmp-nip02-follow-action".to_string()),
+        let Self {
             task,
-        ) {
+            failures,
+            reservation,
+            cancellation,
+        } = self;
+        let reservation = match reservation {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let _ = failures.send(FollowActionStatus::Failed(engine_failure(error)));
+                return;
+            }
+        };
+        let cancellation = match cancellation {
+            Ok(cancellation) => cancellation,
+            Err(error) => {
+                let _ = failures.send(FollowActionStatus::Failed(engine_failure(error)));
+                return;
+            }
+        };
+        if let Err(error) = spawn(reservation, cancellation, task) {
             let _ = failures.send(FollowActionStatus::Failed(
                 FollowActionFailure::ThreadUnavailable {
                     component: "NIP-02 follow action".to_string(),
@@ -417,6 +443,8 @@ fn prepare_set_following_with_timeout(
 ) -> (FollowAction, FollowActionRunner) {
     let (tx, rx) = mpsc::channel();
     let failures = tx.clone();
+    let reservation = engine.reserve_native_task("NIP-02 follow action");
+    let cancellation = engine.native_task_cancel();
     let task = Box::new(move || {
         let _ = tx.send(FollowActionStatus::Acquiring);
         let author = match engine.active_account() {
@@ -547,7 +575,12 @@ fn prepare_set_following_with_timeout(
     });
     (
         FollowAction { statuses: rx },
-        FollowActionRunner { task, failures },
+        FollowActionRunner {
+            task,
+            failures,
+            reservation,
+            cancellation,
+        },
     )
 }
 
@@ -556,6 +589,13 @@ fn engine_failure(error: nmp::EngineError) -> FollowActionFailure {
         nmp::EngineError::ThreadUnavailable { component, reason } => {
             FollowActionFailure::ThreadUnavailable { component, reason }
         }
+        nmp::EngineError::ExecutorSaturated {
+            component,
+            capacity,
+        } => FollowActionFailure::ExecutorSaturated {
+            component,
+            capacity,
+        },
         _ => FollowActionFailure::EngineClosed,
     }
 }
@@ -594,7 +634,7 @@ mod tests {
             FollowChange::Follow,
             Duration::from_millis(10),
         );
-        runner.start_with(|_, task| {
+        runner.start_with(|_, _, task| {
             drop(task);
             Err(io::Error::new(
                 io::ErrorKind::WouldBlock,

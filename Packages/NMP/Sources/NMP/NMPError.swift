@@ -31,6 +31,7 @@ public enum NMPError: Error, Sendable, Equatable {
     case storeOpenFailed(String)
     case storeResetFailed(String)
     case threadUnavailable(component: String, reason: String)
+    case executorSaturated(component: String, capacity: UInt64)
     case invalidSignature(String)
     case engineClosed
     /// `decodeNostrEntity`'s input was not valid bech32, had an
@@ -69,6 +70,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .StoreResetFailed(let reason): self = .storeResetFailed(reason)
         case .ThreadUnavailable(let component, let reason):
             self = .threadUnavailable(component: component, reason: reason)
+        case .ExecutorSaturated(let component, let capacity):
+            self = .executorSaturated(component: component, capacity: capacity)
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed
         case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)

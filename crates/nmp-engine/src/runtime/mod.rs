@@ -94,6 +94,7 @@ struct EnginePoolSink {
 struct EnginePoolRuntime {
     pool: Pool,
     stop: cb::Sender<()>,
+    native_tasks: nmp_executor::Executor,
 }
 
 impl nmp_transport::PoolEventSink for EnginePoolSink {
@@ -324,6 +325,7 @@ impl SignerRegistry {
 pub struct EngineThread {
     engine_join: Option<JoinHandle<()>>,
     bridge_join: Option<JoinHandle<()>>,
+    native_tasks: nmp_executor::Executor,
 }
 
 #[cfg(test)]
@@ -401,13 +403,41 @@ impl EngineThread {
         store: S,
         directory: D,
         cap: usize,
-        mut pool_config: PoolConfig,
+        pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
     ) -> Result<(Self, Handle), EngineThreadError>
     where
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
+        Self::spawn_with_native_task_limit(
+            store,
+            directory,
+            cap,
+            pool_config,
+            admission,
+            nmp_executor::DEFAULT_MAX_TASKS,
+        )
+    }
+
+    pub fn spawn_with_native_task_limit<S, D>(
+        store: S,
+        directory: D,
+        cap: usize,
+        mut pool_config: PoolConfig,
+        admission: RelayAdmissionPolicy,
+        max_native_tasks: usize,
+    ) -> Result<(Self, Handle), EngineThreadError>
+    where
+        S: EventStore + Send + 'static,
+        D: RelayDirectory + Send + 'static,
+    {
+        let native_tasks = nmp_executor::Executor::new(max_native_tasks).map_err(|error| {
+            EngineThreadError::ThreadUnavailable {
+                component: "native task executor".to_string(),
+                reason: error.to_string(),
+            }
+        })?;
         // One limit owns both compilation and connection admission. Legacy
         // zero values select the finite default; conflicting mechanism-test
         // inputs fail closed to the smaller non-zero ceiling.
@@ -427,14 +457,19 @@ impl EngineThread {
         // The pool's OWN mio worker threads + translator thread are interior
         // to `Pool` (harvested, HARVEST-justified in nmp-transport's own
         // docs) — this crate never touches mio/tungstenite directly.
-        let pool = Pool::new(
+        let pool = match Pool::new(
             pool_config,
             EnginePoolSink {
                 events: pool_evt_tx,
                 stopping: pool_stop_rx.clone(),
             },
-        )
-        .map_err(pool_build_error)?;
+        ) {
+            Ok(pool) => pool,
+            Err(error) => {
+                native_tasks.shutdown();
+                return Err(pool_build_error(error));
+            }
+        };
 
         let bridge_inbox = cmd_tx.clone();
         let bridge_join = match thread::Builder::new()
@@ -447,6 +482,7 @@ impl EngineThread {
             Ok(join) => join,
             Err(error) => {
                 pool.shutdown();
+                native_tasks.shutdown();
                 return Err(EngineThreadError::ThreadUnavailable {
                     component: "engine pool bridge".to_string(),
                     reason: error.to_string(),
@@ -457,6 +493,7 @@ impl EngineThread {
         let self_inbox = cmd_tx.clone();
         let engine_pool = pool.clone();
         let engine_stop = pool_stop_tx.clone();
+        let engine_native_tasks = native_tasks.clone();
         let engine_join =
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
@@ -471,6 +508,7 @@ impl EngineThread {
                         EnginePoolRuntime {
                             pool: engine_pool,
                             stop: engine_stop,
+                            native_tasks: engine_native_tasks,
                         },
                         &cmd_rx,
                         &self_inbox,
@@ -481,6 +519,7 @@ impl EngineThread {
                     drop(pool_stop_tx);
                     pool.shutdown();
                     let _ = bridge_join.join();
+                    native_tasks.shutdown();
                     return Err(EngineThreadError::ThreadUnavailable {
                         component: "engine runtime".to_string(),
                         reason: error.to_string(),
@@ -493,6 +532,7 @@ impl EngineThread {
             Self {
                 engine_join: Some(engine_join),
                 bridge_join: Some(bridge_join),
+                native_tasks,
             },
             Handle { inbox: cmd_tx },
         ))
@@ -512,6 +552,11 @@ impl EngineThread {
         if let Some(h) = self.bridge_join.take() {
             let _ = h.join();
         }
+        self.native_tasks.shutdown();
+    }
+
+    pub fn native_tasks(&self) -> nmp_executor::Executor {
+        self.native_tasks.clone()
     }
 }
 
@@ -838,6 +883,7 @@ mod relay_worker_reconciliation_tests {
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
+        let native_tasks = nmp_executor::Executor::new(1).unwrap();
 
         let first = core.handle(EngineMsg::Subscribe(
             query(&author_a),
@@ -859,6 +905,7 @@ mod relay_worker_reconciliation_tests {
             &mut preambles,
             &registry,
             &self_inbox,
+            &native_tasks,
         );
         assert!(pool.live_handle(&relay_a).is_some());
 
@@ -872,6 +919,7 @@ mod relay_worker_reconciliation_tests {
             &mut preambles,
             &registry,
             &self_inbox,
+            &native_tasks,
         );
         assert!(
             pool.live_handle(&relay_a).is_none(),
@@ -891,6 +939,7 @@ mod relay_worker_reconciliation_tests {
             &mut preambles,
             &registry,
             &self_inbox,
+            &native_tasks,
         );
         assert!(
             pool.live_handle(&relay_b).is_some(),
@@ -903,6 +952,7 @@ mod relay_worker_reconciliation_tests {
         );
 
         pool.shutdown();
+        native_tasks.shutdown();
     }
 
     /// Exact read reconciliation must not evict a worker owned only by a
@@ -956,6 +1006,7 @@ mod relay_worker_reconciliation_tests {
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
+        let native_tasks = nmp_executor::Executor::new(1).unwrap();
 
         dispatch_core_effects(
             &core,
@@ -966,6 +1017,7 @@ mod relay_worker_reconciliation_tests {
             &mut preambles,
             &registry,
             &self_inbox,
+            &native_tasks,
         );
         assert!(pool.live_handle(&relay).is_some());
 
@@ -978,6 +1030,7 @@ mod relay_worker_reconciliation_tests {
             &mut preambles,
             &registry,
             &self_inbox,
+            &native_tasks,
         );
         assert!(
             pool.live_handle(&relay).is_some(),
@@ -985,6 +1038,7 @@ mod relay_worker_reconciliation_tests {
         );
 
         pool.shutdown();
+        native_tasks.shutdown();
     }
 }
 
@@ -1055,7 +1109,9 @@ fn engine_loop<S, D>(
     let EnginePoolRuntime {
         pool,
         stop: pool_stop_tx,
+        native_tasks,
     } = pool_runtime;
+    let native_tasks = &native_tasks;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
@@ -1076,6 +1132,7 @@ fn engine_loop<S, D>(
         &mut preambles,
         &registry,
         self_inbox,
+        native_tasks,
     );
 
     loop {
@@ -1102,6 +1159,7 @@ fn engine_loop<S, D>(
                         &mut preambles,
                         &registry,
                         self_inbox,
+                        native_tasks,
                     );
                     continue;
                 }
@@ -1121,6 +1179,7 @@ fn engine_loop<S, D>(
                     &mut preambles,
                     &registry,
                     self_inbox,
+                    native_tasks,
                 );
                 let _ = applied.send(());
             }
@@ -1138,6 +1197,7 @@ fn engine_loop<S, D>(
                         &mut preambles,
                         &registry,
                         self_inbox,
+                        native_tasks,
                     );
                 }
             }
@@ -1192,6 +1252,7 @@ fn engine_loop<S, D>(
                     &mut preambles,
                     &registry,
                     self_inbox,
+                    native_tasks,
                 );
             }
             Cmd::Subscribe { query, reply } => {
@@ -1221,6 +1282,7 @@ fn engine_loop<S, D>(
                         &mut preambles,
                         &registry,
                         self_inbox,
+                        native_tasks,
                     );
                     let _ = reply.send(Err(error));
                     continue;
@@ -1240,6 +1302,7 @@ fn engine_loop<S, D>(
                         &mut preambles,
                         &registry,
                         self_inbox,
+                        native_tasks,
                     );
                     continue;
                 }
@@ -1252,6 +1315,7 @@ fn engine_loop<S, D>(
                     &mut preambles,
                     &registry,
                     self_inbox,
+                    native_tasks,
                 );
             }
             Cmd::RelayWorkerRetired => {
@@ -1270,6 +1334,7 @@ fn engine_loop<S, D>(
                     &mut preambles,
                     &registry,
                     self_inbox,
+                    native_tasks,
                 );
             }
             Cmd::Engine(EngineMsg::SetActivePubkey(pk)) => {
@@ -1285,6 +1350,7 @@ fn engine_loop<S, D>(
                     &mut preambles,
                     &registry,
                     self_inbox,
+                    native_tasks,
                 );
             }
             Cmd::Engine(EngineMsg::Publish(intent, sink)) => {
@@ -1303,6 +1369,7 @@ fn engine_loop<S, D>(
                     &mut preambles,
                     &registry,
                     self_inbox,
+                    native_tasks,
                 );
             }
             Cmd::Engine(msg) => {
@@ -1316,6 +1383,7 @@ fn engine_loop<S, D>(
                     &mut preambles,
                     &registry,
                     self_inbox,
+                    native_tasks,
                 );
             }
         }
@@ -1351,6 +1419,7 @@ fn dispatch_core_effects<S: EventStore>(
     preambles: &mut Preambles,
     registry: &SignerRegistry,
     self_inbox: &Sender<Cmd>,
+    native_tasks: &nmp_executor::Executor,
 ) {
     if let Some(required) = core.required_relay_workers() {
         for event in pool.close_unrequired(&required) {
@@ -1369,6 +1438,7 @@ fn dispatch_core_effects<S: EventStore>(
         preambles,
         registry,
         self_inbox,
+        native_tasks,
     );
 }
 
@@ -1430,6 +1500,9 @@ fn retry_required_relay_workers<S: EventStore>(
 }
 
 /// Execute every `Effect` `EngineCore::handle` returned, in order.
+// Deliberately spells out each reviewed runtime destination so effect routing
+// cannot acquire hidden mutable state.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_effects(
     effects: Vec<Effect>,
     pool: &Pool,
@@ -1438,6 +1511,7 @@ fn dispatch_effects(
     preambles: &mut Preambles,
     registry: &SignerRegistry,
     self_inbox: &Sender<Cmd>,
+    native_tasks: &nmp_executor::Executor,
 ) {
     for effect in effects {
         dispatch_effect(
@@ -1448,10 +1522,14 @@ fn dispatch_effects(
             preambles,
             registry,
             self_inbox,
+            native_tasks,
         );
     }
 }
 
+// Deliberately mirrors `dispatch_effects`; each destination remains explicit
+// at the one-effect boundary where its ownership is audited.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_effect(
     effect: Effect,
     pool: &Pool,
@@ -1460,6 +1538,7 @@ fn dispatch_effect(
     preambles: &mut Preambles,
     registry: &SignerRegistry,
     self_inbox: &Sender<Cmd>,
+    native_tasks: &nmp_executor::Executor,
 ) {
     match effect {
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
@@ -1506,14 +1585,34 @@ fn dispatch_effect(
                     // and keeps the engine thread itself from ever blocking
                     // on a remote signer round-trip.
                     let inbox = self_inbox.clone();
-                    let result = thread::Builder::new()
-                        .name("nmp-engine-signer-waiter".to_string())
-                        .spawn(move || {
-                            let result = pending.recv();
+                    let (pending_rx, cancel) = pending.into_parts();
+                    let cancel = std::sync::Arc::new(std::sync::Mutex::new(cancel));
+                    let shutdown_cancel = std::sync::Arc::clone(&cancel);
+                    let completion_cancel = std::sync::Arc::clone(&cancel);
+                    let result = native_tasks.spawn_with_cancel(
+                        "engine-signer-waiter",
+                        move || {
+                            if let Some(cancel) = shutdown_cancel
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .take()
+                            {
+                                cancel();
+                            }
+                        },
+                        move || {
+                            let result = pending_rx
+                                .recv()
+                                .unwrap_or(Err(nmp_signer::SignerError::Disconnected));
+                            completion_cancel
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .take();
                             let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
                                 id, generation, result,
                             )));
-                        });
+                        },
+                    );
                     if result.is_err() {
                         let _ = self_inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
                             id,

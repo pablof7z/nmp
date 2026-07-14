@@ -3,7 +3,8 @@
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
-type Cancel = Box<dyn FnOnce() + Send + 'static>;
+#[doc(hidden)]
+pub type PendingCancel = Box<dyn FnOnce() + Send + 'static>;
 
 /// One cancellable asynchronous signer result.
 ///
@@ -13,11 +14,11 @@ type Cancel = Box<dyn FnOnce() + Send + 'static>;
 /// sends a response.
 pub struct PendingSignerOp<T: Send + 'static> {
     receiver: Option<Receiver<Result<T, SignerError>>>,
-    cancel: Option<Cancel>,
+    cancel: Option<PendingCancel>,
 }
 
 impl<T: Send + 'static> PendingSignerOp<T> {
-    fn new(receiver: Receiver<Result<T, SignerError>>, cancel: Option<Cancel>) -> Self {
+    fn new(receiver: Receiver<Result<T, SignerError>>, cancel: Option<PendingCancel>) -> Self {
         Self {
             receiver: Some(receiver),
             cancel,
@@ -78,7 +79,8 @@ impl<T: Send + 'static> PendingSignerOp<T> {
         }
     }
 
-    pub(crate) fn into_parts(mut self) -> (Receiver<Result<T, SignerError>>, Option<Cancel>) {
+    #[doc(hidden)]
+    pub fn into_parts(mut self) -> (Receiver<Result<T, SignerError>>, Option<PendingCancel>) {
         let receiver = self
             .receiver
             .take()
@@ -143,7 +145,7 @@ impl<T: Send + 'static> SignerOp<T> {
 
     pub(crate) fn pending_from_parts(
         receiver: Receiver<Result<T, SignerError>>,
-        cancel: Option<Cancel>,
+        cancel: Option<PendingCancel>,
     ) -> Self {
         Self::Pending(PendingSignerOp::new(receiver, cancel))
     }

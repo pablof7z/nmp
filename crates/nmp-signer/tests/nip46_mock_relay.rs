@@ -1,11 +1,11 @@
 use std::net::TcpListener;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use nmp_signer::{
-    CryptoCapability, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation, Nip46Signer,
-    SignerError, SignerOp, SigningCapability,
+    CryptoCapability, Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent,
+    Nip46Invitation, Nip46Signer, SignerError, SignerOp, SigningCapability,
 };
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -192,7 +192,8 @@ fn spawn_mock_remote_signer(
     (relay_url, remote_signer, user, seen_rx)
 }
 
-fn spawn_unresponsive_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<()>) {
+fn spawn_unresponsive_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<()>, mpsc::Receiver<()>)
+{
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let relay_url = format!("ws://{}", listener.local_addr().unwrap());
     let remote = Keys::generate();
@@ -200,6 +201,7 @@ fn spawn_unresponsive_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<()>
     let remote_thread = remote.clone();
     let user_thread = user.clone();
     let (closed_tx, closed_rx) = mpsc::channel();
+    let (sign_seen_tx, sign_seen_rx) = mpsc::channel();
 
     thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
@@ -226,7 +228,11 @@ fn spawn_unresponsive_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<()>
                     let result = match method {
                         "connect" => Some("ack".to_string()),
                         "get_public_key" => Some(user_thread.public_key().to_hex()),
-                        "switch_relays" | "sign_event" => None,
+                        "switch_relays" => None,
+                        "sign_event" => {
+                            let _ = sign_seen_tx.send(());
+                            None
+                        }
                         other => panic!("unexpected method {other}"),
                     };
                     if let Some(result) = result {
@@ -245,7 +251,7 @@ fn spawn_unresponsive_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<()>
         let _ = closed_tx.send(());
     });
 
-    (relay_url, remote, user, closed_rx)
+    (relay_url, remote, user, closed_rx, sign_seen_rx)
 }
 
 #[test]
@@ -436,8 +442,91 @@ fn unavailable_signer_operation_is_retryable() {
 }
 
 #[test]
+fn engine_associated_connection_and_signing_peak_is_six_executor_tasks() {
+    let (relay, remote, user, _closed, sign_seen) = spawn_unresponsive_remote_signer();
+    let uri = format!(
+        "bunker://{}?relay={}&secret=executor-peak",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+    );
+    let executor = nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).unwrap();
+    let cancellation = Nip46Cancellation::default();
+    let shutdown_cancellation = cancellation.clone();
+    let connect_cancellation = cancellation.clone();
+    let connect_executor = executor.clone();
+    let (signer_tx, signer_rx) = mpsc::channel();
+    let (release_connection_tx, release_connection_rx) = mpsc::channel();
+
+    executor
+        .spawn_with_cancel(
+            "NIP-46 connection",
+            move || {
+                shutdown_cancellation.cancel();
+                let _ = release_connection_tx.send(());
+            },
+            move || {
+                let signer = Nip46Signer::connect_bunker_observed_with_executor_and_cancellation(
+                    &uri,
+                    None,
+                    Nip46ClientMetadata::default(),
+                    Duration::from_secs(5),
+                    Arc::new(|_| {}),
+                    &connect_cancellation,
+                    connect_executor,
+                )
+                .unwrap();
+                signer_tx.send(signer).unwrap();
+                let _ = release_connection_rx.recv();
+            },
+        )
+        .unwrap();
+    let signer = signer_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_003),
+        Kind::TextNote,
+        Vec::new(),
+        "held signing peak",
+    );
+    let pending = match signer.sign(unsigned) {
+        SignerOp::Pending(pending) => pending,
+        SignerOp::Ready(_) => panic!("remote signing must be pending"),
+    };
+    sign_seen
+        .recv_timeout(Duration::from_secs(2))
+        .expect("mock signer must receive the held sign request");
+
+    let (pending_rx, cancel) = pending.into_parts();
+    let cancel = Arc::new(Mutex::new(cancel));
+    let shutdown_cancel = Arc::clone(&cancel);
+    executor
+        .spawn_with_cancel(
+            "engine signer waiter",
+            move || {
+                if let Some(cancel) = shutdown_cancel.lock().unwrap().take() {
+                    cancel();
+                }
+            },
+            move || {
+                let _ = pending_rx.recv();
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        executor.census().admitted,
+        6,
+        "connection, session, event-forward, switch-relays, mapper, and engine waiter"
+    );
+    executor.shutdown();
+    assert_eq!(executor.census().admitted, 0);
+    assert_eq!(executor.census().running, 0);
+    drop(signer);
+}
+
+#[test]
 fn ignored_switch_relays_cannot_keep_the_session_alive_after_signer_drop() {
-    let (relay, remote, _user, closed) = spawn_unresponsive_remote_signer();
+    let (relay, remote, _user, closed, _sign_seen) = spawn_unresponsive_remote_signer();
     let uri = format!(
         "bunker://{}?relay={}&secret=ignored-switch",
         remote.public_key().to_hex(),
@@ -454,7 +543,7 @@ fn ignored_switch_relays_cannot_keep_the_session_alive_after_signer_drop() {
 
 #[test]
 fn abandoned_remote_operations_release_every_bounded_pending_slot() {
-    let (relay, remote, user, _closed) = spawn_unresponsive_remote_signer();
+    let (relay, remote, user, _closed, _sign_seen) = spawn_unresponsive_remote_signer();
     let uri = format!(
         "bunker://{}?relay={}&secret=abandoned-ops",
         remote.public_key().to_hex(),

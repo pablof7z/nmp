@@ -27,6 +27,8 @@ data class NMPConfig(
      * under the 2-relay-min, suppressed when `appRelays` is non-empty.
      * Default empty. */
     val fallbackRelays: List<String> = emptyList(),
+    /** Finite zero-queue native observer/action/waiter ceiling. */
+    val maxNativeTasks: UInt = 12u,
 ) {
     fun toFfi(): NmpEngineConfig =
         NmpEngineConfig(
@@ -34,6 +36,7 @@ data class NMPConfig(
             indexerRelays = indexerRelays,
             appRelays = appRelays,
             fallbackRelays = fallbackRelays,
+            maxNativeTasks = maxNativeTasks,
         )
 }
 
@@ -85,6 +88,10 @@ class NMPEngine(
 
     /** The Rust-owned account currently rooting reactive identity and writes. */
     fun activeAccount(): String? = nmpRethrowing { ffi.activeAccount() }
+
+    internal fun nativeTaskCensus() = ffi.nativeTaskCensus()
+
+    internal fun awaitNativeTasksIdle() = ffi.awaitNativeTasksIdle()
 
     /** Remove the plaintext checkpoint. The live signer remains until close. */
     fun clearPersistedAccount() = localAccountStore?.clear()
