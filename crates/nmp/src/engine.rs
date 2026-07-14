@@ -27,9 +27,6 @@ use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::relay_information::{
-    RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
-};
 use nmp_engine::runtime::{
     EngineThread, Handle, ReceiptReattachment, ReceiptStream, SignEventError, SignEventOperation,
     SignerRegistration,
@@ -43,6 +40,9 @@ use nostr::{Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::config::{build_admission_policy, build_directory, EngineConfig};
 use crate::error::EngineError;
+use crate::relay_information::{
+    RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
+};
 use crate::subscription::{DiagnosticsSubscription, Subscription};
 
 /// The open state: the `Handle` verbs are driven through, plus the
@@ -494,9 +494,12 @@ impl Engine {
             )?
         };
         handle
-            .relay_information_async(relay, policy)
+            .relay_information_async(relay, policy.into_engine())
             .await
-            .map_err(RelayInformationRequestError::Acquisition)
+            .map(RelayInformationSnapshot::from_engine)
+            .map_err(|error| {
+                RelayInformationRequestError::Acquisition(RelayInformationError::from_engine(error))
+            })
     }
 
     /// Stop the engine. Idempotent: a second call (or a call racing another

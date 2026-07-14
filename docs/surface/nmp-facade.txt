@@ -39,12 +39,6 @@ pub use nmp::ReceiptId
 pub use nmp::ReceiptReattachment
 pub use nmp::ReceiptStream
 pub use nmp::RelayDiagnosticsSnapshot
-pub use nmp::RelayInformationCachePolicy
-pub use nmp::RelayInformationDocument
-pub use nmp::RelayInformationError
-pub use nmp::RelayInformationFreshness
-pub use nmp::RelayInformationLimitations
-pub use nmp::RelayInformationSnapshot
 pub use nmp::RelayUrl
 pub use nmp::Row
 pub use nmp::RowDelta
@@ -107,8 +101,79 @@ impl core::marker::Unpin for nmp::EngineError
 impl core::marker::UnsafeUnpin for nmp::EngineError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineError
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineError
+pub enum nmp::RelayInformationCachePolicy
+pub nmp::RelayInformationCachePolicy::Refresh
+pub nmp::RelayInformationCachePolicy::UseCache
+impl core::clone::Clone for nmp::RelayInformationCachePolicy
+pub fn nmp::RelayInformationCachePolicy::clone(&self) -> nmp::RelayInformationCachePolicy
+impl core::cmp::Eq for nmp::RelayInformationCachePolicy
+impl core::cmp::PartialEq for nmp::RelayInformationCachePolicy
+pub fn nmp::RelayInformationCachePolicy::eq(&self, &nmp::RelayInformationCachePolicy) -> bool
+impl core::fmt::Debug for nmp::RelayInformationCachePolicy
+pub fn nmp::RelayInformationCachePolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::RelayInformationCachePolicy
+impl core::marker::StructuralPartialEq for nmp::RelayInformationCachePolicy
+impl core::marker::Freeze for nmp::RelayInformationCachePolicy
+impl core::marker::Send for nmp::RelayInformationCachePolicy
+impl core::marker::Sync for nmp::RelayInformationCachePolicy
+impl core::marker::Unpin for nmp::RelayInformationCachePolicy
+impl core::marker::UnsafeUnpin for nmp::RelayInformationCachePolicy
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationCachePolicy
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationCachePolicy
+pub enum nmp::RelayInformationError
+pub nmp::RelayInformationError::CredentialedRelayUrl
+pub nmp::RelayInformationError::ExecutorSaturated
+pub nmp::RelayInformationError::ExecutorSaturated::capacity: usize
+pub nmp::RelayInformationError::Http
+pub nmp::RelayInformationError::Http::reason: alloc::string::String
+pub nmp::RelayInformationError::InvalidDocument
+pub nmp::RelayInformationError::InvalidDocument::reason: alloc::string::String
+pub nmp::RelayInformationError::ResponseTooLarge
+pub nmp::RelayInformationError::ResponseTooLarge::limit_bytes: u64
+pub nmp::RelayInformationError::ServiceClosed
+pub nmp::RelayInformationError::ThreadUnavailable
+pub nmp::RelayInformationError::ThreadUnavailable::reason: alloc::string::String
+pub nmp::RelayInformationError::WaiterSaturated
+pub nmp::RelayInformationError::WaiterSaturated::capacity: usize
+impl core::clone::Clone for nmp::RelayInformationError
+pub fn nmp::RelayInformationError::clone(&self) -> nmp::RelayInformationError
+impl core::cmp::Eq for nmp::RelayInformationError
+impl core::cmp::PartialEq for nmp::RelayInformationError
+pub fn nmp::RelayInformationError::eq(&self, &nmp::RelayInformationError) -> bool
+impl core::error::Error for nmp::RelayInformationError
+impl core::fmt::Debug for nmp::RelayInformationError
+pub fn nmp::RelayInformationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::RelayInformationError
+pub fn nmp::RelayInformationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RelayInformationError
+impl core::marker::Freeze for nmp::RelayInformationError
+impl core::marker::Send for nmp::RelayInformationError
+impl core::marker::Sync for nmp::RelayInformationError
+impl core::marker::Unpin for nmp::RelayInformationError
+impl core::marker::UnsafeUnpin for nmp::RelayInformationError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationError
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationError
+pub enum nmp::RelayInformationFreshness
+pub nmp::RelayInformationFreshness::Fresh
+pub nmp::RelayInformationFreshness::Stale
+impl core::clone::Clone for nmp::RelayInformationFreshness
+pub fn nmp::RelayInformationFreshness::clone(&self) -> nmp::RelayInformationFreshness
+impl core::cmp::Eq for nmp::RelayInformationFreshness
+impl core::cmp::PartialEq for nmp::RelayInformationFreshness
+pub fn nmp::RelayInformationFreshness::eq(&self, &nmp::RelayInformationFreshness) -> bool
+impl core::fmt::Debug for nmp::RelayInformationFreshness
+pub fn nmp::RelayInformationFreshness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::RelayInformationFreshness
+impl core::marker::StructuralPartialEq for nmp::RelayInformationFreshness
+impl core::marker::Freeze for nmp::RelayInformationFreshness
+impl core::marker::Send for nmp::RelayInformationFreshness
+impl core::marker::Sync for nmp::RelayInformationFreshness
+impl core::marker::Unpin for nmp::RelayInformationFreshness
+impl core::marker::UnsafeUnpin for nmp::RelayInformationFreshness
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationFreshness
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationFreshness
 pub enum nmp::RelayInformationRequestError
-pub nmp::RelayInformationRequestError::Acquisition(nmp_engine::relay_information::RelayInformationError)
+pub nmp::RelayInformationRequestError::Acquisition(nmp::RelayInformationError)
 pub nmp::RelayInformationRequestError::Engine(nmp::EngineError)
 impl core::clone::Clone for nmp::RelayInformationRequestError
 pub fn nmp::RelayInformationRequestError::clone(&self) -> nmp::RelayInformationRequestError
@@ -153,7 +218,7 @@ pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::Diag
 pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
-pub async fn nmp::Engine::relay_information(&self, &str, nmp_engine::relay_information::RelayInformationCachePolicy) -> core::result::Result<nmp_engine::relay_information::RelayInformationSnapshot, nmp::RelayInformationRequestError>
+pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
 pub fn nmp::Engine::remove_signer(&self, nmp_engine::runtime::SignerRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
@@ -201,6 +266,93 @@ impl core::marker::Unpin for nmp::ObservationCancel
 impl core::marker::UnsafeUnpin for nmp::ObservationCancel
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::ObservationCancel
 impl !core::panic::unwind_safe::UnwindSafe for nmp::ObservationCancel
+pub struct nmp::RelayInformationDocument
+pub nmp::RelayInformationDocument::banner: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::contact: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::description: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::icon: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::limitation: nmp::RelayInformationLimitations
+pub nmp::RelayInformationDocument::name: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::pubkey: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::self_pubkey: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::software: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::structured: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub nmp::RelayInformationDocument::supported_nips: core::option::Option<alloc::vec::Vec<u16>>
+pub nmp::RelayInformationDocument::terms_of_service: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationDocument::version: core::option::Option<alloc::string::String>
+impl core::clone::Clone for nmp::RelayInformationDocument
+pub fn nmp::RelayInformationDocument::clone(&self) -> nmp::RelayInformationDocument
+impl core::cmp::PartialEq for nmp::RelayInformationDocument
+pub fn nmp::RelayInformationDocument::eq(&self, &nmp::RelayInformationDocument) -> bool
+impl core::fmt::Debug for nmp::RelayInformationDocument
+pub fn nmp::RelayInformationDocument::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RelayInformationDocument
+impl core::marker::Freeze for nmp::RelayInformationDocument
+impl core::marker::Send for nmp::RelayInformationDocument
+impl core::marker::Sync for nmp::RelayInformationDocument
+impl core::marker::Unpin for nmp::RelayInformationDocument
+impl core::marker::UnsafeUnpin for nmp::RelayInformationDocument
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationDocument
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationDocument
+pub struct nmp::RelayInformationLimitations
+pub nmp::RelayInformationLimitations::auth_required: core::option::Option<bool>
+pub nmp::RelayInformationLimitations::created_at_lower_limit: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::created_at_upper_limit: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::max_content_length: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::max_event_tags: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::max_filters: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::max_limit: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::max_message_length: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::max_subid_length: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::max_subscriptions: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::min_pow_difficulty: core::option::Option<u64>
+pub nmp::RelayInformationLimitations::payment_required: core::option::Option<bool>
+impl core::clone::Clone for nmp::RelayInformationLimitations
+pub fn nmp::RelayInformationLimitations::clone(&self) -> nmp::RelayInformationLimitations
+impl core::cmp::Eq for nmp::RelayInformationLimitations
+impl core::cmp::PartialEq for nmp::RelayInformationLimitations
+pub fn nmp::RelayInformationLimitations::eq(&self, &nmp::RelayInformationLimitations) -> bool
+impl core::default::Default for nmp::RelayInformationLimitations
+pub fn nmp::RelayInformationLimitations::default() -> nmp::RelayInformationLimitations
+impl core::fmt::Debug for nmp::RelayInformationLimitations
+pub fn nmp::RelayInformationLimitations::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RelayInformationLimitations
+impl core::marker::Freeze for nmp::RelayInformationLimitations
+impl core::marker::Send for nmp::RelayInformationLimitations
+impl core::marker::Sync for nmp::RelayInformationLimitations
+impl core::marker::Unpin for nmp::RelayInformationLimitations
+impl core::marker::UnsafeUnpin for nmp::RelayInformationLimitations
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationLimitations
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationLimitations
+pub struct nmp::RelayInformationSnapshot
+pub nmp::RelayInformationSnapshot::cache_control: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationSnapshot::document: nmp::RelayInformationDocument
+pub nmp::RelayInformationSnapshot::document_revision: alloc::string::String
+pub nmp::RelayInformationSnapshot::etag: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationSnapshot::expires: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationSnapshot::fetched_at: u64
+pub nmp::RelayInformationSnapshot::fresh_until: u64
+pub nmp::RelayInformationSnapshot::freshness: nmp::RelayInformationFreshness
+pub nmp::RelayInformationSnapshot::last_error: core::option::Option<nmp::RelayInformationError>
+pub nmp::RelayInformationSnapshot::last_modified: core::option::Option<alloc::string::String>
+pub nmp::RelayInformationSnapshot::raw_json: alloc::string::String
+pub nmp::RelayInformationSnapshot::relay: nostr::types::url::RelayUrl
+impl nmp::RelayInformationSnapshot
+pub fn nmp::RelayInformationSnapshot::advertises_nip(&self, u16) -> core::option::Option<bool>
+impl core::clone::Clone for nmp::RelayInformationSnapshot
+pub fn nmp::RelayInformationSnapshot::clone(&self) -> nmp::RelayInformationSnapshot
+impl core::cmp::PartialEq for nmp::RelayInformationSnapshot
+pub fn nmp::RelayInformationSnapshot::eq(&self, &nmp::RelayInformationSnapshot) -> bool
+impl core::fmt::Debug for nmp::RelayInformationSnapshot
+pub fn nmp::RelayInformationSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RelayInformationSnapshot
+impl core::marker::Freeze for nmp::RelayInformationSnapshot
+impl core::marker::Send for nmp::RelayInformationSnapshot
+impl core::marker::Sync for nmp::RelayInformationSnapshot
+impl core::marker::Unpin for nmp::RelayInformationSnapshot
+impl core::marker::UnsafeUnpin for nmp::RelayInformationSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationSnapshot
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationSnapshot
 pub struct nmp::SignEventRequest
 pub nmp::SignEventRequest::content: alloc::string::String
 pub nmp::SignEventRequest::created_at: nostr::types::time::Timestamp
@@ -25085,1478 +25237,6 @@ reexport nmp::ReceiptStream => nmp_engine::runtime::ReceiptStream
 reexport nmp::RelayDiagnosticsSnapshot => nmp_engine::core::diagnostics::RelayDiagnosticsSnapshot
 {
   "previously_defined": "nmp_engine::core::diagnostics::RelayDiagnosticsSnapshot"
-}
-reexport nmp::RelayInformationCachePolicy => nmp_engine::relay_information::RelayInformationCachePolicy
-{
-  "attrs": [],
-  "inner": {
-    "enum": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "has_stripped_variants": false,
-      "variants": [
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "UseCache",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "Refresh",
-          "visibility": "default"
-        }
-      ]
-    }
-  },
-  "name": "RelayInformationCachePolicy",
-  "visibility": "public"
-}
-reexport nmp::RelayInformationDocument => nmp_engine::relay_information::RelayInformationDocument
-{
-  "attrs": [],
-  "inner": {
-    "struct": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "kind": {
-        "plain": {
-          "fields": [
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "name",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "description",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "banner",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "icon",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "pubkey",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "self_pubkey",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "contact",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": {
-                                  "angle_bracketed": {
-                                    "args": [
-                                      {
-                                        "type": {
-                                          "primitive": "u16"
-                                        }
-                                      }
-                                    ],
-                                    "constraints": []
-                                  }
-                                },
-                                "path": "Vec",
-                                "resolved_item": {
-                                  "path": "alloc::vec::Vec"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "supported_nips",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "software",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "version",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "terms_of_service",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": null,
-                    "path": "RelayInformationLimitations",
-                    "resolved_item": {
-                      "definition": {
-                        "attrs": [],
-                        "inner": {
-                          "struct": {
-                            "generics": {
-                              "params": [],
-                              "where_predicates": []
-                            },
-                            "kind": {
-                              "plain": {
-                                "fields": [
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "max_message_length",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "max_subscriptions",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "max_filters",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "max_limit",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "max_subid_length",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "max_event_tags",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "max_content_length",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "min_pow_difficulty",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "bool"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "auth_required",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "bool"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "payment_required",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "created_at_lower_limit",
-                                    "visibility": "public"
-                                  },
-                                  {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct_field": {
-                                        "resolved_path": {
-                                          "args": {
-                                            "angle_bracketed": {
-                                              "args": [
-                                                {
-                                                  "type": {
-                                                    "primitive": "u64"
-                                                  }
-                                                }
-                                              ],
-                                              "constraints": []
-                                            }
-                                          },
-                                          "path": "Option",
-                                          "resolved_item": {
-                                            "path": "core::option::Option"
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "created_at_upper_limit",
-                                    "visibility": "public"
-                                  }
-                                ],
-                                "has_stripped_fields": false
-                              }
-                            }
-                          }
-                        },
-                        "name": "RelayInformationLimitations",
-                        "visibility": "public"
-                      },
-                      "path": "nmp_engine::relay_information::RelayInformationLimitations"
-                    }
-                  }
-                }
-              },
-              "name": "limitation",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          },
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "std::collections::BTreeMap",
-                    "resolved_item": {
-                      "path": "alloc::collections::btree::map::BTreeMap"
-                    }
-                  }
-                }
-              },
-              "name": "structured",
-              "visibility": "public"
-            }
-          ],
-          "has_stripped_fields": false
-        }
-      }
-    }
-  },
-  "name": "RelayInformationDocument",
-  "visibility": "public"
-}
-reexport nmp::RelayInformationError => nmp_engine::relay_information::RelayInformationError
-{
-  "attrs": [],
-  "inner": {
-    "enum": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "has_stripped_variants": false,
-      "variants": [
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "primitive": "usize"
-                        }
-                      },
-                      "name": "capacity",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "ExecutorSaturated",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "primitive": "usize"
-                        }
-                      },
-                      "name": "capacity",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "WaiterSaturated",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "reason",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "ThreadUnavailable",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "ServiceClosed",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "CredentialedRelayUrl",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "reason",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "Http",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "primitive": "u64"
-                        }
-                      },
-                      "name": "limit_bytes",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "ResponseTooLarge",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "reason",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "InvalidDocument",
-          "visibility": "default"
-        }
-      ]
-    }
-  },
-  "name": "RelayInformationError",
-  "visibility": "public"
-}
-reexport nmp::RelayInformationFreshness => nmp_engine::relay_information::RelayInformationFreshness
-{
-  "attrs": [],
-  "inner": {
-    "enum": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "has_stripped_variants": false,
-      "variants": [
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "Fresh",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "Stale",
-          "visibility": "default"
-        }
-      ]
-    }
-  },
-  "name": "RelayInformationFreshness",
-  "visibility": "public"
-}
-reexport nmp::RelayInformationLimitations => nmp_engine::relay_information::RelayInformationLimitations
-{
-  "previously_defined": "nmp_engine::relay_information::RelayInformationLimitations"
-}
-reexport nmp::RelayInformationSnapshot => nmp_engine::relay_information::RelayInformationSnapshot
-{
-  "attrs": [],
-  "inherent_impls": [
-    {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "items": [
-        {
-          "attrs": [],
-          "inner": {
-            "function": {
-              "default_unstable": null,
-              "generics": {
-                "params": [],
-                "where_predicates": []
-              },
-              "has_body": true,
-              "header": {
-                "abi": "Rust",
-                "is_async": false,
-                "is_const": false,
-                "is_unsafe": false
-              },
-              "sig": {
-                "inputs": [
-                  [
-                    "self",
-                    {
-                      "borrowed_ref": {
-                        "is_mutable": false,
-                        "lifetime": null,
-                        "type": {
-                          "generic": "Self"
-                        }
-                      }
-                    }
-                  ],
-                  [
-                    "nip",
-                    {
-                      "primitive": "u16"
-                    }
-                  ]
-                ],
-                "is_c_variadic": false,
-                "output": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "primitive": "bool"
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "name": "advertises_nip",
-          "visibility": "public"
-        }
-      ]
-    }
-  ],
-  "inner": {
-    "struct": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "kind": {
-        "plain": {
-          "fields": [
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": null,
-                    "path": "nostr::RelayUrl",
-                    "resolved_item": {
-                      "definition": {
-                        "previously_defined": "nostr::types::url::RelayUrl"
-                      },
-                      "path": "nostr::types::url::RelayUrl"
-                    }
-                  }
-                }
-              },
-              "name": "relay",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": null,
-                    "path": "RelayInformationDocument",
-                    "resolved_item": {
-                      "definition": {
-                        "previously_defined": "nmp_engine::relay_information::RelayInformationDocument"
-                      },
-                      "path": "nmp_engine::relay_information::RelayInformationDocument"
-                    }
-                  }
-                }
-              },
-              "name": "document",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": null,
-                    "path": "String",
-                    "resolved_item": {
-                      "path": "alloc::string::String"
-                    }
-                  }
-                }
-              },
-              "name": "raw_json",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": null,
-                    "path": "String",
-                    "resolved_item": {
-                      "path": "alloc::string::String"
-                    }
-                  }
-                }
-              },
-              "name": "document_revision",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "primitive": "u64"
-                }
-              },
-              "name": "fetched_at",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "primitive": "u64"
-                }
-              },
-              "name": "fresh_until",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": null,
-                    "path": "RelayInformationFreshness",
-                    "resolved_item": {
-                      "definition": {
-                        "previously_defined": "nmp_engine::relay_information::RelayInformationFreshness"
-                      },
-                      "path": "nmp_engine::relay_information::RelayInformationFreshness"
-                    }
-                  }
-                }
-              },
-              "name": "freshness",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "etag",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "last_modified",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "cache_control",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "expires",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "RelayInformationError",
-                                "resolved_item": {
-                                  "definition": {
-                                    "previously_defined": "nmp_engine::relay_information::RelayInformationError"
-                                  },
-                                  "path": "nmp_engine::relay_information::RelayInformationError"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "last_error",
-              "visibility": "public"
-            }
-          ],
-          "has_stripped_fields": false
-        }
-      }
-    }
-  },
-  "name": "RelayInformationSnapshot",
-  "visibility": "public"
 }
 reexport nmp::RelayUrl => nostr::types::url::RelayUrl
 {
