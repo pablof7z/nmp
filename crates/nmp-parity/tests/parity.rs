@@ -91,25 +91,13 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
         (
             WriteStatus::Sent {
                 relay: relay.clone(),
-                attempt: Some(9),
+                attempt: 9,
                 written_at: Timestamp::from(125),
             },
             FfiWriteStatus::Sent {
                 relay: relay.to_string(),
-                attempt: Some(9),
+                attempt: 9,
                 written_at: 125,
-            },
-        ),
-        (
-            WriteStatus::Sent {
-                relay: relay.clone(),
-                attempt: None,
-                written_at: Timestamp::from(126),
-            },
-            FfiWriteStatus::Sent {
-                relay: relay.to_string(),
-                attempt: None,
-                written_at: 126,
             },
         ),
     ];

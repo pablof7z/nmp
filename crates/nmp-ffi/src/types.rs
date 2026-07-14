@@ -608,7 +608,7 @@ pub enum FfiWriteStatus {
     },
     Sent {
         relay: String,
-        attempt: Option<u64>,
+        attempt: u64,
         written_at: u64,
     },
     Acked {

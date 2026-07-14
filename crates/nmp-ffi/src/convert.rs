@@ -968,12 +968,12 @@ mod write_status_tests {
             (
                 GWriteStatus::Sent {
                     relay: relay.clone(),
-                    attempt: Some(5),
+                    attempt: 5,
                     written_at: Timestamp::from(43),
                 },
                 FfiWriteStatus::Sent {
                     relay: relay.to_string(),
-                    attempt: Some(5),
+                    attempt: 5,
                     written_at: 43,
                 },
             ),

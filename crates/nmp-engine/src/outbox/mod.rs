@@ -62,12 +62,12 @@ pub enum WriteStatus {
         attempt: u64,
         observed_at: Timestamp,
     },
-    /// Transport proved socket write + flush for this relay. Durable writes
-    /// carry their persisted attempt ordinal; an ephemeral write has no
-    /// outbox attempt and therefore reports `None`.
+    /// Transport proved socket write + flush for this persisted relay attempt.
+    /// An ephemeral write has no outbox attempt and therefore cannot mint this
+    /// durable receipt fact.
     Sent {
         relay: RelayUrl,
-        attempt: Option<u64>,
+        attempt: u64,
         written_at: Timestamp,
     },
     Acked(RelayUrl),

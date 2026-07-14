@@ -110,7 +110,7 @@ sealed class WriteStatus {
 
     data class HandoffAmbiguous(val relay: String, val attempt: ULong, val observedAt: ULong) : WriteStatus()
 
-    data class Sent(val relay: String, val attempt: ULong?, val writtenAt: ULong) : WriteStatus()
+    data class Sent(val relay: String, val attempt: ULong, val writtenAt: ULong) : WriteStatus()
 
     data class Acked(val relay: String) : WriteStatus()
 

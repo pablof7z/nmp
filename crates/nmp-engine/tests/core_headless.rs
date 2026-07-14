@@ -2587,7 +2587,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         let auth_replay = auth_replay.0.lock().unwrap();
         assert!(auth_replay.contains(&WriteStatus::Sent {
             relay: relay.clone(),
-            attempt: Some(1),
+            attempt: 1,
             written_at: Timestamp::from(0),
         }));
         assert!(auth_replay.contains(&WriteStatus::AwaitingAuth {
@@ -2637,6 +2637,151 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         "offline/AUTH time allocates nothing; explicit AUTH wake allocates the next ordinal"
     );
     assert!(attempts.iter().all(|attempt| attempt.event == event));
+}
+
+#[test]
+fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
+    let author = Keys::generate();
+    let offline = RelayUrl::parse("wss://restart-offline.example").unwrap();
+    let auth = RelayUrl::parse("wss://restart-auth.example").unwrap();
+    let retry = RelayUrl::parse("wss://restart-retry.example").unwrap();
+    let ambiguous = RelayUrl::parse("wss://restart-ambiguous.example").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retry-receipt-restart.redb");
+
+    let (receipt, retry_at) = {
+        let mut core = EngineCore::new(
+            RedbStore::open(&path).unwrap(),
+            Box::new(FixtureDirectory::new()),
+            10,
+        );
+        connect(&mut core, 0, &auth);
+        connect(&mut core, 1, &retry);
+        connect(&mut core, 2, &ambiguous);
+        let sink = CapturingReceiptSink::default();
+        let (receipt, event, scheduled) = publish_private(
+            &mut core,
+            &author,
+            [
+                offline.clone(),
+                auth.clone(),
+                retry.clone(),
+                ambiguous.clone(),
+            ],
+            sink,
+        );
+
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(11)));
+        mark_written(&mut core, &scheduled, &auth);
+        let auth_wait = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            RelayFrame::from(RelayMessage::ok(
+                event.id,
+                false,
+                "auth-required: authenticate",
+            )),
+        ));
+        assert!(auth_wait.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay }) if relay == &auth
+        )));
+
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(12)));
+        mark_written(&mut core, &scheduled, &retry);
+        let retry_wait = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 1,
+                generation: 1,
+            },
+            RelayFrame::from(RelayMessage::ok(event.id, false, "rate-limited: slow down")),
+        ));
+        let retry_at = retry_wait
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitReceipt(
+                    _,
+                    WriteStatus::RetryEligible {
+                        relay,
+                        attempt: 1,
+                        eligible_at,
+                    },
+                ) if relay == &retry => Some(*eligible_at),
+                _ => None,
+            })
+            .expect("transient classification must expose its exact persisted deadline");
+
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(13)));
+        let ambiguous_correlation = scheduled
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PublishEvent(relay, _, correlation) if relay == &ambiguous => {
+                    Some(*correlation)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let ambiguity = core.handle(EngineMsg::EventHandoff(
+            ambiguous_correlation,
+            HandoffResult::Ambiguous,
+        ));
+        assert!(ambiguity.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                _,
+                WriteStatus::HandoffAmbiguous {
+                    relay,
+                    attempt: 1,
+                    observed_at,
+                },
+            ) if relay == &ambiguous && *observed_at == Timestamp::from(13)
+        )));
+        (receipt, retry_at)
+    };
+
+    let mut recovered = EngineCore::new(
+        RedbStore::open(&path).unwrap(),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    recovered.recover_on_boot();
+    let replay = CapturingReceiptSink::default();
+    assert!(recovered
+        .reattach_receipt(receipt, Box::new(replay.clone()))
+        .is_attached());
+    let replay = replay.0.lock().unwrap();
+
+    assert!(replay.contains(&WriteStatus::AwaitingRelay {
+        relay: offline.clone(),
+    }));
+    assert!(replay.contains(&WriteStatus::Sent {
+        relay: auth.clone(),
+        attempt: 1,
+        written_at: Timestamp::from(11),
+    }));
+    assert!(replay.contains(&WriteStatus::AwaitingAuth {
+        relay: auth.clone(),
+    }));
+    assert!(replay.contains(&WriteStatus::Sent {
+        relay: retry.clone(),
+        attempt: 1,
+        written_at: Timestamp::from(12),
+    }));
+    assert!(replay.contains(&WriteStatus::RetryEligible {
+        relay: retry.clone(),
+        attempt: 1,
+        eligible_at: retry_at,
+    }));
+    assert!(replay.contains(&WriteStatus::HandoffAmbiguous {
+        relay: ambiguous.clone(),
+        attempt: 1,
+        observed_at: Timestamp::from(13),
+    }));
+    assert!(!replay.iter().any(
+        |status| matches!(status, WriteStatus::Sent { relay, .. } if relay == &ambiguous || relay == &offline)
+    ));
 }
 
 #[test]
@@ -3803,7 +3948,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
                 receipt,
                 WriteStatus::Sent {
                     relay: r,
-                    attempt: Some(1),
+                    attempt: 1,
                     written_at,
                 }
             ) if *receipt == id && r == &relay && *written_at == Timestamp::from(10)
@@ -3834,7 +3979,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
 }
 
 #[test]
-fn ephemeral_observer_survives_until_every_handoff_result_then_sees_written_sent() {
+fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
     let author = Keys::generate();
     let relay_a = RelayUrl::parse("wss://ephemeral-a.example").unwrap();
     let relay_b = RelayUrl::parse("wss://ephemeral-b.example").unwrap();
@@ -3880,20 +4025,13 @@ fn ephemeral_observer_survives_until_every_handoff_result_then_sees_written_sent
         correlation_for(&relay_b),
         HandoffResult::Written,
     ));
-    assert!(written.iter().any(|effect| matches!(
-        effect,
-        Effect::EmitReceipt(found, WriteStatus::Sent { relay, .. })
-            if *found == id && relay == &relay_b
-    )));
-    assert_eq!(
-        sink.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|status| matches!(status, WriteStatus::Sent { relay, .. } if relay == &relay_b))
-            .count(),
-        1
-    );
+    assert!(written.is_empty());
+    assert!(!sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|status| matches!(status, WriteStatus::Sent { .. })));
 }
 
 /// The exact handoff class is public receipt truth: `NotHandedOff` waits for
