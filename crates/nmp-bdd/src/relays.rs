@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use nmp_test_support::ConnectionOwner;
 use nostr::{JsonUtil, RelayUrl};
 
 use nostr_relay_builder::builder::{
@@ -146,6 +147,7 @@ pub struct ScriptedRelay {
     pub url: RelayUrl,
     port: u16,
     relay: LocalRelay,
+    connection_owner: Option<ConnectionOwner>,
     contacted: Arc<ContactLog>,
     queries: Arc<QueryLog>,
 }
@@ -155,7 +157,7 @@ impl ScriptedRelay {
     /// `config`. Async because `LocalRelay::run` is (it needs the ambient
     /// tokio runtime `tests/bdd.rs`'s `#[tokio::main]` provides).
     pub async fn start(config: &RelayConfig) -> Self {
-        Self::start_on_port(free_port(), config).await
+        Self::start_on_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), config).await
     }
 
     /// Start a `LocalRelay` on a SPECIFIC port -- the reconnect/drop-and-
@@ -164,12 +166,17 @@ impl ScriptedRelay {
     /// `nmp-engine/tests/runtime_integration.rs` uses, so the engine's own
     /// `Pool` reconnects to the SAME `RelayUrl` it already had open.
     pub async fn start_on_port(port: u16, config: &RelayConfig) -> Self {
+        Self::start_on_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)), config).await
+    }
+
+    async fn start_on_addr(public_addr: SocketAddr, config: &RelayConfig) -> Self {
         let contacted = Arc::new(ContactLog::default());
         let queries = Arc::new(QueryLog::default());
+        let backend_port = free_port();
 
         let relay = LocalRelayBuilder::default()
             .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
-            .port(port)
+            .port(backend_port)
             .write_policy(LoggingWritePolicy {
                 contacted: contacted.clone(),
                 reject: config.reject_writes,
@@ -184,13 +191,21 @@ impl ScriptedRelay {
             .run()
             .await
             .expect("nmp-bdd: scripted relay must start");
-        let url = RelayUrl::parse(&relay.url().await.to_string())
-            .expect("nmp-bdd: scripted relay must report a parseable url");
+        let connection_owner = ConnectionOwner::bind(
+            public_addr,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, backend_port)),
+        )
+        .await
+        .expect("nmp-bdd: client-facing relay owner must bind");
+        let public_addr = connection_owner.local_addr();
+        let url = RelayUrl::parse(&format!("ws://{public_addr}"))
+            .expect("nmp-bdd: client-facing relay URL must parse");
 
         Self {
             url,
-            port,
+            port: public_addr.port(),
             relay,
+            connection_owner: Some(connection_owner),
             contacted,
             queries,
         }
@@ -314,9 +329,22 @@ impl ScriptedRelay {
         self.contacted.wait_contacted(timeout).await
     }
 
-    /// Stop accepting connections (used by the reconnect/drop-and-come-back
-    /// scenarios: the world rebinds a fresh relay on the same port).
+    /// Stop the backend accept loop during ordinary fixture cleanup.
     pub fn shutdown(&self) {
+        self.relay.shutdown();
+    }
+
+    /// Synchronously sever the exact client-facing listener and every
+    /// established stream, then stop the backend. The reconnect scenario can
+    /// now rebind the public port without assuming `LocalRelay::shutdown()`
+    /// closes sessions (it only stops the backend accept loop).
+    pub async fn disconnect(&mut self) {
+        self.connection_owner
+            .take()
+            .expect("nmp-bdd: relay connection owner must still be live")
+            .shutdown()
+            .await
+            .expect("nmp-bdd: relay connection owner must shut down cleanly");
         self.relay.shutdown();
     }
 }
@@ -331,10 +359,8 @@ fn mirror_keys(k: &nostr::Keys) -> RelayKeys {
         .expect("nmp-bdd: mirror keypair across nostr crate versions")
 }
 
-/// Reserve an ephemeral TCP port by binding then immediately dropping the
-/// listener -- identical trick to `runtime_integration.rs::free_port`, also
-/// used by the reconnect scenario to rebind the SAME port for a fresh relay
-/// instance.
+/// Reserve an ephemeral backend port for `LocalRelay`. The client-visible
+/// port is owned independently by [`ConnectionOwner`].
 pub fn free_port() -> u16 {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .expect("nmp-bdd: bind ephemeral port");
