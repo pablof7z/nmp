@@ -234,7 +234,10 @@ pub enum PoolEvent {
         frame: RelayFrame,
     },
     Health {
-        slot: u32,
+        /// The exact connection generation whose health changed. Like
+        /// frames and disconnects, health delivery crosses the off-lock
+        /// sink and may arrive after this slot has reopened.
+        handle: RelayHandle,
         health: RelayHealth,
     },
     /// The one, ever, typed result for a durable `EVENT` handoff submitted

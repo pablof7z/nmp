@@ -884,7 +884,7 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
         PoolEvent::Connected { handle, url } => Some(EngineMsg::RelayConnected(handle, url)),
         PoolEvent::Disconnected { handle, .. } => Some(EngineMsg::RelayDisconnected(handle)),
         PoolEvent::Frame { handle, frame } => Some(EngineMsg::RelayFrame(handle, frame)),
-        PoolEvent::Health { slot, health } => Some(EngineMsg::RelayHealth(slot, health)),
+        PoolEvent::Health { handle, health } => Some(EngineMsg::RelayHealth(handle, health)),
         PoolEvent::EventHandoff {
             correlation,
             result,

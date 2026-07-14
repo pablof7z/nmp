@@ -852,6 +852,13 @@ impl SessionWorker {
     fn on_pool(&mut self, event: PoolEvent) {
         match event {
             PoolEvent::Connected { handle, url } => {
+                if self
+                    .handles
+                    .get(&handle.slot)
+                    .is_some_and(|(current, _)| current.generation > handle.generation)
+                {
+                    return;
+                }
                 let was_empty = self.handles.is_empty();
                 self.handles.insert(handle.slot, (handle, url));
                 if let Some(session) = self.session.upgrade() {
@@ -891,7 +898,15 @@ impl SessionWorker {
                     self.emit(Nip46ConnectionEvent::Unavailable);
                 }
             }
-            PoolEvent::Frame { handle, frame } => self.on_frame(handle, frame),
+            PoolEvent::Frame { handle, frame } => {
+                if self
+                    .handles
+                    .get(&handle.slot)
+                    .is_some_and(|(current, _)| *current == handle)
+                {
+                    self.on_frame(handle, frame);
+                }
+            }
             PoolEvent::Health { .. } | PoolEvent::EventHandoff { .. } => {}
         }
     }
@@ -1136,6 +1151,55 @@ fn forward_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_auth_frame_cannot_mutate_reopened_nip46_generation() {
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let pool = Pool::new(PoolConfig::default(), pool_tx);
+        let (event_tx, event_rx) = mpsc::channel();
+        let subscribers = Arc::new(Mutex::new(vec![event_tx]));
+        let mut worker = SessionWorker::new(
+            pool,
+            Keys::generate(),
+            None,
+            std::sync::Weak::new(),
+            Arc::clone(&subscribers),
+        );
+        let relay = RelayUrl::parse("wss://relay.example").unwrap();
+        let old = nmp_transport::RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        let reopened = nmp_transport::RelayHandle {
+            slot: 0,
+            generation: 2,
+        };
+        worker.handles.insert(0, (reopened, relay.clone()));
+
+        let auth_frame = || {
+            RelayFrame::from_message(RelayMessage::Auth {
+                challenge: "generation-bound-auth".into(),
+            })
+        };
+        worker.on_pool(PoolEvent::Frame {
+            handle: old,
+            frame: auth_frame(),
+        });
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_millis(20)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+
+        worker.on_pool(PoolEvent::Frame {
+            handle: reopened,
+            frame: auth_frame(),
+        });
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Nip46ConnectionEvent::RelayAuthentication(relay)
+        );
+        worker.pool.shutdown();
+    }
 
     #[test]
     fn invitation_encodes_every_relay_secret_permissions_and_metadata() {
