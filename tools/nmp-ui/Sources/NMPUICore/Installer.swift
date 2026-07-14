@@ -48,8 +48,12 @@ public final class NMPUIInstaller {
 
     public func add(_ name: String) throws -> OperationReport {
         let closure = try dependencyClosure(for: name)
-        var lock = try fileSystem.loadLock(registryVersion: catalog.registry.registryVersion)
+        let loadedLock = try fileSystem.loadLockSnapshot(registryVersion: catalog.registry.registryVersion)
+        var lock = loadedLock.state
         var writes: [(String, String)] = []
+        var expected: [String: ProjectFileSystem.FileState] = [
+            ProjectFileSystem.lockPath: loadedLock.file,
+        ]
         var lines: [String] = []
 
         for component in closure {
@@ -64,6 +68,7 @@ public final class NMPUIInstaller {
             var lockedFiles: [String: LockedFile] = [:]
             for file in component.files.sorted(by: { $0.destination < $1.destination }) {
                 if try fileSystem.exists(file.destination) { throw NMPUIError.collision(file.destination) }
+                expected[file.destination] = .absent
                 let content = try catalog.template(named: file.source)
                 writes.append((file.destination, content))
                 lockedFiles[file.destination] = LockedFile(
@@ -82,7 +87,8 @@ public final class NMPUIInstaller {
         lock.registryVersion = catalog.registry.registryVersion
         try fileSystem.commit(
             writes: try fileSystem.transactionWrites(writes, lock: lock),
-            removals: []
+            removals: [],
+            expected: expected
         )
         return OperationReport(lines: lines)
     }
@@ -112,7 +118,8 @@ public final class NMPUIInstaller {
 
     public func update(_ name: String) throws -> OperationReport {
         let closure = try dependencyClosure(for: name)
-        var lock = try fileSystem.loadLock(registryVersion: catalog.registry.registryVersion)
+        let loadedLock = try fileSystem.loadLockSnapshot(registryVersion: catalog.registry.registryVersion)
+        var lock = loadedLock.state
         for component in closure where lock.components[component.name] == nil {
             throw NMPUIError.notInstalled(component.name)
         }
@@ -122,6 +129,9 @@ public final class NMPUIInstaller {
 
         var writes: [String: String] = [:]
         var removals = Set<String>()
+        var expected: [String: ProjectFileSystem.FileState] = [
+            ProjectFileSystem.lockPath: loadedLock.file,
+        ]
         var nextEntries: [String: LockedComponent] = [:]
         var conflictPathsByComponent: [String: [String]] = [:]
 
@@ -130,7 +140,15 @@ public final class NMPUIInstaller {
                 throw NMPUIError.notInstalled(component.name)
             }
 
-            let currentFiles = Dictionary(uniqueKeysWithValues: component.files.map { ($0.destination, $0) })
+            var currentFiles: [String: RegistryFile] = [:]
+            for file in component.files {
+                guard currentFiles[file.destination] == nil else {
+                    throw NMPUIError.invalidRegistry(
+                        "duplicate destination \(file.destination) in component \(component.name)"
+                    )
+                }
+                currentFiles[file.destination] = file
+            }
             let allPaths = Set(installed.files.keys).union(currentFiles.keys)
             var nextFiles: [String: LockedFile] = [:]
 
@@ -141,6 +159,7 @@ public final class NMPUIInstaller {
                 case let (.some(oldFile), .some(currentFile)):
                     guard try fileSystem.exists(path) else { throw NMPUIError.missingManagedFile(path) }
                     let local = try fileSystem.read(path)
+                    expected[path] = .present(Data(local.utf8))
                     let upstream = try catalog.template(named: currentFile.source)
                     let merged = try merger.merge(local: local, base: oldFile.upstreamBase, upstream: upstream)
                     writes[path] = merged.content
@@ -152,6 +171,7 @@ public final class NMPUIInstaller {
                 case let (.some(oldFile), .none):
                     guard try fileSystem.exists(path) else { throw NMPUIError.missingManagedFile(path) }
                     let local = try fileSystem.read(path)
+                    expected[path] = .present(Data(local.utf8))
                     let merged = try merger.merge(local: local, base: oldFile.upstreamBase, upstream: "")
                     if merged.hasConflicts {
                         writes[path] = merged.content
@@ -164,6 +184,7 @@ public final class NMPUIInstaller {
 
                 case let (.none, .some(currentFile)):
                     if try fileSystem.exists(path) { throw NMPUIError.collision(path) }
+                    expected[path] = .absent
                     let upstream = try catalog.template(named: currentFile.source)
                     writes[path] = upstream
                     nextFiles[path] = LockedFile(
@@ -183,7 +204,11 @@ public final class NMPUIInstaller {
 
         if !conflictPathsByComponent.isEmpty {
             let conflictPaths = conflictPathsByComponent.values.flatMap { $0 }.sorted()
-            for path in conflictPaths { if let content = writes[path] { try fileSystem.write(content, to: path) } }
+            for path in conflictPaths {
+                if let content = writes[path], let expectedState = expected[path] {
+                    try fileSystem.write(content, to: path, expected: expectedState)
+                }
+            }
             for component in closure {
                 guard let paths = conflictPathsByComponent[component.name],
                       let installed = lock.components[component.name] else { continue }
@@ -201,7 +226,8 @@ public final class NMPUIInstaller {
         lock.registryVersion = catalog.registry.registryVersion
         try fileSystem.commit(
             writes: try fileSystem.transactionWrites(writes, lock: lock),
-            removals: removals
+            removals: removals,
+            expected: expected
         )
         return OperationReport(lines: closure.map { "updated \($0.name)@\($0.version)" })
     }
@@ -227,6 +253,7 @@ public final class NMPUIInstaller {
         }
 
         try visit(name)
+        try Self.validatePlannedDestinations(result)
         return result
     }
 
@@ -245,10 +272,16 @@ public final class NMPUIInstaller {
             guard components[component.name] == nil else {
                 throw NMPUIError.invalidRegistry("duplicate component \(component.name)")
             }
+            var componentDestinations = Set<String>()
             for file in component.files {
                 _ = try checker.resolve(file.source)
                 _ = try checker.resolve(file.destination)
                 _ = try catalog.template(named: file.source)
+                guard componentDestinations.insert(file.destination).inserted else {
+                    throw NMPUIError.invalidRegistry(
+                        "duplicate destination \(file.destination) in component \(component.name)"
+                    )
+                }
                 if let owner = destinations[file.destination], owner != component.name {
                     throw NMPUIError.invalidRegistry("destination \(file.destination) belongs to both \(owner) and \(component.name)")
                 }
@@ -262,6 +295,20 @@ public final class NMPUIInstaller {
             }
         }
         return components
+    }
+
+    private static func validatePlannedDestinations(_ closure: [RegistryComponent]) throws {
+        var owners: [String: String] = [:]
+        for component in closure {
+            for file in component.files {
+                if let owner = owners[file.destination] {
+                    throw NMPUIError.invalidRegistry(
+                        "planned destination \(file.destination) belongs to both \(owner) and \(component.name)"
+                    )
+                }
+                owners[file.destination] = component.name
+            }
+        }
     }
 
     private static func readableDiff(base: String, local: String) -> [String] {

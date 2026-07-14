@@ -85,12 +85,18 @@ dependency closure. It exits with `component is not installed` instead of
 turning an update into an implicit install; use `add` for installation.
 
 Managed paths are opened relative to the canonical project root without
-following symlinked path components. `add` and conflict-free `update` commit the
-entire dependency closure and lock as one rollback-protected transaction: a
-late file or lock failure restores every prior file and the lock byte-for-byte
-and removes newly created files. Deliberate merge conflicts are the exception:
-their markers and `.nmp-ui-conflicts.json` remain as visible evidence while the
-lock stays unchanged.
+following symlinked path components. New files use an atomic no-replace rename;
+managed updates exchange and verify the exact planned bytes before accepting a
+replacement. A path created or edited by another process is preserved and the
+command exits with a typed collision or concurrent-modification error.
+
+`add` and conflict-free `update` commit the entire dependency closure and lock
+as one rollback-protected transaction. A late file or lock failure restores
+every unchanged prior file and the lock byte-for-byte and removes newly created
+files and directories. Rollback is also compare-and-swap guarded, so it refuses
+to overwrite a newer uncooperative edit. Deliberate merge conflicts are the
+exception: their markers and `.nmp-ui-conflicts.json` remain as visible evidence
+while the lock stays unchanged.
 
 `Fixtures/SampleApp` is the build fixture for this contract. Its package target
 links the real `NMPContent` and `NMPUI` products and compiles the two installed

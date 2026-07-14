@@ -81,6 +81,7 @@ public enum NMPUIError: Error, CustomStringConvertible, Equatable {
     case invalidRegistry(String)
     case unsafePath(String)
     case collision(String)
+    case concurrentModification(String)
     case notInstalled(String)
     case missingManagedFile(String)
     case mergeFailed(String)
@@ -94,6 +95,7 @@ public enum NMPUIError: Error, CustomStringConvertible, Equatable {
         case .invalidRegistry(let message): return "invalid registry: \(message)"
         case .unsafePath(let path): return "unsafe path: \(path)"
         case .collision(let path): return "refusing to overwrite unmanaged path: \(path)"
+        case .concurrentModification(let path): return "managed path changed concurrently: \(path)"
         case .notInstalled(let name): return "component is not installed: \(name)"
         case .missingManagedFile(let path): return "managed file is missing: \(path)"
         case .mergeFailed(let message): return "three-way merge failed: \(message)"
