@@ -1265,7 +1265,16 @@ mod relay_worker_reconciliation_tests {
 fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     match event {
         PoolEvent::Connected { handle, url } => Some(EngineMsg::RelayConnected(handle, url)),
-        PoolEvent::Disconnected { handle, .. } => Some(EngineMsg::RelayDisconnected(handle)),
+        // The `reason` is no longer discarded here (issue #506's CRITICAL
+        // fix): `EngineCore::on_relay_disconnected` needs to tell a
+        // permanent failure (401/403 -- the relay worker has already
+        // retired itself, see `nmp_transport::DisconnectReason::
+        // PermanentlyFailed`'s doc) apart from an ordinary transient one, so
+        // it never re-issues `Effect::EnsureRelay` into a busy 401 redial
+        // loop.
+        PoolEvent::Disconnected { handle, reason } => {
+            Some(EngineMsg::RelayDisconnected(handle, reason))
+        }
         PoolEvent::Frame { handle, frame } => Some(EngineMsg::RelayFrame(handle, frame)),
         PoolEvent::Health { handle, health } => Some(EngineMsg::RelayHealth(handle, health)),
         PoolEvent::EventHandoff {

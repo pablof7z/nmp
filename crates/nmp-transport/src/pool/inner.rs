@@ -382,6 +382,7 @@ impl PoolInner {
             .config
             .reconnect_jitter_max
             .unwrap_or(crate::backoff::RECONNECT_JITTER_MAX);
+        let command_queue_capacity = self.config.command_queue_capacity.max(1);
         super::worker::spawn(
             slot_id,
             worker_id,
@@ -394,6 +395,7 @@ impl PoolInner {
             pong_timeout,
             reconnect_delay_initial,
             reconnect_jitter_max,
+            command_queue_capacity,
             self.spawner.as_ref(),
         )
         .map_err(RelayOpenError::ThreadUnavailable)
@@ -905,20 +907,52 @@ fn apply_worker_event_with_verdict(
             } else {
                 ConnState::Connecting
             };
+            let handle = RelayHandle {
+                slot: event.slot,
+                generation: event.generation,
+            };
+            if permanent {
+                // The load-bearing fix (issue #506's CRITICAL finding): a
+                // permanent failure (401/403 -- `backoff::is_permanent_error`)
+                // means the WORKER ITSELF has already given up for good (see
+                // `worker::drain_permanently_disconnected`) -- it will never
+                // redial on its own. Leaving `state.worker` populated here
+                // would wedge this slot forever: `try_ensure_open`/
+                // `live_handle` judge liveness by `worker.is_some()`, so they
+                // would keep idempotently handing back this dead handle, and
+                // the parked worker thread plus its `max_relays` cap slot
+                // would never be reclaimed. Taking the worker and retiring it
+                // -- exactly the same door `close`/`shutdown` use -- frees
+                // both the OS thread and the cap slot immediately, and
+                // leaves `state.worker == None` so a subsequent
+                // `ensure_open` reopens a FRESH generation instead of
+                // handing back a stale one. This is reported on BOTH
+                // branches below (was-connected and never-connected) --
+                // unlike an ordinary transient failure, a permanent one is
+                // never merely a `Health` update, because there is no
+                // worker left behind for the caller to keep observing.
+                let taken = state.worker.take();
+                let generation = state.generation;
+                // `state`'s mutable borrow of `inner.slots` ends here (its
+                // last use); `retire_worker` below takes `&mut inner` for
+                // the whole `PoolInner`, which NLL only allows once `state`
+                // is no longer live.
+                if let Some(worker) = taken {
+                    inner.retire_worker(event.slot, generation, worker);
+                }
+                return Some(PoolEvent::Disconnected {
+                    handle,
+                    reason: DisconnectReason::PermanentlyFailed,
+                });
+            }
             if was_connected {
                 Some(PoolEvent::Disconnected {
-                    handle: RelayHandle {
-                        slot: event.slot,
-                        generation: event.generation,
-                    },
+                    handle,
                     reason: DisconnectReason::Error,
                 })
             } else {
                 Some(PoolEvent::Health {
-                    handle: RelayHandle {
-                        slot: event.slot,
-                        generation: event.generation,
-                    },
+                    handle,
                     health: state.health.clone(),
                 })
             }
@@ -1158,6 +1192,124 @@ mod tests {
         assert!(
             guard.command_tx_for(h2).is_some(),
             "new handle must be valid"
+        );
+    }
+
+    /// The CRITICAL falsifier (issue #506): a permanent failure (401/403 --
+    /// `backoff::is_permanent_error`) on a relay that never even reached
+    /// `Connected` must still retire the worker and free its `max_relays`
+    /// cap slot -- not merely surface a `Health` update while the zombie
+    /// worker keeps squatting the slot forever. Before the fix, this exact
+    /// scenario left `state.worker: Some(..)` with `health.state ==
+    /// Disconnected`: `try_ensure_open` would then treat the slot as still
+    /// "live" (`state.worker.is_some()`) and idempotently hand back the same
+    /// dead handle, so `max_relays: 1` would wedge on this one relay
+    /// forever.
+    #[test]
+    fn permanent_failure_before_ever_connecting_retires_the_worker_and_frees_the_cap_slot() {
+        let (tx, _rx) = mpsc::channel();
+        let inner = PoolInner::new(
+            PoolConfig {
+                max_relays: 1,
+                ..PoolConfig::default()
+            },
+            Arc::new(Collector(tx)),
+        );
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+        let h1 = guard.ensure_open(&url);
+
+        let disconnected = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h1.slot,
+                generation: h1.generation,
+                kind: WorkerEventKind::Failed {
+                    message: "401 Unauthorized".to_string(),
+                    permanent: true,
+                    retry_in: None,
+                },
+            },
+        );
+        assert!(
+            matches!(
+                disconnected,
+                Some(PoolEvent::Disconnected {
+                    reason: DisconnectReason::PermanentlyFailed,
+                    ..
+                })
+            ),
+            "a permanent failure must surface Disconnected{{PermanentlyFailed}}, \
+             even when the relay never reached Connected -- never a silent Health update"
+        );
+
+        assert!(
+            guard.command_tx_for(h1).is_none(),
+            "the retired worker must reject any further send"
+        );
+        assert!(
+            guard.live_handle(&url).is_none(),
+            "the pool must never auto-redial a permanently-failed relay itself"
+        );
+
+        // The freed cap slot, not just the health flag: with max_relays: 1,
+        // a SECOND distinct relay could not previously open while the
+        // zombie worker squatted the pool's one live slot.
+        let other = RelayUrl::parse("wss://relay-two.example").unwrap();
+        guard
+            .try_ensure_open(&other)
+            .expect("the permanently-failed relay's cap slot must be freed");
+    }
+
+    /// The was-connected sibling of the falsifier above: a permanent
+    /// failure arriving AFTER a live session must still report
+    /// `PermanentlyFailed` (never the ordinary transient `Error` reason) and
+    /// still retire the worker. Losing this distinction is exactly what
+    /// would make the engine's `on_relay_disconnected` re-issue
+    /// `Effect::EnsureRelay` into a 401 busy-loop.
+    #[test]
+    fn permanent_failure_after_a_connected_session_reports_permanent_and_retires() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+        let h1 = guard.ensure_open(&url);
+
+        let connected = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h1.slot,
+                generation: h1.generation,
+                kind: WorkerEventKind::Connected,
+            },
+        );
+        assert!(matches!(connected, Some(PoolEvent::Connected { .. })));
+
+        let disconnected = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h1.slot,
+                generation: h1.generation,
+                kind: WorkerEventKind::Failed {
+                    message: "403 Forbidden".to_string(),
+                    permanent: true,
+                    retry_in: None,
+                },
+            },
+        );
+        assert!(
+            matches!(
+                disconnected,
+                Some(PoolEvent::Disconnected {
+                    reason: DisconnectReason::PermanentlyFailed,
+                    ..
+                })
+            ),
+            "a permanent failure after a live session must report \
+             PermanentlyFailed, never the ordinary transient Error reason"
+        );
+        assert!(
+            guard.command_tx_for(h1).is_none(),
+            "the retired worker must reject any further send"
         );
     }
 
