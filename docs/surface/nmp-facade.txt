@@ -42,7 +42,6 @@ pub use nmp::RelayDiagnosticsSnapshot
 pub use nmp::RelayUrl
 pub use nmp::Row
 pub use nmp::RowDelta
-pub use nmp::RowsMsg
 pub use nmp::Selector
 pub use nmp::SetAlgebra
 pub use nmp::SetOp
@@ -60,6 +59,7 @@ pub use nmp::SourceStatus
 pub use nmp::Tag
 pub use nmp::Timestamp
 pub use nmp::UnsignedEvent
+pub use nmp::WindowLoad
 pub use nmp::WriteIntent
 pub use nmp::WritePayload
 pub use nmp::WriteRouting
@@ -85,6 +85,10 @@ pub nmp::EngineError::StoreStillOpen::path: alloc::string::String
 pub nmp::EngineError::ThreadUnavailable
 pub nmp::EngineError::ThreadUnavailable::component: alloc::string::String
 pub nmp::EngineError::ThreadUnavailable::reason: alloc::string::String
+pub nmp::EngineError::WindowInitialExceedsMax
+pub nmp::EngineError::WindowInitialExceedsMax::initial: usize
+pub nmp::EngineError::WindowInitialExceedsMax::max: usize
+pub nmp::EngineError::WindowSelectionHasLimit
 impl core::clone::Clone for nmp::EngineError
 pub fn nmp::EngineError::clone(&self) -> nmp::EngineError
 impl core::cmp::Eq for nmp::EngineError
@@ -195,6 +199,50 @@ impl core::marker::Unpin for nmp::RelayInformationRequestError
 impl core::marker::UnsafeUnpin for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationRequestError
+#[non_exhaustive] pub enum nmp::RequestRowsError
+pub nmp::RequestRowsError::EngineClosed
+pub nmp::RequestRowsError::StoreUnavailable
+pub nmp::RequestRowsError::TransportUnavailable
+pub nmp::RequestRowsError::TransportUnavailable::reason: alloc::string::String
+pub nmp::RequestRowsError::Unwindowed
+impl core::clone::Clone for nmp::RequestRowsError
+pub fn nmp::RequestRowsError::clone(&self) -> nmp::RequestRowsError
+impl core::cmp::Eq for nmp::RequestRowsError
+impl core::cmp::PartialEq for nmp::RequestRowsError
+pub fn nmp::RequestRowsError::eq(&self, &nmp::RequestRowsError) -> bool
+impl core::error::Error for nmp::RequestRowsError
+impl core::fmt::Debug for nmp::RequestRowsError
+pub fn nmp::RequestRowsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::RequestRowsError
+pub fn nmp::RequestRowsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RequestRowsError
+impl core::marker::Freeze for nmp::RequestRowsError
+impl core::marker::Send for nmp::RequestRowsError
+impl core::marker::Sync for nmp::RequestRowsError
+impl core::marker::Unpin for nmp::RequestRowsError
+impl core::marker::UnsafeUnpin for nmp::RequestRowsError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RequestRowsError
+impl core::panic::unwind_safe::UnwindSafe for nmp::RequestRowsError
+#[non_exhaustive] pub enum nmp::Window
+pub nmp::Window::Expandable
+pub nmp::Window::Expandable::initial: core::num::nonzero::NonZeroUsize
+pub nmp::Window::Expandable::max: core::num::nonzero::NonZeroUsize
+impl core::clone::Clone for nmp::Window
+pub fn nmp::Window::clone(&self) -> nmp::Window
+impl core::cmp::Eq for nmp::Window
+impl core::cmp::PartialEq for nmp::Window
+pub fn nmp::Window::eq(&self, &nmp::Window) -> bool
+impl core::fmt::Debug for nmp::Window
+pub fn nmp::Window::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::Window
+impl core::marker::StructuralPartialEq for nmp::Window
+impl core::marker::Freeze for nmp::Window
+impl core::marker::Send for nmp::Window
+impl core::marker::Sync for nmp::Window
+impl core::marker::Unpin for nmp::Window
+impl core::marker::UnsafeUnpin for nmp::Window
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::Window
+impl core::panic::unwind_safe::UnwindSafe for nmp::Window
 pub struct nmp::DiagnosticsSubscription
 impl nmp::DiagnosticsSubscription
 pub fn nmp::DiagnosticsSubscription::cancel(self)
@@ -215,7 +263,7 @@ pub fn nmp::Engine::active_account(&self) -> core::result::Result<core::option::
 pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nostr::key::public_key::PublicKey, nmp::EngineError>
 pub fn nmp::Engine::add_signer<Sig>(&self, Sig) -> core::result::Result<nmp_engine::runtime::SignerRegistration, nmp::EngineError> where Sig: nmp_signer::capability::SigningCapability + core::marker::Send + 'static
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
-pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery) -> core::result::Result<nmp::Subscription, nmp::EngineError>
+pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
 pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
@@ -256,6 +304,21 @@ impl core::marker::Unpin for nmp::EngineConfig
 impl core::marker::UnsafeUnpin for nmp::EngineConfig
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineConfig
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineConfig
+pub struct nmp::Frame
+pub nmp::Frame::deltas: alloc::vec::Vec<nmp_engine::core::RowDelta>
+pub nmp::Frame::evidence: nmp_engine::core::evidence::AcquisitionEvidence
+pub nmp::Frame::window: core::option::Option<nmp::WindowContents>
+impl core::clone::Clone for nmp::Frame
+pub fn nmp::Frame::clone(&self) -> nmp::Frame
+impl core::fmt::Debug for nmp::Frame
+pub fn nmp::Frame::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nmp::Frame
+impl core::marker::Send for nmp::Frame
+impl core::marker::Sync for nmp::Frame
+impl core::marker::Unpin for nmp::Frame
+impl core::marker::UnsafeUnpin for nmp::Frame
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::Frame
+impl core::panic::unwind_safe::UnwindSafe for nmp::Frame
 pub struct nmp::ObservationCancel
 impl nmp::ObservationCancel
 pub fn nmp::ObservationCancel::cancel(&self)
@@ -379,17 +442,46 @@ pub struct nmp::Subscription
 impl nmp::Subscription
 pub fn nmp::Subscription::cancel(self)
 pub fn nmp::Subscription::cancel_handle(&self) -> nmp::ObservationCancel
-pub fn nmp::Subscription::recv(&self) -> core::result::Result<nmp_engine::runtime::RowsMsg, std::sync::mpsc::RecvError>
-pub fn nmp::Subscription::recv_timeout(&self, core::time::Duration) -> core::result::Result<nmp_engine::runtime::RowsMsg, std::sync::mpsc::RecvTimeoutError>
+pub fn nmp::Subscription::recv(&self) -> core::result::Result<nmp::Frame, std::sync::mpsc::RecvError>
+pub fn nmp::Subscription::recv_timeout(&self, core::time::Duration) -> core::result::Result<nmp::Frame, std::sync::mpsc::RecvTimeoutError>
+pub fn nmp::Subscription::request_rows(&self, usize) -> core::result::Result<(), nmp::RequestRowsError>
+pub fn nmp::Subscription::window_handle(&self) -> core::option::Option<nmp::WindowHandle>
 impl core::ops::drop::Drop for nmp::Subscription
 pub fn nmp::Subscription::drop(&mut self)
-impl core::marker::Freeze for nmp::Subscription
+impl !core::marker::Freeze for nmp::Subscription
 impl core::marker::Send for nmp::Subscription
 impl !core::marker::Sync for nmp::Subscription
 impl core::marker::Unpin for nmp::Subscription
 impl core::marker::UnsafeUnpin for nmp::Subscription
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::Subscription
 impl !core::panic::unwind_safe::UnwindSafe for nmp::Subscription
+pub struct nmp::WindowContents
+pub nmp::WindowContents::load: nmp_engine::core::history::WindowLoad
+pub nmp::WindowContents::rows: alloc::vec::Vec<nmp_engine::core::Row>
+impl core::clone::Clone for nmp::WindowContents
+pub fn nmp::WindowContents::clone(&self) -> nmp::WindowContents
+impl core::fmt::Debug for nmp::WindowContents
+pub fn nmp::WindowContents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nmp::WindowContents
+impl core::marker::Send for nmp::WindowContents
+impl core::marker::Sync for nmp::WindowContents
+impl core::marker::Unpin for nmp::WindowContents
+impl core::marker::UnsafeUnpin for nmp::WindowContents
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::WindowContents
+impl core::panic::unwind_safe::UnwindSafe for nmp::WindowContents
+pub struct nmp::WindowHandle
+impl nmp::WindowHandle
+pub fn nmp::WindowHandle::cancel(&self)
+pub fn nmp::WindowHandle::request_rows(&self, usize) -> core::result::Result<(), nmp::RequestRowsError>
+impl core::clone::Clone for nmp::WindowHandle
+pub fn nmp::WindowHandle::clone(&self) -> nmp::WindowHandle
+impl core::marker::Freeze for nmp::WindowHandle
+impl core::marker::Send for nmp::WindowHandle
+impl core::marker::Sync for nmp::WindowHandle
+impl core::marker::Unpin for nmp::WindowHandle
+impl core::marker::UnsafeUnpin for nmp::WindowHandle
+impl !core::panic::unwind_safe::RefUnwindSafe for nmp::WindowHandle
+impl !core::panic::unwind_safe::UnwindSafe for nmp::WindowHandle
 pub fn nmp::admits_network_relay_hint(&nostr::types::url::RelayUrl) -> bool
 
 # resolved dependency-owned reexports (rustdoc JSON format 60)
@@ -25790,65 +25882,6 @@ reexport nmp::RowDelta => nmp_engine::core::RowDelta
   "name": "RowDelta",
   "visibility": "public"
 }
-reexport nmp::RowsMsg => nmp_engine::runtime::RowsMsg
-{
-  "attrs": [],
-  "inner": {
-    "type_alias": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "type": {
-        "tuple": [
-          {
-            "resolved_path": {
-              "args": {
-                "angle_bracketed": {
-                  "args": [
-                    {
-                      "type": {
-                        "resolved_path": {
-                          "args": null,
-                          "path": "crate::core::RowDelta",
-                          "resolved_item": {
-                            "definition": {
-                              "previously_defined": "nmp_engine::core::RowDelta"
-                            },
-                            "path": "nmp_engine::core::RowDelta"
-                          }
-                        }
-                      }
-                    }
-                  ],
-                  "constraints": []
-                }
-              },
-              "path": "Vec",
-              "resolved_item": {
-                "path": "alloc::vec::Vec"
-              }
-            }
-          },
-          {
-            "resolved_path": {
-              "args": null,
-              "path": "crate::core::AcquisitionEvidence",
-              "resolved_item": {
-                "definition": {
-                  "previously_defined": "nmp_engine::core::evidence::AcquisitionEvidence"
-                },
-                "path": "nmp_engine::core::evidence::AcquisitionEvidence"
-              }
-            }
-          }
-        ]
-      }
-    }
-  },
-  "name": "RowsMsg",
-  "visibility": "public"
-}
 reexport nmp::Selector => nmp_grammar::selector::Selector
 {
   "previously_defined": "nmp_grammar::selector::Selector"
@@ -29119,6 +29152,101 @@ reexport nmp::Timestamp => nostr::types::time::Timestamp
 reexport nmp::UnsignedEvent => nostr::event::unsigned::UnsignedEvent
 {
   "previously_defined": "nostr::event::unsigned::UnsignedEvent"
+}
+reexport nmp::WindowLoad => nmp_engine::core::history::WindowLoad
+{
+  "attrs": [
+    "non_exhaustive"
+  ],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Idle",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Requesting",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "usize"
+                        }
+                      },
+                      "name": "added",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Returned",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "usize"
+                        }
+                      },
+                      "name": "max",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "AtBound",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "WindowLoad",
+  "visibility": "public"
 }
 reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
 {
