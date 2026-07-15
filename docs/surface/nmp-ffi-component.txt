@@ -7496,6 +7496,62 @@ object Object {
             ),
         },
         Method {
+            name: "remove_account",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "pubkey",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Boolean,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_remove_account",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "pubkey",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Int8,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Detach the signing capability [`Self::add_account`] registered for\n`pubkey` (#507/#495). The key material stays engine-side for the\nlifetime of the process either way -- this only un-registers the\ncapability that let it sign. Returns `true` if a capability was\ndetached, `false` if `pubkey` was never added via `add_account` (or\nwas already removed) -- never an error for that case. Orthogonal to\n[`Self::set_active_account`]: routing/active identity are unaffected,\nso a full logout is `set_active_account(None)` *and*\n`remove_account(pubkey)` together.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_account",
+            checksum: Some(
+                46300,
+            ),
+        },
+        Method {
             name: "set_active_account",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",

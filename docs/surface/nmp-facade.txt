@@ -221,6 +221,7 @@ pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::res
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
+pub fn nmp::Engine::remove_account(&self, nostr::key::public_key::PublicKey) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::remove_signer(&self, nmp_engine::runtime::SignerRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
