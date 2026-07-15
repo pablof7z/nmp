@@ -305,7 +305,12 @@ impl Nip46Invitation {
                     reason: error.to_string(),
                 }
             })?;
-        self.connect_observed_inner_with_executor(timeout, event_sink, cancellation, executor, true)
+        self.connect_observed_inner_with_executor(
+            timeout,
+            event_sink,
+            cancellation,
+            SessionExecutor::Owned(executor),
+        )
     }
 
     #[doc(hidden)]
@@ -320,8 +325,7 @@ impl Nip46Invitation {
             timeout,
             event_sink,
             Some(cancellation),
-            executor,
-            false,
+            SessionExecutor::Shared(executor),
         )
     }
 
@@ -330,17 +334,9 @@ impl Nip46Invitation {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: nmp_executor::Executor,
-        owns_executor: bool,
+        executor: SessionExecutor,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let session = Session::spawn(
-            self.relays,
-            self.client_keys,
-            None,
-            cancellation,
-            executor,
-            owns_executor,
-        )?;
+        let session = Session::spawn(self.relays, self.client_keys, None, cancellation, executor)?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
         let remote_signer_public_key = session
@@ -455,8 +451,7 @@ impl Nip46Signer {
             timeout,
             event_sink,
             cancellation,
-            executor,
-            true,
+            SessionExecutor::Owned(executor),
         )
     }
 
@@ -477,8 +472,7 @@ impl Nip46Signer {
             timeout,
             event_sink,
             Some(cancellation),
-            executor,
-            false,
+            SessionExecutor::Shared(executor),
         )
     }
 
@@ -490,8 +484,7 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: nmp_executor::Executor,
-        owns_executor: bool,
+        executor: SessionExecutor,
     ) -> Result<Self, Nip46Error> {
         let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
         let remote_signer_public_key = parsed.remote_signer_public_key;
@@ -501,7 +494,6 @@ impl Nip46Signer {
             Some(remote_signer_public_key),
             cancellation,
             executor,
-            owns_executor,
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
@@ -570,7 +562,7 @@ impl Nip46Signer {
 
     pub fn logout(&self) -> SignerOp<()> {
         map_string(
-            &self.session.executor,
+            self.session.executor(),
             request_string(&self.session, "logout", Vec::new()),
             |result| {
                 (result == "ack").then_some(()).ok_or_else(|| {
@@ -601,7 +593,7 @@ impl SigningCapability for Nip46Signer {
         .to_string();
         let user_public_key = self.user_public_key;
         map_string(
-            &self.session.executor,
+            self.session.executor(),
             request_string(&self.session, "sign_event", vec![body]),
             move |result| {
                 let event = Event::from_json(&result).map_err(|error| {
@@ -711,13 +703,35 @@ fn session_pool_config() -> PoolConfig {
     }
 }
 
+/// Encodes whether a [`Session`] owns its executor (and must shut it down
+/// when the session is torn down) or merely borrows a shared/engine-owned
+/// executor (which outlives the session and must never be shut down by it).
+///
+/// This makes the illegal combination — "shared executor + shut it down on
+/// drop" — unrepresentable: there is exactly one `Drop` behavior per variant.
+enum SessionExecutor {
+    /// A fresh executor created for and used exclusively by this session.
+    /// Shut down when the session drops.
+    Owned(nmp_executor::Executor),
+    /// A caller/engine-owned executor shared across sessions. Never shut
+    /// down by this session; the owner controls its lifetime.
+    Shared(nmp_executor::Executor),
+}
+
+impl SessionExecutor {
+    fn handle(&self) -> &nmp_executor::Executor {
+        match self {
+            SessionExecutor::Owned(executor) | SessionExecutor::Shared(executor) => executor,
+        }
+    }
+}
+
 struct Session {
     commands: Sender<WorkerMsg>,
     connected_relays: AtomicUsize,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
-    executor: nmp_executor::Executor,
-    owns_executor: bool,
+    executor: SessionExecutor,
 }
 
 impl Session {
@@ -726,19 +740,18 @@ impl Session {
         client_keys: Keys,
         remote: Option<PublicKey>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: nmp_executor::Executor,
-        owns_executor: bool,
+        executor: SessionExecutor,
     ) -> Result<Arc<Self>, Nip46Error> {
         let (commands, inbox) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
+        let executor_handle = executor.handle().clone();
         let session = Arc::new(Self {
             commands: commands.clone(),
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
             availability_error: Arc::clone(&availability_error),
-            executor: executor.clone(),
-            owns_executor,
+            executor,
         });
         if let Some(cancellation) = cancellation {
             cancellation.bind(session.commands.clone());
@@ -752,7 +765,7 @@ impl Session {
         )?;
         let worker_pool = pool.clone();
         let cancel_commands = commands.clone();
-        let spawn = executor.spawn_with_cancel(
+        let spawn = executor_handle.spawn_with_cancel(
             "NIP-46 session",
             move || {
                 let _ = cancel_commands.send(WorkerMsg::Shutdown);
@@ -780,6 +793,13 @@ impl Session {
         }
         drop(pool);
         Ok(session)
+    }
+
+    /// Handle to the underlying executor, regardless of ownership. Callers
+    /// that only need to spawn tasks (as opposed to deciding shutdown
+    /// semantics) go through this accessor.
+    fn executor(&self) -> &nmp_executor::Executor {
+        self.executor.handle()
     }
 
     fn is_available(&self) -> bool {
@@ -856,7 +876,7 @@ impl Session {
         let op = request_string(self, "switch_relays", Vec::new());
         let session = Arc::downgrade(self);
         let cancel_commands = self.commands.clone();
-        let _ = self.executor.spawn_with_cancel(
+        let _ = self.executor().spawn_with_cancel(
             "NIP-46 switch-relays",
             move || {
                 let _ = cancel_commands.send(WorkerMsg::Shutdown);
@@ -901,8 +921,8 @@ impl Drop for Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
-        if self.owns_executor {
-            self.executor.shutdown();
+        if let SessionExecutor::Owned(executor) = &self.executor {
+            executor.shutdown();
         }
     }
 }
@@ -1401,7 +1421,7 @@ fn forward_events(
     let events = session.subscribe();
     let cancel_commands = session.commands.clone();
     session
-        .executor
+        .executor()
         .spawn_with_cancel(
             "NIP-46 event forwarder",
             move || {
@@ -1451,8 +1471,7 @@ mod tests {
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
             availability_error: Arc::clone(&availability_error),
-            executor: nmp_executor::Executor::new(4).unwrap(),
-            owns_executor: true,
+            executor: SessionExecutor::Owned(nmp_executor::Executor::new(4).unwrap()),
         });
         let mut worker = SessionWorker::new(
             pool,
@@ -1496,8 +1515,7 @@ mod tests {
             Keys::generate(),
             None,
             None,
-            executor.clone(),
-            false,
+            SessionExecutor::Shared(executor.clone()),
         )
         .unwrap();
 
@@ -1520,8 +1538,7 @@ mod tests {
                 Keys::generate(),
                 None,
                 None,
-                executor.clone(),
-                false,
+                SessionExecutor::Shared(executor.clone()),
             )
             .unwrap();
             forward_events(&session, Arc::new(|_| {})).unwrap();
@@ -1534,8 +1551,7 @@ mod tests {
             Keys::generate(),
             None,
             None,
-            executor.clone(),
-            false,
+            SessionExecutor::Shared(executor.clone()),
         )
         .unwrap();
         let refusal = forward_events(&third, Arc::new(|_| {})).unwrap_err();
