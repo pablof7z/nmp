@@ -3,11 +3,15 @@
 //! (`nmp-store/tests/store_contract.rs`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::filter::MatchEventOptions;
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, Timestamp};
+use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins, AddressKey};
 use crate::coverage::{
@@ -183,6 +187,34 @@ pub struct MemoryStore {
     /// merely "some claim exists" (that would incorrectly hide a winner
     /// created AFTER every pending deletion targeting this address).
     suppress_by_addr: HashMap<AddressKey, HashMap<IntentId, Timestamp>>,
+    /// Ordered secondary index over every row in `by_id`, keyed
+    /// `(created_at, id)` (issue #507 — mirrors `RedbStore`'s
+    /// `BY_CREATED_AT`). `query`'s fallback dimension when no
+    /// more-selective index applies; also gives `expiration_index`-style
+    /// bounded scans over the "unconstrained" query shape.
+    idx_created_at: BTreeSet<(Timestamp, EventId)>,
+    /// `(author, created_at, id)` — mirrors `RedbStore`'s `BY_AUTHOR`.
+    idx_author: BTreeSet<(PublicKey, Timestamp, EventId)>,
+    /// `(kind, created_at, id)` — mirrors `RedbStore`'s `BY_KIND`.
+    idx_kind: BTreeSet<(u16, Timestamp, EventId)>,
+    /// `(author, kind, created_at, id)` — mirrors `RedbStore`'s
+    /// `BY_AUTHOR_KIND`.
+    idx_author_kind: BTreeSet<(PublicKey, u16, Timestamp, EventId)>,
+    /// `(tag letter, tag value, created_at, id)` for every single-letter
+    /// NIP-01 tag a stored event carries (`Tag::single_letter_tag`/
+    /// `Tag::content`) — mirrors `RedbStore`'s `BY_TAG`, indexing exactly
+    /// the same set of tags `insert_tag_index_rows` does in
+    /// `redb_store.rs`, so the two backends can never diverge on which
+    /// tags are queryable.
+    idx_tag: BTreeSet<(SingleLetterTag, String, Timestamp, EventId)>,
+    /// `#[cfg(test)]`-only instrumentation: candidate rows `query` has
+    /// visited (post-narrowing, pre-`match_event`) since the last reset —
+    /// mirrors `RedbStore::query_event_values`. Exists so the falsifier
+    /// tests in this file's own `#[cfg(test)]` module can prove `query`
+    /// actually narrows via an index instead of scanning all of `by_id`,
+    /// not just that its results stay correct.
+    #[cfg(test)]
+    query_rows_examined: AtomicU64,
 }
 
 impl MemoryStore {
@@ -464,12 +496,14 @@ impl MemoryStore {
         match address_key_for(&event) {
             None => {
                 self.index_expiration(&se);
+                self.index_event(&se);
                 self.by_id.insert(event.id, se.clone());
                 Some(se)
             }
             Some(key) => match self.addr_index.get(&key).copied() {
                 None => {
                     self.index_expiration(&se);
+                    self.index_event(&se);
                     self.by_id.insert(event.id, se.clone());
                     self.addr_index.insert(key, event.id);
                     Some(se)
@@ -486,7 +520,9 @@ impl MemoryStore {
                             .remove(&current_id)
                             .expect("addr_index must always point at a stored event");
                         self.unindex_expiration(&replaced);
+                        self.unindex_event(&replaced);
                         self.index_expiration(&se);
+                        self.index_event(&se);
                         self.by_id.insert(event.id, se.clone());
                         self.addr_index.insert(key, event.id);
                         Some(se)
@@ -520,6 +556,165 @@ impl MemoryStore {
                 }
             }
         }
+    }
+
+    /// Add `se` to every secondary query index it belongs to (issue
+    /// #507). Called at EVERY site a row enters `by_id` — mirrors exactly
+    /// the set of rows `redb_store.rs`'s `insert_query_index_rows`/
+    /// `insert_tag_index_rows` maintain: `idx_created_at`/`idx_author`/
+    /// `idx_kind`/`idx_author_kind` always, and `idx_tag` for every
+    /// single-letter NIP-01 tag the event carries. These index tuples are
+    /// keyed on fields (id/author/kind/created_at/tags) that never change
+    /// for a given event id once stored — an in-place mutation of
+    /// `se.event.sig` or `se.provenance` (dedup merge, signature
+    /// adoption) never requires re-indexing, only an actual
+    /// insert-or-remove from `by_id` does.
+    fn index_event(&mut self, se: &StoredEvent) {
+        let id = se.event.id;
+        let author = se.event.pubkey;
+        let kind = se.event.kind.as_u16();
+        let created_at = se.event.created_at;
+        self.idx_created_at.insert((created_at, id));
+        self.idx_author.insert((author, created_at, id));
+        self.idx_kind.insert((kind, created_at, id));
+        self.idx_author_kind.insert((author, kind, created_at, id));
+        for tag in se.event.tags.iter() {
+            if let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) {
+                self.idx_tag
+                    .insert((letter, value.to_string(), created_at, id));
+            }
+        }
+    }
+
+    /// Remove `se` from every secondary query index — the exact inverse
+    /// of `index_event`, called at EVERY site a row leaves `by_id`
+    /// (ordinary `remove`, a replaceable/addressable supersession's
+    /// displaced predecessor -- whether dropped outright or staged into
+    /// `outbox_displaced`, both leave `by_id` -- and `gc`'s eviction
+    /// pass). Must be called with the SAME `se` that `index_event` was
+    /// originally called with (same id/author/kind/created_at/tags), so
+    /// the tuples removed here byte-for-byte match what was inserted.
+    fn unindex_event(&mut self, se: &StoredEvent) {
+        let id = se.event.id;
+        let author = se.event.pubkey;
+        let kind = se.event.kind.as_u16();
+        let created_at = se.event.created_at;
+        self.idx_created_at.remove(&(created_at, id));
+        self.idx_author.remove(&(author, created_at, id));
+        self.idx_kind.remove(&(kind, created_at, id));
+        self.idx_author_kind.remove(&(author, kind, created_at, id));
+        for tag in se.event.tags.iter() {
+            if let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) {
+                self.idx_tag
+                    .remove(&(letter, value.to_string(), created_at, id));
+            }
+        }
+    }
+
+    /// The narrowed candidate id set `query` visits, chosen by the
+    /// cheapest available index dimension (issue #507). This is a PURE
+    /// performance optimization: `query` still runs the exact same
+    /// `is_suppressed`/`match_event` post-filter over whatever this
+    /// returns, so even a looser-than-optimal candidate set (a superset
+    /// of the true answer) can never produce a wrong result — only a
+    /// slower one. Mirrors `RedbStore::plan_ordered_query`'s selection
+    /// order (ids > author+kind > author > kind > tag > global-by-time),
+    /// simplified to a fixed priority list rather than redb's
+    /// cardinality-cost estimate: `MemoryStore` keeps no durable
+    /// per-prefix row counts to estimate from, and this is the test
+    /// oracle besides — simple and obviously correct beats optimal here.
+    fn candidate_ids(&self, filter: &Filter) -> BTreeSet<EventId> {
+        // `nostr::Filter::match_event`'s own `ids_match`/`authors_match`/
+        // `kind_match` all treat a `Some(empty set)` as "no constraint"
+        // (vacuously matches everything) — so narrowing on an empty
+        // required set here would wrongly produce ZERO candidates.
+        // Treat it exactly like `None` for candidate selection, mirroring
+        // `RedbStore::plan_ordered_query`'s identical
+        // `.filter(|values| !values.is_empty())`.
+        let ids = filter.ids.as_ref().filter(|v| !v.is_empty());
+        let authors = filter.authors.as_ref().filter(|v| !v.is_empty());
+        let kinds = filter.kinds.as_ref().filter(|v| !v.is_empty());
+
+        // 1. Exact ids: direct `by_id` lookups, bounded by `|ids|`
+        // regardless of store size — mirrors `RedbStore::query`'s ids
+        // fast path.
+        if let Some(ids) = ids {
+            return ids
+                .iter()
+                .copied()
+                .filter(|id| self.by_id.contains_key(id))
+                .collect();
+        }
+
+        let since = filter.since.unwrap_or(Timestamp::from(0u64));
+        let until = filter.until.unwrap_or(Timestamp::from(u64::MAX));
+        let min_id = EventId::all_zeros();
+        let max_id = EventId::from_byte_array([0xffu8; 32]);
+
+        // 2. authors AND kinds: `idx_author_kind` ranges per (author,
+        // kind) pair.
+        if let (Some(authors), Some(kinds)) = (authors, kinds) {
+            let mut out = BTreeSet::new();
+            for author in authors {
+                for kind in kinds {
+                    let k = kind.as_u16();
+                    let lower = (*author, k, since, min_id);
+                    let upper = (*author, k, until, max_id);
+                    out.extend(
+                        self.idx_author_kind
+                            .range(lower..=upper)
+                            .map(|(_, _, _, id)| *id),
+                    );
+                }
+            }
+            return out;
+        }
+
+        // 3. authors: `idx_author` ranges per author.
+        if let Some(authors) = authors {
+            let mut out = BTreeSet::new();
+            for author in authors {
+                let lower = (*author, since, min_id);
+                let upper = (*author, until, max_id);
+                out.extend(self.idx_author.range(lower..=upper).map(|(_, _, id)| *id));
+            }
+            return out;
+        }
+
+        // 4. kinds: `idx_kind` ranges per kind.
+        if let Some(kinds) = kinds {
+            let mut out = BTreeSet::new();
+            for kind in kinds {
+                let k = kind.as_u16();
+                let lower = (k, since, min_id);
+                let upper = (k, until, max_id);
+                out.extend(self.idx_kind.range(lower..=upper).map(|(_, _, id)| *id));
+            }
+            return out;
+        }
+
+        // 5. some generic tag: narrow on the first present tag dimension
+        // (any deterministic choice is correct — the post-filter still
+        // checks every OTHER tag requirement, if any).
+        if let Some((tag, values)) = filter.generic_tags.iter().next() {
+            let mut out = BTreeSet::new();
+            for value in values {
+                let lower = (*tag, value.clone(), since, min_id);
+                let upper = (*tag, value.clone(), until, max_id);
+                out.extend(self.idx_tag.range(lower..=upper).map(|(_, _, _, id)| *id));
+            }
+            return out;
+        }
+
+        // 6. otherwise: `idx_created_at`, bounded by since/until when
+        // present — degrades to a full ordered scan only for a genuinely
+        // unconstrained filter.
+        let lower = (since, min_id);
+        let upper = (until, max_id);
+        self.idx_created_at
+            .range(lower..=upper)
+            .map(|(_, id)| *id)
+            .collect()
     }
 
     /// The tombstone check (retraction-and-negative-deltas.md §2): `true`
@@ -829,6 +1024,69 @@ impl MemoryStore {
     }
 }
 
+#[cfg(test)]
+impl MemoryStore {
+    /// Reset [`Self::query_rows_examined`] to zero — call before the
+    /// `query` a falsifier test wants to measure, so an earlier setup
+    /// query's own candidate count never leaks into the assertion.
+    fn reset_query_rows_examined(&self) {
+        self.query_rows_examined.store(0, Ordering::Relaxed);
+    }
+
+    /// Candidate rows `query` has visited (post-narrowing) since the last
+    /// [`Self::reset_query_rows_examined`] call.
+    fn query_rows_examined(&self) -> u64 {
+        self.query_rows_examined.load(Ordering::Relaxed)
+    }
+
+    /// Rebuild what every secondary index SHOULD contain directly from
+    /// `by_id` and assert it matches exactly what's actually indexed, in
+    /// both directions — a dangling index entry (pointing at a row no
+    /// longer in `by_id`) and a silently un-indexed row (present in
+    /// `by_id` but missing from an index it qualifies for) are both
+    /// caught by one full-equality assertion per index (issue #507).
+    /// Intended to be called after every mutation in a test scenario that
+    /// exercises insert/replace/remove/expire/gc, so a regression at any
+    /// one of `index_event`/`unindex_event`'s call sites is caught at the
+    /// FIRST mutation it affects, not just at the end.
+    fn assert_index_consistent(&self) {
+        let mut expected_created_at = BTreeSet::new();
+        let mut expected_author = BTreeSet::new();
+        let mut expected_kind = BTreeSet::new();
+        let mut expected_author_kind = BTreeSet::new();
+        let mut expected_tag = BTreeSet::new();
+        for se in self.by_id.values() {
+            let id = se.event.id;
+            let author = se.event.pubkey;
+            let kind = se.event.kind.as_u16();
+            let created_at = se.event.created_at;
+            expected_created_at.insert((created_at, id));
+            expected_author.insert((author, created_at, id));
+            expected_kind.insert((kind, created_at, id));
+            expected_author_kind.insert((author, kind, created_at, id));
+            for tag in se.event.tags.iter() {
+                if let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) {
+                    expected_tag.insert((letter, value.to_string(), created_at, id));
+                }
+            }
+        }
+        assert_eq!(
+            self.idx_created_at, expected_created_at,
+            "idx_created_at diverged from by_id"
+        );
+        assert_eq!(
+            self.idx_author, expected_author,
+            "idx_author diverged from by_id"
+        );
+        assert_eq!(self.idx_kind, expected_kind, "idx_kind diverged from by_id");
+        assert_eq!(
+            self.idx_author_kind, expected_author_kind,
+            "idx_author_kind diverged from by_id"
+        );
+        assert_eq!(self.idx_tag, expected_tag, "idx_tag diverged from by_id");
+    }
+}
+
 /// True iff `se` is a locally-authored row still awaiting a signature —
 /// the GC-exclusion predicate (Fable checkpoint R5), shared by `gc`'s
 /// candidacy filter. Requires a NON-EMPTY `owners` set too (architecture
@@ -922,6 +1180,7 @@ impl EventStore for MemoryStore {
             None => {
                 // Regular event: no competition, always inserted.
                 self.index_expiration(&stored);
+                self.index_event(&stored);
                 self.by_id.insert(event.id, stored);
                 InsertOutcome::Inserted
             }
@@ -930,6 +1189,7 @@ impl EventStore for MemoryStore {
                     // First event ever seen at this address.
                     let id = event.id;
                     self.index_expiration(&stored);
+                    self.index_event(&stored);
                     self.by_id.insert(id, stored);
                     self.addr_index.insert(key, id);
                     InsertOutcome::Inserted
@@ -948,7 +1208,9 @@ impl EventStore for MemoryStore {
                             .remove(&current_id)
                             .expect("addr_index must always point at a stored event");
                         self.unindex_expiration(&replaced);
+                        self.unindex_event(&replaced);
                         self.index_expiration(&stored);
+                        self.index_event(&stored);
                         self.by_id.insert(new_id, stored);
                         self.addr_index.insert(key, new_id);
                         InsertOutcome::Superseded {
@@ -994,6 +1256,7 @@ impl EventStore for MemoryStore {
             }
         }
         self.unindex_expiration(&removed);
+        self.unindex_event(&removed);
         Ok(Some(removed))
     }
 
@@ -1021,9 +1284,15 @@ impl EventStore for MemoryStore {
 
     fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
         // `by_id` holds exactly the current winners (regular events, plus
-        // the one live event per replaceable/addressable address) — so
-        // iterating it and matching is "current winners only" by
-        // construction. Matching is delegated entirely to
+        // the one live event per replaceable/addressable address).
+        // `candidate_ids` narrows to the SAME set of rows a full scan of
+        // `by_id` would have visited, minus rows a cheap index dimension
+        // can already prove can't match (issue #507) — narrowing is a
+        // pure performance optimization, never a behavior change: every
+        // candidate still runs through the EXACT SAME `is_suppressed`/
+        // `match_event` gate below as before, so a looser-than-optimal
+        // candidate set can only cost extra work, never a wrong answer.
+        // Matching itself is delegated entirely to
         // `nostr::Filter::match_event`; no hand-rolled matching here.
         // `is_suppressed` additionally excludes anything a still-open
         // kind:5 intent has provisionally claimed (architecture review
@@ -1032,9 +1301,33 @@ impl EventStore for MemoryStore {
         // `filter.limit` is deliberately NOT consulted here (#124) -- see
         // `EventStore::query`'s own doc for why (deferred to #9's ordering
         // fork, not an oversight).
-        Ok(self
-            .by_id
-            .values()
+        //
+        // Two early-outs mirror `nostr::Filter::match_event`'s own
+        // vacuous-`false` cases (and `RedbStore::query`'s identical
+        // early-outs): a `since > until` filter can never be satisfied by
+        // any `created_at`, and a generic-tag dimension mapped to an
+        // EMPTY value set can never match either (`Filter::tag_match`'s
+        // `set.iter().any(..)` over an empty set is always `false`).
+        // These are pure performance -- omitting them would still yield
+        // the identical (empty) result via the ordinary post-filter
+        // below, just after visiting more candidates.
+        if filter
+            .since
+            .zip(filter.until)
+            .is_some_and(|(since, until)| since > until)
+            || filter.generic_tags.values().any(BTreeSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+
+        let candidates = self.candidate_ids(filter);
+        #[cfg(test)]
+        self.query_rows_examined
+            .fetch_add(candidates.len() as u64, Ordering::Relaxed);
+
+        Ok(candidates
+            .into_iter()
+            .filter_map(|id| self.by_id.get(&id))
             .filter(|se| !self.is_suppressed(se))
             .filter(|se| filter.match_event(&se.event, MatchEventOptions::new()))
             .cloned()
@@ -1071,20 +1364,22 @@ impl EventStore for MemoryStore {
     fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
         let mut report = GcReport::default();
 
-        // Regular events (no address key) matched by no live claim, AND not
-        // an open (unsigned) local intent, are the ONLY GC candidates:
-        // replaceable/addressable current winners are never in this set at
-        // all (retained unconditionally, by construction), and neither is
-        // an unsigned pending row (Fable checkpoint R5 — an open intent
-        // must never be evicted before it ever signs; once
+        // Pass 1: regular events (no address key) matched by no live
+        // claim, AND not an open (unsigned) local intent, are the ONLY GC
+        // candidates: replaceable/addressable current winners are never
+        // in this set at all (retained unconditionally, by construction),
+        // and neither is an unsigned pending row (Fable checkpoint R5 —
+        // an open intent must never be evicted before it ever signs; once
         // `promote_signed` flips it to `Signed` it becomes an ordinary
         // event again, GC-able like any other under `claims`). A row
         // currently hidden by a still-open kind:5 suppression claim is
         // pinned the same way (architecture review requirement — GC must
         // never evict a target a pending cancel/promote can still act on;
         // NIP-40 expiry may still remove it, that's a separate, accepted
-        // path).
-        let victims: Vec<EventId> = self
+        // path). Every victim is removed AND unindexed here (issue #507 —
+        // a GC'd row must vanish from the secondary query indexes FIX 1
+        // added, exactly like any other `by_id` departure).
+        let victim_ids: Vec<EventId> = self
             .by_id
             .iter()
             .filter(|(_, se)| {
@@ -1096,19 +1391,31 @@ impl EventStore for MemoryStore {
             .map(|(id, _)| *id)
             .collect();
 
-        for id in victims {
+        let mut victims: Vec<Event> = Vec::with_capacity(victim_ids.len());
+        for id in victim_ids {
             let se = self
                 .by_id
                 .remove(&id)
                 .expect("victim id was just found in by_id");
+            self.unindex_expiration(&se);
+            self.unindex_event(&se);
             report.events_evicted += 1;
-            let evicted_at = se.event.created_at;
+            victims.push(se.event);
+        }
 
+        // Pass 2: shrink/delete every coverage row an evicted victim falls
+        // inside AND whose retained shape matches it (gc's O(victims ×
+        // rows) coverage-shrink batching is issue #507's SECOND fix, in a
+        // follow-up commit — this commit is scoped to the secondary query
+        // indexes above and keeping GC's `by_id` departures consistent
+        // with them).
+        for event in &victims {
+            let evicted_at = event.created_at;
             let mut to_delete = Vec::new();
             for (row_key, row) in self.coverage.iter_mut() {
                 if row.interval.from <= evicted_at
                     && evicted_at <= row.interval.through
-                    && shape_matches(&row.shape, &se.event)
+                    && shape_matches(&row.shape, event)
                 {
                     match shrink_after_eviction(row.interval, evicted_at) {
                         Some(shrunk) => {
@@ -1337,6 +1644,7 @@ impl EventStore for MemoryStore {
         let (outcome, displaced) = match address_key_for(&stored.event) {
             None => {
                 self.index_expiration(&stored);
+                self.index_event(&stored);
                 self.by_id.insert(stored.event.id, stored.clone());
                 // Architecture review correction: a locally-composed
                 // kind:5 draft stages a REVERSIBLE suppression claim over
@@ -1377,6 +1685,7 @@ impl EventStore for MemoryStore {
                 None => {
                     let id = stored.event.id;
                     self.index_expiration(&stored);
+                    self.index_event(&stored);
                     self.by_id.insert(id, stored.clone());
                     self.addr_index.insert(key, id);
                     (
@@ -1402,7 +1711,9 @@ impl EventStore for MemoryStore {
                             .remove(&current_id)
                             .expect("addr_index must always point at a stored event");
                         self.unindex_expiration(&replaced);
+                        self.unindex_event(&replaced);
                         self.index_expiration(&stored);
+                        self.index_event(&stored);
                         self.by_id.insert(new_id, stored.clone());
                         self.addr_index.insert(key, new_id);
                         (
@@ -2605,5 +2916,263 @@ mod lane_atomicity_tests {
                 outcome: AttemptOutcome::Acked,
             }
         );
+    }
+}
+
+/// Issue #507: `MemoryStore::query` narrows via secondary ordered
+/// indexes instead of scanning every row in `by_id` — these are the
+/// falsifiers for that narrowing (mirroring `redb_store.rs`'s own
+/// `query_by_author_does_not_scan_all_rows`-style tests, one per
+/// selection-heuristic dimension), plus the cross-mutation index-
+/// consistency check `assert_index_consistent` backs.
+#[cfg(test)]
+mod query_index_tests {
+    use super::*;
+    use nostr::{Alphabet, EventBuilder, Keys, Tag};
+
+    fn relay() -> RelayUrl {
+        RelayUrl::parse("wss://r1.example").unwrap()
+    }
+
+    fn note_at(keys: &Keys, created_at: u64) -> Event {
+        EventBuilder::new(Kind::TextNote, "noise")
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn kind_at(keys: &Keys, kind: u16, created_at: u64) -> Event {
+        EventBuilder::new(Kind::from(kind), "noise")
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn tagged_at(keys: &Keys, created_at: u64, value: &str) -> Event {
+        EventBuilder::new(Kind::from(9u16), "noise")
+            .tag(Tag::parse(["t", value]).unwrap())
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn query_by_ids_does_not_scan_all_rows() {
+        let mut store = MemoryStore::new();
+        let target_keys = Keys::generate();
+        let target = note_at(&target_keys, 1);
+        let target_id = target.id;
+        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+            .unwrap();
+        for i in 0..200u64 {
+            let noise_keys = Keys::generate();
+            store
+                .insert(
+                    note_at(&noise_keys, 100 + i),
+                    RelayObserved::new(relay(), Timestamp::from(100 + i)),
+                )
+                .unwrap();
+        }
+
+        store.reset_query_rows_examined();
+        let results = store.query(&Filter::new().id(target_id)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, target_id);
+        assert_eq!(
+            store.query_rows_examined(),
+            1,
+            "an ids-filter query must visit exactly the named ids, never a full scan"
+        );
+    }
+
+    #[test]
+    fn query_by_author_does_not_scan_all_rows() {
+        let mut store = MemoryStore::new();
+        let target_keys = Keys::generate();
+        let target = note_at(&target_keys, 1);
+        let target_id = target.id;
+        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+            .unwrap();
+        for i in 0..200u64 {
+            let noise_keys = Keys::generate();
+            store
+                .insert(
+                    note_at(&noise_keys, 100 + i),
+                    RelayObserved::new(relay(), Timestamp::from(100 + i)),
+                )
+                .unwrap();
+        }
+
+        store.reset_query_rows_examined();
+        let results = store
+            .query(&Filter::new().author(target_keys.public_key()))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, target_id);
+        assert_eq!(
+            store.query_rows_examined(),
+            1,
+            "an author-filtered query on a 201-row store must decode exactly 1 row"
+        );
+    }
+
+    #[test]
+    fn query_by_kind_does_not_scan_all_rows() {
+        let mut store = MemoryStore::new();
+        let keys = Keys::generate();
+        let target = kind_at(&keys, 1, 1);
+        let target_id = target.id;
+        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+            .unwrap();
+        for i in 0..200u64 {
+            store
+                .insert(
+                    kind_at(&keys, 9, 100 + i),
+                    RelayObserved::new(relay(), Timestamp::from(100 + i)),
+                )
+                .unwrap();
+        }
+
+        store.reset_query_rows_examined();
+        let results = store.query(&Filter::new().kind(Kind::from(1u16))).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, target_id);
+        assert_eq!(
+            store.query_rows_examined(),
+            1,
+            "a kind-filtered query on a 201-row store must decode exactly 1 row"
+        );
+    }
+
+    #[test]
+    fn query_by_author_kind_does_not_scan_all_rows() {
+        let mut store = MemoryStore::new();
+        let target_keys = Keys::generate();
+        let other_keys = Keys::generate();
+        let target = kind_at(&target_keys, 1, 1);
+        let target_id = target.id;
+        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+            .unwrap();
+        // Same author, different kind -- must not be picked up by the
+        // author+kind narrowing.
+        store
+            .insert(
+                kind_at(&target_keys, 9, 2),
+                RelayObserved::new(relay(), Timestamp::from(2u64)),
+            )
+            .unwrap();
+        // Same kind, different (noise) authors -- must not be picked up
+        // either.
+        for i in 0..200u64 {
+            store
+                .insert(
+                    kind_at(&other_keys, 1, 100 + i),
+                    RelayObserved::new(relay(), Timestamp::from(100 + i)),
+                )
+                .unwrap();
+        }
+
+        store.reset_query_rows_examined();
+        let results = store
+            .query(
+                &Filter::new()
+                    .author(target_keys.public_key())
+                    .kind(Kind::from(1u16)),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, target_id);
+        assert_eq!(
+            store.query_rows_examined(),
+            1,
+            "an author+kind-filtered query must decode exactly 1 row, not the author's \
+             other-kind row or the other authors' same-kind rows"
+        );
+    }
+
+    #[test]
+    fn query_by_tag_does_not_scan_all_rows() {
+        let mut store = MemoryStore::new();
+        let keys = Keys::generate();
+        let target = tagged_at(&keys, 1, "target");
+        let target_id = target.id;
+        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+            .unwrap();
+        for i in 0..200u64 {
+            store
+                .insert(
+                    tagged_at(&keys, 100 + i, "noise"),
+                    RelayObserved::new(relay(), Timestamp::from(100 + i)),
+                )
+                .unwrap();
+        }
+
+        store.reset_query_rows_examined();
+        let results = store
+            .query(&Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::T), "target"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.id, target_id);
+        assert_eq!(
+            store.query_rows_examined(),
+            1,
+            "a tag-filtered query on a 201-row store must decode exactly 1 row"
+        );
+    }
+
+    #[test]
+    fn indexes_stay_consistent_across_insert_replace_remove_expire_gc() {
+        let mut store = MemoryStore::new();
+        let keys = Keys::generate();
+
+        // Insert a handful of regular, tagged events.
+        let mut ids = Vec::new();
+        for i in 0..5u64 {
+            let event = tagged_at(&keys, 10 + i, &format!("tag{i}"));
+            ids.push(event.id);
+            store
+                .insert(event, RelayObserved::new(relay(), Timestamp::from(1u64)))
+                .unwrap();
+        }
+        store.assert_index_consistent();
+
+        // Replaceable-address supersession.
+        let old = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from(1u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        store
+            .insert(old, RelayObserved::new(relay(), Timestamp::from(1u64)))
+            .unwrap();
+        store.assert_index_consistent();
+        let new = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from(2u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        store
+            .insert(new, RelayObserved::new(relay(), Timestamp::from(2u64)))
+            .unwrap();
+        store.assert_index_consistent();
+
+        // Direct removal.
+        store.remove(ids[0], RetractReason::Rejected).unwrap();
+        store.assert_index_consistent();
+
+        // Expiration.
+        let expiring = EventBuilder::new(Kind::TextNote, "expiring")
+            .custom_created_at(Timestamp::from(50u64))
+            .tag(Tag::expiration(Timestamp::from(60u64)))
+            .sign_with_keys(&keys)
+            .unwrap();
+        store
+            .insert(expiring, RelayObserved::new(relay(), Timestamp::from(1u64)))
+            .unwrap();
+        store.assert_index_consistent();
+        store.expire_due(Timestamp::from(60u64)).unwrap();
+        store.assert_index_consistent();
+
+        // GC the rest (no live claims).
+        store.gc(&ClaimSet::new(Vec::new())).unwrap();
+        store.assert_index_consistent();
     }
 }
