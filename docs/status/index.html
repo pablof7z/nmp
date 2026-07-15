@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-15 19:53 UTC</p>
-    <p class="ep-sub">2026-07-15 &middot; caught-and-fixed CI break &middot; ~3.5 min</p>
-    <audio controls preload="none" src="reports/pulse-0005.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0005.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Briefing — 2026-07-15 20:55 UTC</p>
+    <p class="ep-sub">2026-07-15 &middot; observe(query, window) ships &middot; ~4.7 min</p>
+    <audio controls preload="none" src="reports/pulse-0006.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0006.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">A DNS-rebinding relay-admission fix (#524) merged with the Kotlin package CI lane red, caught and hotfixed (#528). Three more hardening PRs landed right behind it: wake-relay lane indexing (#525), MemoryStore secondary indexes + batched GC (#526), and real kind-ownership enforcement (#527, closing a documented-but-unenforced gap). One more is in CI now: remove_account across all four surfaces (#529). Plus the in-progress observe(query, window) redesign folding History* pagination into the read noun (#474, #485).</p>
+    <p class="ep-blurb">The read API's biggest shape change yet: <code>observe(query, window)</code> makes windowing a policy on the one read noun, retires the parallel <code>History*</code> noun entirely, and fixes the #486 per-advance relay-subscription leak along the way — closing #474/#485/#486. A CI-caught native-task leak in the new window path was fixed and regression-tested before merge. Four more hardening fixes landed alongside it (#525–#528), and NIP-42 content-relay AUTH begins its first wave under #8 — still early, not shipped. <code>remove_account</code> (#529) stays held pending #8's account-handle shape.</p>
   </section>
 
   <details class="archive" id="archive">

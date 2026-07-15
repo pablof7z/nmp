@@ -15,7 +15,36 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 19:53:27 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 20:55:00 GMT</lastBuildDate>
+<item>
+<title>NMP Briefing — 2026-07-15 20:55 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0006.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0006</guid>
+<pubDate>Wed, 15 Jul 2026 20:55:00 GMT</pubDate>
+<description><![CDATA[
+Hey, it's the NMP briefing. This one's a bigger one -- we're due for a deeper look this time, so let's take our time.
+
+The headline this session is big, and it's the good kind of big: reading in NMP just got simpler, not more complicated. For a while, NMP had two ways to ask for data -- a live query, for "give me updates forever," and a separate concept called History, for "give me a page of the past." Two nouns doing overlapping jobs, and that eventually drifts out of sync and gets weird at the edges.
+
+So the team deleted History as its own thing. There's one read noun now -- observe, called with a query and an optional window -- and windowing is just a policy you attach to it. Ask without a window and you get an unbounded live feed of deltas, forever. Ask with a window and you get a bounded, authoritative snapshot instead. That's not an arbitrary product choice -- it's a correctness constraint. An unbounded feed that tried to deliver full snapshots on every change would get quadratically expensive as the result set grows; a bounded window can afford snapshots precisely because it has a ceiling. So delivery mode isn't a separate setting anymore -- it's derived from whether you bounded the query, closing off a whole class of "wait, is this a live feed or a page?" confusion.
+
+One more detail: hitting the edge of your window used to be awkward to represent. Now there's an explicit fact called AtBound that tells you, plainly, "you've reached the edge of what you asked for." It's not an error and it's not a null -- it's a first-class piece of information your app can react to on purpose.
+
+This change also fixes a real bug living quietly in the scrolling path. Scrolling deep into history was leaking a relay subscription on every page advance, and if you scrolled far enough, you could pile up dozens of open subscriptions per relay and trip its connection limits. That's fixed now -- a deep scroll holds a small, constant number of live subscriptions per relay, no matter how far back you go. It's also a good process story: CI actually caught a leak in the native task handling on the new path before it shipped broadly, someone fixed it, and there's now a regression test guarding that exact spot. Three related issues, all closed by one coherent redesign instead of three separate patches.
+
+Alongside that flagship change, four smaller but real fixes landed this session too. A same-day hotfix unbroke the Swift and Kotlin package builds after an earlier security change made local relay connections opt-in by default -- the right call, it just needed a quick follow-up. The outbox's wake-relay lookup now indexes by relay instead of scanning the whole outbox on every check. The in-memory store picked up secondary indexes and batched garbage collection. And kind ownership -- the rule about which module is allowed to write which kind of event -- is now actually enforced in code, instead of being true only by convention. That's the sort of gap that's easy to overlook until somebody accidentally crosses it.
+
+Now, what's still ahead. The next big piece of protocol work is authentication on content relays -- a relay requiring proof of who you are before it'll serve certain data, not just before you publish. Today that only really works on the signer connection, when you're talking to a remote signer; on ordinary content relays it's still early days. What's just gotten underway is the first wave of a seven-part plan to build a properly scoped notion of session identity, so a public anonymous reader and two different logged-in accounts on the same relay stay completely separate instead of quietly mixing. It's real design work just starting -- not a shipped feature, so don't expect authenticated content reads today.
+
+And one thing that's intentionally on hold: there's a draft for cleanly removing an account -- fully detaching a signing key instead of just deactivating it -- but it's paused on purpose, until it can be reshaped to match the account-handle design coming out of that authentication work. Better to wait a beat than build the same thing twice.
+
+That's the briefing. A genuine architectural win this time, a handful of quiet-but-real fixes, and one important thing deliberately waiting its turn. Thanks for listening.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0006.mp3" type="audio/mpeg" length="4508588"/>
+<itunes:title>NMP Briefing — 2026-07-15 20:55 UTC</itunes:title>
+<itunes:duration>282</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-15 19:53 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0005.mp3</link>
