@@ -15,7 +15,28 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 19:04:30 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 19:53:27 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-15 19:53 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0005.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0005</guid>
+<pubDate>Wed, 15 Jul 2026 19:53:27 GMT</pubDate>
+<description><![CDATA[
+Since the last update, one thing needs saying plainly: master went red for a bit, and here's exactly why.
+
+Last hour's fix for a D N S rebinding hole in relay admission (#524) was correct on its own terms -- it pins the resolved I P address a relay was approved on, instead of trusting a fresh D N S answer that could point the same hostname somewhere internal later. But it also flipped a default: local and loopback relays are now rejected unless an app explicitly allows them. The Swift and Kotlin test suites both lean on local relay fixtures for their integration tests, and those fixtures got caught by the same net. It merged anyway, and master's Kotlin package lane went red the moment it landed -- a security change shipped without checking the two S D K lanes it would break. The good news: caught fast, fixed fast. A follow-up hotfix (#528) explicitly admits the local relay fixtures those tests need; both lanes are green again, and the security posture itself is untouched.
+
+Right behind that, three more hardening changes landed within the hour. #525 indexes the wake-relay lookup by relay instead of scanning the whole outbox on every wake-up. #526 adds secondary indexes to the in-memory store and batches its garbage-collection pass, continuing the same bounded-memory push from the last batch. And #527 is about honesty: the documentation has been claiming kind ownership -- which module owns which event kind -- is enforced, and an audit this week found it isn't; there was zero enforcement. That's now closed for real, with a claim-set fold and a dedicated audit crate. One more is still in continuous integration as of this recording: #529 rounds out account lifecycle -- there's long been a way to add an account across Rust, F F I, Swift, and Kotlin, but no symmetric way to remove one, and this adds remove-account across all four surfaces.
+
+Now the bigger architectural move in flight. The read side of the A P I is being reworked, under #474 and #485, so paginated history stops being a second, parallel concept beside the ordinary live query. Today there are effectively two ways to read -- the normal observe call, and a separate History-shaped noun bolted on just for pagination, with its own continuation token. The design in progress retires that second noun entirely: you call the same observe with a query and an optional window, and windowing becomes a policy on the one read noun, not a parallel vocabulary. Not shipped yet -- this is in-progress design work -- but it's where the read side is converging, because two nouns quietly doing overlapping jobs is exactly the kind of thing that diverges later.
+
+So, in one line: a security fix's blast radius on C I got caught and patched rather than left red, three more hardening changes landed right behind it with one more queued, and the history-versus-window redesign keeps moving as the next real shape change to the A P I.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0005.mp3" type="audio/mpeg" length="3401516"/>
+<itunes:title>NMP Pulse — 2026-07-15 19:53 UTC</itunes:title>
+<itunes:duration>213</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-15 19:00 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0004.mp3</link>
