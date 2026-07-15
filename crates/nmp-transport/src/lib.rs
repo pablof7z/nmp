@@ -35,7 +35,9 @@ mod health;
 mod keepalive;
 mod pool;
 
-pub use admission::{classify_ip, classify_relay_host, normalize_bare_host, relay_host_key, RelayHostClass};
+pub use admission::{
+    classify_ip, classify_relay_host, normalize_bare_host, relay_host_key, RelayHostClass,
+};
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
 pub use pool::{

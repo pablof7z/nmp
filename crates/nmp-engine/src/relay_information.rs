@@ -16,7 +16,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use futures_channel::oneshot;
-use nmp_transport::{classify_ip, classify_relay_host, normalize_bare_host, relay_host_key, RelayHostClass};
+use nmp_transport::{
+    classify_ip, classify_relay_host, normalize_bare_host, relay_host_key, RelayHostClass,
+};
 use nostr::RelayUrl;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1706,7 +1708,9 @@ mod tests {
         ]))
     }
 
-    fn local_relay_information_service(executor: nmp_executor::Executor) -> RelayInformationService {
+    fn local_relay_information_service(
+        executor: nmp_executor::Executor,
+    ) -> RelayInformationService {
         RelayInformationService::with_executor_and_limits(
             executor,
             Arc::new(HttpFetcher::new_with_admission(loopback_admission())),

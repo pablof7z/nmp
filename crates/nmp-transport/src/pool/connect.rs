@@ -122,13 +122,15 @@ pub(super) fn open_relay_socket(
         .set_write_timeout(Some(CONNECT_TIMEOUT))
         .map_err(|error| format!("set handshake write timeout: {error}"))?;
 
-    let (socket, _response) = client_tls_with_config(request, stream, Some(relay_websocket_config()), None)
-        .map_err(|error| match error {
-            HandshakeError::Failure(f) => f.to_string(),
-            HandshakeError::Interrupted(_) => {
-                "handshake interrupted on blocking stream".to_string()
-            }
-        })?;
+    let (socket, _response) =
+        client_tls_with_config(request, stream, Some(relay_websocket_config()), None).map_err(
+            |error| match error {
+                HandshakeError::Failure(f) => f.to_string(),
+                HandshakeError::Interrupted(_) => {
+                    "handshake interrupted on blocking stream".to_string()
+                }
+            },
+        )?;
     Ok(socket)
 }
 
@@ -201,10 +203,8 @@ mod tests {
         let config = relay_websocket_config();
         assert_eq!(config.max_message_size, Some(MAX_INBOUND_MESSAGE_BYTES));
         assert_eq!(config.max_frame_size, Some(MAX_INBOUND_FRAME_BYTES));
-        assert!(
-            MAX_INBOUND_MESSAGE_BYTES < 64 * 1024 * 1024,
-            "must be tighter than tungstenite's own default ceiling"
-        );
+        // Compile-time invariant: tighter than tungstenite's own 64 MiB default ceiling.
+        const _: () = assert!(MAX_INBOUND_MESSAGE_BYTES < 64 * 1024 * 1024);
     }
 
     /// A black-holed address must fail inside the bound, never the OS
@@ -242,8 +242,7 @@ mod tests {
             ("::1", 7777),
         ] {
             let started = Instant::now();
-            let result =
-                connect_with_timeout(host, port, Duration::from_secs(5), &BTreeSet::new());
+            let result = connect_with_timeout(host, port, Duration::from_secs(5), &BTreeSet::new());
             let elapsed = started.elapsed();
             let error = result.expect_err(&format!("{host} must be refused"));
             assert_eq!(
