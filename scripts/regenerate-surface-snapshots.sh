@@ -51,9 +51,11 @@ cd "$ROOT"
 } > "$TMP/nmp-facade.txt"
 
 # The supported facade has dozens of explicit roots, not arbitrary dependency
-# method inventories. These generous ceilings catch accidental recursive impl
-# expansion while leaving substantial room for intentional surface growth.
-RUST_FACADE_MAX_LINES=30000
+# method inventories. The 32,000-line ceiling admits the audited #474 canonical
+# candidate at 30,628 lines with 1,372 lines (4.3%) of finite headroom. The
+# independent byte ceiling remains unchanged so accidental recursive impl
+# expansion still fails closed.
+RUST_FACADE_MAX_LINES=32000
 RUST_FACADE_MAX_BYTES=8000000
 RUST_FACADE_LINES=$(wc -l < "$TMP/nmp-facade.txt")
 RUST_FACADE_BYTES=$(wc -c < "$TMP/nmp-facade.txt")

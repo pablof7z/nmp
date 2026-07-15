@@ -2,8 +2,18 @@
 set -euo pipefail
 
 CHECK=$(cd "$(dirname "$0")" && pwd)/check-surface-governance.sh
+REGEN=$(cd "$(dirname "$0")" && pwd)/regenerate-surface-snapshots.sh
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+
+RUST_FACADE_MAX_LINES=$(sed -n 's/^RUST_FACADE_MAX_LINES=//p' "$REGEN")
+RUST_FACADE_MAX_BYTES=$(sed -n 's/^RUST_FACADE_MAX_BYTES=//p' "$REGEN")
+AUDITED_HISTORY_CANDIDATE_LINES=30628
+[[ $RUST_FACADE_MAX_LINES == 32000 ]]
+[[ $RUST_FACADE_MAX_BYTES == 8000000 ]]
+(( AUDITED_HISTORY_CANDIDATE_LINES <= RUST_FACADE_MAX_LINES ))
+(( RUST_FACADE_MAX_LINES - AUDITED_HISTORY_CANDIDATE_LINES == 1372 ))
+echo "ok - audited 30,628-line candidate fits the finite budget; byte guard unchanged"
 
 new_repo() {
   local repo=$1
@@ -220,7 +230,8 @@ append_valid_entry "$repo" rust 998; commit_case "$repo" wrong-pr
 expect_fail "wrong or unrelated PR link" "$repo" "$base"
 
 # The trusted base checker rejects attempts to replace itself or its workflow.
-for protected in scripts/check-surface-governance.sh .github/workflows/ci.yml \
+for protected in scripts/check-surface-governance.sh scripts/regenerate-surface-snapshots.sh \
+  .github/workflows/ci.yml \
   .github/workflows/surface-governance.yml \
   tools/rust-facade-snapshot/src/main.rs \
   tools/rust-facade-snapshot/tests/fixtures/fixture.txt; do

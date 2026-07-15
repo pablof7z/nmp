@@ -44,9 +44,11 @@ over generated bindings without becoming independent semantic engines.
   `null` privacy markers without exposing rustdoc ids. A path-free reference
   must have an indexed semantic definition or extraction fails rather than
   emitting an unstable rustdoc id. Metadata and rustdoc run locked, so manifest
-  and lockfile drift fails closed. Regeneration also enforces a 30,000-line /
-  8,000,000-byte ceiling: deliberately generous for the explicit facade roots,
-  but small enough to catch accidental recursive helper-method expansion.
+  and lockfile drift fails closed. Regeneration also enforces a 32,000-line /
+  8,000,000-byte ceiling. The line budget is the bounded owner-controlled #481
+  update justified by the audited #474 canonical candidate at 30,628 lines:
+  1,372 lines (4.3%) of finite headroom, while the independent byte guard and
+  accidental recursive helper-method-expansion protection stay unchanged.
 - `scripts/regenerate-surface-snapshots.sh` regenerates both from a clean
   checkout; `scripts/check-surface-governance.sh` verifies them.
 - Any baseline change, any change below the public Swift/Kotlin wrapper paths,
