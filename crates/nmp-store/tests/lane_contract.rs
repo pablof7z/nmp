@@ -980,6 +980,46 @@ fn genuine_detail_less_legacy_row_adopts_as_legacy_in_flight_for_bootstrap() {
         .unwrap();
 }
 
+/// A legacy v1 attempt row whose OWN outcome is already terminal (written
+/// before the additive detail table existed, so no DETAILS row overlays it)
+/// must bootstrap straight to `LaneState::Terminal`. This is the live
+/// upgrade-read branch (`redb_store.rs` / `memory_store.rs` bootstrap
+/// `Some(attempt) => LaneState::Terminal`) that the lane doors never produce
+/// themselves: they keep the attempt row's outcome `Started` and record the
+/// terminal outcome in DETAILS instead.
+#[test]
+fn genuine_terminal_legacy_row_adopts_as_terminal_lane_for_bootstrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-terminal.redb");
+    let relay = RelayUrl::parse("wss://legacy-terminal.example").unwrap();
+    let (intent, signed) = {
+        let mut store = reopen(&path);
+        let keys = Keys::generate();
+        let (signed, frozen) = signed_and_frozen(&keys, "legacy-terminal", 262);
+        let intent = store
+            .accept_write(accept(frozen, &keys, 262))
+            .unwrap()
+            .journaled_intent_id()
+            .unwrap();
+        store.promote_signed(intent, signed.sig).unwrap();
+        store
+            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+            .unwrap();
+        (intent, signed)
+    };
+    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Acked);
+
+    let mut store = reopen(&path);
+    let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+    assert_eq!(
+        lane.state,
+        LaneState::Terminal {
+            ordinal: 1,
+            outcome: AttemptOutcome::Acked,
+        }
+    );
+}
+
 #[test]
 fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
     let dir = tempfile::tempdir().unwrap();
