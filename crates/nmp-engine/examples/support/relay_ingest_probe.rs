@@ -10,8 +10,8 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp_engine::core::{RelayAdmissionPolicy, RowDelta};
-use nmp_engine::runtime::EngineThread;
+use nmp_engine::core::{HistoryQuery, RelayAdmissionPolicy, RowDelta};
+use nmp_engine::runtime::{EngineThread, HistoryReceiver, RowsMsg};
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -23,7 +23,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v2";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v4";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 
@@ -36,6 +36,7 @@ pub struct ProbeConfig {
     pub queue_capacity: usize,
     pub batch_size: usize,
     pub visible_limit: Option<usize>,
+    pub trim_allocator_during_ingest: bool,
     pub frame_delay: Duration,
     pub expect_rejection: bool,
     pub timeout: Duration,
@@ -52,6 +53,7 @@ impl Default for ProbeConfig {
             queue_capacity: 1_024,
             batch_size: 128,
             visible_limit: Some(200),
+            trim_allocator_during_ingest: false,
             frame_delay: Duration::ZERO,
             expect_rejection: false,
             timeout: Duration::from_secs(120),
@@ -106,6 +108,8 @@ pub struct ProbeResult {
     pub queue_capacity: usize,
     pub batch_size: usize,
     pub visible_limit: Option<usize>,
+    pub delivery_mode: &'static str,
+    pub trim_allocator_during_ingest: bool,
     pub frame_delay_us: u128,
     pub expect_rejection: bool,
     pub expected_relay_frames: u64,
@@ -114,6 +118,7 @@ pub struct ProbeResult {
     pub observed_removed_rows: u64,
     pub observed_source_growth_deltas: u64,
     pub final_visible_rows: usize,
+    pub all_sources_reconciled: bool,
     pub corpus_bytes: u64,
     pub database_bytes: u64,
     pub generation_ms: f64,
@@ -134,6 +139,15 @@ pub struct ProbeResult {
     pub anonymous_after_ingest_bytes: Option<u64>,
     pub rss_after_shutdown_bytes: Option<u64>,
     pub anonymous_after_shutdown_bytes: Option<u64>,
+    pub rss_after_probe_buffers_release_bytes: Option<u64>,
+    pub anonymous_after_probe_buffers_release_bytes: Option<u64>,
+    pub rss_after_rows_release_bytes: Option<u64>,
+    pub anonymous_after_rows_release_bytes: Option<u64>,
+    pub rss_after_handle_release_bytes: Option<u64>,
+    pub anonymous_after_handle_release_bytes: Option<u64>,
+    pub allocator_trim_attempted: bool,
+    pub rss_after_allocator_trim_bytes: Option<u64>,
+    pub anonymous_after_allocator_trim_bytes: Option<u64>,
     pub shutdown_ms: f64,
     pub reopen_and_verify_ms: f64,
     pub first_event_id: String,
@@ -185,12 +199,17 @@ struct MemorySampler {
 }
 
 impl MemorySampler {
-    fn start() -> Self {
+    fn start(trim_during_ingest: bool) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let join = thread::spawn(move || {
             let mut peak = current_memory();
+            let mut next_trim = Instant::now() + Duration::from_millis(100);
             while !thread_stop.load(Ordering::Relaxed) {
+                if trim_during_ingest && Instant::now() >= next_trim {
+                    trim_allocator();
+                    next_trim = Instant::now() + Duration::from_millis(100);
+                }
                 let current = current_memory();
                 peak.rss_bytes = max_optional(peak.rss_bytes, current.rss_bytes);
                 peak.anonymous_bytes = max_optional(peak.anonymous_bytes, current.anonymous_bytes);
@@ -215,6 +234,22 @@ struct ObservationState {
     latencies_ns: Vec<u64>,
     first_row: Option<Duration>,
     last_row: Option<Duration>,
+}
+
+enum ProbeRows {
+    Lossless(mpsc::Receiver<RowsMsg>),
+    Windowed(HistoryReceiver),
+}
+
+impl ProbeRows {
+    fn recv_timeout(&self, timeout: Duration) -> Result<RowsMsg, mpsc::RecvTimeoutError> {
+        match self {
+            Self::Lossless(rows) => rows.recv_timeout(timeout),
+            Self::Windowed(batches) => batches
+                .recv_timeout(timeout)
+                .map(|batch| (batch.deltas, batch.evidence)),
+        }
+    }
 }
 
 impl ObservationState {
@@ -338,7 +373,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let selection = Filter {
         kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
         authors: Some(Binding::Literal(BTreeSet::from([corpus.author.clone()]))),
-        limit: config.visible_limit,
+        limit: None,
         ..Filter::default()
     };
     let demand = Demand::new(
@@ -367,7 +402,18 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         },
         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )?;
-    let (_query_handle, rows) = handle.subscribe(LiveQuery(demand))?;
+    let live_query = LiveQuery(demand);
+    let rows = match config.visible_limit {
+        Some(limit) => {
+            let (_, rows) =
+                handle.subscribe_history(HistoryQuery::new(live_query, limit, limit))?;
+            ProbeRows::Windowed(rows)
+        }
+        None => {
+            let (_, rows) = handle.subscribe(live_query)?;
+            ProbeRows::Lossless(rows)
+        }
+    };
     let (diagnostics_handle, diagnostics) = handle.observe_diagnostics();
     let observed_relay_frames = Arc::new(AtomicU64::new(0));
     let diagnostic_count = Arc::clone(&observed_relay_frames);
@@ -389,11 +435,12 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .ok_or("expected frame count overflow")?;
     let ingest_started = Instant::now();
     let memory_before_ingest = current_memory();
-    let memory_sampler = MemorySampler::start();
+    let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
     let deadline = Instant::now() + config.timeout;
     let mut observations = ObservationState::new(&config);
     let mut all_sources_reconciled = false;
     let mut rejection_quiet_since = None;
+    let mut accepted_quiet_since = None;
 
     loop {
         let observed_frames = observed_relay_frames.load(Ordering::Acquire);
@@ -405,11 +452,17 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         }
         let rejection_complete = rejection_quiet_since
             .is_some_and(|started| started.elapsed() >= Duration::from_secs(1));
-        let rows_complete =
-            config.visible_limit.is_some() || observations.added_rows == config.events as u64;
-        let evidence_complete = config.visible_limit.is_some() || all_sources_reconciled;
+        let expected_visible_rows = config
+            .visible_limit
+            .map_or(config.events, |limit| config.events.min(limit));
+        let rows_complete = observations.final_visible_rows(&config) == expected_visible_rows;
+        if observed_frames >= expected_frames && rows_complete {
+            accepted_quiet_since.get_or_insert_with(Instant::now);
+        } else {
+            accepted_quiet_since = None;
+        }
         let accepted_complete =
-            observed_frames >= expected_frames && rows_complete && evidence_complete;
+            accepted_quiet_since.is_some_and(|started| started.elapsed() >= Duration::from_secs(1));
         if (config.expect_rejection && rejection_complete)
             || (!config.expect_rejection && accepted_complete)
         {
@@ -427,6 +480,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         }
         match rows.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok((deltas, evidence)) => {
+                accepted_quiet_since = None;
                 observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
                 all_sources_reconciled = evidence.sources.len() == config.relays
                     && evidence
@@ -469,6 +523,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     handle.shutdown();
     engine_thread.join();
     let shutdown_elapsed = shutdown_started.elapsed();
+    while let Ok((deltas, _)) = rows.recv_timeout(Duration::ZERO) {
+        observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
+    }
     let memory_after_shutdown = current_memory();
 
     let mut server_stats = Vec::with_capacity(servers.len());
@@ -515,6 +572,26 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         return Err("bounded visible query is missing the newest event".into());
     }
 
+    observations.latencies_ns.sort_unstable();
+    let observed_added_rows = observations.added_rows;
+    let observed_removed_rows = observations.removed_rows;
+    let observed_source_growth_deltas = observations.source_growth;
+    let first_row_ms = duration_ms(observations.first_row.unwrap_or_default());
+    let last_row_ms = duration_ms(observations.last_row.unwrap_or_default());
+    let apply_latency_p50_ms = ns_ms(percentile(&observations.latencies_ns, 50));
+    let apply_latency_p95_ms = ns_ms(percentile(&observations.latencies_ns, 95));
+    let apply_latency_p99_ms = ns_ms(percentile(&observations.latencies_ns, 99));
+    let apply_latency_max_ms = ns_ms(*observations.latencies_ns.last().unwrap_or(&0));
+    drop(observations);
+    drop(sent_at);
+    let memory_after_probe_buffers_release = current_memory();
+    drop(rows);
+    let memory_after_rows_release = current_memory();
+    drop(handle);
+    let memory_after_handle_release = current_memory();
+    let allocator_trim_attempted = trim_allocator();
+    let memory_after_allocator_trim = current_memory();
+
     let verify_started = Instant::now();
     let reopened = RedbStore::open(&store_path)?;
     let mut persisted_selection = selection.clone();
@@ -544,7 +621,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     drop(reopened);
     let reopen_and_verify = verify_started.elapsed();
 
-    observations.latencies_ns.sort_unstable();
     let ingest_seconds = ingest_elapsed.as_secs_f64();
     Ok(ProbeResult {
         schema: RESULT_SCHEMA,
@@ -562,25 +638,32 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         queue_capacity,
         batch_size,
         visible_limit: config.visible_limit,
+        delivery_mode: if config.visible_limit.is_some() {
+            "bounded-latest-window"
+        } else {
+            "lossless-delta"
+        },
+        trim_allocator_during_ingest: config.trim_allocator_during_ingest,
         frame_delay_us: config.frame_delay.as_micros(),
         expect_rejection: config.expect_rejection,
         expected_relay_frames: expected_frames,
         observed_relay_frames,
-        observed_added_rows: observations.added_rows,
-        observed_removed_rows: observations.removed_rows,
-        observed_source_growth_deltas: observations.source_growth,
+        observed_added_rows,
+        observed_removed_rows,
+        observed_source_growth_deltas,
         final_visible_rows,
+        all_sources_reconciled,
         corpus_bytes: corpus.bytes,
         database_bytes: fs::metadata(&store_path)?.len(),
         generation_ms: duration_ms(corpus.generation),
         ingest_ms: duration_ms(ingest_elapsed),
         relay_frames_per_second: expected_frames as f64 / ingest_seconds,
-        first_row_ms: duration_ms(observations.first_row.unwrap_or_default()),
-        last_row_ms: duration_ms(observations.last_row.unwrap_or_default()),
-        apply_latency_p50_ms: ns_ms(percentile(&observations.latencies_ns, 50)),
-        apply_latency_p95_ms: ns_ms(percentile(&observations.latencies_ns, 95)),
-        apply_latency_p99_ms: ns_ms(percentile(&observations.latencies_ns, 99)),
-        apply_latency_max_ms: ns_ms(*observations.latencies_ns.last().unwrap_or(&0)),
+        first_row_ms,
+        last_row_ms,
+        apply_latency_p50_ms,
+        apply_latency_p95_ms,
+        apply_latency_p99_ms,
+        apply_latency_max_ms,
         rss_before_ingest_bytes: memory_before_ingest.rss_bytes,
         anonymous_before_ingest_bytes: memory_before_ingest.anonymous_bytes,
         peak_ingest_rss_bytes: peak_ingest_memory.rss_bytes,
@@ -593,6 +676,16 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         anonymous_after_ingest_bytes: memory_after_ingest.anonymous_bytes,
         rss_after_shutdown_bytes: memory_after_shutdown.rss_bytes,
         anonymous_after_shutdown_bytes: memory_after_shutdown.anonymous_bytes,
+        rss_after_probe_buffers_release_bytes: memory_after_probe_buffers_release.rss_bytes,
+        anonymous_after_probe_buffers_release_bytes: memory_after_probe_buffers_release
+            .anonymous_bytes,
+        rss_after_rows_release_bytes: memory_after_rows_release.rss_bytes,
+        anonymous_after_rows_release_bytes: memory_after_rows_release.anonymous_bytes,
+        rss_after_handle_release_bytes: memory_after_handle_release.rss_bytes,
+        anonymous_after_handle_release_bytes: memory_after_handle_release.anonymous_bytes,
+        allocator_trim_attempted,
+        rss_after_allocator_trim_bytes: memory_after_allocator_trim.rss_bytes,
+        anonymous_after_allocator_trim_bytes: memory_after_allocator_trim.anonymous_bytes,
         shutdown_ms: duration_ms(shutdown_elapsed),
         reopen_and_verify_ms: duration_ms(reopen_and_verify),
         first_event_id: corpus.first_id,
@@ -885,4 +978,16 @@ fn memory_field_bytes(rollup: &str, field: &str) -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn current_memory() -> MemorySample {
     MemorySample::default()
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator() -> bool {
+    // This is measurement-only: it distinguishes reclaimable glibc pages
+    // from live process state after every probe-owned per-event buffer drops.
+    unsafe { libc::malloc_trim(0) != 0 }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_allocator() -> bool {
+    false
 }

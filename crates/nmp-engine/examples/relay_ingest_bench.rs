@@ -23,6 +23,7 @@ fn main() -> Result<(), ProbeError> {
             "--batch-size" => config.batch_size = value(&mut args, "--batch-size")?,
             "--visible-limit" => config.visible_limit = Some(value(&mut args, "--visible-limit")?),
             "--unlimited" => config.visible_limit = None,
+            "--trim-allocator-during-ingest" => config.trim_allocator_during_ingest = true,
             "--frame-delay-us" => {
                 config.frame_delay = Duration::from_micros(value(&mut args, "--frame-delay-us")?)
             }
@@ -86,6 +87,8 @@ fn print_help() {
          --batch-size N      verify and engine batch ceiling (default 128)\n\
          --visible-limit N   live query window (default 200)\n\
          --unlimited         retain every matching row in the live query\n\
+         --trim-allocator-during-ingest\n\
+                             probe reclaimable glibc pages every 100 ms\n\
          --frame-delay-us N  pace each relay frame for soak runs\n\
          --expect-rejection  assert one oversize frame is rejected\n\
          --timeout-secs N    completion deadline (default 120)\n\
