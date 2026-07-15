@@ -22,6 +22,7 @@
 //! calls `shutdown` too, so a dropped-without-`shutdown` `Engine` still
 //! tears down `EngineThread` cleanly rather than detaching it.
 
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +54,16 @@ struct Inner {
     handle: Handle,
     engine_thread: EngineThread,
     active_pubkey: Option<PublicKey>,
+    /// The account-level noun's own bookkeeping (#507/#495): the runtime's
+    /// `SignerRegistry` is keyed by public key and replaces on every
+    /// `add_signer`, so the public key IS the stable account handle here --
+    /// this map retains the exact `SignerRegistration` needed to detach the
+    /// capability later via [`Handle::remove_signer`]. If an unstable
+    /// `add_signer` call replaces the capability for a key already in this
+    /// map (bypassing `add_account`), the stored registration goes stale:
+    /// [`Engine::remove_account`] then intentionally leaves the newer
+    /// capability attached rather than detaching a signer it didn't install.
+    accounts: HashMap<PublicKey, SignerRegistration>,
 }
 
 /// The one supported Rust product surface (canonical-facade-52-plan.md §1).
@@ -179,6 +190,7 @@ impl Engine {
                 handle,
                 engine_thread,
                 active_pubkey: None,
+                accounts: HashMap::new(),
             })),
             native_tasks,
         })
@@ -218,6 +230,7 @@ impl Engine {
                 handle,
                 engine_thread,
                 active_pubkey: None,
+                accounts: HashMap::new(),
             })),
             native_tasks,
         })
@@ -325,7 +338,12 @@ impl Engine {
 
     /// Register an account from its secret key (hex or bech32 `nsec`). Does
     /// NOT make the account active -- call [`Self::set_active_account`] for
-    /// that. Returns the account's public key.
+    /// that. Returns the account's public key, which also doubles as the
+    /// stable account handle [`Self::remove_account`] later takes: the
+    /// runtime's `SignerRegistry` is per-pubkey replace-on-add, so calling
+    /// `add_account` again for the same key discards the previous capability
+    /// anyway -- this facade just retains whichever `SignerRegistration` is
+    /// current so it stays detachable.
     ///
     /// This builds a `LocalKeySigner` internally, whose `public_key()`
     /// always reports `Some` -- there is no reachable "signer has no
@@ -334,12 +352,25 @@ impl Engine {
     /// `add_signer` covers instead).
     pub fn add_account(&self, secret_key: &str) -> Result<PublicKey, EngineError> {
         let keys = Keys::parse(secret_key).map_err(|_| EngineError::InvalidSecretKey)?;
-        let registration = self.with_handle(|handle| {
-            handle
-                .add_signer(nmp_signer::LocalKeySigner::new(keys))
-                .expect("LocalKeySigner::public_key() always returns a key")
-        })?;
-        Ok(registration.public_key())
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match &mut *guard {
+            Some(inner) => {
+                let registration = inner
+                    .handle
+                    .add_signer(nmp_signer::LocalKeySigner::new(keys))
+                    .expect("LocalKeySigner::public_key() always returns a key");
+                let pubkey = registration.public_key();
+                // Insert/overwrite: the runtime already replaced the
+                // capability for this pubkey, so the newer registration
+                // supersedes whatever this map held before.
+                inner.accounts.insert(pubkey, registration);
+                Ok(pubkey)
+            }
+            None => Err(EngineError::EngineClosed),
+        }
     }
 
     /// Register an arbitrary signing capability (e.g. a NIP-46/bunker
@@ -366,6 +397,46 @@ impl Engine {
     /// or any accepted write's frozen author. A stale registration cannot
     /// detach a newer signer installed for the same public key.
     pub fn remove_signer(&self, registration: SignerRegistration) -> Result<bool, EngineError> {
+        self.with_handle(|handle| handle.remove_signer(registration))
+    }
+
+    /// Detach the signing capability [`Self::add_account`] registered for
+    /// `pubkey` (#507/#495: closes the gap where `add_account` had no
+    /// symmetric removal, so a local-key capability was permanently
+    /// resident for the process lifetime once added). Returns `Ok(true)` if
+    /// a capability was detached, `Ok(false)` if `pubkey` was never added
+    /// via `add_account` (nothing to remove) -- including the case where an
+    /// unstable [`Self::add_signer`] call later replaced the capability for
+    /// this same pubkey out from under the registration this facade was
+    /// tracking: that newer capability is deliberately NOT detached here,
+    /// since this map is only `add_account`'s own bookkeeping and this call
+    /// only ever un-registers what `add_account` itself installed.
+    ///
+    /// This is orthogonal to [`Self::set_active_account`]: removing an
+    /// account's capability does not change which account is active or
+    /// routing reads/writes -- only whether that active account can still
+    /// sign. While `pubkey` remains active with no capability attached,
+    /// [`Self::publish`] terminates with `WriteStatus::Failed` (no
+    /// preceding `Accepted`) and [`Self::sign_event`] fails closed with
+    /// [`SignEventError::NoActiveSigner`]. A full "log out" is
+    /// `set_active_account(None)` *and* `remove_account(pubkey)` together --
+    /// `set_active_account(None)` alone only stops routing onto the
+    /// account; the capability stays registered and silently re-arms the
+    /// instant the same pubkey is made active again.
+    pub fn remove_account(&self, pubkey: PublicKey) -> Result<bool, EngineError> {
+        let registration = {
+            let mut guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            match &mut *guard {
+                Some(inner) => match inner.accounts.remove(&pubkey) {
+                    Some(registration) => registration,
+                    None => return Ok(false),
+                },
+                None => return Err(EngineError::EngineClosed),
+            }
+        };
         self.with_handle(|handle| handle.remove_signer(registration))
     }
 
@@ -536,6 +607,7 @@ impl Engine {
             handle,
             engine_thread,
             active_pubkey: _,
+            accounts: _,
         }) = inner
         {
             handle.shutdown();
@@ -1235,6 +1307,111 @@ mod tests {
             engine.add_account("not-a-key"),
             Err(EngineError::InvalidSecretKey)
         );
+        engine.shutdown();
+    }
+
+    /// #507/#495's headline falsifier: `add_account` had no removal, so a
+    /// registered local-key capability was permanently resident. Adding
+    /// then removing must detach it (`true`), and a second removal of the
+    /// already-detached account must be a no-op (`false`).
+    #[test]
+    fn remove_account_detaches_once_then_is_idempotently_false() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        let pubkey = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("account must register");
+
+        assert_eq!(
+            engine.remove_account(pubkey),
+            Ok(true),
+            "first removal must detach the registered capability"
+        );
+        assert_eq!(
+            engine.remove_account(pubkey),
+            Ok(false),
+            "second removal of an already-detached account must no-op"
+        );
+        engine.shutdown();
+    }
+
+    /// Removing a public key that was never registered via `add_account` is
+    /// a harmless `false`, not an error.
+    #[test]
+    fn remove_account_of_never_added_key_is_false() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        assert_eq!(engine.remove_account(keys.public_key()), Ok(false));
+        engine.shutdown();
+    }
+
+    /// Removal only ever detaches capability, not active identity/routing.
+    /// A capability can be re-armed only by an explicit re-`add_account` --
+    /// there is no path that resurrects it on its own.
+    #[test]
+    fn remove_account_then_re_add_reactivates_signing() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        let pubkey = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("account must register");
+        engine
+            .set_active_account(Some(pubkey))
+            .expect("account must activate");
+
+        assert_eq!(engine.remove_account(pubkey), Ok(true));
+
+        let re_added = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("re-adding the same secret key must succeed");
+        assert_eq!(re_added, pubkey);
+
+        let signed = engine
+            .sign_event(SignEventRequest {
+                created_at: Timestamp::from(1_750_000_000),
+                kind: Kind::Custom(27_235),
+                tags: Vec::new(),
+                content: "re-armed after explicit re-add".to_string(),
+            })
+            .expect("re-added local signer must start")
+            .recv()
+            .expect("re-added local signer must sign");
+        assert_eq!(signed.pubkey, pubkey);
+        engine.shutdown();
+    }
+
+    /// After removal while the account is still active, `sign_event` must
+    /// fail with the same typed no-capability error as never having
+    /// registered a signer at all (`SignEventError::NoActiveSigner`) --
+    /// `set_active_account` alone never re-arms a removed capability, so
+    /// staying active with no capability must fail exactly like never
+    /// having added one.
+    #[test]
+    fn sign_event_after_remove_account_while_still_active_fails_with_no_active_signer() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        let pubkey = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("account must register");
+        engine
+            .set_active_account(Some(pubkey))
+            .expect("account must activate");
+
+        assert_eq!(engine.remove_account(pubkey), Ok(true));
+
+        let result = engine.sign_event(SignEventRequest {
+            created_at: Timestamp::from(1_750_000_000),
+            kind: Kind::TextNote,
+            tags: Vec::new(),
+            content: "no capability left".to_string(),
+        });
+        match result {
+            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
+            Ok(_) => panic!(
+                "an active account with its capability removed must fail closed \
+                 with the same typed error as never having a signer"
+            ),
+        }
         engine.shutdown();
     }
 

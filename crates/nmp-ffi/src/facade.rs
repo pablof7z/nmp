@@ -431,6 +431,20 @@ impl NmpEngine {
         Ok(pk.to_hex())
     }
 
+    /// Detach the signing capability [`Self::add_account`] registered for
+    /// `pubkey` (#507/#495). The key material stays engine-side for the
+    /// lifetime of the process either way -- this only un-registers the
+    /// capability that let it sign. Returns `true` if a capability was
+    /// detached, `false` if `pubkey` was never added via `add_account` (or
+    /// was already removed) -- never an error for that case. Orthogonal to
+    /// [`Self::set_active_account`]: routing/active identity are unaffected,
+    /// so a full logout is `set_active_account(None)` *and*
+    /// `remove_account(pubkey)` together.
+    pub fn remove_account(&self, pubkey: String) -> Result<bool, FfiError> {
+        let pk = parse_pubkey(&pubkey)?;
+        Ok(self.engine.remove_account(pk)?)
+    }
+
     /// Re-root every reactive query AND the active signing capability
     /// together onto `pubkey` (`None` -> logged-out / read-only). `pubkey`
     /// need not have been added via [`Self::add_account`] -- read-only
@@ -1134,6 +1148,65 @@ mod tests {
         }
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
         engine.await_native_tasks_idle();
+        engine.shutdown();
+    }
+
+    /// #507/#495: `add_account` gained a symmetric `remove_account` so a
+    /// local-key capability is no longer permanently resident once
+    /// registered. Add, then remove, then verify signing fails the exact
+    /// same typed way as never having registered a signer -- proving the
+    /// FFI facade actually detaches the capability rather than merely
+    /// forwarding a bookkeeping flag.
+    #[test]
+    fn ffi_remove_account_detaches_capability_and_sign_event_fails_typed() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let author = engine
+            .add_account(format!("{:064x}", 21u8))
+            .expect("account must register");
+        engine
+            .set_active_account(Some(author.clone()))
+            .expect("account must activate");
+
+        assert_eq!(
+            engine.remove_account(author.clone()),
+            Ok(true),
+            "first removal must detach the registered capability"
+        );
+        assert_eq!(
+            engine.remove_account(author.clone()),
+            Ok(false),
+            "second removal of an already-detached account must no-op"
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let result = engine.sign_event(
+            FfiSignEventRequest {
+                created_at: 1,
+                kind: 1,
+                tags: Vec::new(),
+                content: "no capability left".to_string(),
+            },
+            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
+        );
+        match result {
+            Err(error) => assert_eq!(error, FfiError::NoActiveSigner),
+            Ok(_) => panic!("a removed capability must fail closed like never having one"),
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        engine.await_native_tasks_idle();
+        engine.shutdown();
+    }
+
+    /// An invalid pubkey string is a typed error, not a panic, mirroring
+    /// `set_active_account`'s and `add_account`'s own boundary parsing.
+    #[test]
+    fn ffi_remove_account_rejects_malformed_pubkey() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let result = engine.remove_account("not-a-pubkey".to_string());
+        match result {
+            Err(FfiError::InvalidPublicKey { got }) => assert_eq!(got, "not-a-pubkey"),
+            other => panic!("expected InvalidPublicKey, got {other:?}"),
+        }
         engine.shutdown();
     }
 
