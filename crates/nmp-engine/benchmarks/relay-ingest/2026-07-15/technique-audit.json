@@ -1,0 +1,85 @@
+{
+  "schema": "nmp-nostrdb-technique-audit-v1",
+  "reference": "damus-io/nostrdb@f4591db9524bc4936af76af4750ec425e67700be",
+  "audited_nmp_commit": "05e60076dd04ae7e8cb7ab3a92aef981b348ee65",
+  "pre_series_commit": "126f0ac1e06c60724ea269a0eca74df5a5595039",
+  "techniques": [
+    {
+      "technique": "timestamp-bearing field and generic single-letter tag indexes",
+      "disposition": "applied",
+      "merge_commits": [
+        "d3c90875b005839dd6929cb0ac50712edb5cf9e0",
+        "b3bfc8b4fa3d1b50f016e648b53591fd28c0c2df"
+      ],
+      "source": "crates/nmp-store/src/redb_store.rs: BY_CREATED_AT, BY_AUTHOR, BY_KIND, BY_AUTHOR_KIND, BY_TAG"
+    },
+    {
+      "technique": "one-best-index planning, cardinality selection, bounded reverse scans, post-filtering",
+      "disposition": "applied",
+      "merge_commits": [
+        "b3bfc8b4fa3d1b50f016e648b53591fd28c0c2df",
+        "d1709b705e922f7cf1eba37d4f46076c9d7bd572"
+      ],
+      "source": "crates/nmp-store/src/redb_store.rs: query planner and ordered scan paths"
+    },
+    {
+      "technique": "portable packed event values with borrowed filtering",
+      "disposition": "applied",
+      "merge_commits": [
+        "bcfb2954cb0e77e3af5dc4ccc1661955b2914d60",
+        "3f870a4bf80a004bedfc502f6fabf35cba2e6558",
+        "ca1d25d22195720f3d84d950479ae6a1d7148d3c"
+      ],
+      "source": "crates/nmp-store/src/binary_event.rs"
+    },
+    {
+      "technique": "immutable note rows separated from mutable metadata and relay observations",
+      "disposition": "applied",
+      "merge_commits": [
+        "3f870a4bf80a004bedfc502f6fabf35cba2e6558",
+        "9cfd45f9886b71fa6f1d99d10bd36a30bb3d5307"
+      ],
+      "source": "crates/nmp-store/src/redb_store.rs: EVENTS, EVENT_LOCAL, EVENT_OBSERVATIONS, RELAYS"
+    },
+    {
+      "technique": "compact event and relay surrogate keys with fixed-width index keys",
+      "disposition": "applied_after_additional_measurement",
+      "merge_commits": [
+        "ff75b784ede1096e9291b0e90367c505fe6d5c8e"
+      ],
+      "source": "crates/nmp-store/src/redb_store.rs: EventKey=u64, RelayKey=u32, fixed array index definitions"
+    },
+    {
+      "technique": "parallel parse-once verification feeding one governed batch writer",
+      "disposition": "applied",
+      "merge_commits": [
+        "f4ed42b25ff9efa00055f79aed14bd011d262400",
+        "f251089df32f8270ca1746212d34fe11ea35b716"
+      ],
+      "source": "crates/nmp-transport/src/pool/verify.rs and crates/nmp-engine/src/runtime/mod.rs"
+    },
+    {
+      "technique": "incremental affected-handle projection instead of broad live-query recompute",
+      "disposition": "applied",
+      "merge_commits": [
+        "805fc8ab4ebb270e4b0e6d41068347d7e6217d53"
+      ],
+      "source": "crates/nmp-engine/src/core/mod.rs: committed mutation projection paths"
+    },
+    {
+      "technique": "ingest-time full-text token index",
+      "disposition": "not_applied_no_production_query",
+      "issue": 152,
+      "source_evidence": "Filter::search call sites are limited to nmp-store tests and query_bench; no engine, resolver, facade, or app production call path uses it"
+    },
+    {
+      "technique": "content-specific mutable metadata catalog",
+      "disposition": "not_applied_no_owned_mutation_or_profile",
+      "issue": 152,
+      "source_evidence": "no production content metadata mutation path justified a new typed sidecar; relay provenance was split separately where measured"
+    }
+  ],
+  "scale_proof_commit": "97eb1ffb34ffad7934367e7046116df50fb9df94",
+  "current_device_proof_issue": 176,
+  "remaining_external_gate": "reproducible pre-series million-row physical-device baseline"
+}

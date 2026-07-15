@@ -1,0 +1,93 @@
+{
+  "schema": "nmp-relay-ingest-matrix-v1",
+  "issue": 530,
+  "date_utc": "2026-07-15",
+  "current_library_commit": "05e60076dd04ae7e8cb7ab3a92aef981b348ee65",
+  "pre_nostrdb_commit": "126f0ac1e06c60724ea269a0eca74df5a5595039",
+  "probe_commits": [
+    "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+    "6c00d5eb22d9d49378e87bee111e3f1c7e043ddf"
+  ],
+  "runs": [
+    {
+      "id": "ab-pre-1k",
+      "worktree_commit": "126f0ac1e06c60724ea269a0eca74df5a5595039",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "compatibility_patch": "baseline-126f0ac-compat.patch",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 1000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 120",
+      "result": "ab-pre-126f0ac-1k.json"
+    },
+    {
+      "id": "ab-current-1k",
+      "worktree_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 1000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 120",
+      "result": "ab-current-1k.json"
+    },
+    {
+      "id": "ab-pre-10k-deadline",
+      "worktree_commit": "126f0ac1e06c60724ea269a0eca74df5a5595039",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "compatibility_patch": "baseline-126f0ac-compat.patch",
+      "command": "cargo run --release -p nmp-engine --example relay_ingest_bench -- --events 10000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 300",
+      "result": null,
+      "outcome": "deadline elapsed; shutdown remained queued behind the accepted unbounded backlog; externally terminated after more than 315 seconds"
+    },
+    {
+      "id": "ab-current-10k",
+      "worktree_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 10000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 120",
+      "result": "ab-current-10k.json"
+    },
+    {
+      "id": "one-million-e2e",
+      "worktree_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 1000000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 900",
+      "result": "one-million-e2e.json"
+    },
+    {
+      "id": "duplicates-production-bounds",
+      "worktree_commit": "05e60076dd04ae7e8cb7ab3a92aef981b348ee65",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "command": "cargo run --release -p nmp-engine --example relay_ingest_bench -- --events 100000 --relays 3 --passes 2 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 300",
+      "result": "duplicates-production-bounds.json"
+    },
+    {
+      "id": "tiny-queue-overload",
+      "worktree_commit": "05e60076dd04ae7e8cb7ab3a92aef981b348ee65",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "command": "cargo run --release -p nmp-engine --example relay_ingest_bench -- --events 25000 --relays 3 --passes 2 --payload-bytes 256 --queue-capacity 8 --batch-size 7 --visible-limit 200 --timeout-secs 180",
+      "result": "tiny-queue-overload.json"
+    },
+    {
+      "id": "paced-soak-200k",
+      "worktree_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "probe_source_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 10000 --relays 1 --passes 20 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --frame-delay-us 1000 --timeout-secs 600",
+      "result": "paced-soak-200k.json"
+    },
+    {
+      "id": "payload-near-limit",
+      "worktree_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "probe_source_commit": "6c00d5eb22d9d49378e87bee111e3f1c7e043ddf",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 16 --relays 1 --passes 1 --payload-bytes 1047000 --queue-capacity 8 --batch-size 7 --visible-limit 16 --timeout-secs 60",
+      "result": "payload-near-limit.json"
+    },
+    {
+      "id": "payload-over-limit",
+      "worktree_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "probe_source_commit": "6c00d5eb22d9d49378e87bee111e3f1c7e043ddf",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 1 --relays 1 --passes 1 --payload-bytes 1049000 --queue-capacity 8 --batch-size 7 --visible-limit 1 --expect-rejection --timeout-secs 30",
+      "result": "payload-over-limit.json"
+    },
+    {
+      "id": "unlimited-100k",
+      "worktree_commit": "0d3fba70710ce5c00ebdfc0555165a5373885d47",
+      "probe_source_commit": "6c00d5eb22d9d49378e87bee111e3f1c7e043ddf",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 100000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --unlimited --timeout-secs 180",
+      "result": "unlimited-100k.json"
+    }
+  ]
+}
