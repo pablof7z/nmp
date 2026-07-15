@@ -63,7 +63,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Relays & networking**
 - ✅ Full connection lifecycle behind **one finite fan-out ceiling** over the whole read plan
-- ✅ Local / private / link-local / `.onion` targets **rejected by default**
+- ✅ Local / private / link-local / `.onion` targets **rejected by default** — resolved-IP admission is pinned per connection, closing a DNS-rebinding gap where a re-resolve could point an already-approved host somewhere internal
+- ✅ Permanently-failing relays retire cleanly instead of wedging a connection slot; the send queue behind them is bounded
 - ✅ **Self-bootstrapping NIP-65 outbox routing** — configure only indexers; the engine discovers each author's write/inbox relays
 - ✅ Parse-once typed ingest with bounded parallel signature verification
 - ✅ NIP-11 relay metadata (single-flight, LRU-bounded, proven raw-body ceiling)
@@ -105,6 +106,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - **Proven:** the core store, resolver, router, transport, engine, Rust facade, Swift + Kotlin packages, and the NIP-46 remote-signer path — backed by 100+ Rust test modules, differential falsifiers against an independent store, and live-relay tests.
 - **Pending:** several promoted guarantees remain active work — see [`docs/known-gaps.md`](docs/known-gaps.md) (honest built-vs-missing record) and the [bug-class ledger](docs/bug-class-ledger.md) (target vs partial vs structurally proven).
 - The ownership boundary and behavioral invariants are the stable frame; the app-facing spelling is not.
+- **Recent hardening batch (merged):** a DNS-rebinding relay-admission gap closed, a permanently-failed-relay wedge + unbounded send queue fixed, three unbounded-memory bookkeeping structures pruned, and Swift/Kotlin cross-SDK parity gaps (config fields, content-session pause) closed.
+- **In CI now (not yet merged):** wake-relay lane indexing, `MemoryStore` secondary indexes + batched GC, real enforcement of kind-ownership exclusivity (previously documented but unenforced — [#521](https://github.com/pablof7z/nmp/issues/521)), and `remove_account` across all four surfaces.
 
 ## Performance
 
@@ -113,6 +116,7 @@ Built for **bounded memory and streaming — never first-N truncation.** Measure
 - Busiest-room query: **5.15 ms → 0.26 ms**
 - Derived-set resolver over a **59,915-row** bucket: **3,786 ms → 0.73 ms**
 - Rejected-heavy search: **0.188 ms → 0.005 ms**
+- Router coalesce fixed-point: **O(n³) → O(n²)**, plan-identical output
 - Query planning picks one best index and **stops at the visible limit** — no full-history materialization
 - NIP-11 cache carries a **proven ~67 MiB raw-body ceiling** (not a total-RSS claim)
 - Public Rust facade governed under a **30,000-line surface ceiling**, enforced by a trusted-base CI gate
@@ -129,6 +133,7 @@ Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime pen
 - Ship standard **secure-storage signer providers** (Keychain / Keystore)
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
 - Populate NIP-42 AUTH evidence states; land NIP-51 list editing; broaden opt-in protocol modules
+- **In progress:** fold paginated history into the existing read noun as `observe(query, window)` — a window policy, not a second parallel `History*` noun — retiring the earlier `HistoryQuery`/`HistoryContinuation` design
 
 ## The ownership boundary
 
