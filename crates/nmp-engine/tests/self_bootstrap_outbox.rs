@@ -14,7 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
-use nmp_grammar::{Binding, ConcreteFilter, Demand, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{
+    Binding, ConcreteFilter, Demand, Derived, Filter, IdentityField, RelaySessionKey, Selector,
+};
 use nmp_resolver::LiveQuery;
 use nmp_router::{LiveDirectory, SubId, WireOp};
 use nmp_store::MemoryStore;
@@ -38,7 +40,7 @@ impl RowSink for NullSink {
 /// does: `Req` inserts/replaces a `(relay, sub_id)` entry, `Close` removes
 /// it).
 #[derive(Default)]
-struct PlanModel(BTreeMap<(RelayUrl, SubId), ConcreteFilter>);
+struct PlanModel(BTreeMap<(RelaySessionKey, SubId), ConcreteFilter>);
 
 impl PlanModel {
     fn apply(&mut self, effects: &[Effect]) {
@@ -64,7 +66,7 @@ impl PlanModel {
     fn reqs_for(&self, relay: &RelayUrl) -> Vec<&ConcreteFilter> {
         self.0
             .iter()
-            .filter(|((r, _), _)| r == relay)
+            .filter(|((r, _), _)| &r.relay == relay)
             .map(|(_, f)| f)
             .collect()
     }
@@ -72,7 +74,7 @@ impl PlanModel {
     fn sub_id_for_kind(&self, relay: &RelayUrl, kind: u16) -> Option<SubId> {
         self.0
             .iter()
-            .find(|((r, _), f)| r == relay && f.kinds == Some(BTreeSet::from([kind])))
+            .find(|((r, _), f)| &r.relay == relay && f.kinds == Some(BTreeSet::from([kind])))
             .map(|((_, sub_id), _)| sub_id.clone())
     }
 }
@@ -83,7 +85,7 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec
             slot,
             generation: 1,
         },
-        url.clone(),
+        RelaySessionKey::public(url.clone()),
     ))
 }
 
@@ -210,6 +212,7 @@ fn content_atom_adds_write_relay_without_erasing_projected_source_provenance() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", contacts),
     )));
 
@@ -253,6 +256,7 @@ fn content_atom_adds_write_relay_without_erasing_projected_source_provenance() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", relay_list),
     )));
 
@@ -310,6 +314,7 @@ fn relay_list_parse_excludes_explicit_read_only_relays() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind3(&me, &[a.public_key()], 100)),
     )));
 
@@ -319,6 +324,7 @@ fn relay_list_parse_excludes_explicit_read_only_relays() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", relay_list),
     )));
 
@@ -370,6 +376,7 @@ fn discovery_grows_reactively_as_the_follow_set_grows() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind3(&me, &[a.public_key()], 100)),
     )));
     let sub_id_first = plan
@@ -384,6 +391,7 @@ fn discovery_grows_reactively_as_the_follow_set_grows() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind3(&me, &[a.public_key(), b.public_key()], 150)),
     )));
 

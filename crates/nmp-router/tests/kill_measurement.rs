@@ -81,7 +81,7 @@ fn measure(router: &Router) -> Measurement {
         .plan()
         .reqs
         .iter()
-        .map(|(relay, reqs)| (relay.clone(), reqs.len()))
+        .map(|(session, reqs)| (session.relay.clone(), reqs.len()))
         .collect();
     let max_filter_authors = router
         .plan()

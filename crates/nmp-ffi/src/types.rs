@@ -232,11 +232,11 @@ pub enum FfiSourceAuthority {
     Pinned { relays: Vec<String> },
 }
 
-/// `nmp_grammar::AccessContext` mirror. Single-variant today (#106's closed
-/// vocabulary); extensible the same way [`FfiIdentityField`] is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+/// `nmp_grammar::AccessContext` mirror with a stable expected NIP-42 key.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiAccessContext {
     Public,
+    Nip42 { public_key: String },
 }
 
 /// `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
@@ -446,6 +446,7 @@ pub enum FfiAuthPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiSourceEvidence {
     pub relay: String,
+    pub access: FfiAccessContext,
     pub reconciled_through: Option<u64>,
     pub status: FfiSourceStatus,
 }
@@ -605,6 +606,7 @@ pub struct FfiFilterCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiRelayDiagnostics {
     pub relay: String,
+    pub access: FfiAccessContext,
     pub wire_sub_count: u32,
     pub authors_served: u32,
     pub by_lane: Vec<FfiLaneCount>,
@@ -637,10 +639,10 @@ pub struct FfiDiagnosticsSnapshot {
     /// single hostile event naming `N` rejected hosts bumps this by up to
     /// `2N` — a rejection-event tally, not a distinct-host count.
     pub discovered_private_relays_rejected: u64,
-    /// Relay dials the transport pool refused because the configured
+    /// Session dials the transport pool refused because the configured
     /// `max_relays` ceiling was already reached (issue #121, worker-exhaustion
     /// defense). Always `0` when no cap is configured.
-    pub relays_rejected_over_cap: u64,
+    pub sessions_rejected_over_cap: u64,
     /// Latest transport acceptance/verifier failure, if any. This is
     /// observational diagnostics and never changes routing or trust policy.
     pub transport_degraded: Option<String>,

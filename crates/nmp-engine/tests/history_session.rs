@@ -166,7 +166,7 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
             _ => None,
         })
         .flat_map(|delta| &delta.ops)
-        .filter(|(url, _)| url == &relay)
+        .filter(|(session, _)| session.relay == relay)
         .flat_map(|(_, ops)| ops)
         .filter_map(|op| match op {
             WireOp::Req(_, filter) => Some(filter),
@@ -321,7 +321,7 @@ fn unsubscribe_releases_every_session_subscription() {
             _ => None,
         })
         .flat_map(|delta| &delta.ops)
-        .filter(|(url, _)| url == &relay)
+        .filter(|(session, _)| session.relay == relay)
         .flat_map(|(_, ops)| ops)
         .filter(|op| matches!(op, WireOp::Close(_)))
         .count();
@@ -349,8 +349,8 @@ fn track_wire(open: &mut BTreeSet<SubId>, effects: &[Effect], relay: &RelayUrl) 
         let Effect::Wire(delta) = effect else {
             continue;
         };
-        for (url, ops) in &delta.ops {
-            if url != relay {
+        for (session, ops) in &delta.ops {
+            if session.relay != *relay {
                 continue;
             }
             for op in ops {
@@ -476,7 +476,7 @@ fn dense_boundary_tie_subscription_survives_same_second_advances() {
             _ => None,
         })
         .flat_map(|delta| &delta.ops)
-        .filter(|(url, _)| url == &relay)
+        .filter(|(session, _)| session.relay == relay)
         .flat_map(|(_, ops)| ops)
         .find_map(|op| match op {
             WireOp::Req(sub, filter)
@@ -502,8 +502,8 @@ fn dense_boundary_tie_subscription_survives_same_second_advances() {
             let Effect::Wire(delta) = effect else {
                 continue;
             };
-            for (url, ops) in &delta.ops {
-                if url != &relay {
+            for (session, ops) in &delta.ops {
+                if session.relay != relay {
                     continue;
                 }
                 for op in ops {
@@ -542,7 +542,7 @@ fn dense_boundary_tie_subscription_survives_same_second_advances() {
             _ => None,
         })
         .flat_map(|delta| &delta.ops)
-        .filter(|(url, _)| url == &relay)
+        .filter(|(session, _)| session.relay == relay)
         .flat_map(|(_, ops)| ops)
         .any(|op| matches!(op, WireOp::Close(sub) if *sub == tie_sub));
     assert!(

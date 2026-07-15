@@ -508,6 +508,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
     core.handle(EngineMsg::RelayConnected(relay_handle, selected.clone()));
     let disconnected = core.handle(EngineMsg::RelayDisconnected(
         relay_handle,
+        selected.clone(),
         DisconnectReason::Error,
     ));
     assert!(
@@ -547,5 +548,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         .evidence
         .sources
         .iter()
-        .any(|source| { source.relay == selected && source.status == SourceStatus::Disconnected }));
+        .any(|source| {
+            source.relay == selected.relay && source.status == SourceStatus::Disconnected
+        }));
 }

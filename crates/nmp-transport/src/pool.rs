@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub use nmp_grammar::RelaySessionKey;
 use nostr::{Event, RelayMessage, RelayUrl, SubscriptionId};
 
 use crate::handle::RelayHandle;
@@ -301,17 +302,19 @@ pub enum DisconnectReason {
 pub enum PoolEvent {
     Connected {
         handle: RelayHandle,
-        url: RelayUrl,
+        session: RelaySessionKey,
     },
     Disconnected {
         /// The exact connection generation that disconnected. A slot may
         /// already have reopened by the time this event is reduced, so a
         /// bare slot number cannot safely identify the connection that died.
         handle: RelayHandle,
+        session: RelaySessionKey,
         reason: DisconnectReason,
     },
     Frame {
         handle: RelayHandle,
+        session: RelaySessionKey,
         frame: RelayFrame,
     },
     Health {
@@ -319,6 +322,7 @@ pub enum PoolEvent {
         /// frames and disconnects, health delivery crosses the off-lock
         /// sink and may arrive after this slot has reopened.
         handle: RelayHandle,
+        session: RelaySessionKey,
         health: RelayHealth,
     },
     /// A previously closed relay worker has actually exited and its OS
@@ -492,8 +496,13 @@ impl Pool {
     /// generation — the prior handle is now stale. Every refusal is returned
     /// as a typed error; this API never manufactures an invalid handle.
     pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
+        self.ensure_session(&RelaySessionKey::public(url.clone()))
+    }
+
+    /// Ensure the exact physical relay session is dialing/connected.
+    pub fn ensure_session(&self, session: &RelaySessionKey) -> Result<RelayHandle, RelayOpenError> {
         match self.inner.lock() {
-            Ok(mut guard) => guard.try_ensure_open(url),
+            Ok(mut guard) => guard.try_ensure_session(session),
             Err(_) => Err(RelayOpenError::Unavailable),
         }
     }
@@ -502,8 +511,14 @@ impl Pool {
     /// reopening a worker. Used for best-effort close-only wire deltas: a
     /// withdrawn read relay must never be re-created merely to send `CLOSE`.
     pub fn live_handle(&self, url: &RelayUrl) -> Option<RelayHandle> {
+        self.live_session_handle(&RelaySessionKey::public(url.clone()))
+    }
+
+    /// Return the current generation for one exact session without opening
+    /// it.
+    pub fn live_session_handle(&self, session: &RelaySessionKey) -> Option<RelayHandle> {
         match self.inner.lock() {
-            Ok(guard) => guard.live_handle(url),
+            Ok(guard) => guard.live_session_handle(session),
             Err(_) => None,
         }
     }
@@ -595,8 +610,22 @@ impl Pool {
     /// lanes, so transport cannot accidentally evict an in-flight write or
     /// keep historical read workers forever.
     pub fn close_unrequired(&self, required: &BTreeSet<RelayUrl>) -> Vec<PoolEvent> {
+        let required = required
+            .iter()
+            .cloned()
+            .map(RelaySessionKey::public)
+            .collect();
+        self.close_unrequired_sessions(&required)
+    }
+
+    /// Release every live physical session absent from the exact caller-owned
+    /// session set.
+    pub fn close_unrequired_sessions(
+        &self,
+        required: &BTreeSet<RelaySessionKey>,
+    ) -> Vec<PoolEvent> {
         match self.inner.lock() {
-            Ok(mut guard) => guard.close_unrequired(required),
+            Ok(mut guard) => guard.close_unrequired_sessions(required),
             Err(_) => Vec::new(),
         }
     }

@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId};
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
-use nmp_grammar::{Durability, HostAuthority, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{
+    AccessContext, Durability, HostAuthority, RelaySessionKey, WriteIntent, WritePayload,
+    WriteRouting,
+};
 use nmp_router::FixtureDirectory;
 use nmp_store::{
     sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState, RedbStore,
@@ -48,6 +51,10 @@ fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureDirectory {
     FixtureDirectory::new().with_write(pk.to_hex(), [relay])
 }
 
+fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
+    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
+}
+
 fn strip_additive_lane_rows(path: &std::path::Path, intent: nmp_store::IntentId, relay: &RelayUrl) {
     let db = Database::open(path).unwrap();
     let write = db.begin_write().unwrap();
@@ -82,6 +89,8 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     let relay = RelayUrl::parse("wss://durable.example").unwrap();
     let appended = RelayUrl::parse("wss://appended-after-restart.example").unwrap();
     let event = signed(&keys, "exact", 100);
+    let relay_session = signer_session(&relay, event.pubkey);
+    let appended_session = signer_session(&appended, event.pubkey);
 
     let id = {
         let store = RedbStore::open(&path).unwrap();
@@ -95,7 +104,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
                 slot: 0,
                 generation: 1,
             },
-            relay.clone(),
+            relay_session.clone(),
         ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -106,7 +115,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             Box::new(Sink::default()),
         ));
         assert!(effects.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e, _) if r == &relay && e == &event
+            Effect::PublishEvent(r, e, _) if r == &relay_session && e == &event
         )));
         receipt_id(&effects)
     };
@@ -132,10 +141,10 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     assert!(
         recovery
             .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay))
+            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay_session))
             && recovery
                 .iter()
-                .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &appended)),
+                .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &appended_session)),
         "recovery preserves both lanes but allocates no attempt while offline"
     );
     assert!(
@@ -171,25 +180,25 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             slot: 0,
             generation: 1,
         },
-        relay.clone(),
+        relay_session.clone(),
     ));
     assert!(relay_retry.iter().any(|effect| matches!(effect,
-        Effect::PublishEvent(r, e, _) if r == &relay && e == &event
+        Effect::PublishEvent(r, e, _) if r == &relay_session && e == &event
     )));
     let appended_first = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 1,
             generation: 1,
         },
-        appended.clone(),
+        appended_session.clone(),
     ));
     assert!(appended_first.iter().any(|effect| matches!(effect,
-        Effect::PublishEvent(r, e, _) if r == &appended && e == &event
+        Effect::PublishEvent(r, e, _) if r == &appended_session && e == &event
     )));
     let correlation = relay_retry
         .iter()
         .find_map(|effect| match effect {
-            Effect::PublishEvent(r, _, correlation) if r == &relay => Some(*correlation),
+            Effect::PublishEvent(r, _, correlation) if r == &relay_session => Some(*correlation),
             _ => None,
         })
         .unwrap();
@@ -199,6 +208,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             slot: 0,
             generation: 1,
         },
+        relay_session.clone(),
         RelayFrame::from(RelayMessage::ok(event.id, true, "")),
     ));
     assert!(acked.iter().any(|effect| matches!(
@@ -244,6 +254,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://amo.example").unwrap();
     let event = signed(&keys, "once", 101);
+    let session = signer_session(&relay, event.pubkey);
     let intent_id = {
         let store = RedbStore::open(&path).unwrap();
         let mut core = EngineCore::new(
@@ -256,7 +267,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
                 slot: 0,
                 generation: 1,
             },
-            relay.clone(),
+            session.clone(),
         ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -380,6 +391,8 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
     let r1 = RelayUrl::parse("wss://one.example").unwrap();
     let r2 = RelayUrl::parse("wss://two.example").unwrap();
     let event = signed(&keys, "shared", 103);
+    let s1 = signer_session(&r1, event.pubkey);
+    let s2 = signer_session(&r2, event.pubkey);
     let (a, b) = {
         let store = RedbStore::open(&path).unwrap();
         let mut core = EngineCore::new(
@@ -395,14 +408,14 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
                 slot: 0,
                 generation: 1,
             },
-            r1.clone(),
+            s1.clone(),
         ));
         core.handle(EngineMsg::RelayConnected(
             RelayHandle {
                 slot: 1,
                 generation: 1,
             },
-            r2.clone(),
+            s2.clone(),
         ));
         let publish = |core: &mut EngineCore<RedbStore>| {
             core.handle(EngineMsg::Publish(
@@ -444,7 +457,7 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
                 slot: 0,
                 generation: 1,
             },
-            r1.clone(),
+            s1.clone(),
         ))
         .iter()
         .filter(
@@ -457,7 +470,7 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
                 slot: 1,
                 generation: 1,
             },
-            r2.clone(),
+            s2.clone(),
         ))
         .iter()
         .filter(
@@ -571,6 +584,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://corrupt-boot.example").unwrap();
     let event = signed(&keys, "corrupt boot", 108);
+    let session = signer_session(&relay, event.pubkey);
     let (intent_id, receipt_id) = {
         let store = RedbStore::open(&path).unwrap();
         let mut core = EngineCore::new(
@@ -583,7 +597,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
                 slot: 0,
                 generation: 1,
             },
-            relay.clone(),
+            session.clone(),
         ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -767,6 +781,7 @@ fn pinned_host_routing_round_trips_across_a_restart() {
     let keys = Keys::generate();
     let host = RelayUrl::parse("wss://pinned-host.example").unwrap();
     let event = signed(&keys, "pinned", 600);
+    let session = signer_session(&host, event.pubkey);
 
     let id = {
         let store = RedbStore::open(&path).unwrap();
@@ -780,7 +795,7 @@ fn pinned_host_routing_round_trips_across_a_restart() {
                 slot: 0,
                 generation: 1,
             },
-            host.clone(),
+            session.clone(),
         ));
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -791,7 +806,7 @@ fn pinned_host_routing_round_trips_across_a_restart() {
             Box::new(Sink::default()),
         ));
         assert!(effects.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e, _) if r == &host && e == &event
+            Effect::PublishEvent(r, e, _) if r == &session && e == &event
         )));
         receipt_id(&effects)
     };
@@ -802,17 +817,17 @@ fn pinned_host_routing_round_trips_across_a_restart() {
     let recovery = core.recover_on_boot();
     assert!(recovery
         .iter()
-        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &host)));
+        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)));
     let recovery = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
             generation: 1,
         },
-        host.clone(),
+        session.clone(),
     ));
     assert!(
         recovery.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e, _) if r == &host && e == &event
+            Effect::PublishEvent(r, e, _) if r == &session && e == &event
         )),
         "a PinnedHost-routed pending write must still resolve to its exact host after a \
          restart -- parse_routing_snapshot must decode the persisted `pinned-host-hex:` \
