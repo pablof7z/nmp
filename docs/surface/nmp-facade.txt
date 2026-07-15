@@ -20965,59 +20965,7 @@ reexport nmp::Nip46Error => nmp_signer::nip46::Nip46Error
               }
             }
           },
-          "name": "InvalidRelay",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "tuple": [
-                  {
-                    "attrs": [],
-                    "inner": {
-                      "struct_field": {
-                        "resolved_path": {
-                          "args": null,
-                          "path": "String",
-                          "resolved_item": {
-                            "path": "alloc::string::String"
-                          }
-                        }
-                      }
-                    },
-                    "name": "0",
-                    "visibility": "default"
-                  }
-                ]
-              }
-            }
-          },
           "name": "InvalidLaunchScheme",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "InvalidInvitation",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "SecretMismatch",
           "visibility": "default"
         },
         {

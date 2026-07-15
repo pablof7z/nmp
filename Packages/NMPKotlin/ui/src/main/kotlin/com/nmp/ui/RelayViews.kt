@@ -32,6 +32,7 @@ import com.nmp.sdk.AuthPhase
 import com.nmp.sdk.RelayInformation
 import com.nmp.sdk.RelayInformationFreshness
 import com.nmp.sdk.SourceStatus
+import com.nmp.sdk.describe
 
 /** Immutable presentation fields copied from one engine-owned NIP-11
  * snapshot. This value is not a cache and never performs acquisition. */
@@ -51,7 +52,7 @@ data class NmpRelayPresentation(
             advertisedDescription = information.document.description,
             advertisedIcon = information.document.icon,
             freshness = information.freshness,
-            lastError = information.lastError,
+            lastError = information.lastError?.describe(),
         )
 
     val displayName: String

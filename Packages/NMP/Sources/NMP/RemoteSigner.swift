@@ -81,6 +81,71 @@ public struct NMPNip46ClientMetadata: Sendable, Hashable {
     }
 }
 
+/// `nmp_signer::BunkerParseError` mirror (mirrors `nmp-ffi`'s own
+/// `FfiBunkerParseError`; see that type's doc for the Rust side of each
+/// case).
+public enum NMPBunkerParseFailure: Sendable, Equatable {
+    case empty
+    case tooLong(len: UInt64)
+    case wrongScheme
+    case missingRemoteSignerKey
+    case invalidRemoteSignerKey
+    case missingRelay
+    case tooManyRelays(count: UInt64)
+    case invalidRelay(String)
+    case malformed(String)
+
+    init(_ ffi: FfiBunkerParseError) {
+        switch ffi {
+        case .empty: self = .empty
+        case .tooLong(let len): self = .tooLong(len: len)
+        case .wrongScheme: self = .wrongScheme
+        case .missingRemoteSignerKey: self = .missingRemoteSignerKey
+        case .invalidRemoteSignerKey: self = .invalidRemoteSignerKey
+        case .missingRelay: self = .missingRelay
+        case .tooManyRelays(let count): self = .tooManyRelays(count: count)
+        case .invalidRelay(let relay): self = .invalidRelay(relay)
+        case .malformed(let reason): self = .malformed(reason)
+        }
+    }
+}
+
+/// Typed NIP-46 connection failure (mirrors `nmp-ffi`'s own
+/// `FfiNip46Failure`; see that type's doc for the Rust side of each case).
+public enum NMPNip46Failure: Sendable, Equatable {
+    case invalidBunkerUri(NMPBunkerParseFailure)
+    case missingRelay
+    case tooManyRelays(count: UInt64)
+    case invitationTooLong(len: UInt64)
+    case invalidLaunchScheme(String)
+    case timeout
+    case disconnected
+    case rejected(String)
+    case invalidResponse(String)
+    case threadUnavailable(component: String, reason: String)
+    case executorSaturated(component: String, capacity: UInt64)
+    case signerMissingPublicKey
+
+    init(_ ffi: FfiNip46Failure) {
+        switch ffi {
+        case .invalidBunkerUri(let source): self = .invalidBunkerUri(NMPBunkerParseFailure(source))
+        case .missingRelay: self = .missingRelay
+        case .tooManyRelays(let count): self = .tooManyRelays(count: count)
+        case .invitationTooLong(let len): self = .invitationTooLong(len: len)
+        case .invalidLaunchScheme(let scheme): self = .invalidLaunchScheme(scheme)
+        case .timeout: self = .timeout
+        case .disconnected: self = .disconnected
+        case .rejected(let reason): self = .rejected(reason)
+        case .invalidResponse(let reason): self = .invalidResponse(reason)
+        case .threadUnavailable(let component, let reason):
+            self = .threadUnavailable(component: component, reason: reason)
+        case .executorSaturated(let component, let capacity):
+            self = .executorSaturated(component: component, capacity: capacity)
+        case .signerMissingPublicKey: self = .signerMissingPublicKey
+        }
+    }
+}
+
 public enum NMPNip46ConnectionState: Sendable, Equatable {
     case connecting
     case available
@@ -91,7 +156,7 @@ public enum NMPNip46ConnectionState: Sendable, Equatable {
     case connected(userPublicKey: String)
     /// Stronger than `connected`: the signer is attached to this engine.
     case ready(userPublicKey: String)
-    case failed(reason: String)
+    case failed(NMPNip46Failure)
 }
 
 final class NIP46Observer: Nip46ConnectionObserver, @unchecked Sendable {
@@ -120,8 +185,8 @@ final class NIP46Observer: Nip46ConnectionObserver, @unchecked Sendable {
         continuation.yield(.ready(userPublicKey: userPublicKey))
     }
 
-    func onFailed(reason: String) {
-        continuation.yield(.failed(reason: reason))
+    func onFailed(failure: FfiNip46Failure) {
+        continuation.yield(.failed(NMPNip46Failure(failure)))
     }
 
     func onClosed() {
@@ -250,7 +315,12 @@ extension NMPEngine {
         }
         let connection = try connectNip46(invitation: invitation, timeout: timeout)
         guard await UIApplication.shared.open(url) else {
-            connection.observer.onFailed(reason: "the signer app did not accept the handoff")
+            // The OS declined the handoff before any relay-side connection
+            // fact could occur; `.disconnected` ("NIP-46 connection ended")
+            // is the closest existing `Nip46Error` discriminant -- there is
+            // no dedicated variant for a native deep-link refusal since it
+            // never reaches Rust's `Nip46Error` taxonomy at all (#494).
+            connection.observer.onFailed(failure: .disconnected)
             connection.close()
             return connection
         }

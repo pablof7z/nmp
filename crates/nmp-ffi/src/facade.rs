@@ -29,8 +29,9 @@ use std::thread;
 
 use crate::convert::{
     demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey,
-    row_delta_to_ffi, sign_event_failure, sign_event_request_from_ffi, sign_event_start_error,
-    signed_event_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
+    relay_information_error_kind, row_delta_to_ffi, sign_event_failure,
+    sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi,
+    write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
 };
 use crate::nip02::{
     action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
@@ -409,7 +410,7 @@ impl NmpEngine {
             last_modified: value.last_modified,
             cache_control: value.cache_control,
             expires: value.expires,
-            last_error: value.last_error.map(|error| error.to_string()),
+            last_error: value.last_error.map(relay_information_error_kind),
         })
     }
 

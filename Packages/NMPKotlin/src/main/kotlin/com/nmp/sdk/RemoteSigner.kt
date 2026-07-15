@@ -7,10 +7,12 @@ import kotlinx.coroutines.flow.transformWhile
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import uniffi.nmp_ffi.FfiBunkerParseError
 import uniffi.nmp_ffi.FfiLocalSignerApp
 import uniffi.nmp_ffi.FfiLocalSignerProtocol
 import uniffi.nmp_ffi.FfiNip46ClientMetadata
 import uniffi.nmp_ffi.FfiNip46ConnectionEvent
+import uniffi.nmp_ffi.FfiNip46Failure
 import uniffi.nmp_ffi.FfiNip46Invitation
 import uniffi.nmp_ffi.Nip46Connection
 import uniffi.nmp_ffi.Nip46ConnectionObserver
@@ -67,6 +69,72 @@ data class NMPNip46ClientMetadata(
     internal fun toFfi() = FfiNip46ClientMetadata(name, url, image)
 }
 
+/** `nmp_signer::BunkerParseError` mirror (mirrors `nmp-ffi`'s own
+ * `FfiBunkerParseError`; see that type's doc for the Rust side of each
+ * case). */
+sealed interface NMPBunkerParseFailure {
+    data object Empty : NMPBunkerParseFailure
+    data class TooLong(val len: ULong) : NMPBunkerParseFailure
+    data object WrongScheme : NMPBunkerParseFailure
+    data object MissingRemoteSignerKey : NMPBunkerParseFailure
+    data object InvalidRemoteSignerKey : NMPBunkerParseFailure
+    data object MissingRelay : NMPBunkerParseFailure
+    data class TooManyRelays(val count: ULong) : NMPBunkerParseFailure
+    data class InvalidRelay(val relay: String) : NMPBunkerParseFailure
+    data class Malformed(val reason: String) : NMPBunkerParseFailure
+
+    companion object {
+        internal fun from(ffi: FfiBunkerParseError): NMPBunkerParseFailure =
+            when (ffi) {
+                FfiBunkerParseError.Empty -> Empty
+                is FfiBunkerParseError.TooLong -> TooLong(ffi.len)
+                FfiBunkerParseError.WrongScheme -> WrongScheme
+                FfiBunkerParseError.MissingRemoteSignerKey -> MissingRemoteSignerKey
+                FfiBunkerParseError.InvalidRemoteSignerKey -> InvalidRemoteSignerKey
+                FfiBunkerParseError.MissingRelay -> MissingRelay
+                is FfiBunkerParseError.TooManyRelays -> TooManyRelays(ffi.count)
+                is FfiBunkerParseError.InvalidRelay -> InvalidRelay(ffi.relay)
+                is FfiBunkerParseError.Malformed -> Malformed(ffi.reason)
+            }
+    }
+}
+
+/** Typed NIP-46 connection failure (mirrors `nmp-ffi`'s own
+ * `FfiNip46Failure`; see that type's doc for the Rust side of each case). */
+sealed interface NMPNip46Failure {
+    data class InvalidBunkerUri(val source: NMPBunkerParseFailure) : NMPNip46Failure
+    data object MissingRelay : NMPNip46Failure
+    data class TooManyRelays(val count: ULong) : NMPNip46Failure
+    data class InvitationTooLong(val len: ULong) : NMPNip46Failure
+    data class InvalidLaunchScheme(val scheme: String) : NMPNip46Failure
+    data object Timeout : NMPNip46Failure
+    data object Disconnected : NMPNip46Failure
+    data class Rejected(val reason: String) : NMPNip46Failure
+    data class InvalidResponse(val reason: String) : NMPNip46Failure
+    data class ThreadUnavailable(val component: String, val reason: String) : NMPNip46Failure
+    data class ExecutorSaturated(val component: String, val capacity: ULong) : NMPNip46Failure
+    data object SignerMissingPublicKey : NMPNip46Failure
+
+    companion object {
+        internal fun from(ffi: FfiNip46Failure): NMPNip46Failure =
+            when (ffi) {
+                is FfiNip46Failure.InvalidBunkerUri ->
+                    InvalidBunkerUri(NMPBunkerParseFailure.from(ffi.source))
+                FfiNip46Failure.MissingRelay -> MissingRelay
+                is FfiNip46Failure.TooManyRelays -> TooManyRelays(ffi.count)
+                is FfiNip46Failure.InvitationTooLong -> InvitationTooLong(ffi.len)
+                is FfiNip46Failure.InvalidLaunchScheme -> InvalidLaunchScheme(ffi.scheme)
+                FfiNip46Failure.Timeout -> Timeout
+                FfiNip46Failure.Disconnected -> Disconnected
+                is FfiNip46Failure.Rejected -> Rejected(ffi.reason)
+                is FfiNip46Failure.InvalidResponse -> InvalidResponse(ffi.reason)
+                is FfiNip46Failure.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
+                is FfiNip46Failure.ExecutorSaturated -> ExecutorSaturated(ffi.component, ffi.capacity)
+                FfiNip46Failure.SignerMissingPublicKey -> SignerMissingPublicKey
+            }
+    }
+}
+
 sealed interface NMPNip46ConnectionState {
     object Connecting : NMPNip46ConnectionState
     object Available : NMPNip46ConnectionState
@@ -76,7 +144,7 @@ sealed interface NMPNip46ConnectionState {
     data class Connected(val userPublicKey: String) : NMPNip46ConnectionState
     /** Stronger than [Connected]: the signer is attached to this engine. */
     data class Ready(val userPublicKey: String) : NMPNip46ConnectionState
-    data class Failed(val reason: String) : NMPNip46ConnectionState
+    data class Failed(val failure: NMPNip46Failure) : NMPNip46ConnectionState
     object Closed : NMPNip46ConnectionState
 }
 
@@ -121,8 +189,8 @@ internal class NMPNip46Observer : Nip46ConnectionObserver {
         emitIfOpen(NMPNip46ConnectionState.Ready(userPublicKey))
     }
 
-    override fun onFailed(reason: String) {
-        emitIfOpen(NMPNip46ConnectionState.Failed(reason))
+    override fun onFailed(failure: FfiNip46Failure) {
+        emitIfOpen(NMPNip46ConnectionState.Failed(NMPNip46Failure.from(failure)))
     }
 
     override fun onClosed() {
