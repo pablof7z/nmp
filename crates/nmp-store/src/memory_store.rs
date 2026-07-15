@@ -2570,4 +2570,40 @@ mod lane_atomicity_tests {
             .to_string()
             .contains("terminal lane lacks"));
     }
+
+    /// A legacy v1 attempt row whose OWN outcome is already terminal (no
+    /// overlaid DETAILS row) must bootstrap straight to `LaneState::Terminal`
+    /// — the live upgrade-read branch that the lane doors never produce
+    /// themselves (they keep the attempt row `Started` and record the
+    /// terminal outcome in DETAILS). Mirrors the `RedbStore` case in
+    /// `lane_contract.rs`; seeded directly because `MemoryStore`'s maps are
+    /// private and it has no durable file to raw-insert into.
+    #[test]
+    fn genuine_terminal_legacy_row_adopts_as_terminal_lane_for_bootstrap_in_memory() {
+        let (mut store, intent, relay, signed, _) = setup("legacy-terminal");
+        // Drop the empty lane `setup` bootstrapped so this intent presents as
+        // a pre-lane upgrade: a bare terminal attempt row with no lane and no
+        // additive detail row.
+        store.outbox_lanes.remove(&intent);
+        store.outbox_attempts.insert(
+            (intent, relay.clone(), 1),
+            RecoveredAttempt {
+                version: 1,
+                intent_id: intent,
+                relay: relay.clone(),
+                ordinal: 1,
+                event: signed,
+                outcome: AttemptOutcome::Acked,
+            },
+        );
+
+        let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+        assert_eq!(
+            lane.state,
+            LaneState::Terminal {
+                ordinal: 1,
+                outcome: AttemptOutcome::Acked,
+            }
+        );
+    }
 }
