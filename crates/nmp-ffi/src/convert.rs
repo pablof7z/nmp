@@ -913,15 +913,19 @@ fn source_authority_to_ffi(s: GSourceAuthority) -> FfiSourceAuthority {
     }
 }
 
-fn access_context_from_ffi(a: FfiAccessContext) -> GAccessContext {
-    match a {
+fn access_context_from_ffi(a: FfiAccessContext) -> Result<GAccessContext, FfiError> {
+    Ok(match a {
         FfiAccessContext::Public => GAccessContext::Public,
-    }
+        FfiAccessContext::Nip42 { public_key } => GAccessContext::Nip42(parse_pubkey(&public_key)?),
+    })
 }
 
 fn access_context_to_ffi(a: GAccessContext) -> FfiAccessContext {
     match a {
         GAccessContext::Public => FfiAccessContext::Public,
+        GAccessContext::Nip42(public_key) => FfiAccessContext::Nip42 {
+            public_key: public_key.to_hex(),
+        },
     }
 }
 
@@ -948,7 +952,7 @@ pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
     let mut demand = GDemand::new(
         filter_from_ffi(d.selection)?,
         source_authority_from_ffi(d.source)?,
-        access_context_from_ffi(d.access),
+        access_context_from_ffi(d.access)?,
     )?;
     demand.cache = cache_mode_from_ffi(d.cache);
     Ok(demand)
@@ -1016,6 +1020,7 @@ fn source_status_to_ffi(s: SourceStatus) -> FfiSourceStatus {
 fn source_evidence_to_ffi(s: SourceEvidence) -> FfiSourceEvidence {
     FfiSourceEvidence {
         relay: s.relay.to_string(),
+        access: access_context_to_ffi(s.access),
         reconciled_through: s.reconciled_through.map(|ts| ts.as_secs()),
         status: source_status_to_ffi(s.status),
     }
@@ -1240,6 +1245,7 @@ fn lane_to_ffi_string(lane: Lane) -> String {
 fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics {
     FfiRelayDiagnostics {
         relay: r.relay.to_string(),
+        access: access_context_to_ffi(r.access),
         wire_sub_count: r.wire_sub_count as u32,
         authors_served: r.authors_served as u32,
         by_lane: r
@@ -1287,7 +1293,7 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
             .map(|s| s.to_string())
             .collect(),
         discovered_private_relays_rejected: s.discovered_private_relays_rejected,
-        relays_rejected_over_cap: s.relays_rejected_over_cap,
+        sessions_rejected_over_cap: s.sessions_rejected_over_cap,
         transport_degraded: s.transport_degraded,
     }
 }
@@ -1603,6 +1609,7 @@ mod tests {
             .enumerate()
             .map(|(index, status)| SourceEvidence {
                 relay: RelayUrl::parse(&format!("wss://source-{index}.example.com")).unwrap(),
+                access: GAccessContext::Public,
                 reconciled_through: (index % 2 == 0).then(|| Timestamp::from(index as u64 + 10)),
                 status,
             })
@@ -1656,6 +1663,7 @@ mod tests {
         let ffi = diagnostics_snapshot_to_ffi(DiagnosticsSnapshot {
             relays: vec![RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
+                access: GAccessContext::Public,
                 wire_sub_count: 2,
                 authors_served: 1,
                 by_lane: vec![(Lane::AppRelay, 2)],
@@ -1684,7 +1692,7 @@ mod tests {
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
             discovered_private_relays_rejected: 0,
-            relays_rejected_over_cap: 0,
+            sessions_rejected_over_cap: 0,
             store_degraded: None,
             transport_degraded: Some("signature verification worker unavailable".to_string()),
         });

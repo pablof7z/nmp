@@ -19,7 +19,7 @@ use nmp_engine::core::{
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, NarrowOnly,
-    PrivateRoute, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    PrivateRoute, RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
@@ -624,7 +624,7 @@ fn req_for<'a>(effects: &'a [Effect], relay: &RelayUrl) -> (&'a SubId, &'a Concr
     for effect in effects {
         if let Effect::Wire(delta) = effect {
             for (r, ops) in &delta.ops {
-                if r == relay {
+                if &r.relay == relay {
                     for op in ops {
                         if let WireOp::Req(sub_id, filter) = op {
                             return (sub_id, filter);
@@ -645,7 +645,7 @@ fn req_for_kind<'a>(
     for effect in effects {
         if let Effect::Wire(delta) = effect {
             for (r, ops) in &delta.ops {
-                if r != relay {
+                if &r.relay != relay {
                     continue;
                 }
                 for op in ops {
@@ -669,17 +669,47 @@ fn wire_sub_string(sub_id: &SubId) -> String {
     format!("{}", sub_id.1)
 }
 
+fn public_session(relay: &RelayUrl) -> RelaySessionKey {
+    RelaySessionKey::public(relay.clone())
+}
+
+// In the #8 U1 foundation the write plane rides the relay's PUBLIC session
+// (no AUTH reducer yet). This helper keeps its `signer` parameter so the
+// call sites still document which identity's write lane they model, and so
+// the AUTH wave can reintroduce an authenticated session here without
+// re-touching every caller — but today it resolves to the public session.
+fn signer_session(relay: &RelayUrl, _signer: nostr::PublicKey) -> RelaySessionKey {
+    RelaySessionKey::public(relay.clone())
+}
+
 fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
     let mut effects = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot,
             generation: 1,
         },
-        url.clone(),
+        public_session(url),
     ));
     // Most legacy headless tests model a relay with no NIP-11 support list.
     // Resolve that one-shot explicitly now that connection and HTTP
     // capability acquisition are separate reducer inputs.
+    effects.extend(core.handle(EngineMsg::RelayInformationResolved(url.clone(), None)));
+    effects
+}
+
+fn connect_signer<S: EventStore>(
+    core: &mut EngineCore<S>,
+    slot: u32,
+    url: &RelayUrl,
+    signer: nostr::PublicKey,
+) -> Vec<Effect> {
+    let mut effects = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot,
+            generation: 1,
+        },
+        signer_session(url, signer),
+    ));
     effects.extend(core.handle(EngineMsg::RelayInformationResolved(url.clone(), None)));
     effects
 }
@@ -710,7 +740,9 @@ fn mark_written<S: EventStore>(
     let correlation = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::PublishEvent(candidate, _, correlation) if candidate == relay => {
+            Effect::PublishEvent(candidate, event, correlation)
+                if &candidate.relay == relay && candidate.access == AccessContext::Public =>
+            {
                 Some(*correlation)
             }
             _ => None,
@@ -811,6 +843,7 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", b_post.clone()),
     ));
     assert!(
@@ -829,6 +862,7 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", contact_list),
     ));
 
@@ -900,6 +934,7 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
                 slot: 0,
                 generation: 1,
             },
+            public_session(&relay0),
             event_frame("s", event),
         ));
         for effect in &effects {
@@ -1001,6 +1036,7 @@ fn limited_handle_projects_only_the_n_newest_of_m_matches() {
                 slot: 0,
                 generation: 1,
             },
+            public_session(&relay0),
             event_frame("s", event),
         ));
     }
@@ -1068,6 +1104,7 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
                 slot: 0,
                 generation: 1,
             },
+            public_session(&relay0),
             event_frame("s", event),
         ));
     }
@@ -1109,6 +1146,7 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
                 slot: 0,
                 generation: 1,
             },
+            public_session(&relay0),
             event_frame("s", event),
         ));
     }
@@ -1120,6 +1158,7 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", newest.clone()),
     ));
     let batch = effects
@@ -1185,6 +1224,7 @@ fn retracting_top_n_member_pulls_in_next_newest() {
                 slot: 0,
                 generation: 1,
             },
+            public_session(&relay0),
             event_frame("s", event),
         ));
     }
@@ -1207,6 +1247,7 @@ fn retracting_top_n_member_pulls_in_next_newest() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", deletion),
     ));
     let batch = effects
@@ -1266,6 +1307,7 @@ fn unlimited_handle_projects_every_match() {
                 slot: 0,
                 generation: 1,
             },
+            public_session(&relay0),
             event_frame("s", event),
         ));
     }
@@ -1305,6 +1347,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame(&wire, e),
     ));
     assert_eq!(
@@ -1320,6 +1363,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire),
     ));
 
@@ -1376,6 +1420,7 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire),
     ));
 
@@ -1429,6 +1474,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
             slot: 0,
             generation: 1,
         },
+        public_session(&relay_other),
         event_frame(&outbox_wire, event.clone()),
     ));
 
@@ -1465,7 +1511,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     assert!(
         !effects_agnostic.iter().any(|effect| matches!(
             effect,
-            Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay_other)
+            Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r.relay == relay_other)
         )),
         "an ExplicitPinned atom's subscribe must never recompile a Req/Close at any \
          relay but its own declared set"
@@ -1509,6 +1555,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
             slot: 1,
             generation: 1,
         },
+        public_session(&relay_pinned),
         event_frame(&pinned_wire, event.clone()),
     ));
     let deltas = all_row_deltas(&after);
@@ -1580,7 +1627,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     let wire1 = wire_sub_string(sub1);
     assert!(
         !effects1.iter().any(
-            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay2))
+            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r.relay == relay2))
         ),
         "demand1's Pinned({{relay1}}) atom must never touch relay2"
     );
@@ -1608,7 +1655,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     );
     assert!(
         !effects2.iter().any(
-            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r == &relay1))
+            |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r.relay == relay1))
         ),
         "demand2's Pinned({{relay2}}) atom must never touch relay1 -- and must not even \
          re-touch relay1's already-open sub, since these are independent graph nodes"
@@ -1623,6 +1670,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay1),
         eose_frame(&wire1),
     ));
     let evidence1 = evidence_from(&effects, id1).expect("relay1's EOSE must refresh handle1");
@@ -1641,9 +1689,13 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     let closed_relays: BTreeSet<RelayUrl> = teardown
         .iter()
         .filter_map(|e| match e {
-            Effect::Wire(delta) => {
-                Some(delta.ops.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>())
-            }
+            Effect::Wire(delta) => Some(
+                delta
+                    .ops
+                    .iter()
+                    .map(|(session, _)| session.relay.clone())
+                    .collect::<Vec<_>>(),
+            ),
             _ => None,
         })
         .flatten()
@@ -1703,6 +1755,7 @@ fn eose_overwrite_race_credits_only_the_intersection() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire),
     ));
 
@@ -1726,6 +1779,7 @@ fn eose_overwrite_race_credits_only_the_intersection() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire),
     ));
     assert!(
@@ -1765,6 +1819,7 @@ fn limited_fetch_never_records_coverage() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire),
     ));
 
@@ -1860,7 +1915,7 @@ fn equal_evidence_on_reconnect_does_not_spuriously_emit_rows() {
             slot: 7,
             generation: 1,
         },
-        relay.clone(),
+        public_session(&relay),
     ));
     assert!(
         first_connect
@@ -1874,7 +1929,7 @@ fn equal_evidence_on_reconnect_does_not_spuriously_emit_rows() {
             slot: 7,
             generation: 2,
         },
-        relay,
+        public_session(&relay),
     ));
     assert!(
         unchanged_reconnect
@@ -1995,6 +2050,7 @@ fn per_source_evidence_reflects_each_relays_own_proof_independently() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire0),
     ));
     let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
@@ -2013,6 +2069,7 @@ fn per_source_evidence_reflects_each_relays_own_proof_independently() {
             slot: 1,
             generation: 1,
         },
+        public_session(&relay1),
         eose_frame(&wire1),
     ));
     let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
@@ -2085,6 +2142,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame(&wire0, contact_list),
     ));
     // #11: the source relay is also projected as provenance for the outer
@@ -2102,6 +2160,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
             slot: 1,
             generation: 1,
         },
+        public_session(&relay1),
         eose_frame(&wire1),
     ));
     let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
@@ -2130,6 +2189,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire0),
     ));
     assert!(
@@ -2141,6 +2201,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire_outer0),
     ));
     let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
@@ -2182,6 +2243,7 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         eose_frame(&wire0),
     ));
     let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
@@ -2195,6 +2257,7 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         DisconnectReason::Error,
     ));
     let evidence = evidence_from(&effects, id).expect("a link-status flip must emit EmitRows");
@@ -2241,10 +2304,11 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
         slot: 0,
         generation: 2,
     };
-    let _ = core.handle(EngineMsg::RelayConnected(old, relay.clone()));
-    let _ = core.handle(EngineMsg::RelayConnected(reopened, relay.clone()));
+    let session = public_session(&relay);
+    let _ = core.handle(EngineMsg::RelayConnected(old, session.clone()));
+    let _ = core.handle(EngineMsg::RelayConnected(reopened, session.clone()));
 
-    let stale_connect = core.handle(EngineMsg::RelayConnected(old, relay.clone()));
+    let stale_connect = core.handle(EngineMsg::RelayConnected(old, session.clone()));
     assert!(
         stale_connect.is_empty(),
         "an old-generation connect must not replace the reopened handle"
@@ -2252,6 +2316,7 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
 
     let stale_health = core.handle(EngineMsg::RelayHealth(
         old,
+        session.clone(),
         nmp_transport::RelayHealth {
             last_error: Some("stale generation failed".to_string()),
             ..nmp_transport::RelayHealth::default()
@@ -2263,7 +2328,11 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     );
     assert!(core.diagnostics_snapshot().transport_degraded.is_none());
 
-    let stale = core.handle(EngineMsg::RelayDisconnected(old, DisconnectReason::Error));
+    let stale = core.handle(EngineMsg::RelayDisconnected(
+        old,
+        session.clone(),
+        DisconnectReason::Error,
+    ));
     assert!(
         stale.is_empty(),
         "an old-generation disconnect must be a reducer no-op"
@@ -2271,6 +2340,7 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
 
     let current = core.handle(EngineMsg::RelayDisconnected(
         reopened,
+        session.clone(),
         DisconnectReason::Error,
     ));
     let evidence = evidence_from(&current, id).expect("the current disconnect refreshes evidence");
@@ -2283,7 +2353,7 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     assert!(
         current
             .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &relay)),
+            .any(|effect| matches!(effect, Effect::EnsureRelay(key) if key == &session)),
         "the current generation disconnect still re-ensures required work"
     );
 }
@@ -2313,18 +2383,19 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
         slot: 0,
         generation: 1,
     };
-    let _ = core.handle(EngineMsg::RelayConnected(handle, relay.clone()));
+    let _ = core.handle(EngineMsg::RelayConnected(handle, public_session(&relay)));
     assert!(core.diagnostics_snapshot().transport_degraded.is_none());
 
     let effects = core.handle(EngineMsg::RelayDisconnected(
         handle,
+        public_session(&relay),
         DisconnectReason::PermanentlyFailed,
     ));
 
     assert!(
-        !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &relay)),
+        !effects.iter().any(
+            |effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))
+        ),
         "a permanent failure must never re-issue EnsureRelay -- the pool has \
          already retired this worker for good, so this would either race a \
          wedged zombie or busy-loop redialing a relay that keeps refusing"
@@ -2347,15 +2418,16 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
         literal_query(&[1], &a.public_key().to_hex()),
         Box::new(CapturingSink::default()),
     ));
-    let _ = core_transient.handle(EngineMsg::RelayConnected(handle, relay.clone()));
+    let _ = core_transient.handle(EngineMsg::RelayConnected(handle, public_session(&relay)));
     let transient_effects = core_transient.handle(EngineMsg::RelayDisconnected(
         handle,
+        public_session(&relay),
         DisconnectReason::Error,
     ));
     assert!(
-        transient_effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &relay)),
+        transient_effects.iter().any(
+            |effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))
+        ),
         "an ordinary transient disconnect must keep re-issuing EnsureRelay unchanged"
     );
     assert!(
@@ -2395,7 +2467,7 @@ fn set_active_pubkey_reroots_and_recompiles() {
 
     let effects = core.handle(EngineMsg::SetActivePubkey(Some(b.public_key())));
     let closed_a = effects.iter().any(|e| {
-        matches!(e, Effect::Wire(d) if d.ops.iter().any(|(r, ops)| r == &relay_a && ops.iter().any(|op| matches!(op, WireOp::Close(_)))))
+        matches!(e, Effect::Wire(d) if d.ops.iter().any(|(r, ops)| r.relay == relay_a && ops.iter().any(|op| matches!(op, WireOp::Close(_)))))
     });
     assert!(closed_a, "re-root must close a's demand");
     req_for(&effects, &relay_b); // and open b's.
@@ -2425,7 +2497,8 @@ fn enqueue_is_not_converged() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    connect(&mut core, 0, &relay0);
+    connect_signer(&mut core, 0, &relay0, a.public_key());
+    let session = signer_session(&relay0, a.public_key());
 
     // -- Durable: first status is Accepted, never a bool/terminal. --
     let sink = CapturingReceiptSink::default();
@@ -2474,7 +2547,7 @@ fn enqueue_is_not_converged() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &relay0)),
+            .any(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &session)),
         "an ephemeral write is fire-and-forget -- it still reaches the wire"
     );
     assert!(effects
@@ -2500,14 +2573,14 @@ fn enqueue_is_not_converged() {
     ));
     let publish_count = effects
         .iter()
-        .filter(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &relay0))
+        .filter(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &session))
         .count();
     assert_eq!(publish_count, 1, "at-most-once sends exactly once");
 
     let correlation = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::PublishEvent(relay, _, correlation) if relay == &relay0 => Some(*correlation),
+            Effect::PublishEvent(relay, _, correlation) if relay == &session => Some(*correlation),
             _ => None,
         })
         .unwrap();
@@ -2545,6 +2618,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         let sink = CapturingReceiptSink::default();
         let (receipt, event, offline) =
             publish_private(&mut core, &author, [relay.clone()], sink.clone());
+        let session = signer_session(&relay, event.pubkey);
         assert!(sink
             .0
             .lock()
@@ -2554,7 +2628,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             }));
         assert!(offline
             .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay)));
+            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)));
         assert!(!offline
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -2582,13 +2656,14 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .contains(&WriteStatus::AwaitingRelay {
                 relay: relay.clone(),
             }));
-        let first = connect(&mut core, 0, &relay);
+        let first = connect_signer(&mut core, 0, &relay, event.pubkey);
         mark_written(&mut core, &first, &relay);
         let auth = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
             },
+            session.clone(),
             RelayFrame::from(RelayMessage::ok(
                 event.id,
                 false,
@@ -2627,7 +2702,13 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
-        let second = core.handle(EngineMsg::RelayAuthReady(relay.clone()));
+        let second = core.handle(EngineMsg::RelayAuthReady(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            session.clone(),
+        ));
         assert!(second.iter().any(|effect| matches!(
             effect,
             Effect::EmitReceipt(
@@ -2642,7 +2723,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         assert_eq!(
             second
                 .iter()
-                .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &relay))
+                .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &session))
                 .count(),
             1
         );
@@ -2678,9 +2759,9 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
             Box::new(FixtureDirectory::new()),
             10,
         );
-        connect(&mut core, 0, &auth);
-        connect(&mut core, 1, &retry);
-        connect(&mut core, 2, &ambiguous);
+        connect_signer(&mut core, 0, &auth, author.public_key());
+        connect_signer(&mut core, 1, &retry, author.public_key());
+        connect_signer(&mut core, 2, &ambiguous, author.public_key());
         let sink = CapturingReceiptSink::default();
         let (receipt, event, scheduled) = publish_private(
             &mut core,
@@ -2701,6 +2782,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
                 slot: 0,
                 generation: 1,
             },
+            signer_session(&auth, event.pubkey),
             RelayFrame::from(RelayMessage::ok(
                 event.id,
                 false,
@@ -2719,6 +2801,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
                 slot: 1,
                 generation: 1,
             },
+            signer_session(&retry, event.pubkey),
             RelayFrame::from(RelayMessage::ok(event.id, false, "rate-limited: slow down")),
         ));
         let retry_at = retry_wait
@@ -2740,7 +2823,9 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         let ambiguous_correlation = scheduled
             .iter()
             .find_map(|effect| match effect {
-                Effect::PublishEvent(relay, _, correlation) if relay == &ambiguous => {
+                Effect::PublishEvent(relay, _, correlation)
+                    if relay == &signer_session(&ambiguous, event.pubkey) =>
+                {
                     Some(*correlation)
                 }
                 _ => None,
@@ -2812,7 +2897,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://transient-retry.example").unwrap();
     let mut core = new_core(FixtureDirectory::new());
-    connect(&mut core, 0, &relay);
+    connect_signer(&mut core, 0, &relay, author.public_key());
     let sink = CapturingReceiptSink::default();
     let (receipt, event, first) =
         publish_private(&mut core, &author, [relay.clone()], sink.clone());
@@ -2822,6 +2907,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&relay, event.pubkey),
         RelayFrame::from(RelayMessage::ok(event.id, false, "rate-limited: slow down")),
     ));
     assert!(!classified
@@ -2862,7 +2948,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     assert_eq!(
         retry
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(r, e, _) if r == &relay && e.id == event.id))
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, e, _) if r == &signer_session(&relay, event.pubkey) && e.id == event.id))
             .count(),
         1
     );
@@ -2889,7 +2975,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
     relays.sort();
     let mut core = new_core(FixtureDirectory::new());
     for (slot, relay) in relays.iter().enumerate() {
-        connect(&mut core, slot as u32, relay);
+        connect_signer(&mut core, slot as u32, relay, author.public_key());
     }
     let (_, event, first_wave) = publish_private(
         &mut core,
@@ -2900,7 +2986,9 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
     let published = first_wave
         .iter()
         .filter_map(|effect| match effect {
-            Effect::PublishEvent(relay, _, _) => Some(relay.clone()),
+            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
+                Some(session.relay.clone())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2913,22 +3001,28 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
             slot: 0,
             generation: 1,
         },
+        signer_session(first, event.pubkey),
         RelayFrame::from(RelayMessage::ok(event.id, true, "")),
     ));
     assert_eq!(
         released
             .iter()
             .filter_map(|effect| match effect {
-                Effect::PublishEvent(relay, _, _) => Some(relay.clone()),
+                Effect::PublishEvent(session, event, _)
+                    if session.access == AccessContext::Public =>
+                {
+                    Some(session.relay.clone())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>(),
         vec![relays[32].clone()],
         "freeing one global slot schedules the stable next lane"
     );
-    assert!(!released
-        .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == first)));
+    assert!(!released.iter().any(
+        |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+            if session == &signer_session(first, event.pubkey))
+    ));
 }
 
 fn all_row_deltas(effects: &[Effect]) -> Vec<&RowDelta> {
@@ -3129,7 +3223,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
             slot: 0,
             generation: 1,
         },
-        relay.clone(),
+        signer_session(&relay, a.public_key()),
     ));
     let signed = unsigned(&a, 1, "signed cache truth")
         .sign_with_keys(&a)
@@ -3147,6 +3241,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&relay, signed.pubkey),
         RelayFrame::from(RelayMessage::ok(signed.id, false, "policy rejection")),
     ));
     assert!(!all_row_deltas(&rejected)
@@ -3344,9 +3439,9 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     let drop_relay = RelayUrl::parse("wss://drop.example.com").unwrap();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
-    connect(&mut core, 0, &ack);
-    connect(&mut core, 1, &nack);
-    connect(&mut core, 2, &drop_relay);
+    connect_signer(&mut core, 0, &ack, a.public_key());
+    connect_signer(&mut core, 1, &nack, a.public_key());
+    connect_signer(&mut core, 2, &drop_relay, a.public_key());
     let template = unsigned(&a, 1, "same bytes, separate obligations");
     let sink_a = CapturingReceiptSink::default();
     let sink_b = CapturingReceiptSink::default();
@@ -3379,15 +3474,18 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
         generation_a,
         Ok(signed.clone()),
     ));
-    assert!(routed
-        .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &ack)));
-    assert!(routed
-        .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &drop_relay)));
-    assert!(routed
-        .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &nack)));
+    assert!(routed.iter().any(
+        |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+            if session == &signer_session(&ack, event.pubkey))
+    ));
+    assert!(routed.iter().any(
+        |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+            if session == &signer_session(&drop_relay, event.pubkey))
+    ));
+    assert!(routed.iter().any(
+        |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+            if session == &signer_session(&nack, event.pubkey))
+    ));
     mark_written(&mut core, &routed, &ack);
     mark_written(&mut core, &routed, &nack);
     mark_written(&mut core, &routed, &drop_relay);
@@ -3397,6 +3495,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&ack, signed.pubkey),
         RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
     ));
     assert!(acked.iter().any(|effect| matches!(
@@ -3412,6 +3511,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
             slot: 1,
             generation: 1,
         },
+        signer_session(&nack, signed.pubkey),
         RelayFrame::from(RelayMessage::ok(signed.id, false, "no")),
     ));
     assert!(nacked.iter().any(|effect| matches!(
@@ -3424,6 +3524,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
             slot: 2,
             generation: 1,
         },
+        signer_session(&drop_relay, signed.pubkey),
         DisconnectReason::Error,
     ));
     assert!(!dropped.iter().any(
@@ -3443,8 +3544,8 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [out.clone()]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    connect(&mut core, 0, &source);
-    connect(&mut core, 1, &out);
+    connect_signer(&mut core, 0, &source, a.public_key());
+    connect_signer(&mut core, 1, &out, a.public_key());
     let template = unsigned(&a, 1, "relay wins signing race");
     let sink_a = CapturingReceiptSink::default();
     let sink_b = CapturingReceiptSink::default();
@@ -3472,6 +3573,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
             slot: 0,
             generation: 1,
         },
+        signer_session(&source, signed.pubkey),
         event_frame("unsolicited", signed.clone()),
     ));
     for id in [id_a, id_b] {
@@ -3484,7 +3586,10 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &out))
+            .filter(
+                |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+                if session == &signer_session(&out, event.pubkey))
+            )
             .count(),
         1,
         "the per-relay cap admits only one co-owner lane at a time"
@@ -3495,12 +3600,16 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
             slot: 1,
             generation: 1,
         },
+        signer_session(&out, signed.pubkey),
         RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
     ));
     assert_eq!(
         advanced
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &out))
+            .filter(
+                |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+                if session == &signer_session(&out, event.pubkey))
+            )
             .count(),
         1,
         "terminalizing the first lane wakes the next fair lane"
@@ -3720,7 +3829,7 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
-    connect(&mut core, 0, &relay0);
+    connect_signer(&mut core, 0, &relay0, a.public_key());
 
     let genuine = unsigned(&a, 1, "genuine content")
         .sign_with_keys(&a)
@@ -3783,7 +3892,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
-    connect(&mut core, 0, &relay0);
+    connect_signer(&mut core, 0, &relay0, a.public_key());
 
     let genuine = unsigned(&a, 1, "genuine content")
         .sign_with_keys(&a)
@@ -3811,9 +3920,10 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
         "an already-signed payload must never request the signer"
     );
     assert!(
-        effects.iter().any(
-            |e| matches!(e, Effect::PublishEvent(r, ev, _) if r == &relay0 && ev.id == genuine.id)
-        ),
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PublishEvent(r, ev, _)
+                if r == &signer_session(&relay0, genuine.pubkey) && ev.id == genuine.id)),
         "a valid Signed publish must still reach the wire -- got {effects:?}"
     );
 }
@@ -3878,8 +3988,8 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     let store = SharedFailStartStore::new([blocked.clone()]);
     let sink = CapturingReceiptSink::default();
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-    connect(&mut core, 0, &good);
-    connect(&mut core, 1, &blocked);
+    connect_signer(&mut core, 0, &good, author.public_key());
+    connect_signer(&mut core, 1, &blocked, author.public_key());
 
     let (id, _, effects) = publish_private(
         &mut core,
@@ -3887,12 +3997,14 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
         [good.clone(), blocked.clone()],
         sink.clone(),
     );
-    assert!(effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &good)));
-    assert!(!effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(relay, _, _) if relay == &blocked)));
+    assert!(effects.iter().any(
+        |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+            if session == &signer_session(&good, event.pubkey))
+    ));
+    assert!(!effects.iter().any(
+        |effect| matches!(effect, Effect::PublishEvent(session, event, _)
+            if session == &signer_session(&blocked, event.pubkey))
+    ));
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::EmitReceipt(receipt, WriteStatus::PersistenceBlocked(relay))
@@ -3923,7 +4035,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
     let sink = CapturingReceiptSink::default();
-    connect(&mut core, 0, &relay);
+    connect_signer(&mut core, 0, &relay, author.public_key());
 
     let (id, _signed, effects) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
 
@@ -3946,7 +4058,9 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     let correlation = effects
         .iter()
         .find_map(|e| match e {
-            Effect::PublishEvent(r, _, c) if r == &relay => Some(*c),
+            Effect::PublishEvent(r, event, c) if r == &signer_session(&relay, event.pubkey) => {
+                Some(*c)
+            }
             _ => None,
         })
         .expect("a PublishEvent effect must have been emitted for this relay");
@@ -4035,7 +4149,11 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
         effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::PublishEvent(found, _, correlation) if found == relay => Some(*correlation),
+                Effect::PublishEvent(found, event, correlation)
+                    if found == &signer_session(relay, event.pubkey) =>
+                {
+                    Some(*correlation)
+                }
                 _ => None,
             })
             .unwrap()
@@ -4074,8 +4192,8 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
     );
     let mut core = new_core(dir);
     let sink = CapturingReceiptSink::default();
-    connect(&mut core, 0, &relay_a);
-    connect(&mut core, 1, &relay_b);
+    connect_signer(&mut core, 0, &relay_a, author.public_key());
+    connect_signer(&mut core, 1, &relay_b, author.public_key());
 
     let (id, _signed, effects) = publish_private(
         &mut core,
@@ -4087,7 +4205,9 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
         effects
             .iter()
             .find_map(|e| match e {
-                Effect::PublishEvent(r, _, c) if r == relay => Some(*c),
+                Effect::PublishEvent(r, event, c) if r == &signer_session(relay, event.pubkey) => {
+                    Some(*c)
+                }
                 _ => None,
             })
             .expect("a PublishEvent effect must have been emitted for this relay")
@@ -4155,8 +4275,8 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     let store = SharedFailStartStore::new([a.clone(), b.clone()]);
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
     let sink = CapturingReceiptSink::default();
-    connect(&mut core, 0, &a);
-    connect(&mut core, 1, &b);
+    connect_signer(&mut core, 0, &a, author.public_key());
+    connect_signer(&mut core, 1, &b, author.public_key());
 
     let (id, _, effects) =
         publish_private(&mut core, &author, [a.clone(), b.clone()], sink.clone());
@@ -4192,9 +4312,9 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
             slot: 0,
             generation: 1,
         },
-        good.clone(),
+        signer_session(&good, author.public_key()),
     ));
-    connect(&mut core, 1, &blocked);
+    connect_signer(&mut core, 1, &blocked, author.public_key());
     let (id, signed, scheduled) = publish_private(
         &mut core,
         &author,
@@ -4207,6 +4327,7 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&good, signed.pubkey),
         RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
     ));
     assert!(acked.iter().any(|effect| matches!(
@@ -4237,7 +4358,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
             Box::new(FixtureDirectory::new()),
             10,
         );
-        connect(&mut first, 0, &relay);
+        connect_signer(&mut first, 0, &relay, author.public_key());
         let (id, _, effects) = publish_private(
             &mut first,
             &author,
@@ -4258,8 +4379,9 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     assert!(still_blocked
         .recover_on_boot()
         .iter()
-        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay)));
-    connect(&mut still_blocked, 0, &relay);
+        .any(|effect| matches!(effect, Effect::EnsureRelay(r)
+            if r == &signer_session(&relay, author.public_key()))));
+    connect_signer(&mut still_blocked, 0, &relay, author.public_key());
     let replay = CapturingReceiptSink::default();
     assert!(still_blocked
         .reattach_receipt(receipt, Box::new(replay.clone()))
@@ -4279,12 +4401,14 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     let boot = recovered.recover_on_boot();
     assert!(boot
         .iter()
-        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay)));
-    let effects = connect(&mut recovered, 0, &relay);
+        .any(|effect| matches!(effect, Effect::EnsureRelay(r)
+            if r == &signer_session(&relay, author.public_key()))));
+    let effects = connect_signer(&mut recovered, 0, &relay, author.public_key());
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &relay))
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, event, _)
+                if r == &signer_session(&relay, event.pubkey)))
             .count(),
         1
     );
@@ -4311,7 +4435,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
             Box::new(directory),
             10,
         );
-        connect(&mut core, 0, &relay);
+        connect_signer(&mut core, 0, &relay, author.public_key());
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -4349,11 +4473,12 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         10,
     );
     recovered.recover_on_boot();
-    let effects = connect(&mut recovered, 0, &relay);
+    let effects = connect_signer(&mut recovered, 0, &relay, author.public_key());
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &relay))
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, event, _)
+                if r == &signer_session(&relay, event.pubkey)))
             .count(),
         1
     );
@@ -4378,7 +4503,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
             Box::new(directory),
             10,
         );
-        connect(&mut core, 0, &old);
+        connect_signer(&mut core, 0, &old, author.public_key());
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -4409,26 +4534,33 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
             10,
         );
         core.recover_on_boot();
-        let effects = connect(&mut core, 0, &old);
+        let effects = connect_signer(&mut core, 0, &old, author.public_key());
         let old_event = effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::PublishEvent(relay, event, _) if relay == &old => Some(event.clone()),
+                Effect::PublishEvent(session, event, _)
+                    if session == &signer_session(&old, event.pubkey) =>
+                {
+                    Some(event.clone())
+                }
                 _ => None,
             })
             .expect("durable old lane publishes");
         assert!(effects
             .iter()
-            .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &old)));
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, event, _)
+                if r == &signer_session(&old, event.pubkey))));
         assert!(!effects
             .iter()
-            .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &new)));
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, event, _)
+                if r == &signer_session(&new, event.pubkey))));
         mark_written(&mut core, &effects, &old);
         let acked = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
             },
+            signer_session(&old, old_event.pubkey),
             RelayFrame::from(RelayMessage::ok(old_event.id, true, "")),
         ));
         assert!(acked.iter().any(|effect| matches!(
@@ -4464,13 +4596,15 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
     let changed = FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [new.clone()]);
     let mut core = EngineCore::new(RedbFailStartStore::open(&path, []), Box::new(changed), 10);
     core.recover_on_boot();
-    let effects = connect(&mut core, 0, &new);
+    let effects = connect_signer(&mut core, 0, &new, author.public_key());
     assert!(!effects
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &old)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(r, event, _)
+            if r == &signer_session(&old, event.pubkey))));
     assert!(effects
         .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &new)));
+        .any(|effect| matches!(effect, Effect::PublishEvent(r, event, _)
+            if r == &signer_session(&new, event.pubkey))));
 }
 
 #[test]
@@ -4532,8 +4666,8 @@ fn write_ack_per_relay() {
     );
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    connect(&mut core, 0, &relay_ok);
-    connect(&mut core, 1, &relay_bad);
+    connect_signer(&mut core, 0, &relay_ok, a.public_key());
+    connect_signer(&mut core, 1, &relay_bad, a.public_key());
 
     let sink = CapturingReceiptSink::default();
     let effects = core.handle(EngineMsg::Publish(
@@ -4568,6 +4702,7 @@ fn write_ack_per_relay() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&relay_ok, signed.pubkey),
         ok_frame,
     ));
     assert!(effects.iter().any(
@@ -4580,6 +4715,7 @@ fn write_ack_per_relay() {
             slot: 1,
             generation: 1,
         },
+        signer_session(&relay_bad, signed.pubkey),
         nack_frame,
     ));
     assert!(effects.iter().any(
@@ -4611,7 +4747,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
             slot: 0,
             generation: 1,
         },
-        relay.clone(),
+        signer_session(&relay, a.public_key()),
     ));
     let effects = core.handle(EngineMsg::Publish(
         WriteIntent {
@@ -4635,6 +4771,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&relay, signed.pubkey),
         frame(),
     ));
     assert!(!failed
@@ -4645,6 +4782,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&relay, signed.pubkey),
         frame(),
     ));
     assert!(retried.iter().any(
@@ -4741,7 +4879,7 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
             slot: 0,
             generation: 1,
         },
-        relay0.clone(),
+        public_session(&relay0),
     ));
     assert!(connected
         .iter()
@@ -4803,7 +4941,7 @@ fn positive_nip11_advertisement_starts_probe_but_is_not_behavioral_proof() {
             slot: 0,
             generation: 1,
         },
-        relay0.clone(),
+        public_session(&relay0),
     ));
 
     let resolved = core.handle(EngineMsg::RelayInformationResolved(
@@ -4841,7 +4979,7 @@ fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
             slot: 0,
             generation: 1,
         },
-        relay0.clone(),
+        public_session(&relay0),
     ));
 
     let resolved = core.handle(EngineMsg::RelayInformationResolved(
@@ -4917,7 +5055,7 @@ fn connected_relay_outside_the_compiled_plan_emits_no_read_wire_effect() {
             slot: 7,
             generation: 1,
         },
-        unplanned,
+        public_session(&unplanned),
     ));
 
     assert!(
@@ -4971,6 +5109,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         neg_msg_frame(&probe_wire, "6100"),
     ));
 
@@ -4987,7 +5126,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     );
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::Wire(d)
-            if d.ops.iter().any(|(r, ops)| r == &relay0
+            if d.ops.iter().any(|(r, ops)| r.relay == relay0
                 && ops.iter().any(|op| matches!(op, WireOp::Req(..)))))),
         "the widened atom must NOT ALSO reach the relay as a plain REQ"
     );
@@ -5046,6 +5185,7 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         neg_err_frame(&probe_wire),
     ));
 
@@ -5117,6 +5257,7 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         neg_msg_frame(&probe_wire, "6100"),
     ));
 
@@ -5142,7 +5283,7 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
     );
     assert!(
         effects.iter().any(|e| matches!(e, Effect::Wire(d)
-            if d.ops.iter().any(|(r, ops)| r == &relay0
+            if d.ops.iter().any(|(r, ops)| r.relay == relay0
                 && ops.iter().any(|op| matches!(op, WireOp::Req(sid, _) if sid == &neg_sub_id))))),
         "a stale session must fall back to a plain REQ for the same sub-id"
     );
@@ -5179,6 +5320,7 @@ fn root_query_emits_removed_on_delete() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", note),
     ));
     assert!(
@@ -5195,6 +5337,7 @@ fn root_query_emits_removed_on_delete() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", deletion),
     ));
 
@@ -5238,6 +5381,7 @@ fn expiry_emits_removed_via_manual_tick() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", expiring),
     ));
     assert!(
@@ -5303,6 +5447,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         event_frame("s", expiring),
     ));
     assert_eq!(
@@ -5329,6 +5474,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay0),
         neg_msg_frame(&probe_wire, "6100"),
     ));
     let effects = core.handle(EngineMsg::Subscribe(
@@ -5392,7 +5538,7 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
         );
     let mut core = new_core(dir);
     activate(&mut core, &author);
-    connect(&mut core, 0, &read_relay);
+    connect_signer(&mut core, 0, &read_relay, author.public_key());
 
     let sink = CapturingReceiptSink::default();
     let effects = core.handle(EngineMsg::Publish(
@@ -5410,7 +5556,9 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
     let published: BTreeSet<RelayUrl> = effects
         .iter()
         .filter_map(|e| match e {
-            Effect::PublishEvent(relay, _, _) => Some(relay.clone()),
+            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
+                Some(session.relay.clone())
+            }
             _ => None,
         })
         .collect();
@@ -5696,7 +5844,7 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
             slot: 0,
             generation: 1,
         },
-        relay.clone(),
+        public_session(&relay),
     ));
 
     // The real relay ingest path — the exact call that used to `.expect()`
@@ -5707,6 +5855,7 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
             slot: 0,
             generation: 1,
         },
+        public_session(&relay),
         event_frame("s", event),
     ));
 
@@ -6034,7 +6183,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
             slot: 0,
             generation: 1,
         },
-        woken.clone(),
+        signer_session(&woken, author.public_key()),
     ));
 
     assert_eq!(
@@ -6049,7 +6198,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &woken)),
+            .any(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &signer_session(&woken, author.public_key()))),
         "the woken relay's own write must still actually wake and publish, got {effects:?}"
     );
 }
@@ -6133,7 +6282,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
             slot: 0,
             generation: 1,
         },
-        relay.clone(),
+        signer_session(&relay, author.public_key()),
     ));
 
     // No missed wakeup: intent #2's lane -- the only one the index could
@@ -6141,7 +6290,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &relay)),
+            .any(|e| matches!(e, Effect::PublishEvent(r, _, _) if r == &signer_session(&relay, author.public_key()))),
         "a degraded index must never cost a missed wakeup, got {effects:?}"
     );
 
@@ -6186,8 +6335,8 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
             Box::new(FixtureDirectory::new()),
             10,
         );
-        connect(&mut core, 0, &relay_a);
-        connect(&mut core, 1, &relay_b);
+        connect_signer(&mut core, 0, &relay_a, author_a.public_key());
+        connect_signer(&mut core, 1, &relay_b, author_b.public_key());
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(10)));
         let sink_a = CapturingReceiptSink::default();
@@ -6260,8 +6409,8 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
     let relay1 = RelayUrl::parse("wss://receipt-index-removal-1.example.com").unwrap();
     let relay2 = RelayUrl::parse("wss://receipt-index-removal-2.example.com").unwrap();
     let mut core = new_core(FixtureDirectory::new());
-    connect(&mut core, 0, &relay1);
-    connect(&mut core, 1, &relay2);
+    connect_signer(&mut core, 0, &relay1, author1.public_key());
+    connect_signer(&mut core, 1, &relay2, author2.public_key());
 
     // Write #1: drive it all the way to a real, permanent `pending` removal
     // -- a successful ACK closes the intent once its one lane is terminal.
@@ -6273,6 +6422,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
             slot: 0,
             generation: 1,
         },
+        signer_session(&relay1, event1.pubkey),
         RelayFrame::from(RelayMessage::ok(event1.id, true, "")),
     ));
 
@@ -6328,6 +6478,7 @@ fn real_corpus_typed_batch_to_redb_matrix() {
         slot: 0,
         generation: 1,
     };
+    let session = public_session(&relay);
     println!("corpus={path}");
     println!("corpus_events={}", corpus.len());
     for requested in [1usize, 2, 8, 32, 128, 512, corpus.len()] {
@@ -6337,13 +6488,14 @@ fn real_corpus_typed_batch_to_redb_matrix() {
             let dir = tempfile::tempdir().expect("tempdir");
             let store = RedbStore::open(dir.path().join("bench.redb")).expect("open redb");
             let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-            let _ = core.handle(EngineMsg::RelayConnected(handle, relay.clone()));
+            let _ = core.handle(EngineMsg::RelayConnected(handle, session.clone()));
             let frames: Vec<_> = corpus[..size]
                 .iter()
                 .cloned()
                 .map(|event| {
                     (
                         handle,
+                        session.clone(),
                         RelayFrame::from(RelayMessage::event(
                             SubscriptionId::new("nmp-bench"),
                             event,

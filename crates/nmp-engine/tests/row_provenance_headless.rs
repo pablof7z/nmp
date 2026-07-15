@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
-use nmp_grammar::{Binding, Filter};
+use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_store::{EventStore, MemoryStore, RedbStore};
@@ -69,7 +69,7 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) {
             slot,
             generation: 1,
         },
-        url.clone(),
+        RelaySessionKey::public(url.clone()),
     ));
 }
 
@@ -77,12 +77,18 @@ fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
     RelayFrame::from(RelayMessage::event(SubscriptionId::new(sub), event))
 }
 
-fn deliver(core: &mut EngineCore<MemoryStore>, slot: u32, event: &nostr::Event) -> Vec<Effect> {
+fn deliver(
+    core: &mut EngineCore<MemoryStore>,
+    slot: u32,
+    relay: &RelayUrl,
+    event: &nostr::Event,
+) -> Vec<Effect> {
     core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot,
             generation: 1,
         },
+        RelaySessionKey::public(relay.clone()),
         event_frame("s", event.clone()),
     ))
 }
@@ -109,7 +115,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     let event = nmp_resolver::testkit::kind1(&author, "provenance falsifier", 100);
 
     // Arrives from relay0 first: a brand-new row, sources == {relay0}.
-    let effects = deliver(&mut core, 0, &event);
+    let effects = deliver(&mut core, 0, &relay0, &event);
     let added = effects
         .iter()
         .find_map(|effect| match effect {
@@ -134,7 +140,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     // The SAME event id, redelivered from relay0 again (identical
     // observation) -- the store-layer merge no-ops this; no delta at all,
     // and certainly no second Added or a spurious SourcesGrew.
-    let effects = deliver(&mut core, 0, &event);
+    let effects = deliver(&mut core, 0, &relay0, &event);
     assert!(
         !effects
             .iter()
@@ -147,7 +153,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     // Now relay1 delivers the SAME event id: the row's provenance genuinely
     // grows. This must be `SourcesGrew`, never a second `Added` (that would
     // falsely claim the row "newly matches" a second time).
-    let effects = deliver(&mut core, 1, &event);
+    let effects = deliver(&mut core, 1, &relay1, &event);
     let grown = effects
         .iter()
         .find_map(|effect| match effect {
@@ -199,7 +205,7 @@ fn unrelated_handle_lifecycle_never_spuriously_emits_sources_grew() {
     ));
 
     let event = nmp_resolver::testkit::kind1(&author, "lifecycle falsifier", 200);
-    deliver(&mut core, 0, &event);
+    deliver(&mut core, 0, &relay0, &event);
     assert_eq!(sink.added_count_for(event.id), 1);
     assert!(sink.sources_grew_for(event.id).is_empty());
 
@@ -234,7 +240,7 @@ fn unrelated_handle_lifecycle_never_spuriously_emits_sources_grew() {
 
     // Only a REAL second-relay observation may grow it, and it must still
     // do so correctly after all that unrelated lifecycle churn.
-    deliver(&mut core, 1, &event);
+    deliver(&mut core, 1, &relay1, &event);
     let grown = sink.sources_grew_for(event.id);
     assert_eq!(
         grown,

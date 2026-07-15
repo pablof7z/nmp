@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{fold_context, AccessContext, ConcreteFilter, DescriptorHash, SourceAuthority};
+use nmp_grammar::{
+    fold_context, AccessContext, ConcreteFilter, DescriptorHash, RelaySessionKey, SourceAuthority,
+};
 use nmp_store::CoverageKey;
 
 use crate::facts::RelayUrl;
@@ -15,7 +17,7 @@ use crate::route::{RouteProvenance, Skeleton};
 pub type SkeletonHash = DescriptorHash;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct SubId(pub RelayUrl, pub SkeletonHash);
+pub struct SubId(pub RelayUrl, pub SkeletonHash, pub AccessContext);
 
 impl SubId {
     /// Derive the sub-id for `filter` on `relay` from the filter's OWN
@@ -39,7 +41,7 @@ impl SubId {
         access: AccessContext,
     ) -> Self {
         let (skeleton, _) = Skeleton::of(filter);
-        SubId(relay, fold_context(skeleton.hash(), source, access))
+        SubId(relay, fold_context(skeleton.hash(), source, access), access)
     }
 }
 
@@ -68,7 +70,7 @@ pub struct WireReq {
 /// The full per-relay plan for the CURRENT demand set.
 #[derive(Clone, Default, Debug)]
 pub struct RelayPlan {
-    pub reqs: BTreeMap<RelayUrl, Vec<WireReq>>,
+    pub reqs: BTreeMap<RelaySessionKey, Vec<WireReq>>,
     /// Narrow demand atoms for which the whole-demand relay ceiling removed
     /// at least one otherwise-routable source. Kept as coverage keys so the
     /// engine can join the fact back to the exact contextual atom without
@@ -77,7 +79,7 @@ pub struct RelayPlan {
     /// Distinct relay candidates refused by the whole-demand ceiling. This
     /// is diagnostics evidence, not a second routing input: only `reqs` may
     /// reach the wire.
-    pub refused_relays: BTreeSet<RelayUrl>,
+    pub refused_sessions: BTreeSet<RelaySessionKey>,
 }
 
 /// A single wire operation. `Req` is open-or-replace (same sub-id
@@ -93,7 +95,7 @@ pub enum WireOp {
 /// list, all `Close` ops precede all `Req` ops.
 #[derive(Clone, Default, Debug)]
 pub struct WireDelta {
-    pub ops: Vec<(RelayUrl, Vec<WireOp>)>,
+    pub ops: Vec<(RelaySessionKey, Vec<WireOp>)>,
 }
 
 /// Diff `next` against `prev`. Unchanged (relay, skeleton) subs whose
@@ -102,20 +104,20 @@ pub struct WireDelta {
 /// `Req(sub_id, new)`; a vanished sub emits `Close(sub_id)`; a new sub
 /// emits `Req(sub_id, filter)`.
 pub fn diff_plans(prev: &RelayPlan, next: &RelayPlan) -> WireDelta {
-    let relays: BTreeSet<&RelayUrl> = prev.reqs.keys().chain(next.reqs.keys()).collect();
+    let sessions: BTreeSet<&RelaySessionKey> = prev.reqs.keys().chain(next.reqs.keys()).collect();
     let mut ops = Vec::new();
 
-    for relay in relays {
+    for session in sessions {
         let prev_by_sub: BTreeMap<&SubId, &ConcreteFilter> = prev
             .reqs
-            .get(relay)
+            .get(session)
             .into_iter()
             .flatten()
             .map(|r| (&r.sub_id, &r.filter))
             .collect();
         let next_by_sub: BTreeMap<&SubId, &ConcreteFilter> = next
             .reqs
-            .get(relay)
+            .get(session)
             .into_iter()
             .flatten()
             .map(|r| (&r.sub_id, &r.filter))
@@ -141,7 +143,7 @@ pub fn diff_plans(prev: &RelayPlan, next: &RelayPlan) -> WireDelta {
 
         let mut relay_ops: Vec<WireOp> = closes.into_iter().map(WireOp::Close).collect();
         relay_ops.extend(reqs.into_iter().map(|(s, f)| WireOp::Req(s, f)));
-        ops.push((relay.clone(), relay_ops));
+        ops.push((session.clone(), relay_ops));
     }
 
     WireDelta { ops }
@@ -177,7 +179,7 @@ mod tests {
             absorbed: BTreeSet::new(),
         };
         RelayPlan {
-            reqs: BTreeMap::from([(relay, vec![req])]),
+            reqs: BTreeMap::from([(RelaySessionKey::public(relay), vec![req])]),
             ..RelayPlan::default()
         }
     }
@@ -196,7 +198,7 @@ mod tests {
         let delta = diff_plans(&prev, &next);
         assert_eq!(delta.ops.len(), 1);
         let (r, ops) = &delta.ops[0];
-        assert_eq!(r, &relay(0));
+        assert_eq!(r, &RelaySessionKey::public(relay(0)));
         assert_eq!(ops.len(), 1);
         assert!(
             matches!(&ops[0], WireOp::Req(_, f) if f.authors == Some(BTreeSet::from(["aa".to_string(), "cc".to_string()])))
@@ -224,7 +226,7 @@ mod tests {
         let mut next = prev.clone();
         // Change relay 1's filter only.
         next.reqs.insert(
-            relay(1),
+            RelaySessionKey::public(relay(1)),
             vec![WireReq {
                 sub_id: SubId::for_wire(
                     relay(1),
@@ -240,7 +242,7 @@ mod tests {
 
         let delta = diff_plans(&prev, &next);
         assert_eq!(delta.ops.len(), 1);
-        assert_eq!(delta.ops[0].0, relay(1));
+        assert_eq!(delta.ops[0].0, RelaySessionKey::public(relay(1)));
     }
 
     /// #106/atlas's 3rd proof floor: the identical relay+filter under

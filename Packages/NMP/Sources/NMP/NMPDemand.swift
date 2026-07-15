@@ -19,10 +19,13 @@ public enum NMPSourceAuthority: Sendable, Hashable {
     case pinned(Set<String>)
 }
 
-/// `nmp_grammar::AccessContext` mirror. Single-variant today (#106's closed
-/// vocabulary); additional cases are additive.
+/// `nmp_grammar::AccessContext` mirror. Closed vocabulary: an unauthenticated
+/// `public` connection, or NIP-42 authentication against one stable expected
+/// public key (hex). The `nip42` identity is frozen in the demand; changing
+/// the active account never redirects it (#8).
 public enum NMPAccessContext: Sendable, Hashable {
     case `public`
+    case nip42(publicKey: String)
 }
 
 /// `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
@@ -82,12 +85,14 @@ extension NMPAccessContext {
     func toFfi() -> FfiAccessContext {
         switch self {
         case .public: return .public
+        case let .nip42(publicKey): return .nip42(publicKey: publicKey)
         }
     }
 
     init(_ ffi: FfiAccessContext) {
         switch ffi {
         case .public: self = .public
+        case let .nip42(publicKey): self = .nip42(publicKey: publicKey)
         }
     }
 }

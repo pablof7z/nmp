@@ -1843,6 +1843,7 @@ name = "nmp-transport"
 version = "0.1.0"
 dependencies = [
  "mio",
+ "nmp-grammar",
  "nmp-test-support",
  "nostr 0.44.4",
  "nostr-relay-builder",

@@ -1127,7 +1127,8 @@ impl SessionWorker {
 
     fn on_pool(&mut self, event: PoolEvent) {
         match event {
-            PoolEvent::Connected { handle, url } => {
+            PoolEvent::Connected { handle, session } => {
+                let url = session.relay;
                 if self
                     .handles
                     .get(&handle.slot)
@@ -1178,7 +1179,7 @@ impl SessionWorker {
                     self.emit(Nip46ConnectionEvent::Unavailable);
                 }
             }
-            PoolEvent::Frame { handle, frame } => {
+            PoolEvent::Frame { handle, frame, .. } => {
                 if self
                     .handles
                     .get(&handle.slot)
@@ -1658,6 +1659,7 @@ mod tests {
         };
         worker.on_pool(PoolEvent::Frame {
             handle: old,
+            session: nmp_transport::RelaySessionKey::public(relay.clone()),
             frame: auth_frame(),
         });
         assert!(matches!(
@@ -1667,6 +1669,7 @@ mod tests {
 
         worker.on_pool(PoolEvent::Frame {
             handle: reopened,
+            session: nmp_transport::RelaySessionKey::public(relay.clone()),
             frame: auth_frame(),
         });
         assert_eq!(

@@ -14,10 +14,10 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use nmp_grammar::{ConcreteFilter, ContextualAtom};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, RelaySessionKey};
 use nmp_router::SubId;
 use nmp_store::{coverage_key, CoverageInterval, CoverageKey};
-use nostr::{RelayUrl, Timestamp};
+use nostr::Timestamp;
 
 /// One send-time snapshot (ruling §2): what a single outgoing REQ (or NEG
 /// session) proves, captured at the moment it was sent — never re-derived
@@ -31,18 +31,22 @@ struct AttributionSnapshot {
 }
 
 /// All coverage-attribution bookkeeping `EngineCore` owns. Keyed by `SubId`
-/// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash)`), so a
+/// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash, AccessContext)`), so a
 /// FIFO lookup is also implicitly relay-scoped.
 #[derive(Debug, Default)]
 pub(crate) struct AttributionState {
     inflight: HashMap<SubId, VecDeque<AttributionSnapshot>>,
-    /// `(relay, wire-format subscription_id string) -> SubId`, populated at
+    /// `(session, wire-format subscription_id string) -> SubId`, populated at
     /// send time. `nmp-transport::Pool` is an unimplemented Step 0 shell in
     /// M3 step B, so there is no pre-existing wire convention to conform
     /// to; `EngineCore` invents and owns this string entirely (see
     /// `wire_sub_id_string` below) and is the only reader of it, via this
-    /// map — never by re-parsing the string back into a hash.
-    sub_id_by_wire: HashMap<(RelayUrl, String), SubId>,
+    /// map — never by re-parsing the string back into a hash. Keyed by the
+    /// full [`RelaySessionKey`] (never a bare URL): NIP-42 visibility is
+    /// connection-scoped, so the SAME wire string on the SAME relay under a
+    /// DIFFERENT access context is a different physical session's sub and
+    /// must never resolve to this one.
+    sub_id_by_wire: HashMap<(RelaySessionKey, String), SubId>,
     /// `CoverageKey -> the ContextualAtom it came from (#106 -- widened
     /// from a bare `ConcreteFilter`: the store's `record_coverage` now
     /// takes a `&ContextualAtom`, since `CoverageKey` itself is a
@@ -128,13 +132,13 @@ impl AttributionState {
     }
 
     /// Record a send-time snapshot for a REQ just placed on the wire for
-    /// `sub_id` on `relay`, whose (possibly coalesced) filter is `filter`
+    /// `sub_id` on `session`, whose (possibly coalesced) filter is `filter`
     /// and which absorbs `absorbed` narrow atoms (from the `WireReq` this
     /// REQ was materialized from — ruling §2's containment rule, already
     /// discharged by `nmp-router::coalesce`).
     pub(crate) fn record_send(
         &mut self,
-        relay: &RelayUrl,
+        session: &RelaySessionKey,
         sub_id: &SubId,
         filter: &ConcreteFilter,
         absorbed: BTreeSet<CoverageKey>,
@@ -149,8 +153,10 @@ impl AttributionState {
             .entry(sub_id.clone())
             .or_default()
             .push_back(snapshot);
-        self.sub_id_by_wire
-            .insert((relay.clone(), wire_sub_id_string(sub_id)), sub_id.clone());
+        self.sub_id_by_wire.insert(
+            (session.clone(), wire_sub_id_string(sub_id)),
+            sub_id.clone(),
+        );
     }
 
     /// Resolve a wire subscription-id string back to the `SubId`
@@ -160,24 +166,35 @@ impl AttributionState {
     /// wire string, never a `SubId`) back to the right in-flight negentropy
     /// session -- the identical lookup `attribute_eose` performs internally
     /// for EOSE, reused rather than re-implemented (plan §6 E).
-    pub(crate) fn sub_id_for_wire(&self, relay: &RelayUrl, wire_sub_id: &str) -> Option<SubId> {
+    pub(crate) fn sub_id_for_wire(
+        &self,
+        session: &RelaySessionKey,
+        wire_sub_id: &str,
+    ) -> Option<SubId> {
         self.sub_id_by_wire
-            .get(&(relay.clone(), wire_sub_id.to_string()))
+            .get(&(session.clone(), wire_sub_id.to_string()))
             .cloned()
     }
 
     /// Disconnect / pool generation bump (ruling §2 fail-safe): clear every
-    /// outstanding snapshot and wire-id mapping for `relay`. A replayed sub
+    /// outstanding snapshot and wire-id mapping for `session`. A replayed sub
     /// on the new generation calls [`Self::record_send`] again and gets a
     /// fresh snapshot; the pool translator (transport, C) guarantees a
     /// stale-generation frame never reaches `EngineCore` at all, so this is
-    /// the only clearing path attribution needs.
-    pub(crate) fn clear_relay(&mut self, relay: &RelayUrl) {
-        self.inflight.retain(|sub_id, _| &sub_id.0 != relay);
-        self.sub_id_by_wire.retain(|(url, _), _| url != relay);
+    /// the only clearing path attribution needs. Scoped to the EXACT session:
+    /// dropping the URL's other access contexts' snapshots here would erase
+    /// coverage FIFOs for physical connections that never dropped.
+    pub(crate) fn clear_session(&mut self, session: &RelaySessionKey) {
+        let stale: BTreeSet<SubId> = self
+            .sub_id_by_wire
+            .iter()
+            .filter_map(|((key, _), sub_id)| (key == session).then_some(sub_id.clone()))
+            .collect();
+        self.inflight.retain(|sub_id, _| !stale.contains(sub_id));
+        self.sub_id_by_wire.retain(|(key, _), _| key != session);
     }
 
-    /// Attribute an EOSE arriving on `relay` for wire subscription id
+    /// Attribute an EOSE arriving on `session` for wire subscription id
     /// `wire_sub_id` at engine clock `eose_time`. Returns one
     /// `(CoverageKey, CoverageInterval)` pair per attributed atom — empty
     /// if the sub is unknown, its FIFO is empty (fail-safe: never
@@ -196,13 +213,13 @@ impl AttributionState {
     /// recorded anything.
     pub(crate) fn attribute_eose(
         &mut self,
-        relay: &RelayUrl,
+        session: &RelaySessionKey,
         wire_sub_id: &str,
         eose_time: Timestamp,
     ) -> Vec<(CoverageKey, CoverageInterval)> {
         let Some(sub_id) = self
             .sub_id_by_wire
-            .get(&(relay.clone(), wire_sub_id.to_string()))
+            .get(&(session.clone(), wire_sub_id.to_string()))
             .cloned()
         else {
             return Vec::new();

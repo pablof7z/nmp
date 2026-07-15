@@ -506,6 +506,927 @@ reexport nmp::AccessContext => nmp_grammar::descriptor::AccessContext
           },
           "name": "Public",
           "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "tuple": [
+                  {
+                    "attrs": [],
+                    "inner": {
+                      "struct_field": {
+                        "resolved_path": {
+                          "args": null,
+                          "path": "nostr::PublicKey",
+                          "resolved_item": {
+                            "definition": {
+                              "attrs": [],
+                              "inherent_impls": [
+                                {
+                                  "generics": {
+                                    "params": [],
+                                    "where_predicates": []
+                                  },
+                                  "items": [
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "assoc_const": {
+                                          "default_unstable": null,
+                                          "type": {
+                                            "primitive": "usize"
+                                          },
+                                          "value": "32"
+                                        }
+                                      },
+                                      "name": "LEN",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": true,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "bytes",
+                                                {
+                                                  "array": {
+                                                    "len": "32",
+                                                    "type": {
+                                                      "primitive": "u8"
+                                                    }
+                                                  }
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "generic": "Self"
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "from_byte_array",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": false,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "public_key",
+                                                {
+                                                  "borrowed_ref": {
+                                                    "is_mutable": false,
+                                                    "lifetime": null,
+                                                    "type": {
+                                                      "primitive": "str"
+                                                    }
+                                                  }
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "resolved_path": {
+                                                "args": {
+                                                  "angle_bracketed": {
+                                                    "args": [
+                                                      {
+                                                        "type": {
+                                                          "generic": "Self"
+                                                        }
+                                                      },
+                                                      {
+                                                        "type": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "Error",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "attrs": [],
+                                                                "inner": {
+                                                                  "enum": {
+                                                                    "generics": {
+                                                                      "params": [],
+                                                                      "where_predicates": []
+                                                                    },
+                                                                    "has_stripped_variants": false,
+                                                                    "variants": [
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "variant": {
+                                                                            "discriminant": null,
+                                                                            "kind": {
+                                                                              "tuple": [
+                                                                                {
+                                                                                  "attrs": [],
+                                                                                  "inner": {
+                                                                                    "struct_field": {
+                                                                                      "resolved_path": {
+                                                                                        "args": null,
+                                                                                        "path": "secp256k1::Error",
+                                                                                        "resolved_item": {
+                                                                                          "definition": {
+                                                                                            "attrs": [],
+                                                                                            "inner": {
+                                                                                              "enum": {
+                                                                                                "generics": {
+                                                                                                  "params": [],
+                                                                                                  "where_predicates": []
+                                                                                                },
+                                                                                                "has_stripped_variants": false,
+                                                                                                "variants": [
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "IncorrectSignature",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidMessage",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidPublicKey",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidSignature",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidSecretKey",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidSharedSecret",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidRecoveryId",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidTweak",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "NotEnoughMemory",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidPublicKeySum",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": {
+                                                                                                          "tuple": [
+                                                                                                            {
+                                                                                                              "attrs": [],
+                                                                                                              "inner": {
+                                                                                                                "struct_field": {
+                                                                                                                  "resolved_path": {
+                                                                                                                    "args": null,
+                                                                                                                    "path": "key::InvalidParityValue",
+                                                                                                                    "resolved_item": {
+                                                                                                                      "definition": {
+                                                                                                                        "attrs": [],
+                                                                                                                        "inner": {
+                                                                                                                          "struct": {
+                                                                                                                            "generics": {
+                                                                                                                              "params": [],
+                                                                                                                              "where_predicates": []
+                                                                                                                            },
+                                                                                                                            "kind": {
+                                                                                                                              "tuple": [
+                                                                                                                                null
+                                                                                                                              ]
+                                                                                                                            }
+                                                                                                                          }
+                                                                                                                        },
+                                                                                                                        "name": "InvalidParityValue",
+                                                                                                                        "visibility": "public"
+                                                                                                                      },
+                                                                                                                      "path": "secp256k1::key::InvalidParityValue"
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              },
+                                                                                                              "name": "0",
+                                                                                                              "visibility": "default"
+                                                                                                            }
+                                                                                                          ]
+                                                                                                        }
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidParityValue",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidEllSwift",
+                                                                                                    "visibility": "default"
+                                                                                                  }
+                                                                                                ]
+                                                                                              }
+                                                                                            },
+                                                                                            "name": "Error",
+                                                                                            "visibility": "public"
+                                                                                          },
+                                                                                          "path": "secp256k1::Error"
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  },
+                                                                                  "name": "0",
+                                                                                  "visibility": "default"
+                                                                                }
+                                                                              ]
+                                                                            }
+                                                                          }
+                                                                        },
+                                                                        "name": "Secp256k1",
+                                                                        "visibility": "default"
+                                                                      },
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "variant": {
+                                                                            "discriminant": null,
+                                                                            "kind": {
+                                                                              "tuple": [
+                                                                                {
+                                                                                  "attrs": [],
+                                                                                  "inner": {
+                                                                                    "struct_field": {
+                                                                                      "resolved_path": {
+                                                                                        "args": null,
+                                                                                        "path": "hex::FromHexError",
+                                                                                        "resolved_item": {
+                                                                                          "definition": {
+                                                                                            "attrs": [],
+                                                                                            "inner": {
+                                                                                              "enum": {
+                                                                                                "generics": {
+                                                                                                  "params": [],
+                                                                                                  "where_predicates": []
+                                                                                                },
+                                                                                                "has_stripped_variants": false,
+                                                                                                "variants": [
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": {
+                                                                                                          "struct": {
+                                                                                                            "fields": [
+                                                                                                              {
+                                                                                                                "attrs": [],
+                                                                                                                "inner": {
+                                                                                                                  "struct_field": {
+                                                                                                                    "primitive": "char"
+                                                                                                                  }
+                                                                                                                },
+                                                                                                                "name": "c",
+                                                                                                                "visibility": "default"
+                                                                                                              },
+                                                                                                              {
+                                                                                                                "attrs": [],
+                                                                                                                "inner": {
+                                                                                                                  "struct_field": {
+                                                                                                                    "primitive": "usize"
+                                                                                                                  }
+                                                                                                                },
+                                                                                                                "name": "index",
+                                                                                                                "visibility": "default"
+                                                                                                              }
+                                                                                                            ],
+                                                                                                            "has_stripped_fields": false
+                                                                                                          }
+                                                                                                        }
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidHexCharacter",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "OddLength",
+                                                                                                    "visibility": "default"
+                                                                                                  },
+                                                                                                  {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "variant": {
+                                                                                                        "discriminant": null,
+                                                                                                        "kind": "plain"
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "InvalidStringLength",
+                                                                                                    "visibility": "default"
+                                                                                                  }
+                                                                                                ]
+                                                                                              }
+                                                                                            },
+                                                                                            "name": "FromHexError",
+                                                                                            "visibility": "public"
+                                                                                          },
+                                                                                          "path": "hex::error::FromHexError"
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  },
+                                                                                  "name": "0",
+                                                                                  "visibility": "default"
+                                                                                }
+                                                                              ]
+                                                                            }
+                                                                          }
+                                                                        },
+                                                                        "name": "Hex",
+                                                                        "visibility": "default"
+                                                                      },
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "variant": {
+                                                                            "discriminant": null,
+                                                                            "kind": "plain"
+                                                                          }
+                                                                        },
+                                                                        "name": "InvalidSecretKey",
+                                                                        "visibility": "default"
+                                                                      },
+                                                                      {
+                                                                        "attrs": [],
+                                                                        "inner": {
+                                                                          "variant": {
+                                                                            "discriminant": null,
+                                                                            "kind": "plain"
+                                                                          }
+                                                                        },
+                                                                        "name": "InvalidPublicKey",
+                                                                        "visibility": "default"
+                                                                      }
+                                                                    ]
+                                                                  }
+                                                                },
+                                                                "name": "Error",
+                                                                "visibility": "public"
+                                                              },
+                                                              "path": "nostr::key::Error"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ],
+                                                    "constraints": []
+                                                  }
+                                                },
+                                                "path": "Result",
+                                                "resolved_item": {
+                                                  "path": "core::result::Result"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "parse",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": false,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "hex",
+                                                {
+                                                  "borrowed_ref": {
+                                                    "is_mutable": false,
+                                                    "lifetime": null,
+                                                    "type": {
+                                                      "primitive": "str"
+                                                    }
+                                                  }
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "resolved_path": {
+                                                "args": {
+                                                  "angle_bracketed": {
+                                                    "args": [
+                                                      {
+                                                        "type": {
+                                                          "generic": "Self"
+                                                        }
+                                                      },
+                                                      {
+                                                        "type": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "Error",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "previously_defined": "nostr::key::Error"
+                                                              },
+                                                              "path": "nostr::key::Error"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ],
+                                                    "constraints": []
+                                                  }
+                                                },
+                                                "path": "Result",
+                                                "resolved_item": {
+                                                  "path": "core::result::Result"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "from_hex",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": false,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "slice",
+                                                {
+                                                  "borrowed_ref": {
+                                                    "is_mutable": false,
+                                                    "lifetime": null,
+                                                    "type": {
+                                                      "slice": {
+                                                        "primitive": "u8"
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "resolved_path": {
+                                                "args": {
+                                                  "angle_bracketed": {
+                                                    "args": [
+                                                      {
+                                                        "type": {
+                                                          "generic": "Self"
+                                                        }
+                                                      },
+                                                      {
+                                                        "type": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "Error",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "previously_defined": "nostr::key::Error"
+                                                              },
+                                                              "path": "nostr::key::Error"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ],
+                                                    "constraints": []
+                                                  }
+                                                },
+                                                "path": "Result",
+                                                "resolved_item": {
+                                                  "path": "core::result::Result"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "from_slice",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": false,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "self",
+                                                {
+                                                  "borrowed_ref": {
+                                                    "is_mutable": false,
+                                                    "lifetime": null,
+                                                    "type": {
+                                                      "generic": "Self"
+                                                    }
+                                                  }
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "resolved_path": {
+                                                "args": null,
+                                                "path": "String",
+                                                "resolved_item": {
+                                                  "path": "alloc::string::String"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "to_hex",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": false,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "self",
+                                                {
+                                                  "borrowed_ref": {
+                                                    "is_mutable": false,
+                                                    "lifetime": null,
+                                                    "type": {
+                                                      "generic": "Self"
+                                                    }
+                                                  }
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "borrowed_ref": {
+                                                "is_mutable": false,
+                                                "lifetime": null,
+                                                "type": {
+                                                  "array": {
+                                                    "len": "32",
+                                                    "type": {
+                                                      "primitive": "u8"
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "as_bytes",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": false,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "self",
+                                                {
+                                                  "generic": "Self"
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "array": {
+                                                "len": "32",
+                                                "type": {
+                                                  "primitive": "u8"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "to_bytes",
+                                      "visibility": "public"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "function": {
+                                          "default_unstable": null,
+                                          "generics": {
+                                            "params": [],
+                                            "where_predicates": []
+                                          },
+                                          "has_body": true,
+                                          "header": {
+                                            "abi": "Rust",
+                                            "is_async": false,
+                                            "is_const": false,
+                                            "is_unsafe": false
+                                          },
+                                          "sig": {
+                                            "inputs": [
+                                              [
+                                                "self",
+                                                {
+                                                  "borrowed_ref": {
+                                                    "is_mutable": false,
+                                                    "lifetime": null,
+                                                    "type": {
+                                                      "generic": "Self"
+                                                    }
+                                                  }
+                                                }
+                                              ]
+                                            ],
+                                            "is_c_variadic": false,
+                                            "output": {
+                                              "resolved_path": {
+                                                "args": {
+                                                  "angle_bracketed": {
+                                                    "args": [
+                                                      {
+                                                        "type": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "XOnlyPublicKey",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "attrs": [],
+                                                                "inner": {
+                                                                  "struct": {
+                                                                    "generics": {
+                                                                      "params": [],
+                                                                      "where_predicates": []
+                                                                    },
+                                                                    "kind": {
+                                                                      "tuple": [
+                                                                        null
+                                                                      ]
+                                                                    }
+                                                                  }
+                                                                },
+                                                                "name": "XOnlyPublicKey",
+                                                                "visibility": "public"
+                                                              },
+                                                              "path": "secp256k1::key::XOnlyPublicKey"
+                                                            }
+                                                          }
+                                                        }
+                                                      },
+                                                      {
+                                                        "type": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "Error",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "previously_defined": "nostr::key::Error"
+                                                              },
+                                                              "path": "nostr::key::Error"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ],
+                                                    "constraints": []
+                                                  }
+                                                },
+                                                "path": "Result",
+                                                "resolved_item": {
+                                                  "path": "core::result::Result"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "xonly",
+                                      "visibility": "public"
+                                    }
+                                  ]
+                                }
+                              ],
+                              "inner": {
+                                "struct": {
+                                  "generics": {
+                                    "params": [],
+                                    "where_predicates": []
+                                  },
+                                  "kind": {
+                                    "plain": {
+                                      "fields": [],
+                                      "has_stripped_fields": true
+                                    }
+                                  }
+                                }
+                              },
+                              "name": "PublicKey",
+                              "visibility": "public"
+                            },
+                            "path": "nostr::key::public_key::PublicKey"
+                          }
+                        }
+                      }
+                    },
+                    "name": "0",
+                    "visibility": "default"
+                  }
+                ]
+              }
+            }
+          },
+          "name": "Nip42",
+          "visibility": "default"
         }
       ]
     }
@@ -1298,6 +2219,25 @@ reexport nmp::AcquisitionEvidence => nmp_engine::core::evidence::AcquisitionEvid
                                                   }
                                                 },
                                                 "name": "relay",
+                                                "visibility": "public"
+                                              },
+                                              {
+                                                "attrs": [],
+                                                "inner": {
+                                                  "struct_field": {
+                                                    "resolved_path": {
+                                                      "args": null,
+                                                      "path": "nmp_grammar::AccessContext",
+                                                      "resolved_item": {
+                                                        "definition": {
+                                                          "previously_defined": "nmp_grammar::descriptor::AccessContext"
+                                                        },
+                                                        "path": "nmp_grammar::descriptor::AccessContext"
+                                                      }
+                                                    }
+                                                  }
+                                                },
+                                                "name": "access",
                                                 "visibility": "public"
                                               },
                                               {
@@ -4908,6 +5848,25 @@ reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsS
                                                 "attrs": [],
                                                 "inner": {
                                                   "struct_field": {
+                                                    "resolved_path": {
+                                                      "args": null,
+                                                      "path": "nmp_grammar::AccessContext",
+                                                      "resolved_item": {
+                                                        "definition": {
+                                                          "previously_defined": "nmp_grammar::descriptor::AccessContext"
+                                                        },
+                                                        "path": "nmp_grammar::descriptor::AccessContext"
+                                                      }
+                                                    }
+                                                  }
+                                                },
+                                                "name": "access",
+                                                "visibility": "public"
+                                              },
+                                              {
+                                                "attrs": [],
+                                                "inner": {
+                                                  "struct_field": {
                                                     "primitive": "usize"
                                                   }
                                                 },
@@ -5536,7 +6495,7 @@ reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsS
                   "primitive": "u64"
                 }
               },
-              "name": "relays_rejected_over_cap",
+              "name": "sessions_rejected_over_cap",
               "visibility": "public"
             },
             {
@@ -16819,895 +17778,7 @@ reexport nmp::Event => nostr::event::Event
                                                   "path": "PublicKey",
                                                   "resolved_item": {
                                                     "definition": {
-                                                      "attrs": [],
-                                                      "inherent_impls": [
-                                                        {
-                                                          "generics": {
-                                                            "params": [],
-                                                            "where_predicates": []
-                                                          },
-                                                          "items": [
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "assoc_const": {
-                                                                  "default_unstable": null,
-                                                                  "type": {
-                                                                    "primitive": "usize"
-                                                                  },
-                                                                  "value": "32"
-                                                                }
-                                                              },
-                                                              "name": "LEN",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": true,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "bytes",
-                                                                        {
-                                                                          "array": {
-                                                                            "len": "32",
-                                                                            "type": {
-                                                                              "primitive": "u8"
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "generic": "Self"
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "from_byte_array",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": false,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "public_key",
-                                                                        {
-                                                                          "borrowed_ref": {
-                                                                            "is_mutable": false,
-                                                                            "lifetime": null,
-                                                                            "type": {
-                                                                              "primitive": "str"
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "resolved_path": {
-                                                                        "args": {
-                                                                          "angle_bracketed": {
-                                                                            "args": [
-                                                                              {
-                                                                                "type": {
-                                                                                  "generic": "Self"
-                                                                                }
-                                                                              },
-                                                                              {
-                                                                                "type": {
-                                                                                  "resolved_path": {
-                                                                                    "args": null,
-                                                                                    "path": "Error",
-                                                                                    "resolved_item": {
-                                                                                      "definition": {
-                                                                                        "attrs": [],
-                                                                                        "inner": {
-                                                                                          "enum": {
-                                                                                            "generics": {
-                                                                                              "params": [],
-                                                                                              "where_predicates": []
-                                                                                            },
-                                                                                            "has_stripped_variants": false,
-                                                                                            "variants": [
-                                                                                              {
-                                                                                                "attrs": [],
-                                                                                                "inner": {
-                                                                                                  "variant": {
-                                                                                                    "discriminant": null,
-                                                                                                    "kind": {
-                                                                                                      "tuple": [
-                                                                                                        {
-                                                                                                          "attrs": [],
-                                                                                                          "inner": {
-                                                                                                            "struct_field": {
-                                                                                                              "resolved_path": {
-                                                                                                                "args": null,
-                                                                                                                "path": "secp256k1::Error",
-                                                                                                                "resolved_item": {
-                                                                                                                  "definition": {
-                                                                                                                    "attrs": [],
-                                                                                                                    "inner": {
-                                                                                                                      "enum": {
-                                                                                                                        "generics": {
-                                                                                                                          "params": [],
-                                                                                                                          "where_predicates": []
-                                                                                                                        },
-                                                                                                                        "has_stripped_variants": false,
-                                                                                                                        "variants": [
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "IncorrectSignature",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidMessage",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidPublicKey",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidSignature",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidSecretKey",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidSharedSecret",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidRecoveryId",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidTweak",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "NotEnoughMemory",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidPublicKeySum",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": {
-                                                                                                                                  "tuple": [
-                                                                                                                                    {
-                                                                                                                                      "attrs": [],
-                                                                                                                                      "inner": {
-                                                                                                                                        "struct_field": {
-                                                                                                                                          "resolved_path": {
-                                                                                                                                            "args": null,
-                                                                                                                                            "path": "key::InvalidParityValue",
-                                                                                                                                            "resolved_item": {
-                                                                                                                                              "definition": {
-                                                                                                                                                "attrs": [],
-                                                                                                                                                "inner": {
-                                                                                                                                                  "struct": {
-                                                                                                                                                    "generics": {
-                                                                                                                                                      "params": [],
-                                                                                                                                                      "where_predicates": []
-                                                                                                                                                    },
-                                                                                                                                                    "kind": {
-                                                                                                                                                      "tuple": [
-                                                                                                                                                        null
-                                                                                                                                                      ]
-                                                                                                                                                    }
-                                                                                                                                                  }
-                                                                                                                                                },
-                                                                                                                                                "name": "InvalidParityValue",
-                                                                                                                                                "visibility": "public"
-                                                                                                                                              },
-                                                                                                                                              "path": "secp256k1::key::InvalidParityValue"
-                                                                                                                                            }
-                                                                                                                                          }
-                                                                                                                                        }
-                                                                                                                                      },
-                                                                                                                                      "name": "0",
-                                                                                                                                      "visibility": "default"
-                                                                                                                                    }
-                                                                                                                                  ]
-                                                                                                                                }
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidParityValue",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidEllSwift",
-                                                                                                                            "visibility": "default"
-                                                                                                                          }
-                                                                                                                        ]
-                                                                                                                      }
-                                                                                                                    },
-                                                                                                                    "name": "Error",
-                                                                                                                    "visibility": "public"
-                                                                                                                  },
-                                                                                                                  "path": "secp256k1::Error"
-                                                                                                                }
-                                                                                                              }
-                                                                                                            }
-                                                                                                          },
-                                                                                                          "name": "0",
-                                                                                                          "visibility": "default"
-                                                                                                        }
-                                                                                                      ]
-                                                                                                    }
-                                                                                                  }
-                                                                                                },
-                                                                                                "name": "Secp256k1",
-                                                                                                "visibility": "default"
-                                                                                              },
-                                                                                              {
-                                                                                                "attrs": [],
-                                                                                                "inner": {
-                                                                                                  "variant": {
-                                                                                                    "discriminant": null,
-                                                                                                    "kind": {
-                                                                                                      "tuple": [
-                                                                                                        {
-                                                                                                          "attrs": [],
-                                                                                                          "inner": {
-                                                                                                            "struct_field": {
-                                                                                                              "resolved_path": {
-                                                                                                                "args": null,
-                                                                                                                "path": "hex::FromHexError",
-                                                                                                                "resolved_item": {
-                                                                                                                  "definition": {
-                                                                                                                    "attrs": [],
-                                                                                                                    "inner": {
-                                                                                                                      "enum": {
-                                                                                                                        "generics": {
-                                                                                                                          "params": [],
-                                                                                                                          "where_predicates": []
-                                                                                                                        },
-                                                                                                                        "has_stripped_variants": false,
-                                                                                                                        "variants": [
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": {
-                                                                                                                                  "struct": {
-                                                                                                                                    "fields": [
-                                                                                                                                      {
-                                                                                                                                        "attrs": [],
-                                                                                                                                        "inner": {
-                                                                                                                                          "struct_field": {
-                                                                                                                                            "primitive": "char"
-                                                                                                                                          }
-                                                                                                                                        },
-                                                                                                                                        "name": "c",
-                                                                                                                                        "visibility": "default"
-                                                                                                                                      },
-                                                                                                                                      {
-                                                                                                                                        "attrs": [],
-                                                                                                                                        "inner": {
-                                                                                                                                          "struct_field": {
-                                                                                                                                            "primitive": "usize"
-                                                                                                                                          }
-                                                                                                                                        },
-                                                                                                                                        "name": "index",
-                                                                                                                                        "visibility": "default"
-                                                                                                                                      }
-                                                                                                                                    ],
-                                                                                                                                    "has_stripped_fields": false
-                                                                                                                                  }
-                                                                                                                                }
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidHexCharacter",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "OddLength",
-                                                                                                                            "visibility": "default"
-                                                                                                                          },
-                                                                                                                          {
-                                                                                                                            "attrs": [],
-                                                                                                                            "inner": {
-                                                                                                                              "variant": {
-                                                                                                                                "discriminant": null,
-                                                                                                                                "kind": "plain"
-                                                                                                                              }
-                                                                                                                            },
-                                                                                                                            "name": "InvalidStringLength",
-                                                                                                                            "visibility": "default"
-                                                                                                                          }
-                                                                                                                        ]
-                                                                                                                      }
-                                                                                                                    },
-                                                                                                                    "name": "FromHexError",
-                                                                                                                    "visibility": "public"
-                                                                                                                  },
-                                                                                                                  "path": "hex::error::FromHexError"
-                                                                                                                }
-                                                                                                              }
-                                                                                                            }
-                                                                                                          },
-                                                                                                          "name": "0",
-                                                                                                          "visibility": "default"
-                                                                                                        }
-                                                                                                      ]
-                                                                                                    }
-                                                                                                  }
-                                                                                                },
-                                                                                                "name": "Hex",
-                                                                                                "visibility": "default"
-                                                                                              },
-                                                                                              {
-                                                                                                "attrs": [],
-                                                                                                "inner": {
-                                                                                                  "variant": {
-                                                                                                    "discriminant": null,
-                                                                                                    "kind": "plain"
-                                                                                                  }
-                                                                                                },
-                                                                                                "name": "InvalidSecretKey",
-                                                                                                "visibility": "default"
-                                                                                              },
-                                                                                              {
-                                                                                                "attrs": [],
-                                                                                                "inner": {
-                                                                                                  "variant": {
-                                                                                                    "discriminant": null,
-                                                                                                    "kind": "plain"
-                                                                                                  }
-                                                                                                },
-                                                                                                "name": "InvalidPublicKey",
-                                                                                                "visibility": "default"
-                                                                                              }
-                                                                                            ]
-                                                                                          }
-                                                                                        },
-                                                                                        "name": "Error",
-                                                                                        "visibility": "public"
-                                                                                      },
-                                                                                      "path": "nostr::key::Error"
-                                                                                    }
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            ],
-                                                                            "constraints": []
-                                                                          }
-                                                                        },
-                                                                        "path": "Result",
-                                                                        "resolved_item": {
-                                                                          "path": "core::result::Result"
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "parse",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": false,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "hex",
-                                                                        {
-                                                                          "borrowed_ref": {
-                                                                            "is_mutable": false,
-                                                                            "lifetime": null,
-                                                                            "type": {
-                                                                              "primitive": "str"
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "resolved_path": {
-                                                                        "args": {
-                                                                          "angle_bracketed": {
-                                                                            "args": [
-                                                                              {
-                                                                                "type": {
-                                                                                  "generic": "Self"
-                                                                                }
-                                                                              },
-                                                                              {
-                                                                                "type": {
-                                                                                  "resolved_path": {
-                                                                                    "args": null,
-                                                                                    "path": "Error",
-                                                                                    "resolved_item": {
-                                                                                      "definition": {
-                                                                                        "previously_defined": "nostr::key::Error"
-                                                                                      },
-                                                                                      "path": "nostr::key::Error"
-                                                                                    }
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            ],
-                                                                            "constraints": []
-                                                                          }
-                                                                        },
-                                                                        "path": "Result",
-                                                                        "resolved_item": {
-                                                                          "path": "core::result::Result"
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "from_hex",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": false,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "slice",
-                                                                        {
-                                                                          "borrowed_ref": {
-                                                                            "is_mutable": false,
-                                                                            "lifetime": null,
-                                                                            "type": {
-                                                                              "slice": {
-                                                                                "primitive": "u8"
-                                                                              }
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "resolved_path": {
-                                                                        "args": {
-                                                                          "angle_bracketed": {
-                                                                            "args": [
-                                                                              {
-                                                                                "type": {
-                                                                                  "generic": "Self"
-                                                                                }
-                                                                              },
-                                                                              {
-                                                                                "type": {
-                                                                                  "resolved_path": {
-                                                                                    "args": null,
-                                                                                    "path": "Error",
-                                                                                    "resolved_item": {
-                                                                                      "definition": {
-                                                                                        "previously_defined": "nostr::key::Error"
-                                                                                      },
-                                                                                      "path": "nostr::key::Error"
-                                                                                    }
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            ],
-                                                                            "constraints": []
-                                                                          }
-                                                                        },
-                                                                        "path": "Result",
-                                                                        "resolved_item": {
-                                                                          "path": "core::result::Result"
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "from_slice",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": false,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "self",
-                                                                        {
-                                                                          "borrowed_ref": {
-                                                                            "is_mutable": false,
-                                                                            "lifetime": null,
-                                                                            "type": {
-                                                                              "generic": "Self"
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "resolved_path": {
-                                                                        "args": null,
-                                                                        "path": "String",
-                                                                        "resolved_item": {
-                                                                          "path": "alloc::string::String"
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "to_hex",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": false,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "self",
-                                                                        {
-                                                                          "borrowed_ref": {
-                                                                            "is_mutable": false,
-                                                                            "lifetime": null,
-                                                                            "type": {
-                                                                              "generic": "Self"
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "borrowed_ref": {
-                                                                        "is_mutable": false,
-                                                                        "lifetime": null,
-                                                                        "type": {
-                                                                          "array": {
-                                                                            "len": "32",
-                                                                            "type": {
-                                                                              "primitive": "u8"
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "as_bytes",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": false,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "self",
-                                                                        {
-                                                                          "generic": "Self"
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "array": {
-                                                                        "len": "32",
-                                                                        "type": {
-                                                                          "primitive": "u8"
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "to_bytes",
-                                                              "visibility": "public"
-                                                            },
-                                                            {
-                                                              "attrs": [],
-                                                              "inner": {
-                                                                "function": {
-                                                                  "default_unstable": null,
-                                                                  "generics": {
-                                                                    "params": [],
-                                                                    "where_predicates": []
-                                                                  },
-                                                                  "has_body": true,
-                                                                  "header": {
-                                                                    "abi": "Rust",
-                                                                    "is_async": false,
-                                                                    "is_const": false,
-                                                                    "is_unsafe": false
-                                                                  },
-                                                                  "sig": {
-                                                                    "inputs": [
-                                                                      [
-                                                                        "self",
-                                                                        {
-                                                                          "borrowed_ref": {
-                                                                            "is_mutable": false,
-                                                                            "lifetime": null,
-                                                                            "type": {
-                                                                              "generic": "Self"
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      ]
-                                                                    ],
-                                                                    "is_c_variadic": false,
-                                                                    "output": {
-                                                                      "resolved_path": {
-                                                                        "args": {
-                                                                          "angle_bracketed": {
-                                                                            "args": [
-                                                                              {
-                                                                                "type": {
-                                                                                  "resolved_path": {
-                                                                                    "args": null,
-                                                                                    "path": "XOnlyPublicKey",
-                                                                                    "resolved_item": {
-                                                                                      "definition": {
-                                                                                        "attrs": [],
-                                                                                        "inner": {
-                                                                                          "struct": {
-                                                                                            "generics": {
-                                                                                              "params": [],
-                                                                                              "where_predicates": []
-                                                                                            },
-                                                                                            "kind": {
-                                                                                              "tuple": [
-                                                                                                null
-                                                                                              ]
-                                                                                            }
-                                                                                          }
-                                                                                        },
-                                                                                        "name": "XOnlyPublicKey",
-                                                                                        "visibility": "public"
-                                                                                      },
-                                                                                      "path": "secp256k1::key::XOnlyPublicKey"
-                                                                                    }
-                                                                                  }
-                                                                                }
-                                                                              },
-                                                                              {
-                                                                                "type": {
-                                                                                  "resolved_path": {
-                                                                                    "args": null,
-                                                                                    "path": "Error",
-                                                                                    "resolved_item": {
-                                                                                      "definition": {
-                                                                                        "previously_defined": "nostr::key::Error"
-                                                                                      },
-                                                                                      "path": "nostr::key::Error"
-                                                                                    }
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            ],
-                                                                            "constraints": []
-                                                                          }
-                                                                        },
-                                                                        "path": "Result",
-                                                                        "resolved_item": {
-                                                                          "path": "core::result::Result"
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                }
-                                                              },
-                                                              "name": "xonly",
-                                                              "visibility": "public"
-                                                            }
-                                                          ]
-                                                        }
-                                                      ],
-                                                      "inner": {
-                                                        "struct": {
-                                                          "generics": {
-                                                            "params": [],
-                                                            "where_predicates": []
-                                                          },
-                                                          "kind": {
-                                                            "plain": {
-                                                              "fields": [],
-                                                              "has_stripped_fields": true
-                                                            }
-                                                          }
-                                                        }
-                                                      },
-                                                      "name": "PublicKey",
-                                                      "visibility": "public"
+                                                      "previously_defined": "nostr::key::public_key::PublicKey"
                                                     },
                                                     "path": "nostr::key::public_key::PublicKey"
                                                   }

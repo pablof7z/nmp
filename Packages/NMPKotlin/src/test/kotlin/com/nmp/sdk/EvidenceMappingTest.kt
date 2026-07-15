@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import kotlinx.coroutines.flow.emptyFlow
+import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
 import uniffi.nmp_ffi.FfiCoverageInterval
@@ -225,5 +226,6 @@ class EvidenceMappingTest {
         relay: String,
         reconciledThrough: ULong?,
         status: FfiSourceStatus,
-    ): FfiSourceEvidence = FfiSourceEvidence(relay, reconciledThrough, status)
+        access: FfiAccessContext = FfiAccessContext.Public,
+    ): FfiSourceEvidence = FfiSourceEvidence(relay, access, reconciledThrough, status)
 }
