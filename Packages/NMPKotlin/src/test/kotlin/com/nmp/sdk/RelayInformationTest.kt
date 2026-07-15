@@ -139,7 +139,11 @@ class RelayInformationTest {
                         )
                         fail("malformed NIP-11 must fail without an invented empty document")
                     } catch (error: NMPError.RelayInformationUnavailable) {
-                        assertTrue(error.reason.isNotEmpty())
+                        assertTrue(error.kind is RelayInformationErrorKind.InvalidDocument)
+                        assertTrue(
+                            (error.kind as RelayInformationErrorKind.InvalidDocument)
+                                .reason.isNotEmpty(),
+                        )
                     }
                 }
             }

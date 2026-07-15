@@ -3,6 +3,7 @@ package com.nmp.sdk
 import uniffi.nmp_ffi.FfiRelayInformation
 import uniffi.nmp_ffi.FfiRelayInformationCachePolicy
 import uniffi.nmp_ffi.FfiRelayInformationDocument
+import uniffi.nmp_ffi.FfiRelayInformationErrorKind
 import uniffi.nmp_ffi.FfiRelayInformationFreshness
 import uniffi.nmp_ffi.FfiRelayInformationLimitations
 
@@ -65,6 +66,55 @@ enum class RelayInformationFreshness {
     }
 }
 
+/** Typed failure of one bounded NIP-11 acquisition (mirrors `nmp-ffi`'s own
+ * `FfiRelayInformationErrorKind`; see that type's doc for the Rust side of
+ * each case). Carried by [RelayInformation.lastError] as stale-on-error
+ * evidence, and by `NMPError.RelayInformationUnavailable` when acquisition
+ * fails before any last-good document exists. */
+sealed interface RelayInformationErrorKind {
+    data class ExecutorSaturated(val capacity: ULong) : RelayInformationErrorKind
+    data class WaiterSaturated(val capacity: ULong) : RelayInformationErrorKind
+    data class ThreadUnavailable(val reason: String) : RelayInformationErrorKind
+    data object ServiceClosed : RelayInformationErrorKind
+    data object CredentialedRelayUrl : RelayInformationErrorKind
+    data class Http(val reason: String) : RelayInformationErrorKind
+    data class ResponseTooLarge(val limitBytes: ULong) : RelayInformationErrorKind
+    data class InvalidDocument(val reason: String) : RelayInformationErrorKind
+
+    companion object {
+        internal fun from(ffi: FfiRelayInformationErrorKind): RelayInformationErrorKind =
+            when (ffi) {
+                is FfiRelayInformationErrorKind.ExecutorSaturated -> ExecutorSaturated(ffi.capacity)
+                is FfiRelayInformationErrorKind.WaiterSaturated -> WaiterSaturated(ffi.capacity)
+                is FfiRelayInformationErrorKind.ThreadUnavailable -> ThreadUnavailable(ffi.reason)
+                FfiRelayInformationErrorKind.ServiceClosed -> ServiceClosed
+                FfiRelayInformationErrorKind.CredentialedRelayUrl -> CredentialedRelayUrl
+                is FfiRelayInformationErrorKind.Http -> Http(ffi.reason)
+                is FfiRelayInformationErrorKind.ResponseTooLarge -> ResponseTooLarge(ffi.limitBytes)
+                is FfiRelayInformationErrorKind.InvalidDocument -> InvalidDocument(ffi.reason)
+            }
+    }
+}
+
+/** Human-readable text mirroring `nmp::RelayInformationError`'s own
+ * `Display` impl (crates/nmp/src/relay_information.rs), for callers that
+ * only want a message rather than a branch on the typed kind. */
+fun RelayInformationErrorKind.describe(): String =
+    when (this) {
+        is RelayInformationErrorKind.ExecutorSaturated ->
+            "NIP-11 acquisition refused: native task capacity $capacity is full"
+        is RelayInformationErrorKind.WaiterSaturated ->
+            "NIP-11 acquisition refused: per-relay waiter capacity $capacity is full"
+        is RelayInformationErrorKind.ThreadUnavailable ->
+            "NIP-11 acquisition thread unavailable: $reason"
+        RelayInformationErrorKind.ServiceClosed -> "NIP-11 acquisition service is closed"
+        RelayInformationErrorKind.CredentialedRelayUrl ->
+            "NIP-11 acquisition refuses relay URL userinfo"
+        is RelayInformationErrorKind.Http -> "NIP-11 HTTP request failed: $reason"
+        is RelayInformationErrorKind.ResponseTooLarge -> "NIP-11 response exceeds $limitBytes bytes"
+        is RelayInformationErrorKind.InvalidDocument -> "invalid NIP-11 document: $reason"
+    }
+
 data class RelayInformationDocument(
     val name: String?,
     val description: String?,
@@ -113,7 +163,7 @@ data class RelayInformation(
     val lastModified: String?,
     val cacheControl: String?,
     val expires: String?,
-    val lastError: String?,
+    val lastError: RelayInformationErrorKind?,
 ) {
     companion object {
         internal fun from(ffi: FfiRelayInformation) =
@@ -129,7 +179,7 @@ data class RelayInformation(
                 lastModified = ffi.lastModified,
                 cacheControl = ffi.cacheControl,
                 expires = ffi.expires,
-                lastError = ffi.lastError,
+                lastError = ffi.lastError?.let(RelayInformationErrorKind::from),
             )
     }
 }

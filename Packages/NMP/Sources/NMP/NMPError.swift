@@ -62,7 +62,7 @@ public enum NMPError: Error, Sendable, Equatable {
     /// couriered evidence should refresh anyway).
     case intentAlreadyConsumed
     /// No last-good NIP-11 document exists and acquisition failed.
-    case relayInformationUnavailable(String)
+    case relayInformationUnavailable(RelayInformationErrorKind)
     /// One relay's in-flight NIP-11 waiter set is at its finite bound.
     case relayInformationWaitersSaturated(capacity: UInt64)
 
@@ -93,7 +93,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .EmptyPinnedRelaySet: self = .emptyPinnedRelaySet
         case .NoActiveAccount: self = .noActiveAccount
         case .IntentAlreadyConsumed: self = .intentAlreadyConsumed
-        case .RelayInformationUnavailable(let reason): self = .relayInformationUnavailable(reason)
+        case .RelayInformationUnavailable(let kind):
+            self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
         case .RelayInformationWaitersSaturated(let capacity):
             self = .relayInformationWaitersSaturated(capacity: capacity)
         }
