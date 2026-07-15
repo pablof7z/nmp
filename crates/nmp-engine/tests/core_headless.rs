@@ -2267,7 +2267,10 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
         "an old-generation disconnect must be a reducer no-op"
     );
 
-    let current = core.handle(EngineMsg::RelayDisconnected(reopened, DisconnectReason::Error));
+    let current = core.handle(EngineMsg::RelayDisconnected(
+        reopened,
+        DisconnectReason::Error,
+    ));
     let evidence = evidence_from(&current, id).expect("the current disconnect refreshes evidence");
     assert_eq!(
         source_for(evidence, &relay)
@@ -2336,17 +2339,17 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     // Contrast: the ORDINARY (transient) reason on an otherwise identical
     // setup keeps re-issuing EnsureRelay exactly as before -- the fix must
     // not touch that path at all.
-    let mut core_transient = new_core(FixtureDirectory::new().with_write(
-        a.public_key().to_hex(),
-        [relay.clone()],
-    ));
+    let mut core_transient =
+        new_core(FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]));
     let _ = core_transient.handle(EngineMsg::Subscribe(
         literal_query(&[1], &a.public_key().to_hex()),
         Box::new(CapturingSink::default()),
     ));
     let _ = core_transient.handle(EngineMsg::RelayConnected(handle, relay.clone()));
-    let transient_effects =
-        core_transient.handle(EngineMsg::RelayDisconnected(handle, DisconnectReason::Error));
+    let transient_effects = core_transient.handle(EngineMsg::RelayDisconnected(
+        handle,
+        DisconnectReason::Error,
+    ));
     assert!(
         transient_effects
             .iter()
