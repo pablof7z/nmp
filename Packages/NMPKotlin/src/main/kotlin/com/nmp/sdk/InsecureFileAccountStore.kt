@@ -30,6 +30,18 @@ class NMPInsecureFileAccountStore(private val file: Path) {
                 "local account file must have a parent directory"
             }
             Files.createDirectories(directory)
+            try {
+                Files.setPosixFilePermissions(
+                    directory,
+                    setOf(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.OWNER_EXECUTE,
+                    ),
+                )
+            } catch (_: UnsupportedOperationException) {
+                // The selected filesystem does not expose POSIX modes.
+            }
             val temporary = Files.createTempFile(directory, ".${file.fileName}.", ".tmp")
             try {
                 Files.writeString(
