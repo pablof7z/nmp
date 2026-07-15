@@ -128,6 +128,23 @@ class NMPEngine(
      * `observe`. */
     fun observeDiagnostics(): Flow<DiagnosticsSnapshot> = observeDiagnostics(ffi)
 
+    // MARK: - NIP-02 (following)
+
+    /** Observe whether the active account follows [target] through the
+     * NMP-owned NIP-02 resource. This is NMP's protocol projection, not an
+     * app-maintained boolean. See `Following.kt`'s own doc for the
+     * conflation/teardown discipline. */
+    fun observeFollowing(target: String): Flow<FollowingSnapshot> = observeFollowing(ffi, target)
+
+    /** The simple NMP-owned follow action. It returns immediately with a
+     * stream covering acquisition, no-op, atomic conflict, signing,
+     * routing, and relay receipt states. */
+    fun follow(target: String): FollowAction = follow(ffi, target)
+
+    /** The inverse of [follow], with the same acquisition, compare-and-swap,
+     * signer, routing, and receipt guarantees. */
+    fun unfollow(target: String): FollowAction = unfollow(ffi, target)
+
     /** Acquire one NIP-11 representation through the shared engine cache. */
     suspend fun relayInformation(
         relay: String,
