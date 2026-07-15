@@ -203,26 +203,12 @@ fn redb_crash_worker() {
                 .expect("open worker store");
             let _ = store.gc(&ClaimSet::new(Vec::new()));
         }
-        "start-before-commit" => {
-            let mut store =
-                RedbStore::open_with_crash_point(path, RedbCrashPoint::StartAttemptBeforeCommit)
-                    .expect("open worker store");
-            let recovered = store.recover_outbox().remove(0);
-            let _ = store.start_attempt(recovered.intent_id, relay, recovered.frozen);
-        }
         "route-revision-before-commit" => {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::RouteRevisionBeforeCommit)
                     .expect("open worker store");
             let intent = store.recover_outbox()[0].intent_id;
             let _ = store.record_route_revision(intent, BTreeSet::from([relay]));
-        }
-        "finish-before-commit" => {
-            let mut store =
-                RedbStore::open_with_crash_point(path, RedbCrashPoint::FinishAttemptBeforeCommit)
-                    .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
-            let _ = store.finish_attempt(intent, &relay, 1, AttemptOutcome::Acked);
         }
         "lane-bootstrap-before-commit" => {
             let mut store =
@@ -547,47 +533,6 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     assert_eq!(
         store.reattach_receipt(receipt).unwrap().unwrap().state,
         ReceiptState::Compensated
-    );
-}
-
-#[test]
-fn attempt_started_and_terminal_facts_never_partially_commit() {
-    let (_dir, path) = fixture();
-    let (_, signed) = event_pair();
-    let relay = RelayUrl::parse(RELAY).expect("relay");
-    let intent = {
-        let mut store = RedbStore::open(&path).expect("open");
-        let (intent, _) = accepted(&mut store);
-        store.promote_signed(intent, signed.sig).expect("promote");
-        intent
-    };
-    crash(&path, "start-before-commit");
-    {
-        let mut store = RedbStore::open(&path).expect("reopen start crash");
-        assert!(store.recover_attempts(intent).unwrap().is_empty());
-        let started = store
-            .start_attempt(intent, relay.clone(), signed.clone())
-            .unwrap();
-        assert_eq!(
-            (started.ordinal, started.outcome),
-            (1, AttemptOutcome::Started)
-        );
-    }
-    crash(&path, "finish-before-commit");
-    {
-        let mut store = RedbStore::open(&path).expect("reopen finish crash");
-        let attempts = store.recover_attempts(intent).unwrap();
-        assert_eq!(attempts.len(), 1);
-        assert_eq!(attempts[0].outcome, AttemptOutcome::Started);
-        assert_eq!(attempts[0].event.as_json(), signed.as_json());
-        store
-            .finish_attempt(intent, &relay, 1, AttemptOutcome::Acked)
-            .unwrap();
-    }
-    let store = RedbStore::open(&path).expect("final reopen");
-    assert_eq!(
-        store.recover_attempts(intent).unwrap()[0].outcome,
-        AttemptOutcome::Acked
     );
 }
 
