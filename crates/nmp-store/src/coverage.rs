@@ -27,6 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use nmp_grammar::{fold_byte, ConcreteFilter, ContextualAtom, DescriptorHash, IndexedTagName};
 use nostr::filter::MatchEventOptions;
@@ -171,6 +172,140 @@ pub(crate) fn shape_matches(shape: &ConcreteFilter, event: &Event) -> bool {
     shape
         .to_nostr()
         .match_event(event, MatchEventOptions::new())
+}
+
+/// A one-shot index over a single `gc` call's victim set (issue #507),
+/// shared verbatim by `MemoryStore::gc` and `RedbStore::gc` — the same
+/// "one algorithm, both backends call it" pattern [`merge_interval`]
+/// already establishes, so the two can never diverge on coverage-shrink
+/// arithmetic.
+///
+/// **Why the maximum alone determines a row's outcome** (the fact this
+/// type exists to exploit): [`shrink_after_eviction`] only ever RAISES
+/// `interval.from`, to `evicted_at + 1`. Fix one coverage row and let `V`
+/// be the set of victims that both match its shape and fall inside its
+/// CURRENT `[from, through]`. Apply `shrink_after_eviction` for every
+/// member of `V`, in any order:
+///
+/// - A victim `v` only has any effect if `v.created_at` is still inside
+///   the interval at the moment it is applied. Once `from` has been
+///   raised past `v.created_at` (by processing some OTHER victim first),
+///   `v` falls outside the interval and applying it is a no-op.
+/// - So the only victims that can ever actually move `from` are those
+///   whose `created_at` is `>=` every `from`-raise applied before them —
+///   which telescopes to: only the run culminating in the single LARGEST
+///   `created_at` in `V` ever survives to set the final `from`. Every
+///   smaller victim either fires first and is immediately superseded by
+///   a later, larger one, or fires after the max and is already outside
+///   the (already-raised) interval and is a no-op.
+/// - Therefore the row's final state after processing every member of
+///   `V`, IN ANY ORDER, is identical to processing just `m = max(V)`
+///   alone: untouched if `V` is empty, else `from' = m + 1`, and the row
+///   is deleted iff `from' > through` (same rule `shrink_after_eviction`
+///   already encodes for a single victim).
+///
+/// This lets `gc` replace an O(victims × rows) nested loop (the eviction
+/// pass's original shape, mirrored in both backends before issue #507)
+/// with a single O(rows) pass: each row calls [`Self::max_matching_within`]
+/// once, which walks its own pre-sorted, shape-pruned candidate slice
+/// with an early exit on the first (descending-order) match, rather than
+/// re-scanning every victim per row.
+pub(crate) struct GcVictimIndex<'a> {
+    /// Every victim, sorted ascending by `created_at`. Consulted only
+    /// when a row's shape carries no concrete `kinds` set (nothing to
+    /// prune by).
+    global: Vec<&'a Event>,
+    /// The same victims, ALSO bucketed by kind (each bucket sorted
+    /// ascending by `created_at`) — consulted instead of `global`
+    /// whenever the row's shape names a concrete kind set: a shape
+    /// requiring kind `K` can never match a victim of a different kind,
+    /// so its search only ever has to walk the buckets for its own
+    /// kinds, never the other victims at all.
+    by_kind: HashMap<u16, Vec<&'a Event>>,
+}
+
+impl<'a> GcVictimIndex<'a> {
+    /// Build the index once per `gc` call, from the victims that call
+    /// already collected (owned `Event`s — both backends gather the full
+    /// victim set up front, before touching any coverage row).
+    pub(crate) fn new(victims: &'a [Event]) -> Self {
+        let mut global: Vec<&'a Event> = victims.iter().collect();
+        global.sort_by_key(|event| event.created_at);
+
+        let mut by_kind: HashMap<u16, Vec<&'a Event>> = HashMap::new();
+        for event in victims {
+            by_kind.entry(event.kind.as_u16()).or_default().push(event);
+        }
+        for bucket in by_kind.values_mut() {
+            bucket.sort_by_key(|event| event.created_at);
+        }
+
+        Self { global, by_kind }
+    }
+
+    /// `m` from this type's own doc comment: the greatest `created_at`
+    /// among victims that both match `shape` and fall inside `interval`
+    /// — or `None` if no victim qualifies at all (the row is then left
+    /// untouched by the caller). Walks candidates in DESCENDING
+    /// `created_at` order so the very FIRST shape match encountered is
+    /// already the maximum — a true early exit, never a full pass over
+    /// the qualifying range.
+    pub(crate) fn max_matching_within(
+        &self,
+        shape: &ConcreteFilter,
+        interval: CoverageInterval,
+    ) -> Option<Timestamp> {
+        // `shape.kinds` mirrors `nostr::Filter::kind_match`'s own
+        // semantics (via `ConcreteFilter::to_nostr`/`shape_matches`):
+        // `Some(non_empty)` restricts to those kinds, but `None` OR
+        // `Some(empty)` both mean "no kind constraint" (matches any kind)
+        // -- `kind_match`'s `kinds.is_empty() || kinds.contains(..)` is
+        // vacuously `true` for an empty required set. Pruning by kind
+        // bucket is only sound for the genuinely-restrictive case; an
+        // empty-but-`Some` set must fall back to the unpruned global scan
+        // exactly like `None`, or this would wrongly report "no victim
+        // matches" for a shape that in fact matches every kind.
+        match shape.kinds.as_ref().filter(|kinds| !kinds.is_empty()) {
+            Some(kinds) => {
+                // Coarse shape-fingerprint pruning: only the buckets for
+                // the shape's own kinds can possibly match it. Each
+                // bucket's own local max is independent of the others,
+                // so the overall answer is just the max across every
+                // qualifying kind's bucket.
+                let mut best: Option<Timestamp> = None;
+                for kind in kinds {
+                    let Some(bucket) = self.by_kind.get(kind) else {
+                        continue;
+                    };
+                    if let Some(found) = Self::scan_descending(bucket, shape, interval) {
+                        best = Some(best.map_or(found, |current| current.max(found)));
+                    }
+                }
+                best
+            }
+            None => Self::scan_descending(&self.global, shape, interval),
+        }
+    }
+
+    /// `candidates` must already be sorted ascending by `created_at`.
+    /// Binary-searches (`partition_point`) to the sub-slice inside
+    /// `[interval.from, interval.through]`, then walks it back-to-front —
+    /// the first `shape_matches` hit in that reverse walk is the maximum
+    /// matching `created_at`, so this returns on the first hit rather
+    /// than visiting the whole qualifying range.
+    fn scan_descending(
+        candidates: &[&Event],
+        shape: &ConcreteFilter,
+        interval: CoverageInterval,
+    ) -> Option<Timestamp> {
+        let start = candidates.partition_point(|event| event.created_at < interval.from);
+        let end = candidates.partition_point(|event| event.created_at <= interval.through);
+        candidates[start..end]
+            .iter()
+            .rev()
+            .find(|event| shape_matches(shape, event))
+            .map(|event| event.created_at)
+    }
 }
 
 /// The union of every live query's demand skeletons (VISION plan §3.1): what
@@ -478,5 +613,130 @@ mod tests {
         let record = ShapeRecord::from(&original);
         let restored: ConcreteFilter = (&record).into();
         assert_eq!(original, restored);
+    }
+
+    // -----------------------------------------------------------------
+    // `GcVictimIndex` (issue #507): the shared gc coverage-shrink batching
+    // helper both backends call, so they can never diverge on this
+    // arithmetic — see the type's own doc comment for the max-only-
+    // matters proof these tests exercise.
+    // -----------------------------------------------------------------
+
+    fn victim(keys: &nostr::Keys, kind: u16, created_at: u64) -> Event {
+        nostr::EventBuilder::new(nostr::Kind::from(kind), "")
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn kind_shape(kind: u16) -> ConcreteFilter {
+        ConcreteFilter {
+            kinds: Some(StdBTreeSet::from([kind])),
+            authors: None,
+            ids: None,
+            tags: StdBTreeMap::new(),
+            since: None,
+            until: None,
+            limit: None,
+        }
+    }
+
+    fn any_kind_shape() -> ConcreteFilter {
+        ConcreteFilter {
+            kinds: None,
+            authors: None,
+            ids: None,
+            tags: StdBTreeMap::new(),
+            since: None,
+            until: None,
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn max_matching_within_returns_none_when_no_victim_matches() {
+        let keys = nostr::Keys::generate();
+        let victims = vec![victim(&keys, 1, 10)];
+        let index = GcVictimIndex::new(&victims);
+        let interval = CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(200u64));
+        // The one victim's `created_at` (10) is outside the interval.
+        assert!(index
+            .max_matching_within(&kind_shape(1), interval)
+            .is_none());
+    }
+
+    #[test]
+    fn max_matching_within_picks_the_greatest_matching_created_at() {
+        let keys = nostr::Keys::generate();
+        let victims = vec![
+            victim(&keys, 1, 50),
+            victim(&keys, 1, 100),
+            victim(&keys, 1, 75),
+        ];
+        let index = GcVictimIndex::new(&victims);
+        let interval = CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(200u64));
+        assert_eq!(
+            index.max_matching_within(&kind_shape(1), interval),
+            Some(Timestamp::from(100u64)),
+            "the maximum matching created_at must win, regardless of insertion order"
+        );
+    }
+
+    #[test]
+    fn max_matching_within_prunes_non_matching_kinds_even_inside_the_interval() {
+        let keys = nostr::Keys::generate();
+        // A kind-3 victim sitting squarely inside the interval must never
+        // be considered for a kind-1-shaped row: shape pruning walks only
+        // the kind-1 bucket, which is empty here.
+        let victims = vec![victim(&keys, 3, 50)];
+        let index = GcVictimIndex::new(&victims);
+        let interval = CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64));
+        assert!(index
+            .max_matching_within(&kind_shape(1), interval)
+            .is_none());
+    }
+
+    #[test]
+    fn max_matching_within_falls_back_to_the_global_list_for_kindless_shapes() {
+        let keys = nostr::Keys::generate();
+        let victims = vec![victim(&keys, 1, 10), victim(&keys, 9, 20)];
+        let index = GcVictimIndex::new(&victims);
+        let interval = CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64));
+        assert_eq!(
+            index.max_matching_within(&any_kind_shape(), interval),
+            Some(Timestamp::from(20u64))
+        );
+    }
+
+    /// `nostr::Filter::kind_match` (via `ConcreteFilter::to_nostr`/
+    /// `shape_matches`) treats an empty-but-`Some` kinds set as "no kind
+    /// constraint at all" — vacuously matching every kind — the identical
+    /// convention `Filter::authors_match`/`ids_match` use for their own
+    /// empty-`Some` sets. Kind-bucket pruning must therefore treat
+    /// `Some(empty)` exactly like `None` (fall back to the unpruned
+    /// global list), never as "matches nothing": pruning on the buckets
+    /// named by an empty set would otherwise silently disagree with
+    /// `shape_matches` and report no victim at all for a shape that in
+    /// fact matches every one of them.
+    #[test]
+    fn max_matching_within_treats_empty_kinds_set_as_no_constraint_not_as_impossible() {
+        let keys = nostr::Keys::generate();
+        let victims = vec![victim(&keys, 1, 10), victim(&keys, 9, 20)];
+        let index = GcVictimIndex::new(&victims);
+        let interval = CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64));
+        let empty_kinds_shape = ConcreteFilter {
+            kinds: Some(StdBTreeSet::new()),
+            authors: None,
+            ids: None,
+            tags: StdBTreeMap::new(),
+            since: None,
+            until: None,
+            limit: None,
+        };
+        assert_eq!(
+            index.max_matching_within(&empty_kinds_shape, interval),
+            Some(Timestamp::from(20u64)),
+            "an empty-but-Some kinds set must behave like no kind constraint at all"
+        );
     }
 }
