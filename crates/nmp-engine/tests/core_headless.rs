@@ -23,9 +23,9 @@ use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
-    CoverageKey, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome, MemoryStore,
-    PersistenceError, PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt,
-    RecoveredRouteRevision, RedbStore, RelayObserved, RetractReason, StoredEvent,
+    CoverageKey, EventStore, GcReport, InsertOutcome, MemoryStore, PersistenceError,
+    PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision,
+    RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -302,28 +302,6 @@ impl EventStore for FailOnceCompensationStore {
     ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
-    fn start_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: RelayUrl,
-        event: nostr::Event,
-    ) -> Result<RecoveredAttempt, PersistenceError> {
-        self.inner.start_attempt(intent_id, relay, event)
-    }
-    fn finish_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: &RelayUrl,
-        ordinal: u64,
-        outcome: AttemptOutcome,
-    ) -> Result<FinishAttemptOutcome, PersistenceError> {
-        if self.fail_next_attempt_finish {
-            self.fail_next_attempt_finish = false;
-            return Err(PersistenceError("injected attempt finish failure".into()));
-        }
-        self.inner
-            .finish_attempt(intent_id, relay, ordinal, outcome)
-    }
     fn recover_attempts(
         &self,
         intent_id: nmp_store::IntentId,
@@ -454,27 +432,6 @@ impl EventStore for SharedFailStartStore {
         intent_id: nmp_store::IntentId,
     ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
-    }
-    fn start_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: RelayUrl,
-        event: nostr::Event,
-    ) -> Result<RecoveredAttempt, PersistenceError> {
-        if self.failed_relays.contains(&relay) {
-            return Err(PersistenceError("injected attempt start failure".into()));
-        }
-        self.inner.start_attempt(intent_id, relay, event)
-    }
-    fn finish_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: &RelayUrl,
-        ordinal: u64,
-        outcome: AttemptOutcome,
-    ) -> Result<FinishAttemptOutcome, PersistenceError> {
-        self.inner
-            .finish_attempt(intent_id, relay, ordinal, outcome)
     }
     fn recover_attempts(
         &self,
@@ -618,27 +575,6 @@ impl EventStore for RedbFailStartStore {
         intent_id: nmp_store::IntentId,
     ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
-    }
-    fn start_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: RelayUrl,
-        event: nostr::Event,
-    ) -> Result<RecoveredAttempt, PersistenceError> {
-        if self.failed_relays.contains(&relay) {
-            return Err(PersistenceError("injected attempt start failure".into()));
-        }
-        self.inner.start_attempt(intent_id, relay, event)
-    }
-    fn finish_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: &RelayUrl,
-        ordinal: u64,
-        outcome: AttemptOutcome,
-    ) -> Result<FinishAttemptOutcome, PersistenceError> {
-        self.inner
-            .finish_attempt(intent_id, relay, ordinal, outcome)
     }
     fn recover_attempts(
         &self,
@@ -5609,24 +5545,6 @@ impl EventStore for FailIngestStore {
         intent_id: nmp_store::IntentId,
     ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
-    }
-    fn start_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: RelayUrl,
-        event: nostr::Event,
-    ) -> Result<RecoveredAttempt, PersistenceError> {
-        self.inner.start_attempt(intent_id, relay, event)
-    }
-    fn finish_attempt(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relay: &RelayUrl,
-        ordinal: u64,
-        outcome: AttemptOutcome,
-    ) -> Result<FinishAttemptOutcome, PersistenceError> {
-        self.inner
-            .finish_attempt(intent_id, relay, ordinal, outcome)
     }
     fn recover_attempts(
         &self,
