@@ -21,5 +21,9 @@ nmp-ownership.workspace = true
 nmp-router.workspace = true
 nmp-nip02.workspace = true
 nmp-nip51.workspace = true
+# nmp-nip29 exports no claims() (DeclaresNoClaims in the registry); the
+# dev-dep is kept purely for compile-time coupling -- a rename/removal of
+# the crate breaks this audit at build time, before the runtime
+# cargo-metadata test would notice.
 nmp-nip29.workspace = true
 serde_json.workspace = true

@@ -69,12 +69,12 @@ impl KindScope {
         }
     }
 
-    /// Whether this scope shares at least one kind with `other` -- the
-    /// exclusivity check the Unit G workspace audit runs pairwise across
-    /// every linked (and unlinked, per §4.2) module's claims. Symmetric:
-    /// `a.overlaps(b) == b.overlaps(a)`. Reimplemented on top of
-    /// [`KindScope::intersection_witness`] so the empty-range/empty-set
-    /// care lives in exactly one place.
+    /// Whether this scope shares at least one kind with `other`. A
+    /// convenience over [`KindScope::intersection_witness`] (the actual
+    /// exclusivity mechanism [`crate::ClaimSet::build`] folds through --
+    /// the audit needs the witness, not just the bool); the empty-range/
+    /// empty-set care lives in exactly one place. Symmetric:
+    /// `a.overlaps(b) == b.overlaps(a)`.
     pub fn overlaps(&self, other: &KindScope) -> bool {
         self.intersection_witness(other).is_some()
     }
