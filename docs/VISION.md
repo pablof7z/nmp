@@ -8,6 +8,11 @@
   `docs/design/durable-write-signing-and-retry.md`,
   `docs/design/protocol-modules-and-composition.md`, and
   `docs/design/bounded-delivery.md`.
+- **Review enforcement:** `docs/design/architecture-review-gates.md` turns the
+  two-noun rule below (and the bug-class-ledger's type-over-convention rule)
+  into a PR-review checklist, so a third public noun or an unenforced
+  precondition is caught at review time instead of by the next architectural
+  sweep.
 
 ## 1. Thesis
 
