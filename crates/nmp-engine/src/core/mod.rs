@@ -542,10 +542,19 @@ struct HandleState {
 
 struct HistoryState {
     query: HistoryQuery,
-    /// Resolver handles for the latest bounded request plus every engine-
-    /// owned tie-second/older acquisition request opened by `request_rows`.
+    /// Resolver handles the session currently holds open: the one live-top
+    /// demand (`live_handle_id`) plus at most the *current* advance's
+    /// tie-second/older acquisition handles. Older advances' historical
+    /// acquisitions are closed at the next commit (#486) so a deep scroll of
+    /// `K` advances never accumulates `O(K)` live relay subscriptions.
     handles: Vec<QueryHandle>,
     handle_ids: BTreeSet<HandleId>,
+    /// The initial, permanent live-top demand opened at
+    /// [`Self::on_subscribe_history`]. It is never a historical acquisition
+    /// and is retired only when the whole session is dropped; the #486
+    /// supersede-close keeps exactly this handle plus the in-flight advance's
+    /// own handles, closing every earlier tie/older acquisition.
+    live_handle_id: HandleId,
     sink: Box<dyn HistorySink>,
     target_rows: usize,
     acquired_tie_seconds: BTreeSet<u64>,
@@ -2338,6 +2347,7 @@ impl<S: EventStore> EngineCore<S> {
                 query,
                 handles: vec![handle],
                 handle_ids: BTreeSet::from([handle_id]),
+                live_handle_id: handle_id,
                 sink,
                 acquired_tie_seconds: BTreeSet::new(),
                 last_rows: BTreeMap::new(),
@@ -2668,6 +2678,53 @@ impl<S: EventStore> EngineCore<S> {
             .is_some_and(|state| state.pending_load.is_some())
         {
             return Vec::new();
+        }
+
+        // #486: retire every historical tie/older acquisition opened by a
+        // PRIOR advance. Only the permanent live-top handle and the advance
+        // now committing keep their subscriptions; a completed until-bounded
+        // acquisition's rows are already durable and its coverage was recorded
+        // at EOSE, so holding its REQ open only leaks one subscription per
+        // relay per advance. `acquired_tie_seconds` is deliberately retained
+        // (that IS the coverage evidence) so a later advance never re-requests
+        // a tie second already proven. The recompile just below re-diffs the
+        // demand and emits the wire CLOSEs for the handles dropped here.
+        let superseded: Vec<HandleId> = {
+            let state = self
+                .histories
+                .get(&id)
+                .expect("committed history remained live");
+            let current: BTreeSet<HandleId> = state
+                .pending_load
+                .as_ref()
+                .expect("commit checked the staged history load")
+                .opened_handle_ids
+                .iter()
+                .copied()
+                .collect();
+            let live = state.live_handle_id;
+            state
+                .handle_ids
+                .iter()
+                .copied()
+                .filter(|handle| *handle != live && !current.contains(handle))
+                .collect()
+        };
+        if !superseded.is_empty() {
+            for handle_id in &superseded {
+                self.history_by_handle.remove(handle_id);
+                let _ = self.resolver.unsubscribe(*handle_id);
+            }
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("committed history remained live");
+            state
+                .handles
+                .retain(|handle| !superseded.contains(&handle.id()));
+            for handle_id in &superseded {
+                state.handle_ids.remove(handle_id);
+            }
         }
 
         let mut effects = Vec::new();

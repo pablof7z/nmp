@@ -6,7 +6,7 @@ use nmp_engine::core::{
 };
 use nmp_grammar::{Binding, Filter};
 use nmp_resolver::LiveQuery;
-use nmp_router::{FixtureDirectory, WireOp};
+use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{Event, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
@@ -339,4 +339,111 @@ fn unsubscribe_releases_every_session_subscription() {
     assert!(!stray
         .iter()
         .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)));
+}
+
+/// Fold every wire op the effects place for `relay` into `open`, so `open`
+/// always reflects the live subscription set: a `Req` opens a sub-id, a
+/// `Close` retires it.
+fn track_wire(open: &mut BTreeSet<SubId>, effects: &[Effect], relay: &RelayUrl) {
+    for effect in effects {
+        let Effect::Wire(delta) = effect else {
+            continue;
+        };
+        for (url, ops) in &delta.ops {
+            if url != relay {
+                continue;
+            }
+            for op in ops {
+                match op {
+                    WireOp::Req(sub, _) => {
+                        open.insert(sub.clone());
+                    }
+                    WireOp::Close(sub) => {
+                        open.remove(sub);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// #486 falsifier: a deep scroll of many advances must hold O(1) live relay
+/// subscriptions, not one (or two) per advance. Every committed advance opens
+/// an engine-owned tie-second and older-range acquisition REQ; without the
+/// supersede-close each of `K` advances would leak its acquisitions until
+/// teardown (`2 * (max_rows / page_size) + 1` concurrent REQs per relay for a
+/// fully scrolled session — enough to trip a relay's per-connection sub cap).
+/// The engine must retire each prior advance's historical acquisitions at the
+/// next commit, keeping only the permanent live-top demand plus the current
+/// advance's own handles, so the net open subscription count per relay stays
+/// bounded no matter how deep the scroll runs.
+#[test]
+fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://history.example").unwrap();
+    let mut store = MemoryStore::new();
+    // Strictly descending, distinct-second rows so every advance genuinely
+    // opens a fresh tie-second AND older-range acquisition.
+    let total = 210usize;
+    for index in 0..total {
+        let created_at = 10_000 - index as u64;
+        store
+            .insert(
+                signed(&keys, created_at, &format!("row-{index}")),
+                RelayObserved::new(relay.clone(), Timestamp::from(20_000)),
+            )
+            .unwrap();
+    }
+    let directory = FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()]);
+    let mut core = EngineCore::new(store, Box::new(directory), 10);
+
+    let opened = core.handle(EngineMsg::SubscribeHistory(
+        query(&keys, 5, 1000),
+        Box::new(NullHistorySink),
+    ));
+    let id = open(&opened);
+
+    let mut live_subs = BTreeSet::new();
+    track_wire(&mut live_subs, &opened, &relay);
+
+    let mut peak = live_subs.len();
+    // 40 advances of one page (5 rows) each — a 200-row deep scroll. Without
+    // the fix this would accumulate ~80 leaked historical REQs on `relay`.
+    for step in 1..=40 {
+        let target = 5 + step * 5;
+        let staged = core.handle(EngineMsg::RequestRows(id, target));
+        track_wire(&mut live_subs, &staged, &relay);
+        // Drive the auto-staged continuation to convergence, exactly as the
+        // runtime commit loop does, folding every advance's wire ops.
+        loop {
+            let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+            if committed.is_empty() {
+                break;
+            }
+            track_wire(&mut live_subs, &committed, &relay);
+            peak = peak.max(live_subs.len());
+            let restaged = committed.iter().any(|effect| {
+                matches!(effect, Effect::HistoryLoadResult(session, Ok(())) if *session == id)
+            });
+            if !restaged {
+                break;
+            }
+        }
+        peak = peak.max(live_subs.len());
+    }
+
+    // Live-top demand + at most the current advance's tie-second and older
+    // acquisitions: a small constant, never O(number of advances).
+    assert!(
+        peak <= 3,
+        "deep scroll must hold O(1) live subscriptions per relay across many \
+         advances, but peaked at {peak} concurrent REQs (the #486 leak)"
+    );
+    // And after the whole scroll the session still holds only that bounded set.
+    assert!(
+        live_subs.len() <= 3,
+        "a fully scrolled session must not retain a subscription per advance, \
+         holds {} REQs",
+        live_subs.len()
+    );
 }
