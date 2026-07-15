@@ -26,7 +26,7 @@ import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.conflate
-import uniffi.nmp_ffi.FfiAcquisitionEvidence
+import uniffi.nmp_ffi.FfiFrame
 import uniffi.nmp_ffi.FfiRowDelta
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpQueryHandle
@@ -57,7 +57,7 @@ import kotlin.concurrent.withLock
  * cancelled or the flow completes -- see this file's header finding for why
  * that, not UniFFI's generated `Cleaner`, is the correct mapping. */
 fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> =
-    observeRows { observer -> nmpRethrowing { engine.observe(filter.toFfi(), observer) } }
+    observeRows { observer -> nmpRethrowing { engine.observe(filter.toFfi(), null, observer) } }
 
 /** #107: the explicit-`NMPDemand` entry point -- the constructor to reach
  * for once [observeQuery]'s implicit `AuthorOutboxes`/`Public` default
@@ -65,7 +65,7 @@ fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> 
  * non-default `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. Same
  * bridge/accumulation/teardown shape as the `NMPFilter` overload above. */
 fun observeQuery(engine: NmpEngineInterface, demand: NMPDemand): Flow<RowBatch> =
-    observeRows { observer -> nmpRethrowing { engine.observeDemand(demand.toFfi(), observer) } }
+    observeRows { observer -> nmpRethrowing { engine.observeDemand(demand.toFfi(), null, observer) } }
 
 /** Shared bridge/accumulation setup: `subscribe` is the ONE difference
  * between the `NMPFilter` and `NMPDemand` entry points (which
@@ -83,13 +83,19 @@ private fun observeRows(subscribe: (RowObserver) -> NmpQueryHandle): Flow<RowBat
 
         val observer =
             object : RowObserver {
-                override fun onBatch(deltas: List<FfiRowDelta>, evidence: FfiAcquisitionEvidence) {
+                // These subscriptions are opened with `window = null`, so
+                // every delivered `frame.window` is null and `frame.deltas`
+                // is the exact lossless transition -- fold it. (Windowed
+                // observations take the other arm of the one frame
+                // vocabulary: authoritative snapshots, no folding -- see
+                // Window.kt's `WindowBridge`.)
+                override fun onFrame(frame: FfiFrame) {
                     val snapshot =
                         lock.withLock {
-                            for (delta in deltas) applyRowDelta(order, byId, delta)
+                            for (delta in frame.deltas) applyRowDelta(order, byId, delta)
                             order.mapNotNull { byId[it] }
                         }
-                    trySendBlocking(RowBatch(snapshot, AcquisitionEvidence.from(evidence)))
+                    trySendBlocking(RowBatch(snapshot, AcquisitionEvidence.from(frame.evidence)))
                 }
 
                 override fun onClosed() {
@@ -106,7 +112,7 @@ private fun observeRows(subscribe: (RowObserver) -> NmpQueryHandle): Flow<RowBat
  * The accumulator's per-delta step, extracted as a pure function so it is
  * directly unit-testable (#105's `SourcesGrew` replace-in-place proof)
  * without driving the coroutine/`callbackFlow` machinery around it. Mutates
- * `order`/`byId` in place -- identical semantics to `RowBridge.onBatch`'s
+ * `order`/`byId` in place -- identical semantics to `RowBridge.onFrame`'s
  * Swift counterpart.
  */
 internal fun applyRowDelta(

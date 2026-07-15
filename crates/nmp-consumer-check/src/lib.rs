@@ -114,7 +114,7 @@ pub fn describe_coverage_entry(entry: &FilterCoverageEntry) -> String {
 }
 
 /// Names `AcquisitionEvidence` as an explicit type -- the scoped, per-query
-/// evidence `nmp::Subscription::recv`'s `RowsMsg` carries alongside every
+/// evidence `nmp::Subscription::recv`'s `Frame` carries alongside every
 /// row batch (never engine-global, never a completeness verdict). Mirrors
 /// [`describe_coverage_entry`]'s "explicit type, not just a `Debug` field
 /// read" proof for the diagnostics side, but for the query-observation
@@ -211,7 +211,7 @@ mod tests {
             .expect("fixed test secret key must parse");
 
         let subscription = engine
-            .observe(build_derived_index_query())
+            .observe(build_derived_index_query(), None)
             .expect("engine is open");
         drop(subscription); // explicit early withdraw, exercised via Drop
 

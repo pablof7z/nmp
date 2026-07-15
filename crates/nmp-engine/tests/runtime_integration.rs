@@ -991,12 +991,15 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "reattach_receipt",
         "relay_information",
         "remove_signer",
+        "request_rows",
         "set_active_account",
         "shutdown",
         "sign_event",
         "sign_event_with_completion",
         "subscribe",
+        "subscribe_history",
         "unsubscribe",
+        "unsubscribe_history",
     ];
     expected.sort_unstable();
     assert_eq!(

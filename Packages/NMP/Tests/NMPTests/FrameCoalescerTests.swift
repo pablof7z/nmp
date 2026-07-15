@@ -11,7 +11,7 @@ import XCTest
 
 final class FrameCoalescerTests: XCTestCase {
     /// A burst of pushes arriving far faster than the coalescing interval
-    /// (the shape of historical replay flooding `onBatch`/`onSnapshot`) must
+    /// (the shape of historical replay flooding `onFrame`/`onSnapshot`) must
     /// collapse into far fewer deliveries than pushes, while the LAST
     /// delivered value is the LAST pushed value -- no delta is ever lost
     /// from the final state, only intermediate *deliveries* are dropped.

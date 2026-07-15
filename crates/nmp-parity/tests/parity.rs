@@ -25,7 +25,7 @@ use nmp_ffi::nip02::{
 use nmp_ffi::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiDiagnosticsSnapshot, FfiDurability,
-    FfiFilter, FfiReceiptReattachment, FfiRowDelta, FfiShortfallFact, FfiSourceStatus,
+    FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRowDelta, FfiShortfallFact, FfiSourceStatus,
     FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 use nmp_nip02::{
@@ -897,12 +897,14 @@ struct FfiRows {
 }
 
 impl RowObserver for FfiRows {
-    fn on_batch(&self, deltas: Vec<FfiRowDelta>, evidence: FfiAcquisitionEvidence) {
+    fn on_frame(&self, frame: FfiFrame) {
+        // Unbounded FFI observations carry deltas + evidence; `window` is
+        // always `None` (windowing is a policy on the read noun, #485).
         let _ = self
             .tx
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .send((deltas, evidence));
+            .send((frame.deltas, frame.evidence));
     }
 
     fn on_closed(&self) {}
@@ -934,10 +936,10 @@ fn stage_direct_discovery(
     relay: &ScriptedRelay,
 ) -> ObservationCancel {
     let subscription = engine
-        .observe(LiveQuery::from_filter(direct_filter(
-            pubkey,
-            DISCOVERY_TRIGGER_KIND,
-        )))
+        .observe(
+            LiveQuery::from_filter(direct_filter(pubkey, DISCOVERY_TRIGGER_KIND)),
+            None,
+        )
         .expect("direct discovery query must open");
     let cancel = subscription.cancel_handle();
     let (tx, rx) = mpsc::channel();
@@ -951,8 +953,8 @@ fn stage_direct_discovery(
 
     let deadline = Instant::now() + WAIT;
     loop {
-        let (_deltas, evidence) = recv_before(&rx, deadline, "direct discovery query");
-        let evidence = normalize_direct_evidence(evidence, relay.url.as_str());
+        let frame = recv_before(&rx, deadline, "direct discovery query");
+        let evidence = normalize_direct_evidence(frame.evidence, relay.url.as_str());
         if evidence == expected_limited_evidence() {
             break;
         }
@@ -969,6 +971,7 @@ fn stage_ffi_discovery(
     let handle = engine
         .observe(
             ffi_filter(pubkey, DISCOVERY_TRIGGER_KIND),
+            None,
             Box::new(FfiRows { tx: Mutex::new(tx) }),
         )
         .expect("FFI discovery query must open");
@@ -1515,10 +1518,10 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let discovery_cancel = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay);
 
     let subscription = engine
-        .observe(LiveQuery::from_filter(direct_filter(
-            &pubkey.to_hex(),
-            QUERY_KIND,
-        )))
+        .observe(
+            LiveQuery::from_filter(direct_filter(&pubkey.to_hex(), QUERY_KIND)),
+            None,
+        )
         .expect("direct query must open");
     let query_cancel = subscription.cancel_handle();
     let (rows_tx, rows_rx) = mpsc::channel();
@@ -1532,9 +1535,9 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
     let evidence = loop {
-        let (deltas, evidence) = recv_before(&rows_rx, rows_deadline, "direct query");
-        apply_direct_deltas(&mut rows, deltas, &relay_url);
-        let normalized = normalize_direct_evidence(evidence, &relay_url);
+        let frame = recv_before(&rows_rx, rows_deadline, "direct query");
+        apply_direct_deltas(&mut rows, frame.deltas, &relay_url);
+        let normalized = normalize_direct_evidence(frame.evidence, &relay_url);
         if rows.contains_key(&expected_row_id) && normalized == expected_limited_evidence() {
             break normalized;
         }
@@ -1656,6 +1659,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     let query_handle = engine
         .observe(
             ffi_filter(&pubkey, QUERY_KIND),
+            None,
             Box::new(FfiRows {
                 tx: Mutex::new(rows_tx),
             }),

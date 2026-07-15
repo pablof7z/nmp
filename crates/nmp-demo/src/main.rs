@@ -34,9 +34,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, Filter,
-    IdentityField, Kind, LiveQuery, PublicKey, RowDelta, RowsMsg, Selector, Timestamp,
-    UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, Filter, Frame,
+    IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector, Timestamp, UnsignedEvent,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::Keys;
 
@@ -178,7 +178,7 @@ fn main() {
 
     println!("\n-- subscribing to the follow-feed (kind:1 by target's kind:3 contacts) --\n");
     let subscription = engine
-        .observe(my_follows)
+        .observe(my_follows, None)
         .expect("engine is open just after construction");
 
     // `Subscription::recv()` is a blocking call -- the facade has no
@@ -188,7 +188,7 @@ fn main() {
     // uses, so `--secs` can still bound how long THIS app waits without
     // blocking on a facade primitive that has no notion of a deadline
     // itself.
-    let (rows_tx, rows_rx) = mpsc::channel::<RowsMsg>();
+    let (rows_tx, rows_rx) = mpsc::channel::<Frame>();
     // `_rows_thread`: not joined, for the same reason `_diag_thread` below
     // isn't (see the note at the end of `main`) -- this process reads
     // `rows_rx` directly and exits; the OS reclaims the detached thread (and
@@ -271,7 +271,9 @@ fn main() {
             break;
         }
         match rows_rx.recv_timeout(remaining) {
-            Ok((deltas, coverage)) => {
+            Ok(frame) => {
+                let deltas = frame.deltas;
+                let coverage = frame.evidence;
                 total_batches += 1;
                 raw_delta_entries += deltas.len();
                 let coverage_str = format!("{coverage:?}");

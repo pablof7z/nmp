@@ -147,7 +147,15 @@ data class AcquisitionEvidence(
     }
 }
 
-/** One `NMPQuery` element: the full accumulated snapshot (never a bare
- * delta -- the `Flow` bridge does the accumulation, see Query.kt) plus the
- * query's current scoped acquisition evidence. */
-data class RowBatch(val rows: List<Row>, val evidence: AcquisitionEvidence)
+/** One delivered read-noun element: the full row snapshot (never a bare
+ * delta -- unbounded observations accumulate deltas in the Query.kt bridge;
+ * windowed observations deliver authoritative snapshots directly, see
+ * Window.kt) plus the query's current scoped acquisition evidence. */
+data class RowBatch(
+    val rows: List<Row>,
+    val evidence: AcquisitionEvidence,
+    /** Mechanical growth state of the observation's expandable window --
+     * a fact, never a completeness claim. `null` iff the observation is
+     * unbounded (no window, hence no growth state to report). */
+    val load: WindowLoad? = null,
+)

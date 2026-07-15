@@ -47,11 +47,11 @@ use crate::persistent_store_lifetime::{
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
     ClaimSet, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
-    EventStore, GcReport, InFlightPhase, InsertOutcome, IntentId, IntentSigState, LaneDeadline,
-    LaneKey, LaneState, LocalOrigin, PersistenceError, PostHandoffState, PromoteOutcome,
-    Provenance, ReceiptState, RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent,
-    RecoveredLane, RecoveredReceipt, RecoveredRouteRevision, RefuseReason, RelayObserved,
-    RetractReason, SigState, StoredEvent, TransientCause, WriteDurability,
+    EventCursor, EventStore, GcReport, InFlightPhase, InsertOutcome, IntentId, IntentSigState,
+    LaneDeadline, LaneKey, LaneState, LocalOrigin, PersistenceError, PostHandoffState,
+    PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt, RecoveredAttemptDetails,
+    RecoveredIntent, RecoveredLane, RecoveredReceipt, RecoveredRouteRevision, RefuseReason,
+    RelayObserved, RetractReason, SigState, StoredEvent, TransientCause, WriteDurability,
 };
 
 /// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
@@ -1560,6 +1560,46 @@ fn ordered_fixed_range<const N: usize>(
     (lower, upper)
 }
 
+/// Exact ordered range for a bounded page. `exclusive_upper` means the upper
+/// key is the caller's exact cursor rather than the filter's inclusive
+/// `until` ceiling. Because ordered ids are inverted, keys below that cursor
+/// are exactly `created_at < t || (created_at == t && id > cursor.id)`.
+fn ordered_vec_page_range(
+    prefix: &[u8],
+    since: u64,
+    until: u64,
+    before: Option<EventCursor>,
+) -> Option<(Vec<u8>, Vec<u8>, bool)> {
+    let (lower, filter_upper) = ordered_vec_range(prefix, since, until);
+    match before {
+        Some(before) if before.created_at.as_secs() < since => None,
+        Some(before) if before.created_at.as_secs() <= until => Some((
+            lower,
+            ordered_vec_key(prefix, before.created_at, &before.event_id),
+            true,
+        )),
+        _ => Some((lower, filter_upper, false)),
+    }
+}
+
+fn ordered_fixed_page_range<const N: usize>(
+    prefix: &[u8],
+    since: u64,
+    until: u64,
+    before: Option<EventCursor>,
+) -> Option<([u8; N], [u8; N], bool)> {
+    let (lower, filter_upper) = ordered_fixed_range(prefix, since, until);
+    match before {
+        Some(before) if before.created_at.as_secs() < since => None,
+        Some(before) if before.created_at.as_secs() <= until => Some((
+            lower,
+            ordered_fixed_key(prefix, before.created_at, &before.event_id),
+            true,
+        )),
+        _ => Some((lower, filter_upper, false)),
+    }
+}
+
 fn created_at_key(event: &Event) -> [u8; 40] {
     ordered_fixed_key(&[], event.created_at, &event.id)
 }
@@ -2060,14 +2100,25 @@ impl VariableOrderedCursor {
         prefix: &[u8],
         since: u64,
         until: u64,
-    ) -> Result<Self, PersistenceError> {
-        let (lower, upper) = ordered_vec_range(prefix, since, until);
-        Ok(Self {
-            entries: table
+        before: Option<EventCursor>,
+    ) -> Result<Option<Self>, PersistenceError> {
+        let Some((lower, upper, exclusive_upper)) =
+            ordered_vec_page_range(prefix, since, until, before)
+        else {
+            return Ok(None);
+        };
+        let entries = if exclusive_upper {
+            table
+                .range(lower.as_slice()..upper.as_slice())
+                .map_err(persist_err)?
+        } else {
+            table
                 .range(lower.as_slice()..=upper.as_slice())
                 .map_err(persist_err)?
-                .rev(),
-        })
+        };
+        Ok(Some(Self {
+            entries: entries.rev(),
+        }))
     }
 
     fn next_head(&mut self, cursor: usize) -> Result<Option<OrderedHead>, PersistenceError> {
@@ -2097,14 +2148,25 @@ impl<const N: usize> FixedOrderedCursor<N> {
         prefix: &[u8],
         since: u64,
         until: u64,
-    ) -> Result<Self, PersistenceError> {
-        let (lower, upper) = ordered_fixed_range(prefix, since, until);
-        Ok(Self {
-            entries: table
+        before: Option<EventCursor>,
+    ) -> Result<Option<Self>, PersistenceError> {
+        let Some((lower, upper, exclusive_upper)) =
+            ordered_fixed_page_range(prefix, since, until, before)
+        else {
+            return Ok(None);
+        };
+        let entries = if exclusive_upper {
+            table
+                .range::<&[u8; N]>(&lower..&upper)
+                .map_err(persist_err)?
+        } else {
+            table
                 .range::<&[u8; N]>(&lower..=&upper)
                 .map_err(persist_err)?
-                .rev(),
-        })
+        };
+        Ok(Some(Self {
+            entries: entries.rev(),
+        }))
     }
 
     fn next_head(&mut self, cursor: usize) -> Result<Option<OrderedHead>, PersistenceError> {
@@ -2185,6 +2247,13 @@ struct OrderedPlan {
     index: OrderedIndex,
     prefixes: Vec<Vec<u8>>,
     estimated_rows: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OrderedWindow {
+    since: u64,
+    until: u64,
+    before: Option<EventCursor>,
 }
 
 // A composite author×kind index is useful only while its OR-range fan-out
@@ -3545,8 +3614,7 @@ impl RedbStore {
         &self,
         index: &redb::ReadOnlyTable<&[u8; N], EventKey>,
         prefixes: &[Vec<u8>],
-        since: u64,
-        until: u64,
+        window: OrderedWindow,
         limit: Option<usize>,
         materialize_if_visible: &mut impl FnMut(
             EventKey,
@@ -3554,13 +3622,22 @@ impl RedbStore {
             -> Result<Option<StoredEvent>, PersistenceError>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         if let [prefix] = prefixes {
-            let (lower, upper) = ordered_fixed_range(prefix, since, until);
+            let Some((lower, upper, exclusive_upper)) =
+                ordered_fixed_page_range(prefix, window.since, window.until, window.before)
+            else {
+                return Ok(Vec::new());
+            };
+            let entries = if exclusive_upper {
+                index
+                    .range::<&[u8; N]>(&lower..&upper)
+                    .map_err(persist_err)?
+            } else {
+                index
+                    .range::<&[u8; N]>(&lower..=&upper)
+                    .map_err(persist_err)?
+            };
             let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-            for entry in index
-                .range::<&[u8; N]>(&lower..=&upper)
-                .map_err(persist_err)?
-                .rev()
-            {
+            for entry in entries.rev() {
                 let (_key, value) = entry.map_err(persist_err)?;
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
@@ -3576,8 +3653,13 @@ impl RedbStore {
 
         let mut cursors: Vec<_> = prefixes
             .iter()
-            .map(|prefix| FixedOrderedCursor::new(index, prefix, since, until))
-            .collect::<Result<_, _>>()?;
+            .map(|prefix| {
+                FixedOrderedCursor::new(index, prefix, window.since, window.until, window.before)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         let mut heap = BinaryHeap::new();
         for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
             if let Some(head) = cursor.next_head(cursor_index)? {
@@ -3612,8 +3694,7 @@ impl RedbStore {
         &self,
         index: &redb::ReadOnlyTable<&[u8], EventKey>,
         prefixes: &[Vec<u8>],
-        since: u64,
-        until: u64,
+        window: OrderedWindow,
         limit: Option<usize>,
         materialize_if_visible: &mut impl FnMut(
             EventKey,
@@ -3621,13 +3702,22 @@ impl RedbStore {
             -> Result<Option<StoredEvent>, PersistenceError>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         if let [prefix] = prefixes {
-            let (lower, upper) = ordered_vec_range(prefix, since, until);
+            let Some((lower, upper, exclusive_upper)) =
+                ordered_vec_page_range(prefix, window.since, window.until, window.before)
+            else {
+                return Ok(Vec::new());
+            };
+            let entries = if exclusive_upper {
+                index
+                    .range(lower.as_slice()..upper.as_slice())
+                    .map_err(persist_err)?
+            } else {
+                index
+                    .range(lower.as_slice()..=upper.as_slice())
+                    .map_err(persist_err)?
+            };
             let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-            for entry in index
-                .range(lower.as_slice()..=upper.as_slice())
-                .map_err(persist_err)?
-                .rev()
-            {
+            for entry in entries.rev() {
                 let (_key, value) = entry.map_err(persist_err)?;
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
@@ -3643,8 +3733,13 @@ impl RedbStore {
 
         let mut cursors: Vec<_> = prefixes
             .iter()
-            .map(|prefix| VariableOrderedCursor::new(index, prefix, since, until))
-            .collect::<Result<_, _>>()?;
+            .map(|prefix| {
+                VariableOrderedCursor::new(index, prefix, window.since, window.until, window.before)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         let mut heap = BinaryHeap::new();
         for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
             if let Some(head) = cursor.next_head(cursor_index)? {
@@ -3684,7 +3779,9 @@ impl RedbStore {
         read_txn: &redb::ReadTransaction,
         plan: &OrderedPlan,
         filter: &Filter,
+        before: Option<EventCursor>,
         limit: Option<usize>,
+        observed_by: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let local = read_txn.open_table(EVENT_LOCAL).map_err(persist_err)?;
@@ -3692,6 +3789,7 @@ impl RedbStore {
             .open_table(EVENT_OBSERVATIONS)
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
+        let relay_keys = read_txn.open_table(RELAY_KEYS).map_err(persist_err)?;
         let outbox_suppress_by_id = read_txn
             .open_table(OUTBOX_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
@@ -3700,10 +3798,39 @@ impl RedbStore {
             .map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
+        let window = OrderedWindow {
+            since,
+            until,
+            before,
+        };
         let mut relay_cache = HashMap::new();
+        let eligible_relay_keys = if let Some(eligible) = observed_by {
+            let mut keys = BTreeSet::new();
+            for relay in eligible {
+                if let Some(key) = relay_keys.get(relay.as_str()).map_err(persist_err)? {
+                    keys.insert(key.value());
+                }
+            }
+            Some(keys)
+        } else {
+            None
+        };
         let prepared_filter = PreparedFilter::new(filter);
         let mut materialize_if_visible =
             |event_key: EventKey| -> Result<Option<StoredEvent>, PersistenceError> {
+                if let Some(eligible) = &eligible_relay_keys {
+                    let mut observed = false;
+                    for relay_key in eligible {
+                        let key = observation_key(event_key, *relay_key);
+                        if observations.get(&key).map_err(persist_err)?.is_some() {
+                            observed = true;
+                            break;
+                        }
+                    }
+                    if !observed {
+                        return Ok(None);
+                    }
+                }
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_event_values.fetch_add(1, Ordering::Relaxed);
                 let Some(value) = events.get(event_key).map_err(persist_err)? else {
@@ -3742,8 +3869,7 @@ impl RedbStore {
                 self.scan_fixed_ordered(
                     &index,
                     &plan.prefixes,
-                    since,
-                    until,
+                    window,
                     limit,
                     &mut materialize_if_visible,
                 )
@@ -3753,8 +3879,7 @@ impl RedbStore {
                 self.scan_fixed_ordered(
                     &index,
                     &plan.prefixes,
-                    since,
-                    until,
+                    window,
                     limit,
                     &mut materialize_if_visible,
                 )
@@ -3764,8 +3889,7 @@ impl RedbStore {
                 self.scan_fixed_ordered(
                     &index,
                     &plan.prefixes,
-                    since,
-                    until,
+                    window,
                     limit,
                     &mut materialize_if_visible,
                 )
@@ -3775,8 +3899,7 @@ impl RedbStore {
                 self.scan_fixed_ordered(
                     &index,
                     &plan.prefixes,
-                    since,
-                    until,
+                    window,
                     limit,
                     &mut materialize_if_visible,
                 )
@@ -3786,8 +3909,7 @@ impl RedbStore {
                 self.scan_variable_ordered(
                     &index,
                     &plan.prefixes,
-                    since,
-                    until,
+                    window,
                     limit,
                     &mut materialize_if_visible,
                 )
@@ -4148,7 +4270,7 @@ impl EventStore for RedbStore {
         }
 
         let plan = plan_ordered_query(&read_txn, filter)?;
-        self.query_ordered(&read_txn, &plan, filter, None)
+        self.query_ordered(&read_txn, &plan, filter, None, None, None)
     }
 
     fn query_newest(
@@ -4183,7 +4305,193 @@ impl EventStore for RedbStore {
         let read_txn = self.db.begin_read().map_err(persist_err)?;
 
         let plan = plan_ordered_query(&read_txn, filter)?;
-        self.query_ordered(&read_txn, &plan, filter, Some(limit))
+        self.query_ordered(&read_txn, &plan, filter, None, Some(limit), None)
+    }
+
+    fn query_newest_observed_by(
+        &self,
+        filter: &Filter,
+        relays: &BTreeSet<RelayUrl>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0
+            || relays.is_empty()
+            || filter
+                .since
+                .zip(filter.until)
+                .is_some_and(|(since, until)| since > until)
+            || filter.generic_tags.values().any(BTreeSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            let mut rows = self.query(filter)?;
+            rows.retain(|row| {
+                row.provenance
+                    .seen
+                    .keys()
+                    .any(|relay| relays.contains(relay))
+            });
+            rows.sort_by(|a, b| {
+                b.event
+                    .created_at
+                    .cmp(&a.event.created_at)
+                    .then_with(|| a.event.id.cmp(&b.event.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
+        }
+
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let plan = plan_ordered_query(&read_txn, filter)?;
+        self.query_ordered(&read_txn, &plan, filter, None, Some(limit), Some(relays))
+    }
+
+    fn query_newest_before(
+        &self,
+        filter: &Filter,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0
+            || filter
+                .since
+                .zip(filter.until)
+                .is_some_and(|(since, until)| since > until)
+            || filter.generic_tags.values().any(BTreeSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        // Exact ids are already a caller-bounded lookup rather than an
+        // ordered index range. Preserve that narrow path, then apply the
+        // same exact exclusive cursor predicate as the MemoryStore oracle.
+        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            let mut rows = self.query(filter)?;
+            rows.retain(|row| {
+                row.event.created_at < before.created_at
+                    || (row.event.created_at == before.created_at && row.event.id > before.event_id)
+            });
+            rows.sort_by(|a, b| {
+                b.event
+                    .created_at
+                    .cmp(&a.event.created_at)
+                    .then_with(|| a.event.id.cmp(&b.event.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
+        }
+
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let plan = plan_ordered_query(&read_txn, filter)?;
+        self.query_ordered(&read_txn, &plan, filter, Some(before), Some(limit), None)
+    }
+
+    fn query_newest_before_observed_by(
+        &self,
+        filter: &Filter,
+        relays: &BTreeSet<RelayUrl>,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0
+            || relays.is_empty()
+            || filter
+                .since
+                .zip(filter.until)
+                .is_some_and(|(since, until)| since > until)
+            || filter.generic_tags.values().any(BTreeSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            let mut rows = self.query(filter)?;
+            rows.retain(|row| {
+                (row.event.created_at < before.created_at
+                    || (row.event.created_at == before.created_at
+                        && row.event.id > before.event_id))
+                    && row
+                        .provenance
+                        .seen
+                        .keys()
+                        .any(|relay| relays.contains(relay))
+            });
+            rows.sort_by(|a, b| {
+                b.event
+                    .created_at
+                    .cmp(&a.event.created_at)
+                    .then_with(|| a.event.id.cmp(&b.event.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
+        }
+
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let plan = plan_ordered_query(&read_txn, filter)?;
+        self.query_ordered(
+            &read_txn,
+            &plan,
+            filter,
+            Some(before),
+            Some(limit),
+            Some(relays),
+        )
+    }
+
+    fn query_newest_before_any(
+        &self,
+        filters: &[Filter],
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            // The first `limit` rows of the global union can contain no row
+            // ranked below `limit` inside every component that matches it.
+            // Therefore each component scan stays caller-bounded while this
+            // one logical door performs the exact de-duplicated merge.
+            for row in self.query_newest_before(filter, before, limit)? {
+                by_id.entry(row.event.id).or_insert(row);
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    fn query_newest_before_any_observed_by(
+        &self,
+        filters: &[Filter],
+        relays: &BTreeSet<RelayUrl>,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() || relays.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            for row in self.query_newest_before_observed_by(filter, relays, before, limit)? {
+                by_id.entry(row.event.id).or_insert(row);
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
     }
 
     fn remove(
@@ -7876,6 +8184,171 @@ mod tests {
         assert_eq!(
             rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
             expected[..3]
+        );
+    }
+
+    #[test]
+    fn query_newest_before_starts_after_exact_same_second_key_in_page_work() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tag-cursor-work.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://groups.example").unwrap();
+        let created_at = Timestamp::from(1_000u64);
+        let mut expected = Vec::new();
+
+        for i in 0..240u64 {
+            let event = room_event(
+                &keys,
+                "target",
+                created_at.as_secs(),
+                &format!("target-{i}"),
+            );
+            expected.push(event.id);
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(2_000 + i)),
+                )
+                .unwrap();
+        }
+        expected.sort();
+
+        let filter =
+            Filter::new().custom_tag(SingleLetterTag::lowercase(nostr::Alphabet::H), "target");
+        let before = EventCursor::new(created_at, expected[119]);
+        store.reset_query_work();
+        let rows = store.query_newest_before(&filter, before, 10).unwrap();
+
+        assert_eq!(
+            rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            expected[120..130]
+        );
+        assert_eq!(
+            store.query_work(),
+            (10, 10, 10),
+            concat!(
+                "the redb range must begin strictly after the exact cursor key; ",
+                "none of the 120 newer/equal-before rows may be scanned or skipped"
+            )
+        );
+    }
+
+    #[test]
+    fn union_replacement_page_work_is_bounded_per_root_and_deduplicated_globally() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("union-replacement-work.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let author_a = nostr::Keys::generate();
+        let author_b = nostr::Keys::generate();
+        let noise = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://union-work.example").unwrap();
+        let mut newest_a = Vec::new();
+
+        for index in 0..64u64 {
+            let event = room_event(&author_a, "a", 3_000 - index, &format!("author-a-{index}"));
+            newest_a.push(event.id);
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(10_000 + index)),
+                )
+                .unwrap();
+            store
+                .insert(
+                    room_event(&author_b, "b", 2_000 - index, &format!("author-b-{index}")),
+                    RelayObserved::new(relay.clone(), Timestamp::from(11_000 + index)),
+                )
+                .unwrap();
+        }
+        for index in 0..256u64 {
+            store
+                .insert(
+                    room_event(&noise, "noise", 1_000 - index, &format!("noise-{index}")),
+                    RelayObserved::new(relay.clone(), Timestamp::from(12_000 + index)),
+                )
+                .unwrap();
+        }
+
+        let room_kind = Kind::from(9u16);
+        let filters = vec![
+            Filter::new().kind(room_kind).author(author_a.public_key()),
+            Filter::new().kind(room_kind).author(author_b.public_key()),
+            // This root overlaps both author roots and the large noise set.
+            // Its first three rows are the same rows returned by author A.
+            Filter::new().kind(room_kind),
+        ];
+        let before = EventCursor::new(Timestamp::from(4_000u64), newest_a[0]);
+        store.reset_query_work();
+        let rows = store.query_newest_before_any(&filters, before, 3).unwrap();
+
+        assert_eq!(
+            rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            newest_a[..3],
+            "overlapping roots must merge into one canonical de-duplicated page"
+        );
+        assert_eq!(
+            store.query_work(),
+            (9, 9, 9),
+            concat!(
+                "three roots at limit three must consume and materialize exactly nine rows; ",
+                "the 384-row store cannot turn union replacement into a full scan"
+            )
+        );
+    }
+
+    #[test]
+    fn strict_ordered_scan_stops_after_requested_eligible_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("strict-provenance-work.redb");
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        let keys = nostr::Keys::generate();
+        let wanted = RelayUrl::parse("wss://wanted.example").unwrap();
+        let other = RelayUrl::parse("wss://other.example").unwrap();
+
+        for index in 0..20u64 {
+            store
+                .insert(
+                    room_event(
+                        &keys,
+                        "target",
+                        2_000 - index,
+                        &format!("ineligible-{index}"),
+                    ),
+                    RelayObserved::new(other.clone(), Timestamp::from(3_000 + index)),
+                )
+                .unwrap();
+        }
+        for index in 0..3u64 {
+            store
+                .insert(
+                    room_event(&keys, "target", 1_000 - index, &format!("eligible-{index}")),
+                    RelayObserved::new(wanted.clone(), Timestamp::from(4_000 + index)),
+                )
+                .unwrap();
+        }
+
+        let filter =
+            Filter::new().custom_tag(SingleLetterTag::lowercase(nostr::Alphabet::H), "target");
+        let eligible = BTreeSet::from([wanted]);
+        store.reset_query_work();
+        let rows = store
+            .query_newest_observed_by(&filter, &eligible, 3)
+            .unwrap();
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![1_000, 999, 998]
+        );
+        assert_eq!(
+            store.query_work(),
+            (23, 3, 3),
+            concat!(
+                "the ordered index may inspect the twenty newer ineligible keys, ",
+                "but event decoding/provenance materialization stops at the three eligible rows"
+            )
         );
     }
 

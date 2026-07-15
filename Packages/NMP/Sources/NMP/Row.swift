@@ -146,10 +146,16 @@ public struct AcquisitionEvidence: Sendable, Hashable {
     }
 }
 
-/// One `NMPQuery` element: the full accumulated snapshot (never a bare
-/// delta -- `NMPQuery` does the accumulation, see that type's doc) plus the
-/// query's current scoped acquisition evidence.
+/// One `NMPQuery` element: the full current snapshot (never a bare delta --
+/// `NMPQuery` folds unbounded delta streams and retains windowed
+/// authoritative frames, see that type's doc) plus the query's current
+/// scoped acquisition evidence.
 public struct RowBatch: Sendable {
     public let rows: [Row]
     public let evidence: AcquisitionEvidence
+    /// The window's mechanical growth fact (#485). Always present on a
+    /// windowed observation; `nil` on an unbounded one -- there is no
+    /// window whose growth could be reported, exactly as
+    /// `NMPQuery.requestRows(atLeast:)` refuses with `.unwindowed` there.
+    public let load: WindowLoad?
 }
