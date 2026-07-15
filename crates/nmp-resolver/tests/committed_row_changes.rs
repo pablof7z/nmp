@@ -36,6 +36,7 @@ fn inserted_row_carries_every_same_batch_source_and_later_growth_carries_only_ne
             (event.clone(), observed(second.clone(), 12)),
         ])
         .unwrap()
+        .committed
         .row_changes;
     assert_eq!(inserted.inserted.len(), 1);
     assert_eq!(inserted.inserted[0].event.id, event.id);
@@ -52,6 +53,7 @@ fn inserted_row_carries_every_same_batch_source_and_later_growth_carries_only_ne
             (event.clone(), observed(fourth.clone(), 14)),
         ])
         .unwrap()
+        .committed
         .row_changes;
     assert!(grew.inserted.is_empty());
     assert!(grew.removed.is_empty());
@@ -81,6 +83,7 @@ fn same_batch_insert_then_delete_reports_only_the_durable_deletion_row() {
             (deletion.clone(), observed(source.clone(), 21)),
         ])
         .unwrap()
+        .committed
         .row_changes;
 
     assert_eq!(changes.inserted.len(), 1);
@@ -111,6 +114,7 @@ fn same_batch_supersession_chain_collapses_to_old_removed_and_final_winner_inser
             (winner.clone(), observed(source.clone(), 31)),
         ])
         .unwrap()
+        .committed
         .row_changes;
 
     assert_eq!(changes.inserted.len(), 1);

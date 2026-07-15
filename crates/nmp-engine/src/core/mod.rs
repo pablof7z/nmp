@@ -3194,9 +3194,15 @@ impl<S: EventStore> EngineCore<S> {
         match self.resolver.ingest_observed_detailed(events) {
             Err(error) => self.degrade_store(error, effects),
             Ok(ingest) => {
-                let demand_changed = !ingest.delta.is_empty();
-                let affected_handles = ingest.affected_handles;
-                let row_changes = ingest.row_changes;
+                // Recompute this up front from the embedded `committed.delta`
+                // before it moves into `apply_committed_mutation_with` below:
+                // it drives the diagnostics-vs-recompile choice, which is a
+                // genuinely relay-specific concern (event counters need a
+                // diagnostics beat even when the shared apply took the
+                // exact/no-recompile path) and therefore stays outside the
+                // one shared refresh-vs-apply decision rather than
+                // re-implementing it.
+                let demand_changed = !ingest.committed.delta.is_empty();
                 let satisfied_pending = !ingest.satisfied_intents.is_empty();
                 for (intent_id, canonical) in ingest.satisfied_intents {
                     if let Some((receipt_id, pending)) = self
@@ -3219,9 +3225,7 @@ impl<S: EventStore> EngineCore<S> {
                 // router plan. Avoid rebuilding it on every EVENT batch; a
                 // resolver atom delta or an actual NIP-65 directory change is
                 // the evidence that routing may differ.
-                if demand_changed || directory_changed {
-                    self.recompile(effects);
-                } else {
+                if !(demand_changed || directory_changed) {
                     // Event counters are diagnostics facts even when the
                     // demand/router plan is unchanged. Preserve the prior
                     // observable update without paying a full router compile.
@@ -3233,11 +3237,17 @@ impl<S: EventStore> EngineCore<S> {
                 // keep that path broad. The dominant ordinary-ingest path is
                 // exact: refresh only subscriptions whose root filter matches
                 // a changed row (or whose shared projection shape changed).
-                if demand_changed || directory_changed || satisfied_pending {
-                    self.refresh_all_handles(effects);
-                } else {
-                    self.apply_committed_row_changes(affected_handles, &row_changes, effects);
-                }
+                // `directory_changed`/`satisfied_pending` are relay-only
+                // evidence the resolver's own `delta` never carries, so they
+                // ride in as explicit force flags on the SAME shared apply
+                // `apply_committed_mutation` uses for every other committed-
+                // mutation door, instead of re-deciding refresh-vs-apply here.
+                self.apply_committed_mutation_with(
+                    ingest.committed,
+                    directory_changed,
+                    directory_changed || satisfied_pending,
+                    effects,
+                );
             }
         }
     }
@@ -3937,9 +3947,36 @@ impl<S: EventStore> EngineCore<S> {
     /// Reactive demand changes may alter router/evidence shape and therefore
     /// keep the broad full-refresh oracle. A stable shape can deliver the
     /// exact durable row facts through #195's fail-safe incremental algebra.
+    ///
+    /// This is the plain form used by every committed-mutation door that has
+    /// no extra non-resolver evidence of its own (`retract`,
+    /// `react_to_compensation`, `accept_local`): the resolver's own `delta`
+    /// is the ONLY signal for the broad-vs-exact choice.
     fn apply_committed_mutation(
         &mut self,
         committed: CommittedMutationResult,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.apply_committed_mutation_with(committed, false, false, effects);
+    }
+
+    /// The one shared refresh-vs-apply decision behind every committed-
+    /// mutation door, generalized with two force flags for callers that hold
+    /// extra evidence the resolver's `delta` cannot see. Relay ingest is the
+    /// only such caller today: an NIP-65 directory winner can change the
+    /// capped source plan even when the resolver's own demand shape is
+    /// unchanged (`force_recompile`), and a locally-pending write getting
+    /// satisfied by a verified relay copy needs every handle re-read even
+    /// when neither demand nor directory changed (`force_broad_refresh`,
+    /// folded together with `force_recompile` since a directory change also
+    /// implies a broad refresh). Both flags default to `false` through
+    /// [`Self::apply_committed_mutation`], which reproduces this function's
+    /// original (pre-#230) behavior exactly.
+    fn apply_committed_mutation_with(
+        &mut self,
+        committed: CommittedMutationResult,
+        force_recompile: bool,
+        force_broad_refresh: bool,
         effects: &mut Vec<Effect>,
     ) {
         let CommittedMutationResult {
@@ -3947,11 +3984,14 @@ impl<S: EventStore> EngineCore<S> {
             affected_handles,
             row_changes,
         } = committed;
-        if delta.is_empty() {
-            self.apply_committed_row_changes(affected_handles, &row_changes, effects);
-        } else {
+        let demand_changed = !delta.is_empty();
+        if demand_changed || force_recompile {
             self.recompile(effects);
+        }
+        if demand_changed || force_broad_refresh {
             self.refresh_all_handles(effects);
+        } else {
+            self.apply_committed_row_changes(affected_handles, &row_changes, effects);
         }
     }
 
@@ -4453,13 +4493,16 @@ impl EngineCore<nmp_store::RedbStore> {
             .resolver
             .ingest_observed_detailed(events)
             .expect("benchmark fixture store commit");
-        assert!(ingest.delta.is_empty(), "benchmark shape changed demand");
+        assert!(
+            ingest.committed.delta.is_empty(),
+            "benchmark shape changed demand"
+        );
         assert!(
             ingest.satisfied_intents.is_empty(),
             "benchmark event unexpectedly satisfied a local intent"
         );
         effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
-        self.refresh_handles(ingest.affected_handles, &mut effects);
+        self.refresh_handles(ingest.committed.affected_handles, &mut effects);
         effects
     }
 
