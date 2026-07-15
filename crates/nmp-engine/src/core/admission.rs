@@ -61,6 +61,19 @@ impl RelayAdmissionPolicy {
         }
     }
 
+    /// The opted-in local host keys, in [`nmp_transport::relay_host_key`]'s
+    /// normalized form. Exposed (issue #519) so the SAME allowlist this
+    /// policy enforces at discovery-time admission can also be threaded down
+    /// into the transport pool's post-DNS-resolution IP check
+    /// (`nmp_transport::PoolConfig::allowed_local_hosts`) and the NIP-11
+    /// fetcher's resolver — both need to keep admitting an operator's
+    /// INTENTIONAL local relay after its address is actually resolved, not
+    /// only when its URL string is first classified.
+    #[must_use]
+    pub fn allowed_local_hosts(&self) -> &BTreeSet<String> {
+        &self.allowed_local_hosts
+    }
+
     /// True iff a DISCOVERED relay at `url` may enter the routable directory:
     /// a public host always may; a `Local` host may ONLY if its host key was
     /// explicitly opted in.

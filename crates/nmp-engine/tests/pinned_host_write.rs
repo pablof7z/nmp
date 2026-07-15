@@ -141,7 +141,7 @@ async fn pinned_host_send_reaches_only_the_host_and_round_trips_unchanged() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     handle
@@ -261,7 +261,7 @@ async fn pinned_host_rejection_surfaces_as_a_typed_status_never_silence() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     handle

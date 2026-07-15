@@ -60,7 +60,7 @@
 mod diagnostics_channel;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -639,9 +639,22 @@ impl EngineThread {
             (router, pool) => router.min(pool),
         };
         pool_config.max_relays = cap;
+        // Issue #519: thread the SAME opt-in local-host allowlist this
+        // `admission` policy enforces at discovery-time into both places
+        // that actually open a socket/DNS-resolve a relay, so an operator's
+        // intentional local relay keeps working after resolved-IP admission
+        // (`pool::connect`'s dial, `HttpFetcher`'s NIP-11 resolver) is
+        // enforced there too — see those modules' docs for why the URL
+        // string alone is never sufficient.
+        let allowed_local_hosts: Arc<BTreeSet<String>> =
+            Arc::new(admission.allowed_local_hosts().clone());
+        pool_config.allowed_local_hosts = Arc::clone(&allowed_local_hosts);
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let relay_information = RelayInformationService::new_with_admission(
+            native_tasks.clone(),
+            Arc::clone(&allowed_local_hosts),
+        );
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let (pool_evt_tx, pool_evt_rx) =
             cb::bounded::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));

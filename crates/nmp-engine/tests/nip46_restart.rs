@@ -247,7 +247,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
             directory(),
             10,
             PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
         )
         .expect("test engine thread construction");
         handle.set_active_account(Some(user.public_key()));
@@ -282,7 +282,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
         directory(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
@@ -372,7 +372,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     handle.set_active_account(Some(user.public_key()));

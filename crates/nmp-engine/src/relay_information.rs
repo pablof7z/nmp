@@ -6,7 +6,7 @@
 //! from the last acquisition error, so a transient failure never destroys
 //! useful presentation or capability evidence.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +16,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use futures_channel::oneshot;
+use nmp_transport::{
+    classify_ip, classify_relay_host, normalize_bare_host, relay_host_key, RelayHostClass,
+};
 use nostr::RelayUrl;
 use serde::Deserialize;
 use serde_json::Value;
@@ -493,6 +496,14 @@ trait Fetcher: Send + Sync + 'static {
 struct HttpFetcher {
     resolver_config: Option<hickory_resolver::config::ResolverConfig>,
     resolver_strategy: hickory_resolver::config::LookupIpStrategy,
+    /// Operator opt-in local-host allowlist (issue #519), in
+    /// [`nmp_transport::relay_host_key`]'s normalized form — the SAME set
+    /// `nmp-engine`'s `RelayAdmissionPolicy` enforces at discovery-time
+    /// admission. Empty (the default from [`Self::new`]) means NO host may
+    /// fetch NIP-11 over a loopback/private/link-local/unspecified/onion
+    /// host or resolved address; production wiring passes the engine's real
+    /// allowlist via [`Self::new_with_admission`].
+    allowed_local_hosts: Arc<BTreeSet<String>>,
 }
 
 /// An HTTP URL whose authority has been proven not to contain userinfo.
@@ -505,6 +516,18 @@ impl HttpFetcher {
         Self {
             resolver_config: None,
             resolver_strategy: hickory_resolver::config::LookupIpStrategy::Ipv4AndIpv6,
+            allowed_local_hosts: Arc::new(BTreeSet::new()),
+        }
+    }
+
+    /// Production constructor (issue #519): identical to [`Self::new`] but
+    /// carries the engine's real opt-in local-host allowlist so an
+    /// operator-configured local relay's NIP-11 document is still reachable
+    /// after the resolved-IP admission check below refuses everything else.
+    fn new_with_admission(allowed_local_hosts: Arc<BTreeSet<String>>) -> Self {
+        Self {
+            allowed_local_hosts,
+            ..Self::new()
         }
     }
 
@@ -513,6 +536,18 @@ impl HttpFetcher {
         Self {
             resolver_config: Some(config),
             resolver_strategy: hickory_resolver::config::LookupIpStrategy::Ipv4Only,
+            allowed_local_hosts: Arc::new(BTreeSet::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_resolver_config_and_admission(
+        config: hickory_resolver::config::ResolverConfig,
+        allowed_local_hosts: Arc<BTreeSet<String>>,
+    ) -> Self {
+        Self {
+            allowed_local_hosts,
+            ..Self::with_resolver_config(config)
         }
     }
 }
@@ -533,16 +568,26 @@ impl Fetcher for HttpFetcher {
         validators: Option<(&str, &str)>,
         cancellation: FetchCancellation,
     ) -> Result<FetchResult, RelayInformationError> {
+        // Issue #519 (HIGH): refuse a literal loopback/private/link-local/
+        // unspecified/onion HOST before a request is even built. This is the
+        // ONLY defense for an IP-literal relay URL (`ws://127.0.0.1`) — a
+        // literal address never reaches the DNS resolver below, so the
+        // resolver's own filtering can't see it. Matches the SAME
+        // classification `nmp-transport::classify_relay_host` applies at
+        // discovery-time admission; an operator-opted-in host still passes.
+        reject_unadmitted_local_host(relay, &self.allowed_local_hosts)?;
         let url = relay_http_url(relay)?;
         let validators =
             validators.map(|(etag, last_modified)| (etag.to_string(), last_modified.to_string()));
         let runtime = http_runtime()?;
+        let allowed_local_hosts = Arc::clone(&self.allowed_local_hosts);
         runtime.block_on(async move {
             let request = fetch_http(
                 url,
                 validators,
                 self.resolver_config.clone(),
                 self.resolver_strategy,
+                allowed_local_hosts,
             );
             let mut request = Box::pin(request);
             let mut cancelled = Box::pin(cancellation.receiver);
@@ -564,6 +609,29 @@ impl Fetcher for HttpFetcher {
     }
 }
 
+/// Refuse `relay` outright if its URL names a literal loopback/private/
+/// link-local/unspecified/onion HOST that the operator did not explicitly
+/// opt in (issue #519). Pure and DNS-free — the same classification
+/// `nmp-transport::classify_relay_host` applies at discovery-time admission,
+/// checked again here because `Handle::relay_information` is a public API
+/// any caller can invoke for ANY relay URL, admitted into the routable
+/// directory or not.
+fn reject_unadmitted_local_host(
+    relay: &RelayUrl,
+    allowed_local_hosts: &BTreeSet<String>,
+) -> Result<(), RelayInformationError> {
+    if classify_relay_host(relay) == RelayHostClass::Local
+        && !relay_host_key(relay).is_some_and(|host| allowed_local_hosts.contains(&host))
+    {
+        return Err(RelayInformationError::Http {
+            reason: "refusing NIP-11 fetch: relay host is loopback/private/link-local/\
+                     unspecified/onion and not operator opted-in"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn http_runtime() -> Result<tokio::runtime::Runtime, RelayInformationError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -579,11 +647,13 @@ async fn fetch_http(
     validators: Option<(String, String)>,
     resolver_config: Option<hickory_resolver::config::ResolverConfig>,
     resolver_strategy: hickory_resolver::config::LookupIpStrategy,
+    allowed_local_hosts: Arc<BTreeSet<String>>,
 ) -> Result<FetchResult, RelayInformationError> {
     // The client is deliberately born and dropped inside this flight's
     // current-thread runtime. Hickory therefore cannot retain runtime-bound
     // DNS work, and no client clone can outlive the owned executor task.
-    let resolver = HickoryReqwestResolver::new(resolver_config, resolver_strategy)?;
+    let resolver =
+        HickoryReqwestResolver::new(resolver_config, resolver_strategy, allowed_local_hosts)?;
     let client = reqwest::Client::builder()
         .hickory_dns(true)
         .dns_resolver(Arc::new(resolver))
@@ -689,12 +759,17 @@ async fn fetch_http(
 #[derive(Clone)]
 struct HickoryReqwestResolver {
     resolver: hickory_resolver::TokioResolver,
+    /// See [`HttpFetcher::allowed_local_hosts`] — the same set, threaded
+    /// down so a resolved answer for an opted-in host is still admitted
+    /// (issue #519).
+    allowed_local_hosts: Arc<BTreeSet<String>>,
 }
 
 impl HickoryReqwestResolver {
     fn new(
         config: Option<hickory_resolver::config::ResolverConfig>,
         strategy: hickory_resolver::config::LookupIpStrategy,
+        allowed_local_hosts: Arc<BTreeSet<String>>,
     ) -> Result<Self, RelayInformationError> {
         let mut builder = match config {
             Some(config) => hickory_resolver::TokioResolver::builder_with_config(
@@ -710,21 +785,45 @@ impl HickoryReqwestResolver {
         builder.options_mut().ip_strategy = strategy;
         Ok(Self {
             resolver: builder.build(),
+            allowed_local_hosts,
         })
     }
 }
 
 impl reqwest::dns::Resolve for HickoryReqwestResolver {
+    /// Resolve `name` and refuse (issue #519, HIGH) any answer that
+    /// classifies `Local` (loopback/RFC-1918/link-local/unspecified/IPv4-
+    /// mapped-private) unless `name` itself was operator opted in. If EVERY
+    /// resolved address is `Local` and not opted in, the whole lookup fails
+    /// closed — an empty `Addrs` would otherwise surface as a confusing
+    /// "connect to nothing" error further down reqwest's stack, whereas an
+    /// explicit `Err` here reports the real reason immediately. A host with
+    /// a MIX of local and public answers keeps only the public ones (the
+    /// common, benign case of a resolver also handing back an IPv6
+    /// link-local scope address alongside a real public one).
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let resolver = self.resolver.clone();
-        let name = name.as_str().to_string();
+        let allowed_local_hosts = Arc::clone(&self.allowed_local_hosts);
+        let query_name = name.as_str().to_string();
         Box::pin(async move {
-            let lookup = resolver.lookup_ip(name).await?;
-            let addrs: reqwest::dns::Addrs = Box::new(
-                lookup
-                    .into_iter()
-                    .map(|address| std::net::SocketAddr::new(address, 0)),
-            );
+            let lookup = resolver.lookup_ip(query_name.clone()).await?;
+            let host_opted_in = allowed_local_hosts.contains(&normalize_bare_host(&query_name));
+            let mut admitted = Vec::new();
+            for address in lookup {
+                if classify_ip(address) == RelayHostClass::Local && !host_opted_in {
+                    continue;
+                }
+                admitted.push(std::net::SocketAddr::new(address, 0));
+            }
+            if admitted.is_empty() {
+                let message = format!(
+                    "refusing to resolve {query_name}: every resolved address is \
+                     loopback/private/link-local/unspecified and the host is not operator \
+                     opted-in"
+                );
+                return Err(Box::<dyn std::error::Error + Send + Sync>::from(message));
+            }
+            let addrs: reqwest::dns::Addrs = Box::new(admitted.into_iter());
             Ok(addrs)
         })
     }
@@ -797,6 +896,24 @@ impl RelayInformationService {
         Self::with_executor_and_limits(
             executor,
             Arc::new(HttpFetcher::new()),
+            CACHE_CAPACITY,
+            WAITER_CAPACITY,
+        )
+    }
+
+    /// Production constructor (issue #519): identical to [`Self::new`] but
+    /// carries the engine's real `RelayAdmissionPolicy` opt-in local-host
+    /// allowlist through to the NIP-11 fetcher's resolved-IP admission
+    /// check, so an operator-configured local relay's document is still
+    /// reachable — see `EngineThread::spawn_with_native_task_limit`, the one
+    /// production call site.
+    pub(crate) fn new_with_admission(
+        executor: nmp_executor::Executor,
+        allowed_local_hosts: Arc<BTreeSet<String>>,
+    ) -> Self {
+        Self::with_executor_and_limits(
+            executor,
+            Arc::new(HttpFetcher::new_with_admission(allowed_local_hosts)),
             CACHE_CAPACITY,
             WAITER_CAPACITY,
         )
@@ -1567,12 +1684,40 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::thread::JoinHandle;
     use std::time::Instant;
 
     use super::*;
     use crate::core::{EngineCore, EngineMsg};
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
+
+    /// This whole test module's standing convention (long predating issue
+    /// #519) is a real `TcpListener::bind("127.0.0.1:0")` standing in for a
+    /// relay's HTTP endpoint. That is exactly the shape issue #519's
+    /// resolved-IP admission check now refuses by default, so every test
+    /// below that fetches from such a listener needs its host explicitly
+    /// opted in — precisely the "don't break the intentional local-relay
+    /// path" requirement, applied to this crate's own test doubles rather
+    /// than a real operator config.
+    fn loopback_admission() -> Arc<BTreeSet<String>> {
+        Arc::new(BTreeSet::from([
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+            "localhost".to_string(),
+        ]))
+    }
+
+    fn local_relay_information_service(
+        executor: nmp_executor::Executor,
+    ) -> RelayInformationService {
+        RelayInformationService::with_executor_and_limits(
+            executor,
+            Arc::new(HttpFetcher::new_with_admission(loopback_admission())),
+            CACHE_CAPACITY,
+            WAITER_CAPACITY,
+        )
+    }
 
     struct CountingFetcher {
         calls: AtomicUsize,
@@ -1995,7 +2140,8 @@ mod tests {
         });
 
         let relay = RelayUrl::parse(&format!("ws://{redirect_addr}")).unwrap();
-        let error = match HttpFetcher::new().fetch(&relay, None) {
+        let error = match HttpFetcher::new_with_admission(loopback_admission()).fetch(&relay, None)
+        {
             Err(error) => error,
             Ok(_) => panic!("a redirect must not be accepted as NIP-11 data"),
         };
@@ -2024,7 +2170,7 @@ mod tests {
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = RelayInformationService::new(executor.clone());
+        let service = local_relay_information_service(executor.clone());
         let value = service
             .get(relay.clone(), RelayInformationCachePolicy::Refresh)
             .unwrap();
@@ -2060,7 +2206,7 @@ mod tests {
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = RelayInformationService::new(executor.clone());
+        let service = local_relay_information_service(executor.clone());
         let value = service
             .get(relay, RelayInformationCachePolicy::Refresh)
             .unwrap();
@@ -2144,7 +2290,7 @@ mod tests {
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = RelayInformationService::new(executor.clone());
+        let service = local_relay_information_service(executor.clone());
 
         let maximum = service
             .get(relay.clone(), RelayInformationCachePolicy::Refresh)
@@ -2562,7 +2708,7 @@ mod tests {
             let _ = stream.read_to_end(&mut sink);
         });
         let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = RelayInformationService::new(executor.clone());
+        let service = local_relay_information_service(executor.clone());
         let retained = service.clone();
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         let receiver = service
@@ -2604,7 +2750,9 @@ mod tests {
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         let started = Instant::now();
-        let error = HttpFetcher::new().fetch(&relay, None).unwrap_err();
+        let error = HttpFetcher::new_with_admission(loopback_admission())
+            .fetch(&relay, None)
+            .unwrap_err();
         assert!(matches!(error, RelayInformationError::Http { .. }));
         assert!(started.elapsed() < Duration::from_secs(5));
         server.join().unwrap();
@@ -2631,14 +2779,18 @@ mod tests {
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         assert!(matches!(
-            HttpFetcher::new().fetch(&relay, None),
+            HttpFetcher::new_with_admission(loopback_admission()).fetch(&relay, None),
             Err(RelayInformationError::Http { .. })
         ));
         server.join().unwrap();
     }
 
-    #[test]
-    fn hickory_resolves_a_dns_hostname_without_system_gai() {
+    /// Spin up a fake authoritative DNS server that answers every A query
+    /// for `relay.nmp.test` with `127.0.0.1` (60-second TTL). Shared by the
+    /// opted-in-success and refused-by-default falsifiers below (issue
+    /// #519) — this DNS-injection harness itself was the confirmed exploit
+    /// surface (the fetch used to just... work).
+    fn spawn_loopback_dns() -> (hickory_resolver::config::ResolverConfig, JoinHandle<()>) {
         let dns = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let dns_address = dns.local_addr().unwrap();
         let dns_server = std::thread::spawn(move || {
@@ -2666,6 +2818,28 @@ mod tests {
             ]);
             dns.send_to(&response, peer).unwrap();
         });
+        let nameservers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
+            &[dns_address.ip()],
+            dns_address.port(),
+            true,
+        );
+        let resolver =
+            hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), nameservers);
+        (resolver, dns_server)
+    }
+
+    /// This test used to be the confirmed exploit (issue #519): a DNS answer
+    /// pointing `relay.nmp.test` at `127.0.0.1` let the NIP-11 fetch reach a
+    /// loopback listener with no opt-in at all. Now that
+    /// `HickoryReqwestResolver::resolve` refuses unopted-in `Local`
+    /// addresses, this exact scenario only still succeeds because the
+    /// fetcher is explicitly constructed with `relay.nmp.test` opted in —
+    /// pinning issue #519's "don't break the intentional local-relay path"
+    /// requirement using the SAME resolver-injection harness the original
+    /// exploit used.
+    #[test]
+    fn opted_in_host_still_resolves_and_fetches_through_hickory() {
+        let (resolver, dns_server) = spawn_loopback_dns();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -2678,20 +2852,33 @@ mod tests {
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
-        let nameservers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
-            &[dns_address.ip()],
-            dns_address.port(),
-            true,
-        );
-        let resolver =
-            hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), nameservers);
         let relay = RelayUrl::parse(&format!("ws://relay.nmp.test:{port}")).unwrap();
-        let value = HttpFetcher::with_resolver_config(resolver)
+        let allowed = Arc::new(BTreeSet::from(["relay.nmp.test".to_string()]));
+        let value = HttpFetcher::with_resolver_config_and_admission(resolver, allowed)
             .fetch(&relay, None)
             .unwrap();
         assert!(value.raw_json.is_some_and(|json| json.contains("Hostname")));
         dns_server.join().unwrap();
         server.join().unwrap();
+    }
+
+    /// issue #519 (HIGH) falsifier: the exact same DNS-to-loopback answer,
+    /// with NO opt-in, must now be refused rather than silently fetched.
+    /// Deliberately no HTTP listener at all here: a correct fix refuses the
+    /// resolved address before reqwest ever attempts to dial it, so there is
+    /// nothing for a listener to accept.
+    #[test]
+    fn dns_resolution_to_loopback_is_refused_without_opt_in() {
+        let (resolver, dns_server) = spawn_loopback_dns();
+        let relay = RelayUrl::parse("ws://relay.nmp.test:80").unwrap();
+        let error = HttpFetcher::with_resolver_config(resolver)
+            .fetch(&relay, None)
+            .unwrap_err();
+        assert!(
+            matches!(error, RelayInformationError::Http { .. }),
+            "expected a refused/failed HTTP fetch, got {error:?}"
+        );
+        dns_server.join().unwrap();
     }
 
     #[test]
@@ -2774,7 +2961,7 @@ mod tests {
         for userinfo in ["user:secret@", "user@", ":secret@"] {
             let relay = RelayUrl::parse(&format!("ws://{userinfo}{address}/nip11")).unwrap();
             assert!(matches!(
-                HttpFetcher::new().fetch(&relay, None),
+                HttpFetcher::new_with_admission(loopback_admission()).fetch(&relay, None),
                 Err(RelayInformationError::CredentialedRelayUrl)
             ));
         }
