@@ -608,6 +608,21 @@ enum Enum {
             ),
         },
         Variant {
+            name: "StoreStillOpen",
+            discr: None,
+            fields: [
+                Field {
+                    name: "path",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Destructive reset was refused because a live engine in this process\nowns the same canonical persistent-store path.",
+            ),
+        },
+        Variant {
             name: "ThreadUnavailable",
             discr: None,
             fields: [
@@ -5035,7 +5050,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Destructively reset a closed persistent NMP store. This removes all\ncanonical engine state at `store_path`, while leaving any separately\nconfigured native account checkpoint untouched. The operation is\nidempotent when the store does not exist.",
+        "Destructively reset a closed persistent NMP store. This removes all\ncanonical engine state at `store_path`, while leaving any separately\nconfigured native account checkpoint untouched. A live engine in this\nprocess using the same canonical path is refused with\n`FfiError::StoreStillOpen` without touching the file. Shut down or drop\nthat engine first. The operation is idempotent when the store does not\nexist; cross-process exclusion is not provided.",
     ),
     throws: Some(
         Enum {
@@ -5045,7 +5060,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reset_persistent_store",
     checksum: Some(
-        22685,
+        56595,
     ),
 }
 
