@@ -19,6 +19,7 @@ import uniffi.nmp_ffi.FfiContentResolutionDecision
 import uniffi.nmp_ffi.evaluateContentClaim
 import uniffi.nmp_ffi.evaluateContentResolution
 
+@ConsistentCopyVisibility
 data class NostrContentPolicy private constructor(
     val maxActiveReferences: Int,
     val maxResolvedReferences: Int,
@@ -47,7 +48,7 @@ data class NostrContentPolicy private constructor(
                 maxActiveReferences.coerceAtLeast(1),
                 maxResolvedReferences.coerceAtLeast(1),
                 maxDepth.coerceAtLeast(0),
-                releaseGraceMilliseconds,
+                releaseGraceMilliseconds.coerceAtLeast(0),
             )
     }
 }
