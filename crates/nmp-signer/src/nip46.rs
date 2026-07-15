@@ -3,7 +3,7 @@
 //! The adapter owns an independent relay pool and exactly-correlated remote
 //! RPCs. It deliberately does not own NMP's durable write retry/publication.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -699,6 +699,23 @@ fn session_pool_config() -> PoolConfig {
     // protocol/session relay ceiling enforced at every NIP-46 input door.
     PoolConfig {
         max_relays: MAX_NIP46_RELAYS,
+        // Issue #519's resolved-IP admission check (`pool::connect`) refuses
+        // a loopback/private/link-local dial by default — the right default
+        // for a DISCOVERED relay (a network-sourced kind:10002/kind:10050
+        // list an attacker could steer at an internal address). A NIP-46
+        // bunker relay is never discovered that way: it is always the
+        // explicit target of a `bunker://`/`nostrconnect://` URI the user
+        // pasted or scanned, the same trust tier as an operator's own config
+        // (see `nmp-engine::core::admission`'s doc for that provenance
+        // split). Self-hosted bunker signers on loopback/LAN are a common,
+        // legitimate setup, so this session pool keeps admitting the usual
+        // local ranges rather than inheriting the network-discovery-only
+        // refusal.
+        allowed_local_hosts: Arc::new(BTreeSet::from([
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+            "localhost".to_string(),
+        ])),
         ..PoolConfig::default()
     }
 }

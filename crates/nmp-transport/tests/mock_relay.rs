@@ -74,6 +74,22 @@ fn loopback(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
+/// Every relay this file dials is a real loopback listener (`LocalRelay`
+/// bound to `127.0.0.1`). Issue #519's resolved-IP admission check refuses a
+/// loopback dial by default now, so this test suite's own "mock relay is on
+/// 127.0.0.1" convention needs the SAME opt-in an operator would use for an
+/// intentional local relay. `PoolConfig::default()` stays the secure,
+/// empty-allowlist default; every `Pool::new` in this file builds its config
+/// from this instead.
+fn test_pool_config() -> PoolConfig {
+    PoolConfig {
+        allowed_local_hosts: std::sync::Arc::new(std::collections::BTreeSet::from([
+            "127.0.0.1".to_string(),
+        ])),
+        ..PoolConfig::default()
+    }
+}
+
 /// Rust's test harness runs the test fns in this file concurrently by
 /// default, and each `#[tokio::test(flavor = "multi_thread", ...)]` below
 /// gets its OWN dedicated tokio runtime -- so left unguarded, this one file
@@ -144,7 +160,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
             // The test controls the exact disconnect instant, so production
             // reconnect jitter would add no semantic coverage here.
             reconnect_jitter_max: Some(Duration::ZERO),
-            ..PoolConfig::default()
+            ..test_pool_config()
         },
         tx,
     )
@@ -309,7 +325,7 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
         PoolConfig {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             reconnect_jitter_max: Some(Duration::ZERO),
-            ..PoolConfig::default()
+            ..test_pool_config()
         },
         tx,
     )
@@ -467,7 +483,7 @@ async fn durable_event_resolves_written_exactly_once() {
     let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
-    let pool = Pool::new(PoolConfig::default(), tx).expect("test pool construction");
+    let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
     let h = pool.ensure_open(&url).expect("relay admitted");
     // 15s, not 5s -- see test 7's identical `connected1` wait for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).
@@ -571,7 +587,7 @@ async fn close_under_saturated_data_lanes_never_deadlocks_the_pool() {
             ingest_queue_capacity: 1,
             verifier_queue_capacity: 1,
             reconnect_jitter_max: Some(Duration::ZERO),
-            ..PoolConfig::default()
+            ..test_pool_config()
         },
         tx,
     )

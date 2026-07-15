@@ -396,6 +396,7 @@ impl PoolInner {
             reconnect_delay_initial,
             reconnect_jitter_max,
             command_queue_capacity,
+            Arc::clone(&self.config.allowed_local_hosts),
             self.spawner.as_ref(),
         )
         .map_err(RelayOpenError::ThreadUnavailable)
