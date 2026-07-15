@@ -6,7 +6,7 @@
 // `NMPEngine.groupMessageIntent`/`GroupSendIntent` (#156) are this file's
 // write-side counterpart. The app supplies semantic composer state; NMP owns
 // author/time/kind, NIP-27 mention materialization, `p`/reply-`e` tags, and
-// the existing `h`/`previous`/pinned-host composition.
+// `h`/pinned-host composition.
 
 package com.nmp.sdk
 
