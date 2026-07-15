@@ -23,7 +23,7 @@ public struct NMPRelayPresentation: Sendable, Equatable {
             advertisedDescription: information.document.description,
             advertisedIcon: information.document.icon,
             freshness: information.freshness,
-            lastError: information.lastError
+            lastError: information.lastError.map(String.init(describing:))
         )
     }
 

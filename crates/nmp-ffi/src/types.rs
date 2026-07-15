@@ -45,6 +45,23 @@ pub struct FfiRelayInformationLimitations {
     pub created_at_upper_limit: Option<u64>,
 }
 
+/// `nmp::RelayInformationError` mirror (#494) -- typed failure of one
+/// bounded NIP-11 acquisition, carried instead of collapsing into a
+/// `.to_string()` at either NIP-11 FFI seam (the stale-on-error
+/// `FfiRelayInformation.last_error` evidence below, and the acquisition
+/// throw in `convert::FfiError::RelayInformationUnavailable`).
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiRelayInformationErrorKind {
+    ExecutorSaturated { capacity: u64 },
+    WaiterSaturated { capacity: u64 },
+    ThreadUnavailable { reason: String },
+    ServiceClosed,
+    CredentialedRelayUrl,
+    Http { reason: String },
+    ResponseTooLarge { limit_bytes: u64 },
+    InvalidDocument { reason: String },
+}
+
 /// Typed NIP-11 fields understood today. The enclosing record's `raw_json`
 /// remains authoritative for fields added by future NIP-11 revisions.
 #[derive(Debug, Clone, PartialEq, Record)]
@@ -77,7 +94,7 @@ pub struct FfiRelayInformation {
     pub last_modified: Option<String>,
     pub cache_control: Option<String>,
     pub expires: Option<String>,
-    pub last_error: Option<String>,
+    pub last_error: Option<FfiRelayInformationErrorKind>,
 }
 
 /// The reactive identity root (VISION §2 P3). Extensible -- UniFFI enums are
