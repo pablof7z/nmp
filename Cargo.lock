@@ -1609,6 +1609,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-audit"
+version = "0.1.0"
+dependencies = [
+ "nmp-nip02",
+ "nmp-nip29",
+ "nmp-nip51",
+ "nmp-ownership",
+ "nmp-router",
+ "serde_json",
+]
+
+[[package]]
 name = "nmp-bdd"
 version = "0.1.0"
 dependencies = [
