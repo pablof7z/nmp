@@ -23,7 +23,7 @@
 //!    must invalidate stale handles. See [`pack_generation`] for how this is
 //!    made safe without an extra thread of coordination with the pool.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -239,6 +239,7 @@ pub(super) fn spawn(
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
     command_queue_capacity: usize,
+    allowed_local_hosts: Arc<BTreeSet<String>>,
     spawner: &dyn ThreadSpawner,
 ) -> Result<WorkerHandle, ThreadSpawnError> {
     // Bounded (issue #506's HIGH finding): this was the one unbounded queue
@@ -271,6 +272,7 @@ pub(super) fn spawn(
                     keepalive_pong_timeout,
                     reconnect_delay_initial,
                     reconnect_jitter_max,
+                    &allowed_local_hosts,
                 );
             }),
         )
@@ -315,6 +317,7 @@ fn run_worker(
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
+    allowed_local_hosts: &BTreeSet<String>,
 ) {
     let mut pending: VecDeque<String> = VecDeque::new();
     let mut preamble: Vec<String> = Vec::new();
@@ -346,7 +349,7 @@ fn run_worker(
             return;
         }
         let generation = pack_generation(worker_id, attempt);
-        match open_relay_socket(&url) {
+        match open_relay_socket(&url, allowed_local_hosts) {
             Ok(mut socket) => {
                 let connected_at = Instant::now();
                 // REQ-before-EVENT: inject the registered preamble at the

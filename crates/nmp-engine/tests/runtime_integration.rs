@@ -108,7 +108,7 @@ fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .unwrap();
 
@@ -243,7 +243,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
 
@@ -410,7 +410,7 @@ fn no_deadlines_blocks_indefinitely() {
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
 
@@ -631,7 +631,7 @@ fn neg_liveness_deadline_does_not_busy_spin() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
 
@@ -743,7 +743,7 @@ async fn expiring_event_retracts_with_no_further_input() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
 
@@ -811,7 +811,7 @@ async fn earlier_expiration_from_ingest_rearms() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
 
@@ -928,7 +928,7 @@ fn boot_catches_up_past_due_expiry() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
 
@@ -1032,7 +1032,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     handle.set_active_account(Some(keys.public_key()));
@@ -1143,7 +1143,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         FixtureDirectory::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     // This is literally the first command sent to the new engine thread.
