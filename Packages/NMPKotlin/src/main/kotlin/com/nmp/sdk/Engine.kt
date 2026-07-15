@@ -27,6 +27,17 @@ data class NMPConfig(
      * under the 2-relay-min, suppressed when `appRelays` is non-empty.
      * Default empty. */
     val fallbackRelays: List<String> = emptyList(),
+    /** Local/private relay HOSTS the operator explicitly opts into despite
+     * the SSRF admission policy (issue #121). A DISCOVERED (network-sourced
+     * kind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`
+     * host is rejected by default; listing its host here (e.g. `"127.0.0.1"`
+     * or `"localhost"`) re-admits discovered relays on that exact host.
+     * Host-only match (port- and path-insensitive). Default empty. */
+    val allowedLocalRelayHosts: List<String> = emptyList(),
+    /** The one whole-engine relay ceiling. It bounds the complete compiled
+     * demand and the transport worker set with the same effective value.
+     * Legacy zero is normalized to the finite default, never uncapped. */
+    val maxRelays: UInt = 10u,
     /** Finite zero-queue native observer/action/waiter ceiling. */
     val maxNativeTasks: UInt = 12u,
 ) {
@@ -36,6 +47,8 @@ data class NMPConfig(
             indexerRelays = indexerRelays,
             appRelays = appRelays,
             fallbackRelays = fallbackRelays,
+            allowedLocalRelayHosts = allowedLocalRelayHosts,
+            maxRelays = maxRelays,
             maxNativeTasks = maxNativeTasks,
         )
 }
