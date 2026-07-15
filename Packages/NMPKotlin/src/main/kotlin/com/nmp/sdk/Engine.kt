@@ -119,6 +119,15 @@ class NMPEngine(
      * cold-`Flow`/teardown discipline as the `NMPFilter` overload. */
     fun observe(demand: NMPDemand): Flow<RowBatch> = observeQuery(ffi, demand)
 
+    /** Open one coordinated, bounded history session. The returned object
+     * owns both its conflated full-state [NMPHistoryQuery.batches] flow and
+     * the only capability that can advance that exact session. */
+    fun observeHistory(
+        demand: NMPDemand,
+        pageSize: ULong,
+        maxRows: ULong,
+    ): NMPHistoryQuery = NMPHistoryQuery(ffi, demand, pageSize, maxRows)
+
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,
     // events actually received per relay per kind, and per-filter coverage.

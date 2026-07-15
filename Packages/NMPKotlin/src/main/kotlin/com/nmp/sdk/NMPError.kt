@@ -67,6 +67,22 @@ sealed class NMPError(message: String) : Exception(message) {
     object EmptyPinnedRelaySet :
         NMPError("SourceAuthority.Pinned requires a nonempty relay set")
 
+    data class HistoryPageSizeOutOfRange(val value: ULong) :
+        NMPError("history pageSize $value does not fit this platform")
+
+    data class HistoryMaxRowsOutOfRange(val value: ULong) :
+        NMPError("history maxRows $value does not fit this platform")
+
+    object HistoryZeroPageSize : NMPError("history pageSize must be non-zero")
+
+    object HistoryZeroMaxRows : NMPError("history maxRows must be non-zero")
+
+    data class HistoryPageExceedsMaxRows(val pageSize: ULong, val maxRows: ULong) :
+        NMPError("history pageSize $pageSize exceeds maxRows $maxRows")
+
+    object HistorySelectionHasLimit :
+        NMPError("history selection must not also declare a limit")
+
     /** #156: `groupMessageIntent` has no active account from which NMP can
      * derive the unsigned event author. */
     object NoActiveAccount : NMPError("group messages require an active account")
@@ -106,6 +122,15 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.NostrEntitySecretKeyRejected -> NostrEntitySecretKeyRejected
                 is FfiException.AuthorOutboxesRequiresBoundAuthors -> AuthorOutboxesRequiresBoundAuthors
                 is FfiException.EmptyPinnedRelaySet -> EmptyPinnedRelaySet
+                is FfiException.HistoryPageSizeOutOfRange ->
+                    HistoryPageSizeOutOfRange(ffi.value)
+                is FfiException.HistoryMaxRowsOutOfRange ->
+                    HistoryMaxRowsOutOfRange(ffi.value)
+                is FfiException.HistoryZeroPageSize -> HistoryZeroPageSize
+                is FfiException.HistoryZeroMaxRows -> HistoryZeroMaxRows
+                is FfiException.HistoryPageExceedsMaxRows ->
+                    HistoryPageExceedsMaxRows(ffi.pageSize, ffi.maxRows)
+                is FfiException.HistorySelectionHasLimit -> HistorySelectionHasLimit
                 is FfiException.NoActiveAccount -> NoActiveAccount
                 is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
                 is FfiException.RelayInformationUnavailable -> RelayInformationUnavailable(ffi.reason)
