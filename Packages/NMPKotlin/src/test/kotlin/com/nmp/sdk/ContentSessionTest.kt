@@ -35,4 +35,35 @@ class ContentSessionTest {
                 session.close()
             }
         }
+
+    @Test
+    fun stopWithdrawsDemandButSessionIsReusable() =
+        runBlocking {
+            NMPEngine(NMPConfig()).use { engine ->
+                val session =
+                    NMPContentClient(engine).session(
+                        "nostr:$npub",
+                        this,
+                        policy = NostrContentPolicy(releaseGraceMilliseconds = 0),
+                    )
+                val reference = session.snapshot.value.document.references[0]
+                val firstClaim = assertNotNull(session.claim(reference.id))
+                assertEquals(1, session.snapshot.value.activeReferenceCount)
+
+                // stop() withdraws demand immediately, but the session object
+                // itself stays alive (its scope/job are not cancelled).
+                session.stop()
+                assertEquals(0, session.snapshot.value.activeReferenceCount)
+
+                // A later claim on a fresh target re-arms observation,
+                // proving the session was only paused, not torn down.
+                val otherPubkey = "0".repeat(63) + "1"
+                val secondClaim = session.claimProfile(otherPubkey)
+                assertEquals(1, session.snapshot.value.activeReferenceCount)
+
+                firstClaim.close()
+                secondClaim.close()
+                session.close()
+            }
+        }
 }
