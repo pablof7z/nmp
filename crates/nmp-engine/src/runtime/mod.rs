@@ -60,9 +60,9 @@
 mod diagnostics_channel;
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -84,8 +84,9 @@ use nostr::{
 use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, PublishError,
-    ReattachOutcome, ReceiptId, RelayAdmissionPolicy, RowDelta, RowSink,
+    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, HistoryBatch,
+    HistoryContinuation, HistoryLoadError, HistoryQuery, HistorySessionId, HistorySink,
+    PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row, RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteStatus};
 use crate::relay_information::{
@@ -129,6 +130,402 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
 /// per-source acquisition evidence (see the module doc's "two delivery
 /// channels" note).
 pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
+pub type HistoryMsg = HistoryBatch;
+
+/// Receiver for one bounded, latest-wins history stream.
+///
+/// The single-slot mailbox stores a complete current frame. On receipt we
+/// derive `deltas` against this receiver's last delivered frame, rather than
+/// trusting the reducer-adjacent delta that may span an overwritten frame.
+/// Both retained maps are bounded by the session's declared `max_rows`.
+/// Like `std::sync::mpsc::Receiver`, this is a single-consumer value: it is
+/// `Send` but deliberately not `Sync`.
+///
+/// ```compile_fail
+/// use nmp_engine::runtime::HistoryReceiver;
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<HistoryReceiver>();
+/// ```
+pub struct HistoryReceiver {
+    batches: LatestReceiver<HistoryBatch>,
+    delivered: RefCell<BTreeMap<EventId, Row>>,
+}
+
+impl HistoryReceiver {
+    fn new(batches: LatestReceiver<HistoryBatch>) -> Self {
+        Self {
+            batches,
+            delivered: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn recv(&self) -> Result<HistoryBatch, RecvError> {
+        let batch = self.batches.recv().ok_or(RecvError)?;
+        let mut delivered = self.delivered.borrow_mut();
+        Ok(Self::reconcile(&mut delivered, batch))
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<HistoryBatch, RecvTimeoutError> {
+        let batch = self.batches.recv_timeout(timeout)?;
+        let mut delivered = self.delivered.borrow_mut();
+        Ok(Self::reconcile(&mut delivered, batch))
+    }
+
+    fn reconcile(delivered: &mut BTreeMap<EventId, Row>, mut batch: HistoryBatch) -> HistoryBatch {
+        let current: BTreeMap<_, _> = batch
+            .rows
+            .iter()
+            .cloned()
+            .map(|row| (row.event.id, row))
+            .collect();
+        debug_assert_eq!(current.len(), batch.rows.len());
+
+        let mut deltas = Vec::new();
+        for row in &batch.rows {
+            match delivered.get(&row.event.id) {
+                None => deltas.push(RowDelta::Added(row.clone())),
+                Some(previous) if previous.sources != row.sources => {
+                    deltas.push(RowDelta::SourcesGrew {
+                        id: row.event.id,
+                        sources: row.sources.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        for event_id in delivered.keys() {
+            if !current.contains_key(event_id) {
+                deltas.push(RowDelta::Removed(*event_id));
+            }
+        }
+        *delivered = current;
+        batch.deltas = deltas;
+        batch
+    }
+}
+
+#[cfg(test)]
+mod history_mailbox_tests {
+    use std::collections::BTreeSet;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use nmp_grammar::{Binding, Filter};
+    use nmp_router::FixtureDirectory;
+    use nmp_store::{EventStore, MemoryStore, RelayObserved};
+    use nostr::{Keys, Kind, UnsignedEvent};
+
+    use super::*;
+    use crate::core::{HistoryLoadFact, ShortfallFact};
+
+    fn row(keys: &Keys, created_at: u64, content: &str) -> Row {
+        Row {
+            event: UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(created_at),
+                Kind::TextNote,
+                Vec::new(),
+                content,
+            )
+            .sign_with_keys(keys)
+            .unwrap(),
+            sources: BTreeSet::new(),
+        }
+    }
+
+    fn canonical(mut rows: Vec<Row>) -> Vec<Row> {
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows
+    }
+
+    fn batch(rows: Vec<Row>) -> HistoryBatch {
+        HistoryBatch {
+            rows,
+            deltas: Vec::new(),
+            continuation: None,
+            evidence: AcquisitionEvidence::default(),
+            load: HistoryLoadFact::Idle,
+        }
+    }
+
+    fn continuation(row: &Row, generation: u64) -> HistoryContinuation {
+        HistoryContinuation {
+            version: 1,
+            engine_identity: Arc::new(()),
+            session_identity: Arc::new(()),
+            descriptor: LiveQuery::from_filter(nmp_grammar::Filter::default()),
+            generation,
+            boundary: nmp_store::EventCursor::from_event(&row.event),
+        }
+    }
+
+    fn apply(rows: &mut BTreeMap<EventId, Row>, deltas: &[RowDelta]) {
+        for delta in deltas {
+            match delta {
+                RowDelta::Added(row) => {
+                    rows.insert(row.event.id, row.clone());
+                }
+                RowDelta::SourcesGrew { id, sources } => {
+                    rows.get_mut(id).unwrap().sources = sources.clone();
+                }
+                RowDelta::Removed(id) => {
+                    rows.remove(id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_consuming_history_receiver_gets_one_latest_exact_bounded_state() {
+        const MAX_ROWS: usize = 5;
+        let keys = Keys::generate();
+        let candidates: Vec<_> = (0..7)
+            .map(|index| row(&keys, 100 + index, &format!("row-{index}")))
+            .collect();
+        let (tx, rx) = latest_channel();
+        let rx = HistoryReceiver::new(rx);
+
+        let first = canonical(vec![candidates[0].clone(), candidates[1].clone()]);
+        tx.send(batch(first.clone()));
+        let first_batch = rx.recv().unwrap();
+        assert_eq!(first_batch.rows, first);
+        let mut delivered = BTreeMap::new();
+        apply(&mut delivered, &first_batch.deltas);
+
+        let mut expected = Vec::new();
+        for update in 0..10_000 {
+            let omitted = update % candidates.len();
+            expected = canonical(
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != omitted)
+                    .take(MAX_ROWS)
+                    .map(|(_, row)| row.clone())
+                    .collect(),
+            );
+            tx.send(batch(expected.clone()));
+        }
+
+        let latest = rx.recv().unwrap();
+        assert_eq!(latest.rows, expected);
+        assert!(latest.rows.len() <= MAX_ROWS);
+        apply(&mut delivered, &latest.deltas);
+        assert_eq!(
+            delivered,
+            expected
+                .iter()
+                .cloned()
+                .map(|row| (row.event.id, row))
+                .collect()
+        );
+        assert_eq!(rx.delivered.borrow().len(), expected.len());
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_millis(1)),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "the 9,999 overwritten frames must not remain queued"
+        );
+    }
+
+    #[test]
+    fn conflation_keeps_authoritative_rows_and_latest_metadata_with_exact_rebased_deltas() {
+        fn assert_send<T: Send>() {}
+        assert_send::<HistoryReceiver>();
+
+        let keys = Keys::generate();
+        let removed = row(&keys, 101, "removed");
+        let mut provenance_grew = row(&keys, 100, "provenance");
+        let added = row(&keys, 99, "added");
+        let overwritten = row(&keys, 98, "overwritten");
+        let relay = RelayUrl::parse("wss://history-latest.example").unwrap();
+        let (tx, rx) = latest_channel();
+        let rx = HistoryReceiver::new(rx);
+
+        let initial_rows = canonical(vec![removed.clone(), provenance_grew.clone()]);
+        tx.send(HistoryBatch {
+            continuation: Some(continuation(initial_rows.last().unwrap(), 1)),
+            rows: initial_rows,
+            deltas: Vec::new(),
+            evidence: AcquisitionEvidence::default(),
+            load: HistoryLoadFact::Idle,
+        });
+        let initial = rx.recv().unwrap();
+        let mut delivered = BTreeMap::new();
+        apply(&mut delivered, &initial.deltas);
+
+        tx.send(HistoryBatch {
+            continuation: Some(continuation(&overwritten, 2)),
+            rows: canonical(vec![provenance_grew.clone(), overwritten]),
+            deltas: Vec::new(),
+            evidence: AcquisitionEvidence::default(),
+            load: HistoryLoadFact::Requesting,
+        });
+
+        provenance_grew.sources.insert(relay);
+        let latest_rows = canonical(vec![provenance_grew.clone(), added.clone()]);
+        let latest_evidence = AcquisitionEvidence {
+            sources: Vec::new(),
+            shortfall: vec![ShortfallFact::NoResolvedDemand],
+        };
+        let latest_continuation = continuation(latest_rows.last().unwrap(), 3);
+        let latest_boundary = latest_continuation.boundary;
+        tx.send(HistoryBatch {
+            continuation: Some(latest_continuation),
+            rows: latest_rows.clone(),
+            deltas: Vec::new(),
+            evidence: latest_evidence.clone(),
+            load: HistoryLoadFact::Returned { added: 1 },
+        });
+
+        let latest = rx.recv().unwrap();
+        assert_eq!(latest.rows, latest_rows);
+        assert_eq!(latest.evidence, latest_evidence);
+        assert_eq!(latest.load, HistoryLoadFact::Returned { added: 1 });
+        let continuation = latest.continuation.unwrap();
+        assert_eq!(continuation.generation, 3);
+        assert_eq!(continuation.boundary, latest_boundary);
+        assert!(latest
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == added.event.id)));
+        assert!(latest.deltas.iter().any(|delta| matches!(
+            delta,
+            RowDelta::SourcesGrew { id, sources }
+                if *id == provenance_grew.event.id && *sources == provenance_grew.sources
+        )));
+        assert!(latest
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == removed.event.id)));
+        assert_eq!(latest.deltas.len(), 3);
+        apply(&mut delivered, &latest.deltas);
+        assert_eq!(
+            delivered,
+            latest_rows
+                .into_iter()
+                .map(|row| (row.event.id, row))
+                .collect()
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(1)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn closing_history_mailbox_wakes_blocked_receiver() {
+        let (tx, rx) = latest_channel();
+        let rx = HistoryReceiver::new(rx);
+        let waiter = thread::spawn(move || rx.recv());
+        thread::sleep(Duration::from_millis(20));
+        drop(tx);
+        assert!(waiter.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn runtime_reply_drop_rolls_back_and_idle_cancel_and_shutdown_wake_receivers() {
+        let _serial = RUNTIME_LIFECYCLE_TEST_LOCK.lock().unwrap();
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-runtime.example").unwrap();
+        let events: Vec<_> = (0..3)
+            .map(|index| row(&keys, 100 + index, &format!("runtime-{index}")))
+            .map(|row| row.event)
+            .collect();
+        let mut store = MemoryStore::new();
+        for event in &events {
+            store
+                .insert(
+                    event.clone(),
+                    RelayObserved::new(relay.clone(), Timestamp::from(500)),
+                )
+                .unwrap();
+        }
+        let query = HistoryQuery::new(
+            LiveQuery::from_filter(Filter {
+                authors: Some(Binding::Literal(BTreeSet::from([keys
+                    .public_key()
+                    .to_hex()]))),
+                kinds: Some(BTreeSet::from([1])),
+                ..Filter::default()
+            }),
+            1,
+            3,
+        )
+        .unwrap();
+        let (engine_thread, handle) = EngineThread::spawn(
+            store,
+            FixtureDirectory::new(),
+            4,
+            PoolConfig::default(),
+            RelayAdmissionPolicy::default(),
+        )
+        .unwrap();
+
+        let (history_handle, receiver) = handle.subscribe_history(query.clone()).unwrap();
+        let first = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let continuation = first.continuation.unwrap();
+        let (reply, dropped_reply) = mpsc::channel();
+        drop(dropped_reply);
+        handle
+            .inbox
+            .send(Cmd::LoadOlder {
+                id: history_handle.0,
+                continuation: continuation.clone(),
+                reply,
+            })
+            .unwrap();
+        handle
+            .load_older(history_handle, continuation)
+            .expect("same continuation must retry after reply-drop rollback");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let loaded = loop {
+            let batch = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if matches!(batch.load, HistoryLoadFact::Returned { .. }) {
+                break batch;
+            }
+        };
+        assert_eq!(loaded.rows.len(), 2);
+        assert_eq!(loaded.load, HistoryLoadFact::Returned { added: 1 });
+
+        let (idle_ready, idle_started) = mpsc::channel();
+        let (idle_result, idle_done) = mpsc::channel();
+        let idle_waiter = thread::spawn(move || {
+            idle_ready.send(()).unwrap();
+            idle_result.send(receiver.recv().is_err()).unwrap();
+        });
+        idle_started.recv().unwrap();
+        handle.unsubscribe_history(history_handle);
+        assert!(idle_done.recv_timeout(Duration::from_secs(1)).unwrap());
+        idle_waiter.join().unwrap();
+
+        let (_shutdown_handle, shutdown_receiver) = handle.subscribe_history(query).unwrap();
+        shutdown_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let (shutdown_ready, shutdown_started) = mpsc::channel();
+        let (shutdown_result, shutdown_done) = mpsc::channel();
+        let shutdown_waiter = thread::spawn(move || {
+            shutdown_ready.send(()).unwrap();
+            shutdown_result
+                .send(shutdown_receiver.recv().is_err())
+                .unwrap();
+        });
+        shutdown_started.recv().unwrap();
+        handle.shutdown();
+        engine_thread.join();
+        assert!(shutdown_done.recv_timeout(Duration::from_secs(1)).unwrap());
+        shutdown_waiter.join().unwrap();
+    }
+}
 
 /// The app-facing handle to a live subscription (returned by
 /// [`Handle::subscribe`]). `Send`, `Copy`-cheap, carries nothing that
@@ -136,6 +533,9 @@ pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
 /// [`Handle::unsubscribe`] needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryHandle(HandleId);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryHandle(HistorySessionId);
 
 /// A newly accepted write's stable store-issued identity plus its live
 /// observer. Keeping the id separate from the channel lets a later process
@@ -166,6 +566,12 @@ struct NullRowSink;
 
 impl RowSink for NullRowSink {
     fn on_rows(&self, _rows: Vec<RowDelta>) {}
+}
+
+struct NullHistorySink;
+
+impl HistorySink for NullHistorySink {
+    fn on_history(&self, _batch: HistoryBatch) {}
 }
 
 /// Forwards every `WriteStatus` `EngineCore` reports straight onto the
@@ -245,6 +651,16 @@ enum Cmd {
         query: LiveQuery,
         reply: Sender<Result<(HandleId, Receiver<RowsMsg>), EngineThreadError>>,
     },
+    SubscribeHistory {
+        query: HistoryQuery,
+        reply: Sender<Result<(HistorySessionId, HistoryReceiver), EngineThreadError>>,
+    },
+    LoadOlder {
+        id: HistorySessionId,
+        continuation: HistoryContinuation,
+        reply: Sender<Result<(), HistoryLoadError>>,
+    },
+    UnsubscribeHistory(HistorySessionId),
     PublishTracked {
         intent: WriteIntent,
         sink: Box<dyn ReceiptSink>,
@@ -522,6 +938,9 @@ pub struct EngineThread {
 #[cfg(test)]
 static ACTIVE_RUNTIME_THREADS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+static RUNTIME_LIFECYCLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 struct RuntimeThreadCountGuard;
@@ -1051,6 +1470,7 @@ mod relay_worker_reconciliation_tests {
 
     #[test]
     fn repeated_engine_shutdown_returns_runtime_threads_to_exact_baseline() {
+        let _serial = RUNTIME_LIFECYCLE_TEST_LOCK.lock().unwrap();
         let baseline = ACTIVE_RUNTIME_THREADS.load(std::sync::atomic::Ordering::SeqCst);
         for _ in 0..16 {
             let (engine, handle) = EngineThread::spawn(
@@ -1091,6 +1511,7 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
+        let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
@@ -1121,6 +1542,7 @@ mod relay_worker_reconciliation_tests {
             first,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1134,6 +1556,7 @@ mod relay_worker_reconciliation_tests {
             withdrawn,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1153,6 +1576,7 @@ mod relay_worker_reconciliation_tests {
             replacement,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1219,6 +1643,7 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
+        let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
@@ -1238,6 +1663,7 @@ mod relay_worker_reconciliation_tests {
             ready,
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1250,6 +1676,7 @@ mod relay_worker_reconciliation_tests {
             Vec::new(),
             &pool,
             &mut rows,
+            &mut histories,
             &mut diagnostics,
             &mut preambles,
             &registry,
@@ -1451,6 +1878,7 @@ fn engine_loop<S, D>(
     let native_tasks = &native_tasks;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
+    let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
     let mut preambles: Preambles = Preambles::new();
@@ -1475,6 +1903,7 @@ fn engine_loop<S, D>(
         recovery_effects,
         &pool,
         &mut row_channels,
+        &mut history_channels,
         &mut diag_channels,
         &mut preambles,
         &registry,
@@ -1515,6 +1944,7 @@ fn engine_loop<S, D>(
                             effects,
                             &pool,
                             &mut row_channels,
+                            &mut history_channels,
                             &mut diag_channels,
                             &mut preambles,
                             &registry,
@@ -1532,6 +1962,7 @@ fn engine_loop<S, D>(
                             effects,
                             &pool,
                             &mut row_channels,
+                            &mut history_channels,
                             &mut diag_channels,
                             &mut preambles,
                             &registry,
@@ -1562,6 +1993,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1575,6 +2007,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1592,6 +2025,7 @@ fn engine_loop<S, D>(
                         effects,
                         &pool,
                         &mut row_channels,
+                        &mut history_channels,
                         &mut diag_channels,
                         &mut preambles,
                         &registry,
@@ -1745,6 +2179,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1774,6 +2209,7 @@ fn engine_loop<S, D>(
                         withdraw,
                         &pool,
                         &mut row_channels,
+                        &mut history_channels,
                         &mut diag_channels,
                         &mut preambles,
                         &registry,
@@ -1793,6 +2229,7 @@ fn engine_loop<S, D>(
                         withdraw,
                         &pool,
                         &mut row_channels,
+                        &mut history_channels,
                         &mut diag_channels,
                         &mut preambles,
                         &registry,
@@ -1805,6 +2242,173 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
+            Cmd::SubscribeHistory { query, reply } => {
+                let effects = core.handle(EngineMsg::SubscribeHistory(
+                    query,
+                    Box::new(NullHistorySink),
+                ));
+                let Some(id) = effects.iter().find_map(|effect| match effect {
+                    Effect::EmitHistory(id, _) if !history_channels.contains_key(id) => Some(*id),
+                    _ => None,
+                }) else {
+                    let _ = reply.send(Err(EngineThreadError::ThreadUnavailable {
+                        component: "history projection".to_string(),
+                        reason: "history session could not open its canonical projection"
+                            .to_string(),
+                    }));
+                    dispatch_core_effects(
+                        &core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    continue;
+                };
+                let (history_tx, history_rx) = latest_channel();
+                history_channels.insert(id, history_tx);
+                if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
+                    history_channels.remove(&id);
+                    let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
+                    dispatch_core_effects(
+                        &core,
+                        withdraw,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
+                if reply
+                    .send(Ok((id, HistoryReceiver::new(history_rx))))
+                    .is_err()
+                {
+                    history_channels.remove(&id);
+                    let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
+                    dispatch_core_effects(
+                        &core,
+                        withdraw,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    continue;
+                }
+                dispatch_core_effects(
+                    &core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
+            Cmd::LoadOlder {
+                id,
+                continuation,
+                reply,
+            } => {
+                let effects = core.handle(EngineMsg::LoadOlder(id, continuation));
+                let result = effects.iter().find_map(|effect| match effect {
+                    Effect::HistoryLoadResult(session, result) if *session == id => {
+                        Some(result.clone())
+                    }
+                    _ => None,
+                });
+                if result.as_ref().is_some_and(Result::is_ok) {
+                    if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
+                        let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
+                        dispatch_core_effects(
+                            &core,
+                            rollback,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        let _ = reply.send(Err(HistoryLoadError::TransportUnavailable {
+                            reason: error.to_string(),
+                        }));
+                        continue;
+                    }
+                    if reply.send(Ok(())).is_err() {
+                        let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
+                        dispatch_core_effects(
+                            &core,
+                            rollback,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        continue;
+                    }
+                    let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+                    dispatch_core_effects(
+                        &core,
+                        committed,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    continue;
+                } else {
+                    let _ = reply.send(result.unwrap_or(Err(HistoryLoadError::StoreUnavailable)));
+                }
+                dispatch_core_effects(
+                    &core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
+            Cmd::UnsubscribeHistory(id) => {
+                history_channels.remove(&id);
+                let effects = core.handle(EngineMsg::UnsubscribeHistory(id));
+                dispatch_core_effects(
+                    &core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1823,6 +2427,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1839,6 +2444,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1857,6 +2463,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1870,6 +2477,7 @@ fn engine_loop<S, D>(
                     effects,
                     &pool,
                     &mut row_channels,
+                    &mut history_channels,
                     &mut diag_channels,
                     &mut preambles,
                     &registry,
@@ -1910,6 +2518,7 @@ fn dispatch_core_effects<S: EventStore>(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -1928,6 +2537,7 @@ fn dispatch_core_effects<S: EventStore>(
         effects,
         pool,
         row_channels,
+        history_channels,
         diag_channels,
         preambles,
         registry,
@@ -1941,25 +2551,142 @@ fn dispatch_core_effects<S: EventStore>(
 /// construction error #442 requires. Successful opens are idempotently reused
 /// by ordinary effect dispatch.
 fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), EngineThreadError> {
-    for effect in effects {
-        let Effect::Wire(delta) = effect else {
-            continue;
-        };
-        for (relay, ops) in &delta.ops {
-            if !ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
-                continue;
-            }
-            if let Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) =
-                pool.ensure_open(relay)
-            {
-                return Err(EngineThreadError::ThreadUnavailable {
+    preflight_query_relay_workers_with(
+        effects,
+        |relay| pool.live_handle(relay).is_some(),
+        |relay| match pool.ensure_open(relay) {
+            Ok(handle) => Ok(Some(handle)),
+            Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) => {
+                Err(EngineThreadError::ThreadUnavailable {
                     component: error.role.to_string(),
                     reason: error.reason,
-                });
+                })
+            }
+            // Capacity/unavailable remains ordinary local shortfall. It is
+            // represented by acquisition evidence, not construction failure.
+            Err(_) => Ok(None),
+        },
+        |handle| {
+            let _ = pool.close(handle);
+        },
+    )
+}
+
+fn preflight_query_relay_workers_with(
+    effects: &[Effect],
+    mut is_live: impl FnMut(&RelayUrl) -> bool,
+    mut ensure_open: impl FnMut(
+        &RelayUrl,
+    ) -> Result<Option<nmp_transport::RelayHandle>, EngineThreadError>,
+    mut close: impl FnMut(nmp_transport::RelayHandle),
+) -> Result<(), EngineThreadError> {
+    let mut relays = BTreeSet::new();
+    for effect in effects {
+        match effect {
+            Effect::Wire(delta) => {
+                for (relay, ops) in &delta.ops {
+                    if ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
+                        relays.insert(relay.clone());
+                    }
+                }
+            }
+            Effect::PreflightHistoryRelays(planned) => relays.extend(planned.iter().cloned()),
+            _ => {}
+        }
+    }
+
+    let mut opened = Vec::new();
+    for relay in relays {
+        let was_live = is_live(&relay);
+        match ensure_open(&relay) {
+            Ok(Some(handle)) if !was_live => opened.push(handle),
+            Ok(_) => {}
+            Err(error) => {
+                for handle in opened {
+                    close(handle);
+                }
+                return Err(error);
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod history_preflight_tests {
+    use std::cell::RefCell;
+
+    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nmp_transport::RelayHandle;
+
+    use super::*;
+
+    #[test]
+    fn partial_history_preflight_failure_closes_every_worker_it_opened() {
+        let first = RelayUrl::parse("wss://a-history-preflight.example").unwrap();
+        let second = RelayUrl::parse("wss://b-history-preflight.example").unwrap();
+        let filter = ConcreteFilter::default();
+        let delta = WireDelta {
+            ops: vec![
+                (
+                    first.clone(),
+                    vec![WireOp::Req(
+                        SubId::for_wire(
+                            first.clone(),
+                            &filter,
+                            &SourceAuthority::Public,
+                            AccessContext::Public,
+                        ),
+                        filter.clone(),
+                    )],
+                ),
+                (
+                    second.clone(),
+                    vec![WireOp::Req(
+                        SubId::for_wire(
+                            second.clone(),
+                            &filter,
+                            &SourceAuthority::Public,
+                            AccessContext::Public,
+                        ),
+                        filter,
+                    )],
+                ),
+            ],
+        };
+        let effects = vec![Effect::Wire(delta)];
+        let closed = RefCell::new(Vec::new());
+        let result = preflight_query_relay_workers_with(
+            &effects,
+            |_| false,
+            |relay| {
+                if relay == &first {
+                    Ok(Some(RelayHandle {
+                        slot: 7,
+                        generation: 1,
+                    }))
+                } else {
+                    Err(EngineThreadError::ThreadUnavailable {
+                        component: "relay worker".to_string(),
+                        reason: "injected refusal".to_string(),
+                    })
+                }
+            },
+            |handle| closed.borrow_mut().push(handle),
+        );
+
+        assert!(matches!(
+            result,
+            Err(EngineThreadError::ThreadUnavailable { .. })
+        ));
+        assert_eq!(
+            closed.into_inner(),
+            vec![RelayHandle {
+                slot: 7,
+                generation: 1
+            }]
+        );
+    }
 }
 
 /// Retry the exact currently-owned relay set once after an actual worker
@@ -2000,6 +2727,7 @@ fn dispatch_effects(
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -2010,6 +2738,7 @@ fn dispatch_effects(
             effect,
             pool,
             row_channels,
+            history_channels,
             diag_channels,
             preambles,
             registry,
@@ -2025,6 +2754,7 @@ fn dispatch_effect(
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
     registry: &SignerRegistry,
@@ -2032,6 +2762,7 @@ fn dispatch_effect(
 ) {
     match effect {
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
+        Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(url, reqs) => apply_replay(&url, reqs, pool, preambles),
         Effect::FetchRelayInformation(url) => {
             let generation = runtime
@@ -2167,6 +2898,12 @@ fn dispatch_effect(
                 let _ = tx.send((rows, evidence));
             }
         }
+        Effect::EmitHistory(id, batch) => {
+            if let Some(tx) = history_channels.get(&id) {
+                tx.send(batch);
+            }
+        }
+        Effect::HistoryLoadResult(..) => {}
         Effect::EmitDiagnostics(mut snapshot) => {
             // Fold in the transport pool's own relay-cap rejection count
             // (issue #121, worker-exhaustion half). `EngineCore` builds the
@@ -2591,6 +3328,43 @@ impl Handle {
         let _ = self
             .inbox
             .send(Cmd::Engine(EngineMsg::Unsubscribe(handle.0)));
+    }
+
+    pub fn subscribe_history(
+        &self,
+        query: HistoryQuery,
+    ) -> Result<(HistoryHandle, HistoryReceiver), EngineThreadError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::SubscribeHistory {
+                query,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: subscribe_history() called after shutdown");
+        let (id, history_rx) = reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped the history subscribe reply")?;
+        Ok((HistoryHandle(id), history_rx))
+    }
+
+    pub fn load_older(
+        &self,
+        handle: HistoryHandle,
+        continuation: HistoryContinuation,
+    ) -> Result<(), HistoryLoadError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::LoadOlder {
+                id: handle.0,
+                continuation,
+                reply: reply_tx,
+            })
+            .map_err(|_| HistoryLoadError::WrongEngine)?;
+        reply_rx.recv().map_err(|_| HistoryLoadError::WrongEngine)?
+    }
+
+    pub fn unsubscribe_history(&self, handle: HistoryHandle) {
+        let _ = self.inbox.send(Cmd::UnsubscribeHistory(handle.0));
     }
 
     /// Register a signing/crypto capability, keyed by its own `public_key()`

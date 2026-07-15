@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nmp_engine::core::DiagnosticsSnapshot;
-use nmp_engine::runtime::{DiagnosticsHandle, Handle, LatestReceiver, QueryHandle, RowsMsg};
+use nmp_engine::core::{HistoryBatch, HistoryContinuation, HistoryLoadError};
+use nmp_engine::runtime::{
+    DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle, RowsMsg,
+};
 
 /// The facade's single opaque cancellation capability (#52; codex-nova's
 /// ratified shape), shared by both [`Subscription`] and
@@ -83,6 +86,91 @@ impl ObservationCancel {
 pub struct Subscription {
     cancel: ObservationCancel,
     rows: std::sync::mpsc::Receiver<RowsMsg>,
+}
+
+/// A coordinated, bounded history read. The engine owns every acquisition
+/// handle and cursor generation; this facade retains only the opaque runtime
+/// capability needed to request the next older window and cancel the whole
+/// session.
+pub struct HistorySubscription {
+    cancel: ObservationCancel,
+    advance: HistoryAdvance,
+    batches: HistoryReceiver,
+}
+
+/// Opaque, cloneable capability for advancing one exact history session.
+///
+/// It intentionally owns no receiver: a blocking consumer can retain
+/// exclusive delivery ownership while another thread requests the next older
+/// window. The embedded cancellation guard is the same guard owned by the
+/// corresponding [`HistorySubscription`], so either side can withdraw the
+/// whole session exactly once.
+#[derive(Clone)]
+pub struct HistoryAdvance {
+    cancel: ObservationCancel,
+    engine: Handle,
+    handle: HistoryHandle,
+}
+
+impl HistoryAdvance {
+    pub fn load_older(&self, continuation: HistoryContinuation) -> Result<(), HistoryLoadError> {
+        self.engine.load_older(self.handle, continuation)
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl HistorySubscription {
+    pub(crate) fn new(engine: Handle, handle: HistoryHandle, batches: HistoryReceiver) -> Self {
+        let cancel_engine = engine.clone();
+        let cancel = ObservationCancel::new(move || cancel_engine.unsubscribe_history(handle));
+        Self {
+            cancel: cancel.clone(),
+            advance: HistoryAdvance {
+                cancel,
+                engine,
+                handle,
+            },
+            batches,
+        }
+    }
+
+    /// Block for the newest self-contained bounded history state.
+    /// Intermediate states may be conflated, while `rows` and the re-derived
+    /// `deltas` always describe an exact transition from this receiver's last
+    /// return.
+    pub fn recv(&self) -> Result<HistoryBatch, RecvError> {
+        self.batches.recv()
+    }
+
+    /// The same latest-state stream as [`Self::recv`], with a bounded wait.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<HistoryBatch, RecvTimeoutError> {
+        self.batches.recv_timeout(timeout)
+    }
+
+    pub fn load_older(&self, continuation: HistoryContinuation) -> Result<(), HistoryLoadError> {
+        self.advance.load_older(continuation)
+    }
+
+    #[must_use]
+    pub fn advance_handle(&self) -> HistoryAdvance {
+        self.advance.clone()
+    }
+
+    #[must_use]
+    pub fn cancel_handle(&self) -> ObservationCancel {
+        self.cancel.clone()
+    }
+
+    pub fn cancel(self) {}
+}
+
+impl Drop for HistorySubscription {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl Subscription {

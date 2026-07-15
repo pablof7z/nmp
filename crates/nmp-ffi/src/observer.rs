@@ -5,8 +5,8 @@
 //! thin Swift layer (a later builder) adapts into `AsyncStream`.
 
 use crate::types::{
-    FfiAcquisitionEvidence, FfiDiagnosticsSnapshot, FfiRowDelta, FfiSignEventFailure,
-    FfiSignedEvent, FfiWriteStatus,
+    FfiAcquisitionEvidence, FfiDiagnosticsSnapshot, FfiHistoryBatch, FfiRowDelta,
+    FfiSignEventFailure, FfiSignedEvent, FfiWriteStatus,
 };
 
 /// Drains a live subscription's `Receiver<RowsMsg>` (M4 §4b). `on_batch` is
@@ -22,6 +22,17 @@ use crate::types::{
 #[uniffi::export(callback_interface)]
 pub trait RowObserver: Send + Sync {
     fn on_batch(&self, deltas: Vec<FfiRowDelta>, evidence: FfiAcquisitionEvidence);
+    fn on_closed(&self);
+}
+
+/// Drains one coordinated bounded-history session. Each callback is one
+/// atomic incremental frame containing rows, scoped acquisition evidence,
+/// mechanical load state, and the only continuation valid for that exact
+/// generation. `on_closed` fires exactly once after cancellation or engine
+/// shutdown.
+#[uniffi::export(callback_interface)]
+pub trait HistoryObserver: Send + Sync {
+    fn on_batch(&self, batch: FfiHistoryBatch);
     fn on_closed(&self);
 }
 

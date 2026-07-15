@@ -43,7 +43,7 @@ use crate::error::EngineError;
 use crate::relay_information::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
 };
-use crate::subscription::{DiagnosticsSubscription, Subscription};
+use crate::subscription::{DiagnosticsSubscription, HistorySubscription, Subscription};
 
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`
@@ -289,6 +289,24 @@ impl Engine {
             handle
                 .subscribe(query)
                 .map(|(query_handle, rows)| Subscription::new(handle.clone(), query_handle, rows))
+        })?
+        .map_err(EngineError::from_thread_error)
+    }
+
+    /// Open a coordinated, bounded history specialization of the read noun.
+    /// Continuations remain process-local capabilities owned by the returned
+    /// subscription; dropping it withdraws every engine-owned acquisition
+    /// handle opened by prior `load_older` calls.
+    pub fn observe_history(
+        &self,
+        query: nmp_engine::core::HistoryQuery,
+    ) -> Result<HistorySubscription, EngineError> {
+        self.with_handle(|handle| {
+            handle
+                .subscribe_history(query)
+                .map(|(history_handle, batches)| {
+                    HistorySubscription::new(handle.clone(), history_handle, batches)
+                })
         })?
         .map_err(EngineError::from_thread_error)
     }
@@ -1355,6 +1373,10 @@ mod tests {
             Some(EngineError::EngineClosed)
         );
         assert_eq!(
+            engine.observe_history(history_probe_query()).err(),
+            Some(EngineError::EngineClosed)
+        );
+        assert_eq!(
             engine.set_active_account(None).err(),
             Some(EngineError::EngineClosed)
         );
@@ -1531,6 +1553,136 @@ mod tests {
              Drop-driven withdrawal produces"
         );
 
+        engine.shutdown();
+    }
+
+    #[test]
+    fn history_cancel_handle_unblocks_idle_recv_within_a_bound() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let subscription = engine
+            .observe_history(history_probe_query())
+            .expect("engine is open");
+        subscription
+            .recv()
+            .expect("a fresh history subscription delivers its current state");
+        let cancel = subscription.cancel_handle();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(subscription.recv().is_err());
+        });
+        cancel.cancel();
+        assert!(result_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("history cancellation must wake the blocked receiver"));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn shutdown_wakes_a_live_history_receiver_within_a_bound() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let subscription = engine
+            .observe_history(history_probe_query())
+            .expect("engine is open");
+        subscription
+            .recv()
+            .expect("a fresh history subscription delivers its current state");
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(subscription.recv().is_err());
+        });
+        engine.shutdown();
+        assert!(result_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("shutdown must wake the blocked history receiver"));
+    }
+
+    #[test]
+    fn history_advance_and_blocking_recv_have_safe_split_ownership() {
+        use nmp_store::EventStore;
+
+        let fixture = tempfile::tempdir().expect("temporary directory");
+        let path = fixture.path().join("history-advance.redb");
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-facade.example").unwrap();
+        {
+            let mut store = RedbStore::open(&path).expect("history store must open");
+            for index in 0..3 {
+                let event = UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(100),
+                    Kind::Custom(7_777),
+                    Vec::new(),
+                    format!("history-{index}"),
+                )
+                .sign_with_keys(&keys)
+                .unwrap();
+                store
+                    .insert(
+                        event,
+                        nmp_store::RelayObserved::new(relay.clone(), Timestamp::from(200)),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let engine = Engine::new(EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let query = nmp_engine::core::HistoryQuery::new(
+            LiveQuery::from_filter(nmp_grammar::Filter {
+                kinds: Some(std::collections::BTreeSet::from([7_777])),
+                authors: Some(nmp_grammar::Binding::Literal(
+                    std::collections::BTreeSet::from([keys.public_key().to_hex()]),
+                )),
+                ..nmp_grammar::Filter::default()
+            }),
+            1,
+            3,
+        )
+        .unwrap();
+        let subscription = engine.observe_history(query).expect("history must open");
+        let first = subscription.recv().expect("initial frame must arrive");
+        let continuation = first.continuation.expect("one visible row has a boundary");
+        let advance = subscription.advance_handle();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (batch_tx, batch_rx) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            loop {
+                let batch = subscription.recv();
+                let returned = matches!(
+                    batch.as_ref().map(|batch| batch.load),
+                    Ok(nmp_engine::core::HistoryLoadFact::Returned { .. })
+                );
+                if returned || batch.is_err() {
+                    batch_tx.send(batch).unwrap();
+                    break;
+                }
+            }
+        });
+        ready_rx.recv().unwrap();
+        advance
+            .load_older(continuation)
+            .expect("separate capability must advance while recv owns delivery");
+        let batch = batch_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("advance must unblock the independently-owned receiver")
+            .expect("history channel stays open");
+        assert_eq!(
+            batch.load,
+            nmp_engine::core::HistoryLoadFact::Returned { added: 1 }
+        );
+        drain.join().unwrap();
+
+        // The drain's subscription has already dropped and cancelled the
+        // shared session. A retained advance clone converges on that same
+        // idempotent guard rather than issuing a second withdrawal.
+        advance.cancel();
         engine.shutdown();
     }
 
@@ -1731,5 +1883,9 @@ mod tests {
             kinds: Some(std::collections::BTreeSet::from([9999u16])),
             ..nmp_grammar::Filter::default()
         })
+    }
+
+    fn history_probe_query() -> nmp_engine::core::HistoryQuery {
+        nmp_engine::core::HistoryQuery::new(probe_query(), 1, 2).unwrap()
     }
 }

@@ -28,20 +28,23 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::convert::{
-    demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi, parse_pubkey,
-    relay_information_error_kind, row_delta_to_ffi, sign_event_failure,
-    sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi,
-    write_intent_from_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
+    demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi,
+    history_batch_to_ffi, history_query_from_ffi, parse_pubkey, relay_information_error_kind,
+    row_delta_to_ffi, sign_event_failure, sign_event_request_from_ffi, sign_event_start_error,
+    signed_event_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError,
+    FfiHistoryLoadError, WriteStatusRef,
 };
 use crate::nip02::{
     action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
     FollowObserver, NmpFollowHandle,
 };
-use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
+use crate::observer::{
+    DiagnosticsObserver, HistoryObserver, ReceiptObserver, RowObserver, SignEventObserver,
+};
 use crate::types::{
-    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiRelayInformation,
+    FfiDemand, FfiFilter, FfiHistoryQuery, FfiReceiptReattachment, FfiRelayInformation,
     FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
-    FfiRelayInformationLimitations, FfiSignEventRequest, FfiWriteIntent,
+    FfiRelayInformationLimitations, FfiSignEventRequest, FfiWriteIntent, NmpHistoryContinuation,
 };
 use nmp::ReceiptReattachment;
 
@@ -592,6 +595,32 @@ impl NmpEngine {
         Ok(Arc::new(NmpQueryHandle { cancel }))
     }
 
+    /// Open one coordinated bounded-history session. The drain task owns the
+    /// blocking receiver exclusively; the returned handle owns only the
+    /// opaque advance/cancel capability for that same session. Every older
+    /// request must return a continuation issued in the latest callback.
+    pub fn observe_history(
+        &self,
+        query: FfiHistoryQuery,
+        observer: Box<dyn HistoryObserver>,
+    ) -> Result<Arc<NmpHistoryHandle>, FfiError> {
+        let query = history_query_from_ffi(query)?;
+        let reservation = self.engine.reserve_native_task("history-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "history-observer")?;
+        let subscription = self.engine.observe_history(query)?;
+        let advance = subscription.advance_handle();
+
+        starter.run(move || {
+            while let Ok(batch) = subscription.recv() {
+                observer.on_batch(history_batch_to_ffi(batch));
+            }
+            observer.on_closed();
+        });
+
+        Ok(Arc::new(NmpHistoryHandle { advance }))
+    }
+
     /// Enqueue a write. `observer` streams every `WriteStatus` this intent
     /// ever reaches (ledger #9 -- enqueue is not converged; the first value
     /// is never a terminal for a durable/at-most-once intent). A
@@ -783,6 +812,36 @@ impl Drop for NmpQueryHandle {
     }
 }
 
+/// Native owner for one bounded-history session. `Drop` and explicit
+/// `cancel` share the subscription's one withdrawal guard, closing every
+/// engine-owned acquisition handle opened by prior advances.
+#[derive(uniffi::Object)]
+pub struct NmpHistoryHandle {
+    advance: nmp::HistoryAdvance,
+}
+
+#[uniffi::export]
+impl NmpHistoryHandle {
+    pub fn load_older(
+        &self,
+        continuation: Arc<NmpHistoryContinuation>,
+    ) -> Result<(), FfiHistoryLoadError> {
+        self.advance
+            .load_older(continuation.inner.clone())
+            .map_err(FfiHistoryLoadError::from)
+    }
+
+    pub fn cancel(&self) {
+        self.advance.cancel();
+    }
+}
+
+impl Drop for NmpHistoryHandle {
+    fn drop(&mut self) {
+        self.advance.cancel();
+    }
+}
+
 /// The app-facing handle to a live diagnostics stream (returned by
 /// [`NmpEngine::observe_diagnostics`]). Same discipline as [`NmpQueryHandle`]
 /// -- holds ONLY the opaque [`nmp::ObservationCancel`] token
@@ -832,8 +891,10 @@ impl Drop for NmpDiagnosticsHandle {
 mod tests {
     use super::*;
     use crate::types::{
-        FfiDurability, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWritePayload,
-        FfiWriteRouting, FfiWriteStatus,
+        FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter,
+        FfiHistoryBatch, FfiHistoryLoadFact, FfiHistoryQuery, FfiSignEventFailure,
+        FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting,
+        FfiWriteStatus,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -842,6 +903,186 @@ mod tests {
 
     struct CensusDiagnosticsObserver {
         closes: Arc<AtomicUsize>,
+    }
+
+    struct RecordingHistoryObserver {
+        batches: mpsc::Sender<FfiHistoryBatch>,
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl HistoryObserver for RecordingHistoryObserver {
+        fn on_batch(&self, batch: FfiHistoryBatch) {
+            let _ = self.batches.send(batch);
+        }
+
+        fn on_closed(&self) {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn ffi_history_query(author: String, page_size: u64, max_rows: u64) -> FfiHistoryQuery {
+        FfiHistoryQuery {
+            demand: FfiDemand {
+                selection: FfiFilter {
+                    kinds: Some(vec![7_778]),
+                    authors: Some(FfiBinding::Literal {
+                        values: vec![author],
+                    }),
+                    ..FfiFilter::default()
+                },
+                source: FfiSourceAuthority::AuthorOutboxes,
+                access: FfiAccessContext::Public,
+                cache: FfiCacheMode::Agnostic,
+            },
+            page_size,
+            max_rows,
+        }
+    }
+
+    fn recv_history_fact(
+        batches: &mpsc::Receiver<FfiHistoryBatch>,
+        wanted: impl Fn(FfiHistoryLoadFact) -> bool,
+    ) -> FfiHistoryBatch {
+        loop {
+            let batch = batches
+                .recv_timeout(Duration::from_secs(5))
+                .expect("history callback must arrive within the lifecycle bound");
+            if wanted(batch.load) {
+                return batch;
+            }
+        }
+    }
+
+    #[test]
+    fn ffi_history_projects_exact_batches_misuse_errors_and_drop_lifecycle() {
+        use nmp_store::EventStore;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("ffi-history.redb");
+        let keys = nostr::Keys::generate();
+        let relay = nostr::RelayUrl::parse("wss://ffi-history.example").unwrap();
+        {
+            let mut store = nmp_store::RedbStore::open(&path).unwrap();
+            for index in 0..3 {
+                let event = nostr::UnsignedEvent::new(
+                    keys.public_key(),
+                    nostr::Timestamp::from(100),
+                    nostr::Kind::Custom(7_778),
+                    Vec::new(),
+                    format!("ffi-history-{index}"),
+                )
+                .sign_with_keys(&keys)
+                .unwrap();
+                store
+                    .insert(
+                        event,
+                        nmp_store::RelayObserved::new(relay.clone(), nostr::Timestamp::from(200)),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let engine = NmpEngine::new(NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            max_native_tasks: 4,
+            ..NmpEngineConfig::default()
+        })
+        .unwrap();
+        let query = ffi_history_query(keys.public_key().to_hex(), 1, 2);
+        let (batch_tx, batch_rx) = mpsc::channel();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handle = engine
+            .observe_history(
+                query.clone(),
+                Box::new(RecordingHistoryObserver {
+                    batches: batch_tx,
+                    closes: Arc::clone(&closes),
+                }),
+            )
+            .unwrap();
+        let first = recv_history_fact(&batch_rx, |fact| fact == FfiHistoryLoadFact::Idle);
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.deltas.len(), 1);
+        let first_continuation = first.continuation.unwrap();
+
+        handle.load_older(Arc::clone(&first_continuation)).unwrap();
+        let second = recv_history_fact(&batch_rx, |fact| {
+            fact == FfiHistoryLoadFact::Returned { added: 1 }
+        });
+        assert_eq!(second.rows.len(), 2);
+        assert_eq!(second.deltas.len(), 1);
+        let second_continuation = second.continuation.unwrap();
+        assert_eq!(
+            handle
+                .load_older(Arc::clone(&first_continuation))
+                .unwrap_err(),
+            FfiHistoryLoadError::StaleGeneration
+        );
+
+        let (other_tx, _other_rx) = mpsc::channel();
+        let other_closes = Arc::new(AtomicUsize::new(0));
+        let other_session = engine
+            .observe_history(
+                query.clone(),
+                Box::new(RecordingHistoryObserver {
+                    batches: other_tx,
+                    closes: Arc::clone(&other_closes),
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            other_session
+                .load_older(Arc::clone(&second_continuation))
+                .unwrap_err(),
+            FfiHistoryLoadError::WrongSession
+        );
+        let refreshed_original =
+            recv_history_fact(&batch_rx, |fact| fact == FfiHistoryLoadFact::Idle);
+        let current_original_continuation = refreshed_original
+            .continuation
+            .expect("session refresh retains its exact boundary");
+
+        let other_engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let (wrong_tx, _wrong_rx) = mpsc::channel();
+        let wrong_closes = Arc::new(AtomicUsize::new(0));
+        let wrong_engine_session = other_engine
+            .observe_history(
+                query,
+                Box::new(RecordingHistoryObserver {
+                    batches: wrong_tx,
+                    closes: Arc::clone(&wrong_closes),
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            wrong_engine_session
+                .load_older(Arc::clone(&second_continuation))
+                .unwrap_err(),
+            FfiHistoryLoadError::WrongEngine
+        );
+
+        assert_eq!(
+            handle
+                .load_older(current_original_continuation)
+                .unwrap_err(),
+            FfiHistoryLoadError::AtBound { max_rows: 2 }
+        );
+        let at_bound = recv_history_fact(&batch_rx, |fact| {
+            fact == FfiHistoryLoadFact::AtBound { max_rows: 2 }
+        });
+        assert!(at_bound.continuation.is_some());
+
+        drop(handle);
+        drop(other_session);
+        engine.await_native_tasks_idle();
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert_eq!(other_closes.load(Ordering::SeqCst), 1);
+
+        drop(wrong_engine_session);
+        other_engine.await_native_tasks_idle();
+        assert_eq!(wrong_closes.load(Ordering::SeqCst), 1);
+        engine.shutdown();
+        other_engine.shutdown();
     }
 
     impl DiagnosticsObserver for CensusDiagnosticsObserver {

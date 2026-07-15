@@ -180,6 +180,22 @@ public final class NMPEngine: Sendable {
         try NMPQuery(engine: ffi, demand: demand.toFfi())
     }
 
+    /// Open one coordinated bounded-history specialization of the read noun.
+    /// The demand owns selection/source/access/cache identity; `pageSize`
+    /// bounds each advance and `maxRows` bounds every engine/FFI/Swift state.
+    public func observeHistory(
+        _ demand: NMPDemand,
+        pageSize: UInt64,
+        maxRows: UInt64
+    ) throws -> NMPHistoryQuery {
+        try NMPHistoryQuery(
+            engine: ffi,
+            demand: demand.toFfi(),
+            pageSize: pageSize,
+            maxRows: maxRows
+        )
+    }
+
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,
     // events actually received per relay per kind, and per-filter coverage.
