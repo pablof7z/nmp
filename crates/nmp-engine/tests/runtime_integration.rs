@@ -118,7 +118,10 @@ fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
             path: path.canonicalize().unwrap(),
         })
     );
-    assert!(path.exists(), "typed refusal must leave raw-engine bytes intact");
+    assert!(
+        path.exists(),
+        "typed refusal must leave raw-engine bytes intact"
+    );
 
     handle.shutdown();
     engine_thread.join();

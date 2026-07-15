@@ -49,9 +49,7 @@ fn resolve_store_path(path: &Path) -> io::Result<PathBuf> {
                         };
                     }
                     Ok(_) => return Err(error),
-                    Err(metadata_error)
-                        if metadata_error.kind() == io::ErrorKind::NotFound =>
-                    {
+                    Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => {
                         let file_name = candidate.file_name().ok_or(error)?;
                         let parent = candidate
                             .parent()
@@ -275,10 +273,8 @@ mod tests {
     fn two_live_owners_require_the_last_registration_to_close() {
         let fixture = tempfile::tempdir().unwrap();
         let path = fixture.path().join("two-owners.redb");
-        let first = open_and_register::<(), io::Error>(&path, |path| {
-            create_bytes(path, b"stable")
-        })
-        .unwrap();
+        let first = open_and_register::<(), io::Error>(&path, |path| create_bytes(path, b"stable"))
+            .unwrap();
         let second = open_and_register::<(), io::Error>(&path, |_| Ok(())).unwrap();
 
         assert!(matches!(
@@ -355,10 +351,9 @@ mod tests {
 
         let fixture = tempfile::tempdir().unwrap();
         let path = fixture.path().join("after-poison.redb");
-        let owner = open_and_register::<(), io::Error>(&path, |path| {
-            create_bytes(path, b"after poison")
-        })
-        .expect("open must recover poisoned registry");
+        let owner =
+            open_and_register::<(), io::Error>(&path, |path| create_bytes(path, b"after poison"))
+                .expect("open must recover poisoned registry");
         assert!(matches!(
             reset_store(&path),
             Err(RedbStoreResetError::StoreStillOpen { .. })
