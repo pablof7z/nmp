@@ -209,6 +209,7 @@ final class EvidenceMappingTests: XCTestCase {
                 sources: [
                     .init(
                         relay: "wss://source.example",
+                        access: .public,
                         reconciledThrough: 9,
                         status: .disconnected
                     )
