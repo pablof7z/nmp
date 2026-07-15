@@ -27,7 +27,7 @@ use nmp_store::{
     PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision,
     RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
-use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
+use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
 
 use std::collections::BTreeSet;
@@ -2188,10 +2188,13 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
     assert_eq!(r0.status, SourceStatus::Requesting);
 
     // relay0 drops. Its watermark must survive; its status must flip.
-    let effects = core.handle(EngineMsg::RelayDisconnected(RelayHandle {
-        slot: 0,
-        generation: 1,
-    }));
+    let effects = core.handle(EngineMsg::RelayDisconnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        DisconnectReason::Error,
+    ));
     let evidence = evidence_from(&effects, id).expect("a link-status flip must emit EmitRows");
     let r0 = source_for(evidence, &relay0).expect("relay0 must still be a source");
     assert_eq!(
@@ -2258,13 +2261,13 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     );
     assert!(core.diagnostics_snapshot().transport_degraded.is_none());
 
-    let stale = core.handle(EngineMsg::RelayDisconnected(old));
+    let stale = core.handle(EngineMsg::RelayDisconnected(old, DisconnectReason::Error));
     assert!(
         stale.is_empty(),
         "an old-generation disconnect must be a reducer no-op"
     );
 
-    let current = core.handle(EngineMsg::RelayDisconnected(reopened));
+    let current = core.handle(EngineMsg::RelayDisconnected(reopened, DisconnectReason::Error));
     let evidence = evidence_from(&current, id).expect("the current disconnect refreshes evidence");
     assert_eq!(
         source_for(evidence, &relay)
@@ -2277,6 +2280,85 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
             .iter()
             .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &relay)),
         "the current generation disconnect still re-ensures required work"
+    );
+}
+
+/// The CRITICAL falsifier (issue #506), reducer half: a
+/// `DisconnectReason::PermanentlyFailed` (401/403 -- the transport pool has
+/// ALREADY retired the worker and freed its cap slot by the time this
+/// reaches the reducer) must NEVER re-issue `Effect::EnsureRelay` -- doing
+/// so is either a no-op race against a wedged zombie (the pre-#506 bug) or,
+/// since the pool now grants a fresh worker on any `ensure_open` against an
+/// empty slot, a tight 401 busy-redial loop. It must instead record a
+/// terminal degraded diagnostics fact (the same `transport_degraded` field
+/// `on_relay_health` owns) so the failure stays OBSERVABLE without the
+/// reducer ever trying again on its own.
+#[test]
+fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+
+    let handle = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let _ = core.handle(EngineMsg::RelayConnected(handle, relay.clone()));
+    assert!(core.diagnostics_snapshot().transport_degraded.is_none());
+
+    let effects = core.handle(EngineMsg::RelayDisconnected(
+        handle,
+        DisconnectReason::PermanentlyFailed,
+    ));
+
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &relay)),
+        "a permanent failure must never re-issue EnsureRelay -- the pool has \
+         already retired this worker for good, so this would either race a \
+         wedged zombie or busy-loop redialing a relay that keeps refusing"
+    );
+    let degraded = core
+        .diagnostics_snapshot()
+        .transport_degraded
+        .expect("a permanent failure must record a terminal degraded diagnostics fact");
+    assert!(
+        degraded.contains(relay.as_str()),
+        "the degraded fact should identify which relay permanently failed, got: {degraded}"
+    );
+
+    // Contrast: the ORDINARY (transient) reason on an otherwise identical
+    // setup keeps re-issuing EnsureRelay exactly as before -- the fix must
+    // not touch that path at all.
+    let mut core_transient = new_core(FixtureDirectory::new().with_write(
+        a.public_key().to_hex(),
+        [relay.clone()],
+    ));
+    let _ = core_transient.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = core_transient.handle(EngineMsg::RelayConnected(handle, relay.clone()));
+    let transient_effects =
+        core_transient.handle(EngineMsg::RelayDisconnected(handle, DisconnectReason::Error));
+    assert!(
+        transient_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &relay)),
+        "an ordinary transient disconnect must keep re-issuing EnsureRelay unchanged"
+    );
+    assert!(
+        core_transient
+            .diagnostics_snapshot()
+            .transport_degraded
+            .is_none(),
+        "an ordinary transient disconnect must not fabricate a terminal degraded fact"
     );
 }
 
@@ -3332,10 +3414,13 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
         Effect::EmitReceipt(id, WriteStatus::Rejected(relay, _)) if *id == id_b && relay == &nack
     )));
 
-    let dropped = core.handle(EngineMsg::RelayDisconnected(RelayHandle {
-        slot: 2,
-        generation: 1,
-    }));
+    let dropped = core.handle(EngineMsg::RelayDisconnected(
+        RelayHandle {
+            slot: 2,
+            generation: 1,
+        },
+        DisconnectReason::Error,
+    ));
     assert!(!dropped.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::GaveUp(_)) if *id == id_a)
     ));

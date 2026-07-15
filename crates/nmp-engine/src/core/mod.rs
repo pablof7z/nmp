@@ -63,7 +63,8 @@ use nmp_store::{
     WriteDurability,
 };
 use nmp_transport::{
-    AttemptCorrelation, HandoffResult, RelayFrame, RelayHandle as TransportRelayHandle, RelayHealth,
+    AttemptCorrelation, DisconnectReason, HandoffResult, RelayFrame,
+    RelayHandle as TransportRelayHandle, RelayHealth,
 };
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
@@ -374,7 +375,15 @@ pub enum EngineMsg {
     /// relay. `Some` retains document revision/freshness/error provenance;
     /// `None` means no document fact was acquired before the decision grace.
     RelayInformationResolved(RelayUrl, Option<RelayInformationCapabilityEvidence>),
-    RelayDisconnected(TransportRelayHandle),
+    /// `reason` distinguishes an ordinary transient disconnect (the pool
+    /// itself keeps redialing on its own backoff schedule -- the reducer's
+    /// job is only to reflect the link status and re-request its worker) from
+    /// a `DisconnectReason::PermanentlyFailed` one (401/403 -- the pool has
+    /// ALREADY retired the worker for good; see `on_relay_disconnected`'s
+    /// doc for why a permanent reason must never re-issue `Effect::
+    /// EnsureRelay`, which would otherwise busy-loop against a relay that
+    /// keeps saying no).
+    RelayDisconnected(TransportRelayHandle, DisconnectReason),
     RelayHealth(TransportRelayHandle, RelayHealth),
     RelayFrame(TransportRelayHandle, RelayFrame),
     RelayFrames(Vec<(TransportRelayHandle, RelayFrame)>),
@@ -1912,7 +1921,9 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::RelayInformationResolved(url, information) => {
                 self.on_relay_information_resolved(url, information)
             }
-            EngineMsg::RelayDisconnected(handle) => self.on_relay_disconnected(handle),
+            EngineMsg::RelayDisconnected(handle, reason) => {
+                self.on_relay_disconnected(handle, reason)
+            }
             EngineMsg::RelayHealth(handle, health) => self.on_relay_health(handle, health),
             EngineMsg::RelayFrame(handle, frame) => self.on_relay_frame(handle, frame),
             EngineMsg::RelayFrames(frames) => self.on_relay_frames(frames),
@@ -3129,7 +3140,36 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    fn on_relay_disconnected(&mut self, handle: TransportRelayHandle) -> Vec<Effect> {
+    /// `reason` is the one piece of information issue #506's CRITICAL fix
+    /// restores across the pool->engine boundary. Ordinary (transient)
+    /// disconnects keep EXACTLY today's behavior: the pool itself is already
+    /// redialing on its own backoff schedule, and `Effect::EnsureRelay` here
+    /// is an idempotent no-op nudge for that same worker. A
+    /// `DisconnectReason::PermanentlyFailed` slot is different in kind: the
+    /// transport pool has ALREADY retired that worker thread for good (see
+    /// `nmp_transport::DisconnectReason::PermanentlyFailed`'s doc) -- it will
+    /// never redial on its own, so re-issuing `EnsureRelay` unconditionally
+    /// here would either be a silent no-op racing a wedged zombie (the
+    /// pre-#506 bug) or, once the pool immediately reopens on ANY
+    /// `ensure_open`, a tight redial loop against a relay that keeps
+    /// rejecting the same way (a 401 busy-loop -- exactly what the fix must
+    /// NOT introduce). So a permanent reason records a terminal degraded
+    /// fact instead (reusing the same `transport_degraded` diagnostics field
+    /// `on_relay_health` already owns) and stops short of `EnsureRelay`;
+    /// every other reaction below (clearing attribution, suspending
+    /// in-flight write lanes, dropping open reconciliations, clearing
+    /// `connected_relays`) is identical for both reasons, because the relay
+    /// is equally not-connected either way. Recovery for a permanently-failed
+    /// relay is still possible afterward -- an explicit demand re-add or
+    /// `on_relay_auth_ready` issues a FRESH `EnsureRelay`, which the pool
+    /// grants a fresh generation for because its worker slot is already
+    /// empty (`ensure_open` on an empty slot is indistinguishable from
+    /// `close`-then-`ensure_open`) -- it is simply never AUTOMATIC.
+    fn on_relay_disconnected(
+        &mut self,
+        handle: TransportRelayHandle,
+        reason: DisconnectReason,
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
         if let Some((current, url)) = self.slot_to_relay.get(&handle.slot).cloned() {
             if current != handle {
@@ -3152,7 +3192,20 @@ impl<S: EventStore> EngineCore<S> {
             // usable" acceptance criterion -- watermark and link status are
             // deliberately orthogonal fields, never one enum).
             self.connected_relays.remove(&url);
-            effects.push(Effect::EnsureRelay(url));
+            match reason {
+                DisconnectReason::PermanentlyFailed => {
+                    self.transport_degraded = Some(format!(
+                        "relay {url} permanently failed (authentication/authorization \
+                         rejected) and will not automatically retry"
+                    ));
+                    effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+                }
+                DisconnectReason::Closed
+                | DisconnectReason::Error
+                | DisconnectReason::ShuttingDown => {
+                    effects.push(Effect::EnsureRelay(url));
+                }
+            }
         }
         // Same reasoning as `on_relay_connected`: a link-status flip alone
         // must become observable via `EmitRows`.
