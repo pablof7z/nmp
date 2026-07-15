@@ -259,6 +259,32 @@ impl Router {
                 // each skeleton's honest k-cover first; the ONE assembled-
                 // plan ceiling below accounts for every skeleton and every
                 // additive/pinned lane together.
+                //
+                // #505 asked whether threading the real (or a "generous
+                // multiple" of the) whole-demand `cap` in here instead of
+                // `usize::MAX` would bound `solver::solve`'s greedy loop
+                // without changing the assembled plan. It would not, and is
+                // deliberately NOT done:
+                //   1. `solve`'s iteration count is already bounded by
+                //      `sum(per-author ceilings) <= k * authors_in_group`
+                //      (`k` is 2 here) regardless of `cap` -- every
+                //      iteration's selected relay must satisfy at least one
+                //      outstanding (author, slot) need, or the loop exits
+                //      via the "no candidate relay helps" branch. So any
+                //      `cap` at or above `2 * authors_in_group` is a no-op
+                //      (no perf change), and the O(authors^2) cost the
+                //      issue flags is the per-iteration O(authors *
+                //      candidates) rescan, not iteration count.
+                //   2. Any `cap` BELOW that natural bound stops the solve
+                //      before every author reaches `k`, for exactly the
+                //      relay-diverse (low-overlap) follow sets that make
+                //      this slow in the first place -- reintroducing the
+                //      truncation defect #20 removed, since a later skeleton
+                //      or additive lane might have had global-cap headroom
+                //      this skeleton never got to use, changing both the
+                //      shortfall diagnostics and the wire plan.
+                // A real fix would make the per-iteration scores rescan
+                // incremental instead of touching `cap`; out of scope here.
                 cap: usize::MAX,
             });
             uncovered_authors.extend(coverage.shortfall.clone());
