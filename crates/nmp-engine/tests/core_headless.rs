@@ -673,8 +673,13 @@ fn public_session(relay: &RelayUrl) -> RelaySessionKey {
     RelaySessionKey::public(relay.clone())
 }
 
-fn signer_session(relay: &RelayUrl, signer: nostr::PublicKey) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
+// In the #8 U1 foundation the write plane rides the relay's PUBLIC session
+// (no AUTH reducer yet). This helper keeps its `signer` parameter so the
+// call sites still document which identity's write lane they model, and so
+// the AUTH wave can reintroduce an authenticated session here without
+// re-touching every caller — but today it resolves to the public session.
+fn signer_session(relay: &RelayUrl, _signer: nostr::PublicKey) -> RelaySessionKey {
+    RelaySessionKey::public(relay.clone())
 }
 
 fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
@@ -736,8 +741,7 @@ fn mark_written<S: EventStore>(
         .iter()
         .find_map(|effect| match effect {
             Effect::PublishEvent(candidate, event, correlation)
-                if &candidate.relay == relay
-                    && candidate.access == AccessContext::Nip42(event.pubkey) =>
+                if &candidate.relay == relay && candidate.access == AccessContext::Public =>
             {
                 Some(*correlation)
             }
@@ -2389,9 +2393,9 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     ));
 
     assert!(
-        !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))),
+        !effects.iter().any(
+            |effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))
+        ),
         "a permanent failure must never re-issue EnsureRelay -- the pool has \
          already retired this worker for good, so this would either race a \
          wedged zombie or busy-loop redialing a relay that keeps refusing"
@@ -2421,9 +2425,9 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
         DisconnectReason::Error,
     ));
     assert!(
-        transient_effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))),
+        transient_effects.iter().any(
+            |effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))
+        ),
         "an ordinary transient disconnect must keep re-issuing EnsureRelay unchanged"
     );
     assert!(
@@ -2982,9 +2986,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
     let published = first_wave
         .iter()
         .filter_map(|effect| match effect {
-            Effect::PublishEvent(session, event, _)
-                if session.access == AccessContext::Nip42(event.pubkey) =>
-            {
+            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
                 Some(session.relay.clone())
             }
             _ => None,
@@ -3007,7 +3009,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
             .iter()
             .filter_map(|effect| match effect {
                 Effect::PublishEvent(session, event, _)
-                    if session.access == AccessContext::Nip42(event.pubkey) =>
+                    if session.access == AccessContext::Public =>
                 {
                     Some(session.relay.clone())
                 }
@@ -5554,9 +5556,7 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
     let published: BTreeSet<RelayUrl> = effects
         .iter()
         .filter_map(|e| match e {
-            Effect::PublishEvent(session, event, _)
-                if session.access == AccessContext::Nip42(event.pubkey) =>
-            {
+            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
                 Some(session.relay.clone())
             }
             _ => None,

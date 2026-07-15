@@ -63,9 +63,21 @@ public struct FilterCoverage: Sendable, Hashable {
 /// actually received per kind, and per-filter coverage state. Every field is
 /// a REAL number read off the running engine -- never fabricated/estimated.
 public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
-    public var id: String { relay }
+    // One relay URL can now host distinct sessions (#8: `.public` vs a
+    // `.nip42` identity), so identity must include the access context or two
+    // rows on the same URL would collide.
+    public var id: String {
+        switch access {
+        case .public: return relay
+        case let .nip42(publicKey): return "\(relay)#nip42:\(publicKey)"
+        }
+    }
 
     public let relay: String
+    /// The frozen access identity of the physical session these diagnostics
+    /// describe (#8): the same relay under `.public` versus a `.nip42`
+    /// identity is a distinct session with its own row.
+    public let access: NMPAccessContext
     public let wireSubCount: UInt32
     public let authorsServed: UInt32
     public let byLane: [LaneCount]
@@ -82,6 +94,7 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
 
     init(_ ffi: FfiRelayDiagnostics) {
         relay = ffi.relay
+        access = NMPAccessContext(ffi.access)
         wireSubCount = ffi.wireSubCount
         authorsServed = ffi.authorsServed
         byLane = ffi.byLane.map(LaneCount.init)

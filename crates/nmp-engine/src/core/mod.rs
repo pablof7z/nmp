@@ -822,10 +822,14 @@ pub enum Effect {
     /// `["EVENT", …]` frame on `relay`'s current generation, correlated by
     /// `AttemptCorrelation` (issue #93) — the durable handoff is generation-
     /// scoped and reports back exactly one typed `HandoffResult`, never
-    /// silently carried into a later connection. The session is the write
-    /// plane's own identity-scoped one (#8): `RelaySessionKey::new(relay,
-    /// AccessContext::Nip42(signing pubkey))` — a write never rides the
-    /// Public read session.
+    /// silently carried into a later connection. In this NIP-42 foundation
+    /// (#8 U1) the write plane has exactly one access context —
+    /// `AccessContext::Public` — so a write rides `RelaySessionKey::public(
+    /// relay)`, reusing the same physical session a public read holds. An
+    /// identity-scoped authenticated write session (`Nip42(signing pubkey)`)
+    /// is deferred to the AUTH-reducer wave that can actually authenticate
+    /// it; carrying it here with no reducer only forces a redundant cold
+    /// dial of an already-connected relay.
     PublishEvent(RelaySessionKey, SignedEvent, AttemptCorrelation),
     /// Ensure a write-only relay session is dialing without creating an
     /// attempt. An ordinal is allocated only after `RelayConnected` proves
@@ -1208,8 +1212,9 @@ pub struct EngineCore<S: EventStore> {
 /// reducer's own bookkeeping.
 struct AttemptCorrelationTarget {
     receipt: ReceiptId,
-    /// The identity-scoped write session this attempt rides (#8):
-    /// `RelaySessionKey::new(relay, AccessContext::Nip42(signing pubkey))`.
+    /// The write session this attempt rides. In the #8 U1 foundation this is
+    /// always `RelaySessionKey::public(relay)` (no AUTH reducer yet);
+    /// authenticated write sessions arrive in a later wave.
     session: RelaySessionKey,
     /// Durable/AtMostOnce correlations identify the exact persisted lane
     /// ordinal. Ephemeral correlations have no outbox row.
@@ -1576,7 +1581,6 @@ impl<S: EventStore> EngineCore<S> {
         );
 
         for pending in self.pending.values() {
-            let access = AccessContext::Nip42(pending.signing_pubkey);
             required.extend(
                 pending
                     .pending_relays
@@ -1584,7 +1588,7 @@ impl<S: EventStore> EngineCore<S> {
                     .chain(&pending.unstarted_relays)
                     .chain(&pending.route_blocked_relays)
                     .cloned()
-                    .map(|relay| RelaySessionKey::new(relay, access)),
+                    .map(RelaySessionKey::public),
             );
 
             let Some(intent_id) = pending.intent_id else {
@@ -1593,7 +1597,7 @@ impl<S: EventStore> EngineCore<S> {
             let lanes = self.resolver.store().recover_outbox_lanes(intent_id).ok()?;
             required.extend(lanes.into_iter().filter_map(|lane| {
                 (!matches!(lane.state, LaneState::Terminal { .. }))
-                    .then_some(RelaySessionKey::new(lane.key.relay, access))
+                    .then_some(RelaySessionKey::public(lane.key.relay))
             }));
         }
 
@@ -1628,18 +1632,12 @@ impl<S: EventStore> EngineCore<S> {
         });
 
         for (_, id, lane) in eligible {
-            // The write plane's connectivity check is against the lane's own
-            // identity-scoped session (#8): the Public read session for the
-            // same URL being up proves nothing about THIS identity's session.
-            let session = RelaySessionKey::new(
-                lane.key.relay.clone(),
-                AccessContext::Nip42(
-                    self.pending
-                        .get(&id)
-                        .expect("recovered lane belongs to pending write")
-                        .signing_pubkey,
-                ),
-            );
+            // The write plane's connectivity check is against the lane's
+            // public session (#8 U1: writes share the relay's public
+            // session; no authenticated write session exists until the AUTH
+            // wave). A public read holding this relay up therefore also
+            // satisfies the write, so no redundant cold dial is forced.
+            let session = RelaySessionKey::public(lane.key.relay.clone());
             if !self.connected_relays.contains(&session) {
                 if self
                     .resolver
@@ -1808,9 +1806,10 @@ impl<S: EventStore> EngineCore<S> {
     /// filtered to `session` -- the loop below still filters, since the
     /// degraded fallback hands it every pending intent's lanes unfiltered
     /// (exactly as the old, pre-#507 `wake_relay_lanes` body did). A lane
-    /// whose receipt has no pending entry is skipped: without a pending
-    /// write there is no signing identity, so no session it could honestly
-    /// belong to (#8).
+    /// whose receipt has no pending entry is skipped: without a live pending
+    /// write there is nothing to wake. In the #8 U1 foundation the write
+    /// plane rides the relay's public session, so a lane belongs to
+    /// `RelaySessionKey::public(lane.key.relay)`.
     fn apply_relay_wake(
         &mut self,
         session: &RelaySessionKey,
@@ -1819,14 +1818,10 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) {
         for (id, lane) in lanes {
-            let Some(pending) = self.pending.get(&id) else {
+            if !self.pending.contains_key(&id) {
                 continue;
-            };
-            let lane_session = RelaySessionKey::new(
-                lane.key.relay.clone(),
-                AccessContext::Nip42(pending.signing_pubkey),
-            );
-            if &lane_session != session {
+            }
+            if RelaySessionKey::public(lane.key.relay.clone()) != *session {
                 continue;
             }
             let should_wake = if auth_only {
@@ -2099,14 +2094,10 @@ impl<S: EventStore> EngineCore<S> {
             };
             for lane in lanes {
                 let relay = lane.key.relay.clone();
-                // The recovered write lane's worker demand is its identity-
-                // scoped session (#8): the signing identity was frozen at
-                // acceptance (`expected_pubkey`) and recovery must redial
-                // exactly that session, never the URL's Public one.
-                let session = RelaySessionKey::new(
-                    lane.key.relay.clone(),
-                    AccessContext::Nip42(intent.expected_pubkey),
-                );
+                // The recovered write lane's worker demand is the relay's
+                // public session (#8 U1: no authenticated write session yet);
+                // recovery redials exactly that public session.
+                let session = RelaySessionKey::public(lane.key.relay.clone());
                 if let Some(pending) = self.pending.get_mut(&id) {
                     if pending.lane_relays.insert(relay.clone()) {
                         self.receipts_by_lane_relay
@@ -3669,15 +3660,12 @@ impl<S: EventStore> EngineCore<S> {
                     correlation,
                     AttemptCorrelationTarget {
                         receipt: id,
-                        session: RelaySessionKey::new(
-                            relay.clone(),
-                            AccessContext::Nip42(event.pubkey),
-                        ),
+                        session: RelaySessionKey::public(relay.clone()),
                         lane: None,
                     },
                 );
                 effects.push(Effect::PublishEvent(
-                    RelaySessionKey::new(relay, AccessContext::Nip42(event.pubkey)),
+                    RelaySessionKey::public(relay),
                     event.clone(),
                     correlation,
                 ));
@@ -3740,8 +3728,7 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
             if matches!(lane.state, LaneState::WaitingConnection) {
-                let session =
-                    RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(event.pubkey));
+                let session = RelaySessionKey::public(lane.key.relay.clone());
                 if self.connected_relays.contains(&session) {
                     let _ = self.resolver.store_mut().set_lane_eligible(
                         &lane.key,
@@ -4079,15 +4066,13 @@ impl<S: EventStore> EngineCore<S> {
             let Some(intent_id) = pending.intent_id else {
                 continue;
             };
-            // An OK is only trusted from the exact identity-scoped session
-            // this pending write publishes on (#8): an ack observed on the
-            // wrong-identity session (or the Public one) must never advance
-            // another identity's write lane — the relay may accept an event
-            // for one authenticated identity while rejecting it for another.
-            let expected_session = RelaySessionKey::new(
-                session.relay.clone(),
-                AccessContext::Nip42(pending.signing_pubkey),
-            );
+            // An OK is only trusted from the exact session this pending write
+            // publishes on (#8 U1: the relay's public write session). An ack
+            // arriving on any other context's session for the same URL must
+            // never advance this write lane. (The authenticated-write case —
+            // distinct Nip42 sessions per signing identity — arrives with the
+            // AUTH-reducer wave.)
+            let expected_session = RelaySessionKey::public(session.relay.clone());
             if &expected_session != session {
                 continue;
             }
@@ -4216,19 +4201,14 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
         for (id, lane) in lanes {
-            // Only lanes riding EXACTLY this identity-scoped session suspend
-            // (#8): the same URL's other identities' sessions (and the
-            // Public read session) did not drop. A lane whose receipt has no
-            // pending entry has no signing identity to derive a session
-            // from, so it is skipped.
-            let Some(pending) = self.pending.get(&id) else {
+            // Only lanes riding EXACTLY this session suspend (#8): a different
+            // access context's session for the same URL did not drop. In the
+            // U1 foundation write lanes ride the relay's public session; a
+            // lane whose receipt has no live pending entry is skipped.
+            if !self.pending.contains_key(&id) {
                 continue;
-            };
-            let lane_session = RelaySessionKey::new(
-                lane.key.relay.clone(),
-                AccessContext::Nip42(pending.signing_pubkey),
-            );
-            if &lane_session != session {
+            }
+            if RelaySessionKey::public(lane.key.relay.clone()) != *session {
                 continue;
             }
             let relay = &session.relay;

@@ -1613,13 +1613,11 @@ mod relay_worker_reconciliation_tests {
     fn durable_write_lane_retains_worker_without_read_demand() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://write-only.example").unwrap();
-        // Write sessions are identity-scoped (#8): the worker this durable
-        // lane owns is the author's own Nip42 session, never the URL's
-        // Public read session.
-        let write_session = RelaySessionKey::new(
-            relay.clone(),
-            nmp_grammar::AccessContext::Nip42(author.public_key()),
-        );
+        // #8 U1: the write plane rides the relay's PUBLIC session (no AUTH
+        // reducer yet), so the worker this durable lane owns is the public
+        // session for the URL. Authenticated per-identity write sessions
+        // arrive with the AUTH wave.
+        let write_session = RelaySessionKey::public(relay.clone());
         let directory =
             FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
@@ -2657,8 +2655,7 @@ fn preflight_query_relay_workers_with(
     mut is_live: impl FnMut(&RelaySessionKey) -> bool,
     mut ensure_session: impl FnMut(
         &RelaySessionKey,
-    )
-        -> Result<Option<nmp_transport::RelayHandle>, EngineThreadError>,
+    ) -> Result<Option<nmp_transport::RelayHandle>, EngineThreadError>,
     mut close: impl FnMut(nmp_transport::RelayHandle),
 ) -> Result<(), EngineThreadError> {
     let mut sessions = BTreeSet::new();

@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId};
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
-    AccessContext, Durability, HostAuthority, RelaySessionKey, WriteIntent, WritePayload,
-    WriteRouting,
+    Durability, HostAuthority, RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{
@@ -51,8 +50,12 @@ fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureDirectory {
     FixtureDirectory::new().with_write(pk.to_hex(), [relay])
 }
 
-fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
+// #8 U1: the write plane rides the relay's PUBLIC session (no AUTH reducer
+// yet). The `signer` parameter is retained so call sites still name the
+// modelled write identity and the AUTH wave can restore an authenticated
+// session here without touching every caller.
+fn signer_session(relay: &RelayUrl, _signer: PublicKey) -> RelaySessionKey {
+    RelaySessionKey::public(relay.clone())
 }
 
 fn strip_additive_lane_rows(path: &std::path::Path, intent: nmp_store::IntentId, relay: &RelayUrl) {

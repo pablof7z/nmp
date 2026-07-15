@@ -43,21 +43,27 @@ sealed class NMPSourceAuthority {
     }
 }
 
-/** `nmp_grammar::AccessContext` mirror. Single-variant today (#106's closed
- * vocabulary); additional cases are additive. */
-enum class NMPAccessContext {
-    Public,
-    ;
+/** `nmp_grammar::AccessContext` mirror. Closed vocabulary: an unauthenticated
+ * [Public] connection, or NIP-42 authentication against one stable expected
+ * public key (hex). The [Nip42] identity is frozen in the demand; changing the
+ * active account never redirects it (#8). Modelled as a sealed class rather
+ * than an enum so the authenticated variant can carry its expected key. */
+sealed class NMPAccessContext {
+    object Public : NMPAccessContext()
+
+    data class Nip42(val publicKey: String) : NMPAccessContext()
 
     fun toFfi(): FfiAccessContext =
         when (this) {
-            Public -> FfiAccessContext.PUBLIC
+            is Public -> FfiAccessContext.Public
+            is Nip42 -> FfiAccessContext.Nip42(publicKey)
         }
 
     companion object {
         fun from(ffi: FfiAccessContext): NMPAccessContext =
             when (ffi) {
-                FfiAccessContext.PUBLIC -> Public
+                is FfiAccessContext.Public -> Public
+                is FfiAccessContext.Nip42 -> Nip42(ffi.publicKey)
             }
     }
 }

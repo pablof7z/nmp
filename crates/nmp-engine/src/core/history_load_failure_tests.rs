@@ -544,11 +544,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         .shortfall
         .iter()
         .any(|fact| { matches!(fact, ShortfallFact::LocalLimit { .. }) }));
-    assert!(returned
-        .evidence
-        .sources
-        .iter()
-        .any(|source| {
-            source.relay == selected.relay && source.status == SourceStatus::Disconnected
-        }));
+    assert!(returned.evidence.sources.iter().any(|source| {
+        source.relay == selected.relay && source.status == SourceStatus::Disconnected
+    }));
 }
