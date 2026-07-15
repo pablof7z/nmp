@@ -49,6 +49,48 @@ class InsecureFileAccountStoreTest {
         }
     }
 
+    // #507/#495: removing the checkpointed account must clear the on-disk
+    // checkpoint too, or the removed account resurrects on the very next
+    // restore -- proving `addAccount`'s side effect has a symmetric undo.
+    // Removing an unrelated pubkey must leave an existing checkpoint alone.
+    @Test
+    fun removeAccountClearsCheckpointAndLeavesUnrelatedCheckpointIntact() {
+        val checkpoint = root.resolve("local-account.nsec")
+        val store = NMPInsecureFileAccountStore(checkpoint)
+        // The x-only pubkey for secret key `2` -- a distinct, valid, but
+        // never-`addAccount`-ed account, used only to prove removal of an
+        // unrelated pubkey is a no-op that does not touch the checkpoint.
+        val otherPubkey = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+
+        NMPEngine(NMPConfig(), store).use { engine ->
+            val pubkey = engine.addAccount(secretOne)
+            engine.setActiveAccount(pubkey)
+            assertTrue(Files.exists(checkpoint))
+
+            assertFalse(
+                engine.removeAccount(otherPubkey),
+                "an unrelated, never-added pubkey has nothing to remove",
+            )
+            assertTrue(
+                Files.exists(checkpoint),
+                "removing an unrelated pubkey must not touch an existing checkpoint",
+            )
+
+            assertTrue(engine.removeAccount(pubkey))
+            assertFalse(
+                Files.exists(checkpoint),
+                "removing the checkpointed account must clear its on-disk checkpoint",
+            )
+        }
+
+        NMPEngine(NMPConfig(), store).use { restarted ->
+            assertNull(
+                restarted.activeAccount(),
+                "a removed-and-cleared account must not resurrect on the next restart",
+            )
+        }
+    }
+
     @Test
     fun invalidCheckpointFailsClosedDuringConstruction() {
         val checkpoint = root.resolve("local-account.nsec")

@@ -72,11 +72,24 @@ class NMPEngine(
 
     internal val ffi: NmpEngine = nmpRethrowing { NmpEngine(config.toFfi()) }
 
+    /** Guards [checkpointedPubkey], the only mutable state this class holds
+     * (#507/#495's checkpoint-resurrection fix needs it settable from both
+     * `init`'s restore path and [addAccount]/[removeAccount]). */
+    private val checkpointLock = Any()
+
+    /** The pubkey currently checkpointed to [localAccountStore], if any --
+     * tracked so [removeAccount] can clear the on-disk checkpoint exactly
+     * when it removes the account that owns it, rather than leaving a
+     * removed account to silently resurrect on the next restart's
+     * `init`-time restore. */
+    private var checkpointedPubkey: String? = null
+
     init {
         try {
             localAccountStore?.loadSecretKey()?.let { secretKey ->
                 val pubkey = nmpRethrowing { ffi.addAccount(secretKey) }
                 nmpRethrowing { ffi.setActiveAccount(pubkey) }
+                checkpointedPubkey = pubkey
             }
         } catch (error: Throwable) {
             ffi.shutdown()
@@ -95,7 +108,37 @@ class NMPEngine(
     fun addAccount(secretKey: String): String {
         val pubkey = nmpRethrowing { ffi.addAccount(secretKey) }
         localAccountStore?.saveSecretKey(secretKey)
+        if (localAccountStore != null) {
+            synchronized(checkpointLock) { checkpointedPubkey = pubkey }
+        }
         return pubkey
+    }
+
+    /** Detach the signing capability [addAccount] registered for `pubkey`
+     * (#507/#495: closes the gap where a local-key signer capability was
+     * permanently resident once added -- `setActiveAccount(null)` alone only
+     * deactivates routing, it never detaches the capability, so making the
+     * same pubkey active again silently re-armed signing). Key material
+     * stays engine-side either way; this only un-registers the capability
+     * that let it sign. Orthogonal to [setActiveAccount]: routing/active
+     * identity are unaffected -- a full log out is `setActiveAccount(null)`
+     * *and* `removeAccount(pubkey)` together.
+     *
+     * When `pubkey` is the account currently checkpointed to
+     * [localAccountStore], this also clears that on-disk checkpoint (the
+     * store's own `clear()`) so the removed account does not resurrect the
+     * next time this engine restarts and restores from the checkpoint --
+     * removing a DIFFERENT pubkey leaves an existing checkpoint untouched.
+     * Returns `true` if a capability was detached, `false` if `pubkey` was
+     * never added via [addAccount] (or was already removed). */
+    fun removeAccount(pubkey: String): Boolean {
+        val removed = nmpRethrowing { ffi.removeAccount(pubkey) }
+        val isCheckpointed = synchronized(checkpointLock) { checkpointedPubkey == pubkey }
+        if (isCheckpointed) {
+            localAccountStore?.clear()
+            synchronized(checkpointLock) { checkpointedPubkey = null }
+        }
+        return removed
     }
 
     /** Re-root every reactive query AND the active signing capability
