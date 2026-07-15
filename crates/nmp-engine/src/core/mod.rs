@@ -570,6 +570,14 @@ struct PendingWrite {
     /// The persisted started ordinal currently awaiting a terminal outcome
     /// for each relay.
     attempt_ordinals: BTreeMap<RelayUrl, u64>,
+    /// Every relay this reducer has ever learned owns a persisted outbox
+    /// lane for this intent (epic #507 finding E5). Populated exactly where
+    /// the core learns an intent's lanes — `bootstrap_outbox_lanes`'s two
+    /// call sites (`recover_on_boot`, `on_signed`) — and never elsewhere:
+    /// this is the per-receipt half of `EngineCore::receipts_by_lane_relay`,
+    /// kept so a permanent removal from `pending` can walk exactly this set
+    /// to clean the reverse index rather than scanning it.
+    lane_relays: BTreeSet<RelayUrl>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for
@@ -622,6 +630,53 @@ pub struct EngineCore<S: EventStore> {
     /// `EventId` on the wire) find its receipt.
     pending: HashMap<ReceiptId, PendingWrite>,
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
+    /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
+    /// finding E5): `receipt_for_intent` used to be a full linear scan of
+    /// `pending`, run once per due deadline in
+    /// `consume_due_outbox_deadlines`. Maintained at every real
+    /// `pending.insert`/`pending.remove` (never at `fail_and_compensate`'s
+    /// transient remove-then-reinsert, which never changes which intent a
+    /// receipt owns). This mirrors `pending` exactly and needs no separate
+    /// invalidation story: it is rebuilt from scratch, in step with
+    /// `pending`, every `recover_on_boot`.
+    intent_receipts: HashMap<IntentId, ReceiptId>,
+    /// Relay -> receipts with a lane on that relay (epic #507 finding E5).
+    /// A narrowing INDEX only, never a second source of truth: the store's
+    /// `OUTBOX_LANES` table stays authoritative (its keys are intent-first,
+    /// and `close_terminal_intent` deliberately never deletes a closed
+    /// intent's own terminal lane rows -- both `MemoryStore` and `RedbStore`
+    /// only drop `OUTBOX_INTENTS`/the deadline indexes there, per that
+    /// door's own doc comment: "Receipts and all route/attempt/detail
+    /// evidence are retained" -- so a durable relay-scoped secondary table
+    /// would still index retained garbage and would need transactional
+    /// maintenance across every lane-writing door).
+    /// This index instead rides the reducer's own `pending`/`recover_on_boot`
+    /// lifecycle: rebuilt deterministically at boot, so there is no cache-
+    /// invalidation question distinct from the one `pending` itself already
+    /// answers. `wake_relay_lanes` uses this to avoid re-reading every
+    /// outstanding write's lanes on every relay connect/disconnect/auth
+    /// event -- it only narrows WHICH intents to re-read via
+    /// `recover_outbox_lanes`, the store read itself remains the truth.
+    /// Kept in lockstep with each `PendingWrite::lane_relays` (its per-
+    /// receipt half): populated at the same two `bootstrap_outbox_lanes`
+    /// call sites, cleaned by walking `lane_relays` on a real removal.
+    receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
+    /// Safety valve for `receipts_by_lane_relay` (epic #507 finding E5): set
+    /// to true the moment ANY path could have created/learned lanes but the
+    /// index could not record them (a `bootstrap_outbox_lanes` or
+    /// `recover_route_revisions` error during `recover_on_boot`/`on_signed`).
+    /// `recover_on_boot` resets it to false at the start of its one-shot,
+    /// deterministic rebuild -- the same moment `pending` itself is rebuilt
+    /// from scratch -- and a later failure during that same rebuild (or any
+    /// post-boot lane-learning call) sets it back to true for the rest of
+    /// this process's life; nothing un-degrades it mid-process, on purpose.
+    /// While true, `wake_relay_lanes` falls back to the full
+    /// `recover_all_lanes` scan unchanged: a missed wakeup permanently wedges
+    /// a durable write lane (the worst bug class here -- see the idle-
+    /// barrier missed-wakeup fix, d755f39, and #507's own missed-wakeup
+    /// finding), so an unprovable index is always treated as untrustworthy
+    /// rather than guessed at.
+    lane_relay_index_degraded: bool,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
     /// Latest provenance-bearing NIP-11 advertisement for relays in the
@@ -764,6 +819,9 @@ impl<S: EventStore> EngineCore<S> {
             next_unaccepted_receipt: Some(u64::MAX),
             pending: HashMap::new(),
             event_to_receipts: HashMap::new(),
+            intent_receipts: HashMap::new(),
+            receipts_by_lane_relay: HashMap::new(),
+            lane_relay_index_degraded: false,
             prober: Prober::new(),
             nip11_information: HashMap::new(),
             neg_sessions: HashMap::new(),
@@ -822,10 +880,31 @@ impl<S: EventStore> EngineCore<S> {
         Ok(AttemptCorrelation(id))
     }
 
+    /// O(1) via `intent_receipts` (epic #507 finding E5) -- this door used
+    /// to be a full `self.pending` linear scan, run once per due deadline in
+    /// `consume_due_outbox_deadlines`.
     fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
-        self.pending
-            .iter()
-            .find_map(|(id, pending)| (pending.intent_id == Some(intent_id)).then_some(*id))
+        self.intent_receipts.get(&intent_id).copied()
+    }
+
+    /// Remove a permanently-discarded pending write's entries from the
+    /// `intent_receipts` and `receipts_by_lane_relay` indexes (epic #507
+    /// finding E5). Call this at every REAL removal from `self.pending` --
+    /// never at `fail_and_compensate`'s transient remove-then-reinsert
+    /// (`CompensateOutcome::NotFound`/`Err`), which must leave both indexes
+    /// untouched because the obligation and its lanes are still live.
+    fn forget_pending_indexes(&mut self, id: ReceiptId, pending: &PendingWrite) {
+        if let Some(intent_id) = pending.intent_id {
+            self.intent_receipts.remove(&intent_id);
+        }
+        for relay in &pending.lane_relays {
+            if let Some(receipts) = self.receipts_by_lane_relay.get_mut(relay) {
+                receipts.remove(&id);
+                if receipts.is_empty() {
+                    self.receipts_by_lane_relay.remove(relay);
+                }
+            }
+        }
     }
 
     fn emit_write_status(&self, id: ReceiptId, status: WriteStatus, effects: &mut Vec<Effect>) {
@@ -866,7 +945,9 @@ impl<S: EventStore> EngineCore<S> {
         else {
             return;
         };
-        self.pending.remove(&id);
+        if let Some(pending) = self.pending.remove(&id) {
+            self.forget_pending_indexes(id, &pending);
+        }
         if let Some(event_id) = event_id {
             if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
                 receipts.remove(&id);
@@ -1013,6 +1094,17 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Full O(pending) re-read of every outstanding write's lanes. This
+    /// remains a deliberate architectural stance for `schedule_ready` (its
+    /// caller below) and `required_relay_workers`, NOT an oversight (epic
+    /// #507 finding E5): both compute durable-cap/attempt-ordinal
+    /// accounting, which is defined over ALL outstanding lanes globally --
+    /// there is no per-relay narrowing that preserves that meaning, so they
+    /// are left unchanged here. `wake_relay_lanes` is the one caller this
+    /// full scan was NOT inherent to (a single relay event only ever needs
+    /// that relay's own lanes); it now goes through the narrower
+    /// `receipts_by_lane_relay` index instead, except in the degraded
+    /// fallback which still calls this exact function.
     fn recover_all_lanes(&self) -> Result<Vec<(ReceiptId, RecoveredLane)>, PersistenceError> {
         let mut lanes = Vec::new();
         for (id, pending) in &self.pending {
@@ -1180,12 +1272,96 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Wake every `WaitingConnection` (or, if `auth_only`, `WaitingAuth`)
+    /// lane on `relay` -- called on every relay connect/disconnect/auth
+    /// event. Before epic #507 finding E5, this ran `recover_all_lanes` (a
+    /// full `O(pending)` store re-read) and then filtered down to one
+    /// relay, TWICE over per event (once here, once again inside
+    /// `schedule_ready` at the end). The non-degraded path below instead
+    /// narrows via `receipts_by_lane_relay` to exactly the receipts that
+    /// actually own a lane on `relay`, re-reading only those intents.
+    ///
+    /// While `lane_relay_index_degraded`, this falls back to the OLD full
+    /// scan, unchanged: the index cannot be trusted to be a superset of
+    /// live lanes right now, and guessing wrong here means a lane never
+    /// wakes -- a permanently wedged durable write, the worst bug class in
+    /// this codebase (see the idle-barrier missed-wakeup fix, d755f39, and
+    /// #507's own missed-wakeup finding). A missed wakeup is never an
+    /// acceptable price for narrower reads.
     fn wake_relay_lanes(&mut self, relay: &RelayUrl, auth_only: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
-        let Ok(lanes) = self.recover_all_lanes() else {
-            self.retry_scheduler_blocked = true;
+
+        if self.lane_relay_index_degraded {
+            let Ok(lanes) = self.recover_all_lanes() else {
+                self.retry_scheduler_blocked = true;
+                return effects;
+            };
+            self.apply_relay_wake(relay, auth_only, lanes, &mut effects);
+            effects.extend(self.schedule_ready(self.clock));
             return effects;
-        };
+        }
+
+        // Clone the candidate receipt set first: the loop below needs a
+        // mutable borrow of `self` (store reads, `retry_scheduler_blocked`),
+        // so it cannot hold a live borrow of `self.receipts_by_lane_relay`
+        // at the same time.
+        let candidates: Vec<ReceiptId> = self
+            .receipts_by_lane_relay
+            .get(relay)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let mut lanes: Vec<(ReceiptId, RecoveredLane)> = Vec::new();
+        for id in candidates {
+            let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id)
+            else {
+                continue;
+            };
+            match self.resolver.store().recover_outbox_lanes(intent_id) {
+                Ok(recovered) => lanes.extend(
+                    recovered
+                        .into_iter()
+                        .filter(|lane| &lane.key.relay == relay)
+                        .map(|lane| (id, lane)),
+                ),
+                Err(_) => {
+                    // A transient read failure for this one receipt, not an
+                    // indexing gap -- the established `retry_scheduler_blocked`
+                    // idiom (a later engine message retries) applies exactly
+                    // as it does everywhere else this door is read, without
+                    // needing to distrust the whole index.
+                    self.retry_scheduler_blocked = true;
+                }
+            }
+        }
+        // Same deterministic order `recover_all_lanes` produces (by
+        // `lane.key`): order affects effect emission order, and this must be
+        // indistinguishable from the old full-scan behavior for a given
+        // input, not merely equivalent in aggregate.
+        lanes.sort_by(|(_, left), (_, right)| left.key.cmp(&right.key));
+
+        self.apply_relay_wake(relay, auth_only, lanes, &mut effects);
+        effects.extend(self.schedule_ready(self.clock));
+        effects
+    }
+
+    /// The exact per-lane wake body `wake_relay_lanes` ran inline before
+    /// epic #507 finding E5, shared now by both its indexed fast path and
+    /// its degraded full-scan fallback so the two are behaviorally
+    /// identical for a given input. `lanes` is assumed pre-sorted by
+    /// `lane.key` (both callers already do this); it need NOT be pre-
+    /// filtered to `relay` -- the loop below still filters, since the
+    /// degraded fallback hands it every pending intent's lanes unfiltered
+    /// (exactly as the old, pre-#507 `wake_relay_lanes` body did).
+    fn apply_relay_wake(
+        &mut self,
+        relay: &RelayUrl,
+        auth_only: bool,
+        lanes: Vec<(ReceiptId, RecoveredLane)>,
+        effects: &mut Vec<Effect>,
+    ) {
         for (id, lane) in lanes {
             if &lane.key.relay != relay {
                 continue;
@@ -1213,12 +1389,10 @@ impl<S: EventStore> EngineCore<S> {
                         attempt: lane.last_ordinal,
                         eligible_at: self.clock,
                     },
-                    &mut effects,
+                    effects,
                 );
             }
         }
-        effects.extend(self.schedule_ready(self.clock));
-        effects
     }
 
     fn consume_due_outbox_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
@@ -1349,6 +1523,11 @@ impl<S: EventStore> EngineCore<S> {
         let recovered = self.resolver.store().recover_outbox();
         let mut effects = Vec::new();
         let mut recovered_ids = Vec::new();
+        // This is the one deterministic, from-scratch rebuild of `pending`
+        // (and, with it, every index derived from `pending`) -- the exact
+        // moment `receipts_by_lane_relay` can be trusted again regardless of
+        // what happened in a prior process (epic #507 finding E5).
+        self.lane_relay_index_degraded = false;
 
         for intent in recovered {
             let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
@@ -1382,8 +1561,10 @@ impl<S: EventStore> EngineCore<S> {
                     unstarted_relays: BTreeSet::new(),
                     route_blocked_relays: BTreeSet::new(),
                     attempt_ordinals: BTreeMap::new(),
+                    lane_relays: BTreeSet::new(),
                 },
             );
+            self.intent_receipts.insert(intent.intent_id, id);
             recovered_ids.push(id);
 
             if !already_signed {
@@ -1400,7 +1581,16 @@ impl<S: EventStore> EngineCore<S> {
                 .recover_route_revisions(intent.intent_id)
             {
                 Ok(revisions) => revisions,
-                Err(_) => continue,
+                Err(_) => {
+                    // This intent may already own real persisted lanes from
+                    // before this boot; skipping straight to the next intent
+                    // (as below) means `bootstrap_outbox_lanes` never runs
+                    // for it this boot, so the reverse index can never learn
+                    // those lanes -- an unprovable gap, so degrade rather
+                    // than silently under-index (epic #507 finding E5).
+                    self.lane_relay_index_degraded = true;
+                    continue;
+                }
             };
             let durable_relays = revisions
                 .iter()
@@ -1434,9 +1624,26 @@ impl<S: EventStore> EngineCore<S> {
                 .bootstrap_outbox_lanes(intent.intent_id)
             {
                 Ok(lanes) => lanes,
-                Err(_) => continue,
+                Err(_) => {
+                    // Same reasoning as the `recover_route_revisions` error
+                    // above: this is the sole call that teaches the reverse
+                    // index this intent's lanes, so a failure here is an
+                    // audit hole, not a "no lanes" fact -- degrade rather
+                    // than guess (epic #507 finding E5).
+                    self.lane_relay_index_degraded = true;
+                    continue;
+                }
             };
             for lane in lanes {
+                let relay = lane.key.relay.clone();
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    if pending.lane_relays.insert(relay.clone()) {
+                        self.receipts_by_lane_relay
+                            .entry(relay)
+                            .or_default()
+                            .insert(id);
+                    }
+                }
                 match lane.state {
                     LaneState::LegacyInFlight { ordinal }
                     | LaneState::InFlight {
@@ -2203,8 +2410,15 @@ impl<S: EventStore> EngineCore<S> {
                 unstarted_relays: BTreeSet::new(),
                 route_blocked_relays: BTreeSet::new(),
                 attempt_ordinals: BTreeMap::new(),
+                lane_relays: BTreeSet::new(),
             },
         );
+        // `intent_id` is `None` only for Ephemeral, which never owns a
+        // pending row or a lane -- nothing to index for it (epic #507
+        // finding E5).
+        if let Some(intent_id) = intent_id {
+            self.intent_receipts.insert(intent_id, id);
+        }
 
         if let Some(committed) = committed {
             // A local pending row was committed before Accepted. When it did
@@ -2413,6 +2627,13 @@ impl<S: EventStore> EngineCore<S> {
             Some(Ok(relays)) => relays,
             Some(Err(reason)) => {
                 if let Some(pending) = self.pending.remove(&id) {
+                    // No lanes have been bootstrapped for this intent yet at
+                    // this point in `on_signed` (that only happens further
+                    // below, after routes resolve) -- `lane_relays` is
+                    // guaranteed empty, but `intent_receipts` was already
+                    // populated at acceptance, so this must still clean it
+                    // (epic #507 finding E5).
+                    self.forget_pending_indexes(id, &pending);
                     let status = WriteStatus::Failed(reason);
                     Self::notify(&pending, status.clone());
                     effects.push(Effect::EmitReceipt(id, status));
@@ -2443,7 +2664,13 @@ impl<S: EventStore> EngineCore<S> {
                 );
                 effects.push(Effect::PublishEvent(relay, event.clone(), correlation));
             }
-            self.pending.remove(&id);
+            // Ephemeral never owns a durable lane (`intent_id` is `None`),
+            // so there is nothing for `forget_pending_indexes` to find, but
+            // calling it keeps this a single uniform cleanup discipline for
+            // every real `pending` removal (epic #507 finding E5).
+            if let Some(pending) = self.pending.remove(&id) {
+                self.forget_pending_indexes(id, &pending);
+            }
             return;
         }
 
@@ -2468,6 +2695,12 @@ impl<S: EventStore> EngineCore<S> {
         let lanes = match self.resolver.store_mut().bootstrap_outbox_lanes(intent_id) {
             Ok(lanes) => lanes,
             Err(_) => {
+                // This is the sole call that teaches the reverse index this
+                // freshly-signed intent's lanes; a failure here means the
+                // index cannot learn whatever lanes may (or may not) exist,
+                // so degrade rather than assume "no lanes" (epic #507
+                // finding E5).
+                self.lane_relay_index_degraded = true;
                 for relay in relays {
                     self.emit_write_status(id, WriteStatus::PersistenceBlocked(relay), effects);
                 }
@@ -2479,6 +2712,15 @@ impl<S: EventStore> EngineCore<S> {
             .or_default()
             .insert(id);
         for lane in lanes {
+            let lane_relay = lane.key.relay.clone();
+            if let Some(pending) = self.pending.get_mut(&id) {
+                if pending.lane_relays.insert(lane_relay.clone()) {
+                    self.receipts_by_lane_relay
+                        .entry(lane_relay)
+                        .or_default()
+                        .insert(id);
+                }
+            }
             if matches!(lane.state, LaneState::WaitingConnection) {
                 if self.connected_relays.contains(&lane.key.relay) {
                     let _ = self.resolver.store_mut().set_lane_eligible(
@@ -2691,6 +2933,12 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
+        // Reached only when `intent_id` was `None` (Ephemeral -- nothing to
+        // clean) or compensation actually committed (a real, permanent
+        // removal): both `NotFound`/`Err` arms above reinsert `pending`
+        // untouched and return early, so the indexes must stay untouched
+        // for those (epic #507 finding E5).
+        self.forget_pending_indexes(id, &pending);
         Self::notify(&pending, WriteStatus::Failed(reason.clone()));
         effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
     }
