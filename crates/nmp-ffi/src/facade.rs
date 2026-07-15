@@ -36,6 +36,10 @@ use crate::nip02::{
     action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
     FollowObserver, NmpFollowHandle,
 };
+use crate::nip51::{
+    action_status_to_ffi as relay_action_status_to_ffi, FfiRelayListActionFailure,
+    FfiRelayListActionStatus, RelayListActionObserver,
+};
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
 use crate::types::{
     FfiDemand, FfiFilter, FfiReceiptReattachment, FfiRelayInformation,
@@ -244,6 +248,66 @@ fn start_following_action_with(
                 },
             };
             observer.on_status(crate::nip02::FfiFollowActionStatus::Failed { failure });
+            observer.on_closed();
+        }
+    }
+}
+
+fn start_relay_list_action(
+    engine: Arc<nmp::Engine>,
+    relay: String,
+    change: nmp_nip51::RelayChange,
+    observer: Box<dyn RelayListActionObserver>,
+) {
+    let relay = match nostr::RelayUrl::parse(&relay) {
+        Ok(value) => value,
+        Err(_) => {
+            observer.on_status(FfiRelayListActionStatus::Failed {
+                failure: FfiRelayListActionFailure::InvalidRelay { got: relay },
+            });
+            observer.on_closed();
+            return;
+        }
+    };
+    let (action, runner) = nmp_nip51::prepare_set_relay(engine.clone(), relay, change);
+    let bridge_engine = engine;
+    let observer: Arc<dyn RelayListActionObserver> = Arc::from(observer);
+    let bridge = Arc::clone(&observer);
+    let spawn = (|| {
+        let reservation = bridge_engine.reserve_native_task("relay-list-action-observer")?;
+        let cancel = bridge_engine.native_task_cancel()?;
+        spawn_native_bridge(
+            reservation,
+            cancel,
+            "relay-list-action-observer",
+            move || {
+                while let Ok(status) = action.recv() {
+                    bridge.on_status(relay_action_status_to_ffi(status));
+                }
+                bridge.on_closed();
+            },
+        )
+    })();
+    match spawn {
+        Ok(()) => runner.start(),
+        Err(error) => {
+            let failure = match error {
+                FfiError::ThreadUnavailable { component, reason } => {
+                    FfiRelayListActionFailure::ThreadUnavailable { component, reason }
+                }
+                FfiError::ExecutorSaturated {
+                    component,
+                    capacity,
+                } => FfiRelayListActionFailure::ExecutorSaturated {
+                    component,
+                    capacity,
+                },
+                other => FfiRelayListActionFailure::ThreadUnavailable {
+                    component: "relay-list-action-observer".to_string(),
+                    reason: format!("unexpected bridge refusal: {other:?}"),
+                },
+            };
+            observer.on_status(FfiRelayListActionStatus::Failed { failure });
             observer.on_closed();
         }
     }
@@ -526,6 +590,37 @@ impl NmpEngine {
             self.engine.clone(),
             target,
             nmp_nip02::FollowChange::Unfollow,
+            observer,
+        );
+    }
+
+    /// Add one canonical public `r` tag to the active account's NIP-51
+    /// kind:10009 list through the module-owned source-evidence and exact-base
+    /// replacement action.
+    pub fn add_simple_group_relay(
+        &self,
+        relay: String,
+        observer: Box<dyn RelayListActionObserver>,
+    ) {
+        start_relay_list_action(
+            self.engine.clone(),
+            relay,
+            nmp_nip51::RelayChange::Add,
+            observer,
+        );
+    }
+
+    /// Remove matching public `r` tags while preserving group entries,
+    /// private content, and every unrelated tag.
+    pub fn remove_simple_group_relay(
+        &self,
+        relay: String,
+        observer: Box<dyn RelayListActionObserver>,
+    ) {
+        start_relay_list_action(
+            self.engine.clone(),
+            relay,
+            nmp_nip51::RelayChange::Remove,
             observer,
         );
     }

@@ -128,6 +128,14 @@ class NMPEngine(
      * `observe`. */
     fun observeDiagnostics(): Flow<DiagnosticsSnapshot> = observeDiagnostics(ffi)
 
+    /** Add one public relay to the active account's NIP-51 kind:10009 list. */
+    fun addSimpleGroupRelay(relay: String): RelayListAction =
+        relayListAction(ffi, relay, adding = true)
+
+    /** Remove matching public relay tags without altering remembered groups. */
+    fun removeSimpleGroupRelay(relay: String): RelayListAction =
+        relayListAction(ffi, relay, adding = false)
+
     /** Acquire one NIP-11 representation through the shared engine cache. */
     suspend fun relayInformation(
         relay: String,

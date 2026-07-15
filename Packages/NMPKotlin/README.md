@@ -30,6 +30,19 @@ NMPEngine(NMPConfig(indexerRelays = listOf("wss://purplepag.es"))).use { nmp ->
 
 See `src/main/kotlin/com/nmp/sdk/Engine.kt` for the full public surface.
 
+The same package exposes NMP-owned add/remove actions for public `r` tags in
+the active account's NIP-51 kind:10009 list:
+
+```kotlin
+nmp.addSimpleGroupRelay("wss://relay.example").status.collect { status ->
+    // acquisition, no-op, exact-base conflict, and write receipt facts
+}
+val removal = nmp.removeSimpleGroupRelay("wss://relay.example")
+```
+
+These actions preserve remembered `group` entries and unrelated fields; the
+JVM caller never constructs tags or chooses a replacement base.
+
 Apps that opt into the separate `:ui` artifact may also import `com.nmp.ui`.
 Its relay views accept caller-owned `NmpRelayInformationState`, query-scoped
 `NmpRelayRuntimePresentation`, and an optional already-resolved Compose

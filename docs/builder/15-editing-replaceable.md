@@ -1,9 +1,11 @@
 # Editing replaceable state safely
 
 **Status: IMPLEMENTED CONTRACT.** NMP now has an atomic exact-base guard for
-protocol-owned whole-value edits. The first public semantic operation is
-NIP-02 following (`nmp.follow(pubkey)` / `nmp.unfollow(pubkey)`). The contract
-is source-scoped; it never claims to know the globally newest Nostr value.
+protocol-owned whole-value edits. Public semantic operations now include
+NIP-02 following (`nmp.follow(pubkey)` / `nmp.unfollow(pubkey)`) and NIP-51
+Simple groups relay editing (`addSimpleGroupRelay` /
+`removeSimpleGroupRelay`). The contract is source-scoped; it never claims to
+know the globally newest Nostr value.
 
 ## The destructive-write trap
 
@@ -71,6 +73,15 @@ ReplaceableConflict { expected, actual }
 The action does not silently rebuild on the new base. A caller may wait for the
 live resource to refine and explicitly invoke a new action.
 
+NIP-51 kind:10009 relay editing uses the same guard with one deliberately
+different first-value policy. Once every current planned source reconciles and
+proves that no kind:10009 exists, adding a relay may create the first list with
+`expected_base: None`; removing from that established absence is a no-op. A
+cache miss or incomplete source plan still never authorizes first creation.
+The editor appends one canonical public `r` tag, removes only matching `r`
+tags, and preserves content, `group` tags, private-list payloads, and unrelated
+tags exactly.
+
 ### 4. Use the ordinary write pipeline
 
 After acceptance, the edit uses the normal durable write path: frozen author,
@@ -107,6 +118,19 @@ for await status in action.status {
 Every operational outcome is stream state, including malformed target,
 signed-out account, source failure, acquisition timeout, no-op, atomic base
 conflict, signing, routing, and relay results. `follow` itself does not throw.
+
+The relay-list action has the same streamed shape:
+
+```swift
+let action = nmp.addSimpleGroupRelay("wss://relay.example")
+for await status in action.status { /* acquisition + receipt state */ }
+
+let removal = nmp.removeSimpleGroupRelay("wss://relay.example")
+```
+
+Native callers pass a relay URL, never raw tags or a replacement event. NMP
+parses the URL, establishes the kind:10009 base, composes the exact-preserving
+replacement, signs, routes, and reports the durable receipt.
 
 For a bindable live relationship:
 
@@ -156,6 +180,8 @@ The shipped falsifiers cover:
   follow no-op, preservation of an existing contact, unfollow/ACK, and reactive
   not-following state;
 - Swift action-state mapping and Gallery accessibility/runtime behavior.
+- NIP-51 add/remove preservation, duplicate/no-op, first-list, and native
+  Swift/Kotlin action-state mapping.
 
 ---
 

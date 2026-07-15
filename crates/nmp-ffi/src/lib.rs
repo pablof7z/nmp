@@ -37,6 +37,7 @@ pub mod entity;
 pub mod facade;
 pub mod nip02;
 pub mod nip29;
+pub mod nip51;
 pub mod observer;
 pub mod signer;
 pub mod types;

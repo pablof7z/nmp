@@ -1747,9 +1747,11 @@ dependencies = [
 name = "nmp-nip51"
 version = "0.1.0"
 dependencies = [
+ "nmp",
  "nmp-grammar",
  "nmp-ownership",
  "nostr 0.44.4",
+ "tempfile",
 ]
 
 [[package]]

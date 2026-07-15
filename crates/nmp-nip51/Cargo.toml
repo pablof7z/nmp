@@ -5,14 +5,15 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# #63/#108's ownership boundary: nmp-nip51 owns kind:10009's schema/codec/
-# demand-constructor/claim ONLY. No router/resolver/engine dependency --
-# this crate is a pure value/codec layer, same discipline as nmp-grammar
-# itself. `nostr` for `Tag`/`Event`/`RelayUrl` parsing (no scratch bech32/
-# tag parsing, memory rule: use rust-nostr, not scratch crypto); `nmp-grammar`
-# for `Demand`/`Filter`/`Binding`; `nmp-ownership` for the `KindClaim` this
-# crate declares over kind 10009.
+# #63/#108's ownership boundary: nmp-nip51 owns kind:10009's schema, codec,
+# demand, and guarded semantic relay-list edit. The engine dependency is for
+# the same source-evidence + exact-base action pattern nmp-nip02 uses; protocol
+# semantics remain here rather than leaking into the facade or native shells.
 [dependencies]
 nostr.workspace = true
+nmp.workspace = true
 nmp-grammar.workspace = true
 nmp-ownership.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

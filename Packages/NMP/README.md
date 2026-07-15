@@ -68,6 +68,21 @@ the next engine construction restores and activates it. Sign-out calls
 This provider is not encrypted, Keychain-backed, Secure-Enclave-backed, or a
 production-vault claim.
 
+Favorite NIP-29 relay editing is an NMP-owned action over the active account's
+NIP-51 kind:10009 list:
+
+```swift
+for await status in nmp.addSimpleGroupRelay("wss://relay.example").status {
+    // acquisition, no-op, exact-base conflict, and write receipt facts
+}
+let removal = nmp.removeSimpleGroupRelay("wss://relay.example")
+```
+
+The action preserves remembered `group` entries and every unrelated field. It
+may create the first list only after configured sources reconcile an
+established absence; an ordinary cache miss is never permission to replace
+from empty.
+
 See `Sources/NMP/Engine.swift` and
 [`docs/builder/34-content.md`](../../docs/builder/34-content.md).
 For the SwiftUI product and live Gallery, see

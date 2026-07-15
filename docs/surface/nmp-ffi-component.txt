@@ -1719,6 +1719,204 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiRelayListActionFailure",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidRelay",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SignedOut",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "AccountChanged",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "AcquisitionTimedOut",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "CachedOnly",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SourceUnavailable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "BaseHasWrongAuthor",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "BaseHasWrongKind",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "TimestampExhausted",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidGeneratedTag",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ReceiptUnavailable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ThreadUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ExecutorSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiRelayListActionStatus",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Acquiring",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "NoChange",
+            discr: None,
+            fields: [
+                Field {
+                    name: "present",
+                    type_: Boolean,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Receipt",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "status",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiWriteStatus",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Failed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "failure",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRelayListActionFailure",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiRowDelta",
     module_path: "nmp_ffi",
     remote: false,
@@ -5967,6 +6165,67 @@ object Object {
             ),
         },
         Method {
+            name: "add_simple_group_relay",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "relay",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "RelayListActionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_add_simple_group_relay",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "relay",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Add one canonical public `r` tag to the active account's NIP-51\nkind:10009 list through the module-owned source-evidence and exact-base\nreplacement action.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_add_simple_group_relay",
+            checksum: Some(
+                52482,
+            ),
+        },
+        Method {
             name: "await_native_tasks_idle",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -7116,6 +7375,67 @@ object Object {
             ),
         },
         Method {
+            name: "remove_simple_group_relay",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "relay",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "RelayListActionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_remove_simple_group_relay",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "relay",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Remove matching public `r` tags while preserving group entries,\nprivate content, and every unrelated tag.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_simple_group_relay",
+            checksum: Some(
+                51673,
+            ),
+        },
+        Method {
             name: "set_active_account",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -8123,6 +8443,90 @@ callback CallbackInterface {
     docstring: Some(
         "Drains a publish's `Receiver<WriteStatus>` (ledger #9: enqueue is not\nconverged -- this may be called many times per publish, ending only when\nthe intent reaches every relay's terminal, or never at all for an\n`Ephemeral` intent, mirroring `Handle::publish`'s own receiver).\n`on_closed` fires exactly once, when the receipt's `Sender` is dropped\n(the intent has resolved or the engine has shut down) -- after which no\nfurther `on_status` call will ever occur, mirroring `RowObserver` and\n`DiagnosticsObserver`.",
     ),
+}
+
+callback CallbackInterface {
+    name: "RelayListActionObserver",
+    module_path: "nmp_ffi",
+    methods: [
+        Method {
+            name: "on_status",
+            object_name: "RelayListActionObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "status",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRelayListActionStatus",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_relaylistactionobserver_on_status",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_relaylistactionobserver_on_status",
+            checksum: Some(
+                39604,
+            ),
+        },
+        Method {
+            name: "on_closed",
+            object_name: "RelayListActionObserver",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_relaylistactionobserver_on_closed",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_relaylistactionobserver_on_closed",
+            checksum: Some(
+                42940,
+            ),
+        },
+    ],
+    ffi_init_callback: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_init_callback_vtable_relaylistactionobserver",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "vtable",
+                type_: Reference(
+                    Struct(
+                        "VTableCallbackInterfaceRelayListActionObserver",
+                    ),
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: false,
+        is_object_free_function: false,
+    },
+    docstring: None,
 }
 
 callback CallbackInterface {
