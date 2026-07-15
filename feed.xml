@@ -15,7 +15,40 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 22:51:00 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 23:54:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-15 23:54 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0009.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0009</guid>
+<pubDate>Wed, 15 Jul 2026 23:54:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse. Big one this hour: the piece that's been building for the last two pulses just merged.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin SDKs, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+The headline: wave one of content-relay authentication is in. It's the first real brick of a bigger structure, so let's be precise about what it is, and just as important, what it deliberately isn't.
+
+Here's the problem it solves. Every relay connection in NMP has always been identified by its URL. Fine when everyone's anonymous. But once a relay can tell who's asking -- a reader, your account, someone else's account -- identifying a connection by URL alone gets dangerous. If a public session and two accounts ever shared the same plan or socket bookkeeping, work fetched under one identity could get silently credited to another. Not hypothetical; it's a named item on this project's own bug-class ledger.
+
+The fix: relay identity is no longer just a URL, it's a session -- a URL paired with an access context, either public or a specific account. Everything downstream keys off that pair instead of the bare address: which plan a piece of demand belongs to, its subscription IDs, attribution and coverage evidence, and how admission counts against the relay ceiling. Two accounts talking to the same relay are now structurally two separate sessions, not by convention, but because the types won't let them collide.
+
+And this didn't merge on faith. It went through an adversarial review built to break that isolation -- six invariants checked with file-and-line evidence, covering context distinctness, no residual cross-credit, clean disconnects, session-counted admission, and write-path consistency. All six held, clean.
+
+Now, the honest part, because it'd be easy to oversell this. There's no challenge from the relay yet, no response, no state machine proving a session's identity. Writes still ride the plain public session by design -- authenticated writes are deferred rather than shipped half-correct. There's no "log in to a relay" call an app can make today. What exists is the identity plumbing authentication will need once it exists, proven safe first, because retrofitting it after real credentials are flowing would be scarier.
+
+Content-relay authentication is planned as three waves. This is wave one, done. Wave two, just started, is the actual authentication reducer -- tracking a relay's challenge, sending the signed response, separating a plain write acknowledgement from genuine proof of identity. Real protocol work, still ahead.
+
+One small honest note: a flaky macOS test in the mock relay transport got filed as its own issue -- testing-infrastructure quirk, not a product bug.
+
+And remove-account stays exactly where it's been: drafted, held, waiting for this same work to settle.
+
+So, in one line: the first real brick of content-relay authentication is laid, it passed a genuine adversarial test, and it deliberately can't log anyone in yet. That's the pulse.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0009.mp3" type="audio/mpeg" length="3430316"/>
+<itunes:title>NMP Pulse — 2026-07-15 23:54 UTC</itunes:title>
+<itunes:duration>214</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-15 22:51 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0008.mp3</link>
