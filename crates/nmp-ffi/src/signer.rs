@@ -99,11 +99,12 @@ pub enum FfiNip46Failure {
         component: String,
         capacity: u64,
     },
-    /// `nmp::Engine::add_signer` unconditionally maps every internal
-    /// `AddSignerError` to `EngineError::SignerMissingPublicKey`
-    /// (crates/nmp/src/engine.rs) -- the only engine-side failure reachable
-    /// when a NIP-46 signer is (re)attached after the relay handshake
-    /// completes. It is not a `Nip46Error` variant; it crosses a different
+    /// `nmp::Engine::add_signer` maps every internal `AddSignerError` to
+    /// `EngineError::SignerMissingPublicKey` (crates/nmp/src/engine.rs). This
+    /// is the signer-side engine-attach failure; the other reachable
+    /// `add_signer` outcome, `EngineError::EngineClosed` (engine shut down
+    /// mid-handshake), is surfaced as `Disconnected` instead so the two are
+    /// not conflated. It is not a `Nip46Error` variant; it crosses a different
     /// internal taxonomy (`nmp::EngineError`) at the same observer seam.
     SignerMissingPublicKey,
 }
@@ -179,10 +180,15 @@ fn nip46_failure_to_ffi(error: nmp_signer::Nip46Error) -> FfiNip46Failure {
 }
 
 /// `nmp::Engine::add_signer` (re)attachment failure -> [`FfiNip46Failure`].
-/// See that variant's own doc: this call site can only ever observe
-/// `EngineError::SignerMissingPublicKey`.
-fn engine_attach_failure_to_ffi(_error: nmp::EngineError) -> FfiNip46Failure {
-    FfiNip46Failure::SignerMissingPublicKey
+/// `add_signer` can fail two ways: the inner `AddSignerError` (always mapped
+/// to `EngineError::SignerMissingPublicKey`) and `EngineError::EngineClosed`
+/// when the engine shuts down mid-handshake. Preserve that distinction rather
+/// than collapsing both into a misleading "missing public key".
+fn engine_attach_failure_to_ffi(error: nmp::EngineError) -> FfiNip46Failure {
+    match error {
+        nmp::EngineError::EngineClosed => FfiNip46Failure::Disconnected,
+        _ => FfiNip46Failure::SignerMissingPublicKey,
+    }
 }
 
 #[derive(uniffi::Object)]
