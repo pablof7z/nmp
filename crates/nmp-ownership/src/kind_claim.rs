@@ -23,6 +23,15 @@ pub struct KindClaim {
     /// `KindClaim` has no other way to carry one, so route authority is
     /// ownership by construction, not by convention.
     pub route_policy: Option<RoutePolicy>,
+    /// Conscious acknowledgment that this claim's scope intersects the
+    /// discovery-kind set ({0, 3} ∪ 10000..=19999, `DiscoveryKinds` in
+    /// nmp-router facts.rs): a module claiming a discovery kind must
+    /// consciously interact with indexer semantics
+    /// (routing-and-ownership.md §4.2 layer 2, check (c)). The nmp-audit
+    /// workspace test enforces consistency in BOTH directions: an
+    /// unacknowledged discovery-kind claim is red, and a stale ack on a
+    /// non-discovery scope is red.
+    pub discovery_ack: bool,
 }
 
 #[cfg(test)]
@@ -39,6 +48,9 @@ mod tests {
             scope: KindScope::Range(9000..=9030),
             exclusive: true,
             route_policy: None,
+            // 9000..=9030 shares no kind with DiscoveryKinds ({0, 3} ∪
+            // 10000..=19999) -- nothing to consciously acknowledge.
+            discovery_ack: false,
         };
         assert_eq!(nip29.owner.0, "nip29");
         assert!(nip29.route_policy.is_none());
@@ -55,6 +67,9 @@ mod tests {
                 on_empty: FailMode::Closed,
                 route_class: RouteClass::VerifiedPrivateInbox,
             }),
+            // 10050 falls in the 1xxxx discovery range -- this claim DOES
+            // intersect DiscoveryKinds, so the ack must be true.
+            discovery_ack: true,
         };
         assert!(nip17.scope.contains(1059));
         let policy = nip17.route_policy.expect("nip17 overrides routing");

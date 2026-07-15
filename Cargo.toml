@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/nmp-grammar",
     "crates/nmp-ownership",
+    # workspace-wide kind-ownership audit (routing-and-ownership.md §4.2
+    # layer 2); tests only, nothing depends on it.
+    "crates/nmp-audit",
     "crates/nmp-store",
     "crates/nmp-resolver",
     "crates/nmp-router",
