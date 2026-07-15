@@ -71,19 +71,27 @@ impl GroupTimelineEvidence {
         Self { ids: Vec::new() }
     }
 
-    /// Build evidence from delivered rows -- `(id, created_at, raw tags)`
-    /// exactly as a live `group_content_demand` read renders them.
+    /// Build evidence from delivered rows -- `(id, created_at, author, raw
+    /// tags)` exactly as a live `group_content_demand` read renders them.
     /// KIND-BLIND: membership is decided by the `h` tag alone, never by
-    /// `kind`. Keeps at most [`PREVIOUS_MAX`] ids, newest (`created_at`)
-    /// first.
+    /// `kind`. AUTHOR-EXCLUSIVE: per NIP-29's own semantics, `previous` is
+    /// evidence of *other* activity in the group the sender can chain off
+    /// of -- a row authored by `sending_author` itself is dropped before
+    /// sorting/truncation so a burst of the sender's own just-sent messages
+    /// can never crowd out the last real "other" activity it should be
+    /// referencing. Keeps at most [`PREVIOUS_MAX`] ids, newest
+    /// (`created_at`) first.
     pub fn from_events(
         group_id: &str,
-        items: impl IntoIterator<Item = (EventId, u64, Vec<Vec<String>>)>,
+        sending_author: PublicKey,
+        items: impl IntoIterator<Item = (EventId, u64, PublicKey, Vec<Vec<String>>)>,
     ) -> Self {
         let mut rows: Vec<(EventId, u64)> = items
             .into_iter()
-            .filter(|(_, _, tags)| is_member_of(tags, group_id))
-            .map(|(id, created_at, _tags)| (id, created_at))
+            .filter(|(_, _, author, tags)| {
+                *author != sending_author && is_member_of(tags, group_id)
+            })
+            .map(|(id, created_at, _author, _tags)| (id, created_at))
             .collect();
         rows.sort_by_key(|(_id, created_at)| std::cmp::Reverse(*created_at));
         rows.truncate(PREVIOUS_MAX);
@@ -346,27 +354,34 @@ mod tests {
 
     /// Falsifier 5(b)+(d): rows from a different group are excluded, and
     /// the surviving refs are 8-char prefixes, newest-first, capped at
-    /// `PREVIOUS_MAX`.
+    /// `PREVIOUS_MAX`. All rows here are authored by someone other than the
+    /// sender, so the author-exclusion added for self-authored rows never
+    /// engages -- that's covered by its own test below.
     #[test]
     fn previous_evidence_excludes_other_groups_and_orders_newest_first() {
+        let other_author = pubkey();
+        let sending_author = pubkey();
         let rows = vec![
             (
                 event_id(1),
                 100,
+                other_author,
                 vec![vec!["h".to_string(), "group-a".to_string()]],
             ),
             (
                 event_id(2),
                 300,
+                other_author,
                 vec![vec!["h".to_string(), "group-a".to_string()]],
             ),
             (
                 event_id(3),
                 200,
+                other_author,
                 vec![vec!["h".to_string(), "other-group".to_string()]],
             ),
         ];
-        let evidence = GroupTimelineEvidence::from_events("group-a", rows);
+        let evidence = GroupTimelineEvidence::from_events("group-a", sending_author, rows);
         assert_eq!(evidence.ids, vec![event_id(2), event_id(1)]);
 
         let prefixes = evidence.prefixes();
@@ -400,17 +415,72 @@ mod tests {
     /// `PREVIOUS_MAX` truncates even when more rows are delivered.
     #[test]
     fn previous_evidence_caps_at_previous_max() {
+        let other_author = pubkey();
+        let sending_author = pubkey();
         let rows: Vec<_> = (0..(PREVIOUS_MAX as u8 + 5))
             .map(|n| {
                 (
                     event_id(n + 1),
                     n as u64,
+                    other_author,
                     vec![vec!["h".to_string(), "group-a".to_string()]],
                 )
             })
             .collect();
-        let evidence = GroupTimelineEvidence::from_events("group-a", rows);
+        let evidence = GroupTimelineEvidence::from_events("group-a", sending_author, rows);
         assert_eq!(evidence.ids.len(), PREVIOUS_MAX);
+    }
+
+    /// NIP-29's own semantics for `previous`: it references the sender's
+    /// view of *other* recent activity in the group, not the sender's own
+    /// just-published messages. Rows authored by `sending_author` are
+    /// dropped before the newest-first cap-10 selection runs, so a burst of
+    /// the sender's own messages can never crowd out real other-author
+    /// evidence -- and if literally everything observed was self-authored,
+    /// the result is legitimately empty (no `previous` tag at all).
+    #[test]
+    fn previous_evidence_excludes_the_sending_authors_own_rows() {
+        let sending_author = pubkey();
+        let other_author = pubkey();
+        let rows = vec![
+            (
+                event_id(1),
+                100,
+                other_author,
+                vec![vec!["h".to_string(), "group-a".to_string()]],
+            ),
+            // Newer than the surviving other-author row, but authored by
+            // the sender itself -- must never appear in `previous`, even
+            // though it is the most recent event overall.
+            (
+                event_id(2),
+                300,
+                sending_author,
+                vec![vec!["h".to_string(), "group-a".to_string()]],
+            ),
+            (
+                event_id(3),
+                200,
+                sending_author,
+                vec![vec!["h".to_string(), "group-a".to_string()]],
+            ),
+        ];
+        let evidence = GroupTimelineEvidence::from_events("group-a", sending_author, rows);
+        assert_eq!(evidence.ids, vec![event_id(1)]);
+
+        // If every observed row is self-authored, evidence is legitimately
+        // empty -- no `previous` tag is emitted at all (falsifier 5(c)'s
+        // "zero rows" case, reached here via author exclusion rather than
+        // an empty input).
+        let all_self_authored = vec![(
+            event_id(4),
+            400,
+            sending_author,
+            vec![vec!["h".to_string(), "group-a".to_string()]],
+        )];
+        let empty_evidence =
+            GroupTimelineEvidence::from_events("group-a", sending_author, all_self_authored);
+        assert!(empty_evidence.is_empty());
     }
 
     /// The `h` tag always names exactly the group this send targets.

@@ -65,11 +65,12 @@ pub fn compose_group_message(
     let author = engine
         .active_account()?
         .ok_or(GroupMessageError::SignedOut)?;
-    let previous = trusted_previous(engine, host.clone(), group_id)?;
+    let previous = trusted_previous(engine, host.clone(), group_id, author)?;
 
+    let mut seen_recipients = std::collections::HashSet::with_capacity(recipients.len());
     let mut ordered_recipients = Vec::with_capacity(recipients.len());
     for recipient in recipients {
-        if !ordered_recipients.contains(&recipient) {
+        if seen_recipients.insert(recipient) {
             ordered_recipients.push(recipient);
         }
     }
@@ -78,7 +79,7 @@ pub fn compose_group_message(
 
     let mut notification_recipients = ordered_recipients;
     if let Some(parent) = reply_to {
-        if !notification_recipients.contains(&parent.author) {
+        if seen_recipients.insert(parent.author) {
             notification_recipients.push(parent.author);
         }
     }
@@ -126,10 +127,16 @@ fn trusted_timeline_demand(host: RelayUrl, group_id: &str) -> nmp::Demand {
 /// ordinary demand. `EngineCore::on_subscribe` always emits that first frame
 /// from local canonical state before any network result is required; if a
 /// screen already observes the same group, normal demand coalescing applies.
+///
+/// `sending_author` is the composing account itself -- passed through to
+/// [`GroupTimelineEvidence::from_events`] so rows this account authored are
+/// excluded from `previous` (NIP-29's own semantics: the tag couriers
+/// evidence of *other* recent activity, never the sender's own messages).
 fn trusted_previous(
     engine: &Engine,
     host: RelayUrl,
     group_id: &str,
+    sending_author: PublicKey,
 ) -> Result<GroupTimelineEvidence, GroupMessageError> {
     let subscription = engine.observe(LiveQuery(trusted_timeline_demand(host, group_id)))?;
     let (deltas, _evidence) = subscription
@@ -139,6 +146,7 @@ fn trusted_previous(
         RowDelta::Added(row) => Some((
             row.event.id,
             row.event.created_at.as_secs(),
+            row.event.pubkey,
             row.event
                 .tags
                 .iter()
@@ -147,7 +155,11 @@ fn trusted_previous(
         )),
         RowDelta::SourcesGrew { .. } | RowDelta::Removed(_) => None,
     });
-    Ok(GroupTimelineEvidence::from_events(group_id, rows))
+    Ok(GroupTimelineEvidence::from_events(
+        group_id,
+        sending_author,
+        rows,
+    ))
 }
 
 fn materialize_content(content: String, recipients: &[PublicKey]) -> String {
