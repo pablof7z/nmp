@@ -3184,6 +3184,19 @@ impl<S: EventStore> EngineCore<S> {
             // NEXT `recompile()`/reconnect naturally re-opens whatever
             // demand still wants this shape.
             self.neg_sessions.retain(|_, session| session.relay != url);
+            // A one-shot negentropy backfill (`finish_neg_session`) that
+            // was mid-flight on this relay will never EOSE now -- its own
+            // socket is gone -- so `pending_backfills`/`pending_neg_credit`
+            // (both keyed by the backfill's relay-scoped `SubId`, whose
+            // `.0` is exactly this `url`) would otherwise orphan forever:
+            // the only other removal site is EOSE-gated
+            // (`on_relay_frame`'s `EndOfStoredEvents` arm). Coverage is not
+            // permanently lost -- a reconnect's `recompile()` re-opens the
+            // live REQ and negentropy runs again -- only the orphaned
+            // one-shot bookkeeping for THIS attempt is dropped, exactly
+            // like `neg_sessions` right above.
+            self.pending_backfills.retain(|sub_id| sub_id.0 != url);
+            self.pending_neg_credit.retain(|sub_id, _| sub_id.0 != url);
             // Feeds `AcquisitionEvidence.sources[_].status`: this relay is
             // no longer connected, but `ever_connected_relays` is untouched
             // -- a subsequent evidence computation reads `Disconnected`,
@@ -3480,6 +3493,18 @@ impl<S: EventStore> EngineCore<S> {
                 .compile(&admitted_demand, self.directory.as_ref(), self.cap);
         let planned = &self.router.plan().reqs;
         self.nip11_information
+            .retain(|relay, _| planned.contains_key(relay));
+        // Finding E4 (epic #507): `events_by_relay_kind` is bumped once per
+        // inbound EVENT (`ingest_relay_events`) but was never pruned when a
+        // relay permanently left the plan/directory, growing unbounded
+        // across relay churn. `diagnostics::build` only ever reads it via
+        // `.get(relay)` for `relay in &diag.per_relay`, and `diag.per_relay`
+        // is itself built straight off `plan.reqs` (`nmp-router`'s
+        // `diag::build`) -- i.e. exactly `planned` here -- so no live
+        // reader ever consults an entry outside this set. Safe to prune
+        // against the SAME "still-planned" key set as `nip11_information`
+        // just above.
+        self.events_by_relay_kind
             .retain(|relay, _| planned.contains_key(relay));
         // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
         // for the full current demand, regardless of whether anything
