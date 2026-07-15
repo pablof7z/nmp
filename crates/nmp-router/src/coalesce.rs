@@ -328,7 +328,7 @@ impl RuleRegistry {
     fn merge_fixed_point(&self, current: &mut Vec<Entry>) {
         let mut settled = 0usize;
         let mut j = settled + 1;
-        while settled + 1 <= current.len() {
+        while settled < current.len() {
             if j >= current.len() {
                 // Row `settled` fully scanned against everything currently
                 // present, no merge found: it can never merge with anything
