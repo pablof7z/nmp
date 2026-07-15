@@ -121,11 +121,9 @@ impl Engine {
     pub fn reset_persistent_store(path: impl AsRef<std::path::Path>) -> Result<(), EngineError> {
         match RedbStore::reset(path) {
             Ok(()) => Ok(()),
-            Err(RedbStoreResetError::StoreStillOpen { path }) => {
-                Err(EngineError::StoreStillOpen {
-                    path: path.to_string_lossy().into_owned(),
-                })
-            }
+            Err(RedbStoreResetError::StoreStillOpen { path }) => Err(EngineError::StoreStillOpen {
+                path: path.to_string_lossy().into_owned(),
+            }),
             Err(RedbStoreResetError::ResetFailed { reason }) => {
                 Err(EngineError::StoreResetFailed { reason })
             }
