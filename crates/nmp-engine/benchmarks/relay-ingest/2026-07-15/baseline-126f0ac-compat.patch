@@ -1,0 +1,35 @@
+diff --git a/crates/nmp-engine/Cargo.toml b/crates/nmp-engine/Cargo.toml
+--- a/crates/nmp-engine/Cargo.toml
++++ b/crates/nmp-engine/Cargo.toml
+@@ -61,2 +61,3 @@
+ tungstenite = "0.29"
++serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+diff --git a/crates/nmp-engine/examples/support/relay_ingest_probe.rs b/crates/nmp-engine/examples/support/relay_ingest_probe.rs
+--- a/crates/nmp-engine/examples/support/relay_ingest_probe.rs
++++ b/crates/nmp-engine/examples/support/relay_ingest_probe.rs
+@@ -352,20 +352,15 @@
+     let (engine_thread, handle) = EngineThread::spawn(
+         store,
+         FixtureDirectory::new(),
+         config.relays,
+         PoolConfig {
+             max_relays: config.relays,
+-            ingest_queue_capacity: queue_capacity,
+-            command_queue_capacity: queue_capacity,
+-            event_sink_queue_capacity: queue_capacity,
+-            verifier_queue_capacity: queue_capacity,
+-            max_verify_batch: batch_size,
+-            max_engine_batch: batch_size,
++            keepalive_idle: None,
++            keepalive_pong_timeout: None,
+             reconnect_delay_initial: Some(Duration::from_secs(3600)),
+             reconnect_jitter_max: Some(Duration::ZERO),
+-            ..PoolConfig::default()
+         },
+         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+-    )?;
+-    let (_query_handle, rows) = handle.subscribe(LiveQuery(demand))?;
++    );
++    let (_query_handle, rows) = handle.subscribe(LiveQuery(demand));
+     let (diagnostics_handle, diagnostics) = handle.observe_diagnostics();
