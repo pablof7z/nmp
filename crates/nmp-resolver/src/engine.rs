@@ -19,20 +19,14 @@ use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
 
 /// Full result of relay ingest when a verified relay copy also satisfies
-/// locally-pending write owners of the same canonical event.
+/// locally-pending write owners of the same canonical event. Embeds the
+/// same [`CommittedMutationResult`] every other committed-mutation door
+/// returns, so a caller drives the refresh-vs-apply decision through the
+/// ONE shared apply regardless of which door produced it; only the
+/// relay-specific `satisfied_intents` extra rides alongside it.
 pub struct RelayIngestResult {
-    pub delta: DemandDelta,
+    pub committed: CommittedMutationResult,
     pub satisfied_intents: Vec<(nmp_store::IntentId, nostr::Event)>,
-    /// App/query handles whose row projection can have changed as a direct
-    /// consequence of this committed batch. This is the post-commit
-    /// subscription-notification set: callers need not re-query unrelated
-    /// handles merely to prove they stayed unchanged.
-    pub affected_handles: BTreeSet<HandleId>,
-    /// Exact canonical row facts produced by the committed writer batch.
-    /// Simple app projections can apply these facts directly instead of
-    /// re-reading and re-materializing their entire prior result set merely
-    /// to discover one `Added`, `SourcesGrew`, or `Removed` delta.
-    pub row_changes: CommittedRowChanges,
 }
 
 /// Exact live-query consequences of one already-committed canonical store
@@ -42,7 +36,15 @@ pub struct RelayIngestResult {
 /// by replaying their full history.
 pub struct CommittedMutationResult {
     pub delta: DemandDelta,
+    /// App/query handles whose row projection can have changed as a direct
+    /// consequence of this committed batch. This is the post-commit
+    /// subscription-notification set: callers need not re-query unrelated
+    /// handles merely to prove they stayed unchanged.
     pub affected_handles: BTreeSet<HandleId>,
+    /// Exact canonical row facts produced by the committed writer batch.
+    /// Simple app projections can apply these facts directly instead of
+    /// re-reading and re-materializing their entire prior result set merely
+    /// to discover one `Added`, `SourcesGrew`, or `Removed` delta.
     pub row_changes: CommittedRowChanges,
 }
 
@@ -621,7 +623,7 @@ impl<S: EventStore> Engine<S> {
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<DemandDelta, PersistenceError> {
-        Ok(self.ingest_observed_detailed(events)?.delta)
+        Ok(self.ingest_observed_detailed(events)?.committed.delta)
     }
 
     pub fn ingest_observed_detailed(
@@ -732,10 +734,12 @@ impl<S: EventStore> Engine<S> {
         let delta = self.react(inserted_or_provenance_changed, removed)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(RelayIngestResult {
-            delta,
+            committed: CommittedMutationResult {
+                delta,
+                affected_handles,
+                row_changes,
+            },
             satisfied_intents,
-            affected_handles,
-            row_changes,
         })
     }
 
