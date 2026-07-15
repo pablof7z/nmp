@@ -872,8 +872,8 @@ fn duplicate_source_observation_grows_projected_routing_evidence() {
             RelayObserved::new(second.clone(), Timestamp::from(101)),
         )])
         .unwrap();
-    assert_eq!(result.row_changes.provenance_grew.len(), 1);
-    let delta = result.delta;
+    assert_eq!(result.committed.row_changes.provenance_grew.len(), 1);
+    let delta = result.committed.delta;
 
     assert_eq!(delta.closed().len(), 1);
     assert_eq!(delta.opened().len(), 1);
