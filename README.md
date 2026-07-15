@@ -60,6 +60,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Canonical **redb** store: provenance-preserving dedup, replaceable events, NIP-40 expiry (event-driven), kind:5 deletion + permanent tombstones
 - ✅ Exact negative-delta supersession — stable handles update in place, no full re-query
 - ✅ **Scoped acquisition evidence** — rows plus per-source facts; never a global "synced" / "complete"
+- ✅ **Windowing is a policy on the one read noun** — `observe(query, window)`; the parallel `History*` noun is gone. Delivery derives from boundedness (unbounded ⇒ deltas, windowed ⇒ authoritative snapshot), `AtBound` is a delivered fact not an error, and a deep scroll now holds **O(1)** live subscriptions per relay (closes [#474](https://github.com/pablof7z/nmp/issues/474)/[#485](https://github.com/pablof7z/nmp/issues/485)/[#486](https://github.com/pablof7z/nmp/issues/486))
 
 **Relays & networking**
 - ✅ Full connection lifecycle behind **one finite fan-out ceiling** over the whole read plan
@@ -69,7 +70,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Parse-once typed ingest with bounded parallel signature verification
 - ✅ NIP-11 relay metadata (single-flight, LRU-bounded, proven raw-body ceiling)
 - ✅ NIP-77 negentropy — end-to-end set reconciliation, proven by a live falsifier against a real negentropy-speaking relay (reconnect temporarily replays as plain REQ — perf, not correctness)
-- 🧪 NIP-42 AUTH — real and tested inside the NIP-46 signer connection; on **content** relays the participation gate + write-side `AwaitingAuth` exist but no challenge is answered yet and read-evidence states are reserved for [#8](https://github.com/pablof7z/nmp/issues/8)
+- 🧪 NIP-42 AUTH — real and tested inside the NIP-46 signer connection; on **content** relays only the participation gate + write-side `AwaitingAuth` exist today. No challenge is answered yet — a 7-PR landing plan for closed access-scoped session identity (`AccessContext`, session-keyed routing/attribution/admission) is early in-flight under [#8](https://github.com/pablof7z/nmp/issues/8)
 
 **Signing & identity**
 - ✅ Local key signer
@@ -106,8 +107,10 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - **Proven:** the core store, resolver, router, transport, engine, Rust facade, Swift + Kotlin packages, and the NIP-46 remote-signer path — backed by 100+ Rust test modules, differential falsifiers against an independent store, and live-relay tests.
 - **Pending:** several promoted guarantees remain active work — see [`docs/known-gaps.md`](docs/known-gaps.md) (honest built-vs-missing record) and the [bug-class ledger](docs/bug-class-ledger.md) (target vs partial vs structurally proven).
 - The ownership boundary and behavioral invariants are the stable frame; the app-facing spelling is not.
-- **Recent hardening batch (merged):** a DNS-rebinding relay-admission gap closed, a permanently-failed-relay wedge + unbounded send queue fixed, three unbounded-memory bookkeeping structures pruned, and Swift/Kotlin cross-SDK parity gaps (config fields, content-session pause) closed.
-- **In CI now (not yet merged):** wake-relay lane indexing, `MemoryStore` secondary indexes + batched GC, real enforcement of kind-ownership exclusivity (previously documented but unenforced — [#521](https://github.com/pablof7z/nmp/issues/521)), and `remove_account` across all four surfaces.
+- **Headline (merged):** history is no longer a second noun — `observe(query, window)` makes windowing a policy on the one read noun, delivery mode derives from boundedness, and the #486 per-advance relay-REQ leak is fixed (deep scroll now holds O(1) live subscriptions per relay). Closes [#474](https://github.com/pablof7z/nmp/issues/474)/[#485](https://github.com/pablof7z/nmp/issues/485)/[#486](https://github.com/pablof7z/nmp/issues/486) — [#531](https://github.com/pablof7z/nmp/pull/531).
+- **Recent hardening batch (merged):** a DNS-rebinding relay-admission gap closed, a permanently-failed-relay wedge + unbounded send queue fixed, three unbounded-memory bookkeeping structures pruned, Swift/Kotlin cross-SDK parity gaps (config fields, content-session pause) closed, wake-relay lane lookups indexed instead of full-scanned, `MemoryStore` secondary indexes + batched GC landed, and kind-ownership exclusivity now has real enforcement (it was previously documented but unenforced — [#521](https://github.com/pablof7z/nmp/issues/521)).
+- **In progress:** NIP-42 content-relay AUTH ([#8](https://github.com/pablof7z/nmp/issues/8)) — Wave 1 of a 7-PR landing plan (closed access-scoped session identity) just started; only the NIP-46 bunker AUTH path works today.
+- **Held:** [`remove_account`](https://github.com/pablof7z/nmp/pull/529) is drafted but paused pending reconciliation to #8's ratified account-handle shape.
 
 ## Performance
 
@@ -132,8 +135,8 @@ Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime pen
 - Close **platform qualification** — an iOS-Simulator test target, an Android AAR
 - Ship standard **secure-storage signer providers** (Keychain / Keystore)
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
-- Populate NIP-42 AUTH evidence states; land NIP-51 list editing; broaden opt-in protocol modules
-- **In progress:** fold paginated history into the existing read noun as `observe(query, window)` — a window policy, not a second parallel `History*` noun — retiring the earlier `HistoryQuery`/`HistoryContinuation` design
+- Land NIP-51 list editing; broaden opt-in protocol modules
+- **In progress:** NIP-42 content-relay AUTH — closed access-scoped session identity (`AccessContext`, session-keyed routing/attribution/admission), Wave 1 of a 7-PR landing plan under [#8](https://github.com/pablof7z/nmp/issues/8)
 
 ## The ownership boundary
 

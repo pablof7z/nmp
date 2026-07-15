@@ -1,14 +1,14 @@
-//! A single-slot "latest value wins" mailbox (M5 plan §1.2 step 4). The
-//! diagnostics stream is a projection of engine-global state that can be
-//! recomputed on every recompile/EOSE — a slow consumer should see the MOST
-//! RECENT snapshot next, never a growing backlog of stale ones (unlike
-//! `RowsMsg`'s plain `mpsc` channel, where every row delta matters and none
-//! may be dropped). `recv` still blocks via `Condvar::wait` (D8: never a
-//! poll loop) and reports sender-disconnect exactly like `mpsc::Receiver::
-//! recv`'s `Err`, so `dispatch_effect`/the FFI drain thread can treat it the
-//! same way.
+//! A single-slot "latest value wins" mailbox (M5 plan §1.2 step 4). It backs
+//! self-contained diagnostics snapshots and bounded history snapshots: a
+//! slow consumer sees the MOST RECENT state next, never a growing backlog of
+//! stale frames. Ordinary `RowsMsg` remains on plain `mpsc` because its raw
+//! incremental deltas cannot be dropped. `recv` still blocks via
+//! `Condvar::wait` (D8: never a poll loop) and reports sender-disconnect like
+//! `mpsc::Receiver::recv`'s `Err`.
 
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 struct Slot<T> {
     value: Option<T>,
@@ -20,16 +20,12 @@ struct Inner<T> {
     cvar: Condvar,
 }
 
-/// The producer half. `EngineThread`'s dispatch loop holds one per
-/// registered diagnostics observer (see `runtime::Handle::
-/// observe_diagnostics`); dropping it (on `Cmd::UnobserveDiagnostics`)
-/// closes the mailbox.
+/// The producer half. Dropping it closes the mailbox and wakes its receiver.
 pub struct LatestSender<T> {
     inner: Arc<Inner<T>>,
 }
 
-/// The consumer half, returned to the caller of `observe_diagnostics`
-/// (wrapped again by `nmp-ffi`'s drain thread for the Swift bridge).
+/// The consumer half shared by self-contained latest-state streams.
 pub struct LatestReceiver<T> {
     inner: Arc<Inner<T>>,
 }
@@ -87,6 +83,28 @@ impl<T> LatestReceiver<T> {
             slot = self.inner.cvar.wait(slot).unwrap();
         }
     }
+
+    /// Wait at most `timeout` for the newest value. This uses the same
+    /// condvar and one slot as [`Self::recv`]; it does not poll or create a
+    /// second queue.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        let slot = self.inner.slot.lock().unwrap();
+        let (mut slot, wait) = self
+            .inner
+            .cvar
+            .wait_timeout_while(slot, timeout, |slot| slot.value.is_none() && !slot.closed)
+            .unwrap();
+        if let Some(value) = slot.value.take() {
+            return Ok(value);
+        }
+        if slot.closed {
+            Err(RecvTimeoutError::Disconnected)
+        } else if wait.timed_out() {
+            Err(RecvTimeoutError::Timeout)
+        } else {
+            unreachable!("condvar wait ended without a value, close, or timeout")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -120,5 +138,19 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         drop(tx);
         assert_eq!(handle.join().unwrap(), None);
+    }
+
+    #[test]
+    fn timeout_distinguishes_elapsed_wait_from_disconnect() {
+        let (tx, rx) = latest_channel::<u32>();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(1)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        drop(tx);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Err(RecvTimeoutError::Disconnected)
+        );
     }
 }

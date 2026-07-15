@@ -627,6 +627,33 @@ with honest CI-proof status (`M-Routing (headless)`: fixture-module falsifiers
 green; real-module falsification pending the first `nmp-mod-*`). Do not fake a
 real module — the fixtures live in the audit crate's test tree.
 
+**2026-07-15 update (#521) — Unit G partially LANDED, reality diverged from the
+paragraph above in two ways worth recording:**
+
+- The "zero real module crates" premise expired: `nmp-nip02` (kind:3,
+  exclusive) and `nmp-nip51` (kind:10009, exclusive) both export `claims()`
+  today, and `nmp-nip29` deliberately exports none (§3.2.1 contextual). The
+  module naming convention became `nmp-nip*`, not `nmp-mod-*`, so the audit's
+  enrollment is keyed on the durable fact instead of the name pattern: **every
+  workspace crate declaring a normal dependency on `nmp-ownership` must be
+  enrolled in `nmp-audit`'s registry** (as `Claims(...)` or an explicit
+  `DeclaresNoClaims { rationale }`), asserted exactly-equal in both directions
+  against `cargo metadata`.
+- **Landed:** `nmp_ownership::ClaimSet::build` (layer 1's fold: typed
+  `ClaimOverlap` naming both owners + a witness kind; `exclusive_owner`/
+  `route_policy` lookups for the future layer-3 gate), the
+  `KindClaim::discovery_ack` field (check (c), enforced in both directions),
+  the `crates/nmp-audit` workspace member with checks (a)/(b)/(c) over the
+  real claims plus fixture falsifiers, and bug-class-ledger **row 22** (the
+  entry this plan calls "ledger #14"; the ledger's own #14 was meanwhile
+  assigned to the schema-vs-contextual class). **Deferred to Unit E, its
+  first real consumer:** the `EngineCore::new` `ModuleRegistration` wiring
+  (today every construction site would pass an empty vec — enforcement
+  theater) and the layer-3 runtime publish gate (today's claims all carry
+  `route_policy: None`, so the gate has zero behavior-changing cells; see
+  `routing-and-ownership.md` §4.2's status ledger and layer-3 semantics
+  clarification).
+
 ---
 
 ## 5. Known-gaps & issues that fold in vs stay separate

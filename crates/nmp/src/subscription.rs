@@ -6,17 +6,55 @@
 //! §1): withdrawing a subscription is never a step an app must remember to
 //! take, only one it may take early via [`Subscription::cancel`]/
 //! [`DiagnosticsSubscription::cancel`].
+//!
+//! ## One read noun, windowing is a policy on it (#485)
+//!
+//! [`Engine::observe`](crate::Engine::observe) takes an optional [`Window`].
+//! There is ONE [`Subscription`] type for both modes; delivery is DERIVED from
+//! boundedness, never a free knob:
+//!
+//! - `window: None` ⇒ the unbounded delta stream. Each [`Frame`] carries the
+//!   engine-computed lossless [`RowDelta`] transition and `window: None`. The
+//!   full row set is never redelivered — doing so would be the O(rows²)
+//!   redelivery class this design exists to avoid.
+//! - `Some(`[`Window::Expandable`]`)` ⇒ a bounded newest-first window
+//!   delivered as conflated latest-state snapshot frames. Each [`Frame`]
+//!   carries `window: Some(`[`WindowContents`]`)` (the complete current row
+//!   set plus its [`WindowLoad`] growth fact) and receiver-derived `deltas`.
+//!   Grow it with [`Subscription::request_rows`].
 
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvError, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nmp_engine::core::DiagnosticsSnapshot;
-use nmp_engine::runtime::{DiagnosticsHandle, Handle, LatestReceiver, QueryHandle, RowsMsg};
+use nmp_engine::core::{
+    AcquisitionEvidence, DiagnosticsSnapshot, HistoryAdvanceError, Row, RowDelta, WindowLoad,
+};
+use nmp_engine::runtime::{
+    DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle, RowsMsg,
+};
+
+/// Window policy on the read noun (#485). One real variant today; future
+/// policies (e.g. latest-only, anchored) are new variants on this
+/// `#[non_exhaustive]` enum, never new nouns — windowing stays a POLICY on
+/// [`Engine::observe`](crate::Engine::observe), not a parallel `observe_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Window {
+    /// A bounded newest-first window: it starts with `initial` canonical rows
+    /// and grows only by explicit [`Subscription::request_rows`], never above
+    /// `max`. `NonZeroUsize` makes an empty window unrepresentable; `initial`
+    /// must not exceed `max` (validated at `observe`).
+    Expandable {
+        initial: NonZeroUsize,
+        max: NonZeroUsize,
+    },
+}
 
 /// The facade's single opaque cancellation capability (#52; codex-nova's
-/// ratified shape), shared by both [`Subscription`] and
+/// ratified shape), shared by [`Subscription`], [`WindowHandle`], and
 /// [`DiagnosticsSubscription`]. Exposes only [`Self::cancel`] -- no
 /// `Handle`/`QueryHandle`/`DiagnosticsHandle` (the raw mechanism-capability
 /// types `nmp-ffi` used to hold directly) ever appears in a stable facade
@@ -28,15 +66,10 @@ use nmp_engine::runtime::{DiagnosticsHandle, Handle, LatestReceiver, QueryHandle
 /// next `recv()` to notice the disconnect.
 ///
 /// Cancellation is idempotent across every clone AND the owning
-/// subscription's own `Drop`: exactly ONE withdrawal (`Handle::
-/// unsubscribe`/`DiagnosticsHandle::cancel`) ever fires, no matter how many
-/// clones call [`Self::cancel`] or whether `Drop` also runs -- an
-/// `AtomicBool` guard shared through the `Arc` makes the first caller (in
-/// either role) win and every other call a no-op. `Subscription`/
-/// `DiagnosticsSubscription` each hold one of these (built in their own
-/// `new`) and route their own `Drop` through that SAME instance's
-/// [`Self::cancel`], so a caller holding a clone and the owning value's own
-/// teardown converge on one guarded action -- never a double-withdrawal.
+/// subscription's own `Drop`: exactly ONE withdrawal ever fires, no matter
+/// how many clones call [`Self::cancel`] or whether `Drop` also runs -- an
+/// `AtomicBool` guard shared through the `Arc` makes the first caller win and
+/// every other call a no-op.
 #[derive(Clone)]
 pub struct ObservationCancel {
     inner: Arc<CancelState>,
@@ -44,12 +77,11 @@ pub struct ObservationCancel {
 
 struct CancelState {
     done: AtomicBool,
-    // A boxed closure rather than an enum over `Query`/`Diagnostics`
+    // A boxed closure rather than an enum over `Query`/`Window`/`Diagnostics`
     // variants: it captures exactly the one withdrawal action each
-    // constructor below needs (`Handle::unsubscribe`/`DiagnosticsHandle::
-    // cancel`) with no further vocabulary added here, and it is what makes
-    // the guard itself trivially provable in isolation (see this module's
-    // tests) without spinning up a real engine just to count calls.
+    // constructor below needs with no further vocabulary added here, and it is
+    // what makes the guard itself trivially provable in isolation (see this
+    // module's tests) without spinning up a real engine just to count calls.
     action: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -76,13 +108,137 @@ impl ObservationCancel {
     }
 }
 
-/// A live query subscription. `Drop` withdraws it -- an app never needs a
-/// second container or lifecycle hook to make that happen; call
-/// [`Self::cancel`] instead of `drop`ping the value for an explicit early
-/// teardown that reads as intent rather than scope exit.
+/// One delivered observation frame (#485). ONE vocabulary for both delivery
+/// modes; which fields are populated is derived from whether the observation
+/// was opened with a [`Window`].
+#[derive(Debug, Clone)]
+pub struct Frame {
+    /// The exact transition from this subscription's previously received
+    /// frame. Unbounded observations: the engine-computed lossless delta
+    /// stream. Windowed observations: derived receiver-side against the last
+    /// delivered frame (windowed frames conflate, so the delta is rebased
+    /// onto whatever was last actually seen).
+    pub deltas: Vec<RowDelta>,
+    /// The complete current bounded row set plus its growth fact. `Some` iff
+    /// the subscription was opened with a [`Window`]. Unbounded observations
+    /// never redeliver the full set (the O(rows²) redelivery class), so this
+    /// is always `None` for them.
+    pub window: Option<WindowContents>,
+    /// The query's scoped, per-source acquisition evidence.
+    pub evidence: AcquisitionEvidence,
+}
+
+/// The complete current contents of a bounded window plus its growth fact.
+#[derive(Debug, Clone)]
+pub struct WindowContents {
+    /// Canonical newest-first (`created_at DESC, event_id ASC`) window rows.
+    pub rows: Vec<Row>,
+    /// Mechanical growth state of the window as of this frame.
+    pub load: WindowLoad,
+}
+
+/// The ways [`Subscription::request_rows`]/[`WindowHandle::request_rows`] can
+/// fail (#485). Growth is declarative — there is no opaque continuation token
+/// to mismatch and no generation to go stale — so the only failures are the
+/// structural one (this observation has no window) and the two ways a staged
+/// advance can be rolled back before it ever became observable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RequestRowsError {
+    /// This subscription observes the full live set; there is no window to
+    /// grow. Only observations opened with a [`Window`] can `request_rows`.
+    Unwindowed,
+    /// The engine thread has shut down.
+    EngineClosed,
+    /// The canonical store could not serve the advance (the staged load was
+    /// rolled back with exact prior-projection restoration).
+    StoreUnavailable,
+    /// No planned source could serve the advance (the staged load was rolled
+    /// back with exact prior-projection restoration).
+    TransportUnavailable { reason: String },
+}
+
+impl std::fmt::Display for RequestRowsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unwindowed => {
+                f.write_str("request_rows requires a windowed observation; this one is unbounded")
+            }
+            Self::EngineClosed => f.write_str("engine already shut down"),
+            Self::StoreUnavailable => {
+                f.write_str("window advance could not read or resolve the canonical store")
+            }
+            Self::TransportUnavailable { reason } => {
+                write!(f, "window advance transport unavailable: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestRowsError {}
+
+impl RequestRowsError {
+    fn from_advance(error: HistoryAdvanceError) -> Self {
+        match error {
+            HistoryAdvanceError::StoreUnavailable => Self::StoreUnavailable,
+            HistoryAdvanceError::TransportUnavailable { reason } => {
+                Self::TransportUnavailable { reason }
+            }
+        }
+    }
+}
+
+/// A live observation. `Drop` withdraws it -- an app never needs a second
+/// container or lifecycle hook to make that happen; call [`Self::cancel`]
+/// instead of `drop`ping the value for an explicit early teardown that reads
+/// as intent rather than scope exit.
+///
+/// One type serves both the unbounded delta stream and a bounded [`Window`];
+/// [`Self::window_handle`] returns `Some` iff this observation is windowed.
 pub struct Subscription {
     cancel: ObservationCancel,
-    rows: std::sync::mpsc::Receiver<RowsMsg>,
+    delivery: Delivery,
+    window: Option<WindowHandle>,
+}
+
+enum Delivery {
+    Unbounded(std::sync::mpsc::Receiver<RowsMsg>),
+    Windowed(HistoryReceiver),
+}
+
+/// Cloneable growth capability for a windowed observation (#485).
+///
+/// [`Subscription::recv`] blocks, so a drain thread typically owns the
+/// `Subscription` outright; this handle lets a SEPARATE thread grow the same
+/// window via [`Self::request_rows`] or withdraw it via [`Self::cancel`]. The
+/// embedded cancellation guard is the SAME guard the owning [`Subscription`]
+/// routes its `Drop` through, so either side withdraws the whole observation
+/// exactly once.
+#[derive(Clone)]
+pub struct WindowHandle {
+    cancel: ObservationCancel,
+    engine: Handle,
+    handle: HistoryHandle,
+}
+
+impl WindowHandle {
+    /// Monotonically raise the window's row target to at least `at_least`,
+    /// clamped to the window's declared `max`. Idempotent; a value at or below
+    /// the current target is a no-op. Growth outcomes arrive as [`WindowLoad`]
+    /// facts in subsequent frames — this call only declares the intent.
+    pub fn request_rows(&self, at_least: usize) -> Result<(), RequestRowsError> {
+        match self.engine.request_rows(self.handle, at_least) {
+            None => Err(RequestRowsError::EngineClosed),
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) => Err(RequestRowsError::from_advance(error)),
+        }
+    }
+
+    /// Withdraw the whole observation now (idempotent; converges on the same
+    /// one-withdrawal guard as the owning [`Subscription`]'s `Drop`).
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
 }
 
 impl Subscription {
@@ -93,23 +249,104 @@ impl Subscription {
     ) -> Self {
         Self {
             cancel: ObservationCancel::new(move || handle.unsubscribe(query_handle)),
-            rows,
+            delivery: Delivery::Unbounded(rows),
+            window: None,
         }
     }
 
-    /// Block for the next `RowsMsg` batch (raw rows + this query's scoped
-    /// acquisition evidence). `Err` once the engine thread has shut down and the
-    /// channel disconnects.
-    pub fn recv(&self) -> Result<RowsMsg, RecvError> {
-        self.rows.recv()
+    pub(crate) fn new_windowed(
+        engine: Handle,
+        handle: HistoryHandle,
+        batches: HistoryReceiver,
+    ) -> Self {
+        let cancel_engine = engine.clone();
+        let cancel = ObservationCancel::new(move || cancel_engine.unsubscribe_history(handle));
+        let window = WindowHandle {
+            cancel: cancel.clone(),
+            engine,
+            handle,
+        };
+        Self {
+            cancel,
+            delivery: Delivery::Windowed(batches),
+            window: Some(window),
+        }
     }
 
-    /// Wait at most `timeout` for the next live-query frame. This is the
-    /// same stream as [`Self::recv`], with no polling or second cache; it is
-    /// useful to protocol actions whose acquisition phase has an explicit,
-    /// bounded deadline.
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<RowsMsg, RecvTimeoutError> {
-        self.rows.recv_timeout(timeout)
+    /// Block for the next observation [`Frame`]. Unbounded: the next lossless
+    /// delta batch. Windowed: the newest self-contained bounded state
+    /// (intermediate states may be conflated, while `window.rows` and the
+    /// re-derived `deltas` always describe an exact transition from this
+    /// receiver's last return). `Err` once the engine thread has shut down and
+    /// the channel disconnects.
+    pub fn recv(&self) -> Result<Frame, RecvError> {
+        match &self.delivery {
+            Delivery::Unbounded(rows) => {
+                let (deltas, evidence) = rows.recv()?;
+                Ok(Frame {
+                    deltas,
+                    window: None,
+                    evidence,
+                })
+            }
+            Delivery::Windowed(batches) => {
+                let batch = batches.recv()?;
+                Ok(Frame {
+                    deltas: batch.deltas,
+                    window: Some(WindowContents {
+                        rows: batch.rows,
+                        load: batch.load,
+                    }),
+                    evidence: batch.evidence,
+                })
+            }
+        }
+    }
+
+    /// Wait at most `timeout` for the next [`Frame`]. The same stream as
+    /// [`Self::recv`], with no polling or second cache.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Frame, RecvTimeoutError> {
+        match &self.delivery {
+            Delivery::Unbounded(rows) => {
+                let (deltas, evidence) = rows.recv_timeout(timeout)?;
+                Ok(Frame {
+                    deltas,
+                    window: None,
+                    evidence,
+                })
+            }
+            Delivery::Windowed(batches) => {
+                let batch = batches.recv_timeout(timeout)?;
+                Ok(Frame {
+                    deltas: batch.deltas,
+                    window: Some(WindowContents {
+                        rows: batch.rows,
+                        load: batch.load,
+                    }),
+                    evidence: batch.evidence,
+                })
+            }
+        }
+    }
+
+    /// Windowed observations only: monotonically raise the window's row target
+    /// to at least `at_least`, clamped to the declared `max`. Idempotent; a
+    /// value at or below the current target is a no-op. Returns
+    /// [`RequestRowsError::Unwindowed`] for an unbounded observation. Growth
+    /// outcomes arrive as [`WindowLoad`] facts in subsequent frames.
+    pub fn request_rows(&self, at_least: usize) -> Result<(), RequestRowsError> {
+        match &self.window {
+            Some(handle) => handle.request_rows(at_least),
+            None => Err(RequestRowsError::Unwindowed),
+        }
+    }
+
+    /// A cloneable growth/cancel capability for a windowed observation.
+    /// `None` for unbounded observations — the capability's existence is
+    /// derived from the window policy, not a separate flag.
+    #[must_use]
+    pub fn window_handle(&self) -> Option<WindowHandle> {
+        self.window.clone()
     }
 
     /// Withdraw the subscription now, rather than waiting for `Drop`.

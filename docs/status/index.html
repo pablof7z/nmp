@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-15 19:00 UTC</p>
-    <p class="ep-sub">2026-07-15 &middot; hardening batch &middot; ~2.5 min</p>
-    <audio controls preload="none" src="reports/pulse-0004.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0004.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Briefing — 2026-07-15 20:55 UTC</p>
+    <p class="ep-sub">2026-07-15 &middot; observe(query, window) ships &middot; ~4.7 min</p>
+    <audio controls preload="none" src="reports/pulse-0006.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0006.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">A DNS-rebinding SSRF hole in relay admission closed (#524), a permanently-failed relay's wedge-and-leak fixed (#511), a router pass taken from cubic to quadratic (#510), two unbounded bookkeeping structures pruned (#512, #514), Kotlin/Swift content-session and NMPConfig parity (#523, #513), an unsafe NIP-29 tag omitted (#516), and the in-progress plan to fold History* pagination into a windowed observe() (#485).</p>
+    <p class="ep-blurb">The read API's biggest shape change yet: <code>observe(query, window)</code> makes windowing a policy on the one read noun, retires the parallel <code>History*</code> noun entirely, and fixes the #486 per-advance relay-subscription leak along the way — closing #474/#485/#486. A CI-caught native-task leak in the new window path was fixed and regression-tested before merge. Four more hardening fixes landed alongside it (#525–#528), and NIP-42 content-relay AUTH begins its first wave under #8 — still early, not shipped. <code>remove_account</code> (#529) stays held pending #8's account-handle shape.</p>
   </section>
 
   <details class="archive" id="archive">

@@ -29,7 +29,9 @@ mod admission;
 mod attribution;
 mod diagnostics;
 mod evidence;
+mod history;
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
@@ -51,8 +53,8 @@ use nmp_resolver::{
     LocalAcceptResult, QueryHandle,
 };
 use nmp_router::{
-    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, Router, RuleRegistry, SubId,
-    WireDelta, WireOp, WireReq,
+    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayPlan, Router, RuleRegistry,
+    SubId, WireDelta, WireOp, WireReq,
 };
 use nmp_signer::SignerError;
 use nmp_store::{
@@ -229,6 +231,7 @@ pub use admission::RelayAdmissionPolicy;
 use attribution::AttributionState;
 pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
+pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
@@ -285,6 +288,13 @@ impl ReattachOutcome {
 /// Sink an app-facing `Handle` registers for row deltas on a subscription.
 pub trait RowSink: Send {
     fn on_rows(&self, rows: Vec<RowDelta>);
+}
+
+/// Reducer-side observer for one coordinated history session. Runtime
+/// delivery still travels through [`Effect::EmitHistory`]; this sink keeps
+/// the pure headless reducer directly falsifiable like [`RowSink`].
+pub trait HistorySink: Send {
+    fn on_history(&self, batch: HistoryBatch);
 }
 
 /// The canonical row value (#105): the event plus its sorted, deduplicated
@@ -368,6 +378,19 @@ impl RowDelta {
 pub enum EngineMsg {
     Subscribe(LiveQuery, Box<dyn RowSink>),
     Unsubscribe(HandleId),
+    SubscribeHistory(HistoryQuery, Box<dyn HistorySink>),
+    /// Declaratively raise this window's row target to at least `usize`,
+    /// clamped to the declared `max_rows` (#485). Monotonic and idempotent:
+    /// a value at or below the current target is a no-op (or, at the bound, a
+    /// single `AtBound` frame beat). Replaces the opaque continuation token.
+    RequestRows(HistorySessionId, usize),
+    /// Runtime acknowledgement that every newly-required relay worker was
+    /// acquired and the staged window advance may become observable.
+    CommitHistoryLoad(HistorySessionId),
+    /// Runtime refusal/caller cancellation before a staged advance became
+    /// observable. Restores the exact prior projection and demand.
+    RollbackHistoryLoad(HistorySessionId),
+    UnsubscribeHistory(HistorySessionId),
     SetActivePubkey(Option<PublicKey>),
     Publish(WriteIntent, Box<dyn ReceiptSink>),
     RelayConnected(TransportRelayHandle, RelayUrl),
@@ -421,6 +444,11 @@ pub enum EngineMsg {
 pub enum Effect {
     /// -> `Pool::send` per (relay, current handle).
     Wire(WireDelta),
+    /// Prospective relay workers for a staged history advance. The runtime
+    /// may preflight these workers, but dispatch never sends protocol work
+    /// from this effect. The live router/attribution state changes only
+    /// after the synchronous caller has accepted the successful reply.
+    PreflightHistoryRelays(BTreeSet<RelayUrl>),
     /// Reconnect: resend the current wire subs on the NEW generation.
     Replay(RelayUrl, Vec<WireReq>),
     /// Acquire/revalidate NIP-11 without blocking the reducer thread.
@@ -451,6 +479,8 @@ pub enum Effect {
         nmp_store::CoverageInterval,
     ),
     EmitRows(HandleId, Vec<RowDelta>, AcquisitionEvidence),
+    EmitHistory(HistorySessionId, HistoryBatch),
+    HistoryLoadResult(HistorySessionId, Result<(), HistoryAdvanceError>),
     /// The engine-global diagnostics projection (M5 plan §1.2 step 3),
     /// pushed at the end of every `recompile()` and after every EOSE
     /// (coverage watermarks can advance with no recompile at all). Read-only
@@ -508,6 +538,57 @@ struct HandleState {
     /// possibly missed historical snapshot, so the next affected batch must
     /// retry the full oracle before incremental application resumes.
     projection_complete: bool,
+}
+
+struct HistoryState {
+    query: HistoryQuery,
+    /// Resolver handles the session currently holds open: the one live-top
+    /// demand (`live_handle_id`) plus at most the *current* advance's
+    /// tie-second/older acquisition handles. Older advances' historical
+    /// acquisitions are closed at the next commit (#486) so a deep scroll of
+    /// `K` advances never accumulates `O(K)` live relay subscriptions.
+    handles: Vec<QueryHandle>,
+    handle_ids: BTreeSet<HandleId>,
+    /// The initial, permanent live-top demand opened at
+    /// [`Self::on_subscribe_history`]. It is never a historical acquisition
+    /// and is retired only when the whole session is dropped.
+    live_handle_id: HandleId,
+    /// Every engine-owned acquisition handle the session currently holds open,
+    /// mapped to `Some(second)` for a tie-second REQ (`since==until==second`)
+    /// or `None` for an older-range REQ. The live-top handle is never in this
+    /// map. This is what the #486 supersede-close consults: an older handle is
+    /// always safe to retire once superseded (its range is re-requestable, so
+    /// no permanent gap), while a tie handle is kept open until the window
+    /// boundary descends strictly below its second — only then is that dense
+    /// second fully materialized as an interior region and its REQ redundant,
+    /// so retiring it can never drop an un-projected same-second row.
+    acquisitions: BTreeMap<HandleId, Option<u64>>,
+    sink: Box<dyn HistorySink>,
+    target_rows: usize,
+    acquired_tie_seconds: BTreeSet<u64>,
+    /// The bounded canonical payload set. History delivery is latest-wins,
+    /// so every emitted frame must be able to stand alone after intermediate
+    /// deltas are overwritten.
+    last_rows: BTreeMap<EventId, Row>,
+    /// Same membership as `last_rows`, ordered canonically newest-first.
+    /// This makes top/bottom rebalance O(log max_rows), never an O(total)
+    /// sort after every committed row mutation.
+    order: BTreeSet<(Reverse<u64>, EventId)>,
+    last_evidence: Option<AcquisitionEvidence>,
+    projection_complete: bool,
+    load: WindowLoad,
+    pending_load: Option<PendingHistoryLoad>,
+}
+
+struct PendingHistoryLoad {
+    prior_target_rows: usize,
+    prior_load: WindowLoad,
+    prior_evidence: Option<AcquisitionEvidence>,
+    prior_projection_complete: bool,
+    acquired_tie_second: Option<u64>,
+    opened_handle_ids: Vec<HandleId>,
+    added_row_ids: Vec<EventId>,
+    staged_batches: Vec<HistoryBatch>,
 }
 
 /// The minimal retained projection state needed to apply a committed writer
@@ -570,6 +651,14 @@ struct PendingWrite {
     /// The persisted started ordinal currently awaiting a terminal outcome
     /// for each relay.
     attempt_ordinals: BTreeMap<RelayUrl, u64>,
+    /// Every relay this reducer has ever learned owns a persisted outbox
+    /// lane for this intent (epic #507 finding E5). Populated exactly where
+    /// the core learns an intent's lanes — `bootstrap_outbox_lanes`'s two
+    /// call sites (`recover_on_boot`, `on_signed`) — and never elsewhere:
+    /// this is the per-receipt half of `EngineCore::receipts_by_lane_relay`,
+    /// kept so a permanent removal from `pending` can walk exactly this set
+    /// to clean the reverse index rather than scanning it.
+    lane_relays: BTreeSet<RelayUrl>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for
@@ -593,6 +682,9 @@ pub struct EngineCore<S: EventStore> {
     directory: Box<dyn RelayDirectory>,
     cap: usize,
     handles: HashMap<HandleId, HandleState>,
+    histories: HashMap<HistorySessionId, HistoryState>,
+    history_by_handle: HashMap<HandleId, HistorySessionId>,
+    next_history_id: u64,
     attribution: AttributionState,
     /// EngineCore's memory of the exact connection generation and URL that
     /// currently occupy each pool slot. Disconnects are asynchronous; the
@@ -622,6 +714,53 @@ pub struct EngineCore<S: EventStore> {
     /// `EventId` on the wire) find its receipt.
     pending: HashMap<ReceiptId, PendingWrite>,
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
+    /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
+    /// finding E5): `receipt_for_intent` used to be a full linear scan of
+    /// `pending`, run once per due deadline in
+    /// `consume_due_outbox_deadlines`. Maintained at every real
+    /// `pending.insert`/`pending.remove` (never at `fail_and_compensate`'s
+    /// transient remove-then-reinsert, which never changes which intent a
+    /// receipt owns). This mirrors `pending` exactly and needs no separate
+    /// invalidation story: it is rebuilt from scratch, in step with
+    /// `pending`, every `recover_on_boot`.
+    intent_receipts: HashMap<IntentId, ReceiptId>,
+    /// Relay -> receipts with a lane on that relay (epic #507 finding E5).
+    /// A narrowing INDEX only, never a second source of truth: the store's
+    /// `OUTBOX_LANES` table stays authoritative (its keys are intent-first,
+    /// and `close_terminal_intent` deliberately never deletes a closed
+    /// intent's own terminal lane rows -- both `MemoryStore` and `RedbStore`
+    /// only drop `OUTBOX_INTENTS`/the deadline indexes there, per that
+    /// door's own doc comment: "Receipts and all route/attempt/detail
+    /// evidence are retained" -- so a durable relay-scoped secondary table
+    /// would still index retained garbage and would need transactional
+    /// maintenance across every lane-writing door).
+    /// This index instead rides the reducer's own `pending`/`recover_on_boot`
+    /// lifecycle: rebuilt deterministically at boot, so there is no cache-
+    /// invalidation question distinct from the one `pending` itself already
+    /// answers. `wake_relay_lanes` uses this to avoid re-reading every
+    /// outstanding write's lanes on every relay connect/disconnect/auth
+    /// event -- it only narrows WHICH intents to re-read via
+    /// `recover_outbox_lanes`, the store read itself remains the truth.
+    /// Kept in lockstep with each `PendingWrite::lane_relays` (its per-
+    /// receipt half): populated at the same two `bootstrap_outbox_lanes`
+    /// call sites, cleaned by walking `lane_relays` on a real removal.
+    receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
+    /// Safety valve for `receipts_by_lane_relay` (epic #507 finding E5): set
+    /// to true the moment ANY path could have created/learned lanes but the
+    /// index could not record them (a `bootstrap_outbox_lanes` or
+    /// `recover_route_revisions` error during `recover_on_boot`/`on_signed`).
+    /// `recover_on_boot` resets it to false at the start of its one-shot,
+    /// deterministic rebuild -- the same moment `pending` itself is rebuilt
+    /// from scratch -- and a later failure during that same rebuild (or any
+    /// post-boot lane-learning call) sets it back to true for the rest of
+    /// this process's life; nothing un-degrades it mid-process, on purpose.
+    /// While true, `wake_relay_lanes` falls back to the full
+    /// `recover_all_lanes` scan unchanged: a missed wakeup permanently wedges
+    /// a durable write lane (the worst bug class here -- see the idle-
+    /// barrier missed-wakeup fix, d755f39, and #507's own missed-wakeup
+    /// finding), so an unprovable index is always treated as untrustworthy
+    /// rather than guessed at.
+    lane_relay_index_degraded: bool,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
     /// Latest provenance-bearing NIP-11 advertisement for relays in the
@@ -729,6 +868,12 @@ pub struct EngineCore<S: EventStore> {
     projection_store_queries: Cell<u64>,
     #[cfg(test)]
     router_compiles: Cell<u64>,
+    #[cfg(test)]
+    history_store_queries: Cell<u64>,
+    #[cfg(test)]
+    history_rows_examined: Cell<u64>,
+    #[cfg(test)]
+    history_affected_row_queries: Cell<u64>,
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
@@ -755,6 +900,9 @@ impl<S: EventStore> EngineCore<S> {
             directory,
             cap,
             handles: HashMap::new(),
+            histories: HashMap::new(),
+            history_by_handle: HashMap::new(),
+            next_history_id: 1,
             attribution: AttributionState::new(),
             slot_to_relay: HashMap::new(),
             connected_relays: BTreeSet::new(),
@@ -764,6 +912,9 @@ impl<S: EventStore> EngineCore<S> {
             next_unaccepted_receipt: Some(u64::MAX),
             pending: HashMap::new(),
             event_to_receipts: HashMap::new(),
+            intent_receipts: HashMap::new(),
+            receipts_by_lane_relay: HashMap::new(),
+            lane_relay_index_degraded: false,
             prober: Prober::new(),
             nip11_information: HashMap::new(),
             neg_sessions: HashMap::new(),
@@ -784,6 +935,12 @@ impl<S: EventStore> EngineCore<S> {
             projection_store_queries: Cell::new(0),
             #[cfg(test)]
             router_compiles: Cell::new(0),
+            #[cfg(test)]
+            history_store_queries: Cell::new(0),
+            #[cfg(test)]
+            history_rows_examined: Cell::new(0),
+            #[cfg(test)]
+            history_affected_row_queries: Cell::new(0),
         }
     }
 
@@ -822,10 +979,31 @@ impl<S: EventStore> EngineCore<S> {
         Ok(AttemptCorrelation(id))
     }
 
+    /// O(1) via `intent_receipts` (epic #507 finding E5) -- this door used
+    /// to be a full `self.pending` linear scan, run once per due deadline in
+    /// `consume_due_outbox_deadlines`.
     fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
-        self.pending
-            .iter()
-            .find_map(|(id, pending)| (pending.intent_id == Some(intent_id)).then_some(*id))
+        self.intent_receipts.get(&intent_id).copied()
+    }
+
+    /// Remove a permanently-discarded pending write's entries from the
+    /// `intent_receipts` and `receipts_by_lane_relay` indexes (epic #507
+    /// finding E5). Call this at every REAL removal from `self.pending` --
+    /// never at `fail_and_compensate`'s transient remove-then-reinsert
+    /// (`CompensateOutcome::NotFound`/`Err`), which must leave both indexes
+    /// untouched because the obligation and its lanes are still live.
+    fn forget_pending_indexes(&mut self, id: ReceiptId, pending: &PendingWrite) {
+        if let Some(intent_id) = pending.intent_id {
+            self.intent_receipts.remove(&intent_id);
+        }
+        for relay in &pending.lane_relays {
+            if let Some(receipts) = self.receipts_by_lane_relay.get_mut(relay) {
+                receipts.remove(&id);
+                if receipts.is_empty() {
+                    self.receipts_by_lane_relay.remove(relay);
+                }
+            }
+        }
     }
 
     fn emit_write_status(&self, id: ReceiptId, status: WriteStatus, effects: &mut Vec<Effect>) {
@@ -866,7 +1044,9 @@ impl<S: EventStore> EngineCore<S> {
         else {
             return;
         };
-        self.pending.remove(&id);
+        if let Some(pending) = self.pending.remove(&id) {
+            self.forget_pending_indexes(id, &pending);
+        }
         if let Some(event_id) = event_id {
             if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
                 receipts.remove(&id);
@@ -1013,6 +1193,17 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Full O(pending) re-read of every outstanding write's lanes. This
+    /// remains a deliberate architectural stance for `schedule_ready` (its
+    /// caller below) and `required_relay_workers`, NOT an oversight (epic
+    /// #507 finding E5): both compute durable-cap/attempt-ordinal
+    /// accounting, which is defined over ALL outstanding lanes globally --
+    /// there is no per-relay narrowing that preserves that meaning, so they
+    /// are left unchanged here. `wake_relay_lanes` is the one caller this
+    /// full scan was NOT inherent to (a single relay event only ever needs
+    /// that relay's own lanes); it now goes through the narrower
+    /// `receipts_by_lane_relay` index instead, except in the degraded
+    /// fallback which still calls this exact function.
     fn recover_all_lanes(&self) -> Result<Vec<(ReceiptId, RecoveredLane)>, PersistenceError> {
         let mut lanes = Vec::new();
         for (id, pending) in &self.pending {
@@ -1180,12 +1371,96 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Wake every `WaitingConnection` (or, if `auth_only`, `WaitingAuth`)
+    /// lane on `relay` -- called on every relay connect/disconnect/auth
+    /// event. Before epic #507 finding E5, this ran `recover_all_lanes` (a
+    /// full `O(pending)` store re-read) and then filtered down to one
+    /// relay, TWICE over per event (once here, once again inside
+    /// `schedule_ready` at the end). The non-degraded path below instead
+    /// narrows via `receipts_by_lane_relay` to exactly the receipts that
+    /// actually own a lane on `relay`, re-reading only those intents.
+    ///
+    /// While `lane_relay_index_degraded`, this falls back to the OLD full
+    /// scan, unchanged: the index cannot be trusted to be a superset of
+    /// live lanes right now, and guessing wrong here means a lane never
+    /// wakes -- a permanently wedged durable write, the worst bug class in
+    /// this codebase (see the idle-barrier missed-wakeup fix, d755f39, and
+    /// #507's own missed-wakeup finding). A missed wakeup is never an
+    /// acceptable price for narrower reads.
     fn wake_relay_lanes(&mut self, relay: &RelayUrl, auth_only: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
-        let Ok(lanes) = self.recover_all_lanes() else {
-            self.retry_scheduler_blocked = true;
+
+        if self.lane_relay_index_degraded {
+            let Ok(lanes) = self.recover_all_lanes() else {
+                self.retry_scheduler_blocked = true;
+                return effects;
+            };
+            self.apply_relay_wake(relay, auth_only, lanes, &mut effects);
+            effects.extend(self.schedule_ready(self.clock));
             return effects;
-        };
+        }
+
+        // Clone the candidate receipt set first: the loop below needs a
+        // mutable borrow of `self` (store reads, `retry_scheduler_blocked`),
+        // so it cannot hold a live borrow of `self.receipts_by_lane_relay`
+        // at the same time.
+        let candidates: Vec<ReceiptId> = self
+            .receipts_by_lane_relay
+            .get(relay)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let mut lanes: Vec<(ReceiptId, RecoveredLane)> = Vec::new();
+        for id in candidates {
+            let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id)
+            else {
+                continue;
+            };
+            match self.resolver.store().recover_outbox_lanes(intent_id) {
+                Ok(recovered) => lanes.extend(
+                    recovered
+                        .into_iter()
+                        .filter(|lane| &lane.key.relay == relay)
+                        .map(|lane| (id, lane)),
+                ),
+                Err(_) => {
+                    // A transient read failure for this one receipt, not an
+                    // indexing gap -- the established `retry_scheduler_blocked`
+                    // idiom (a later engine message retries) applies exactly
+                    // as it does everywhere else this door is read, without
+                    // needing to distrust the whole index.
+                    self.retry_scheduler_blocked = true;
+                }
+            }
+        }
+        // Same deterministic order `recover_all_lanes` produces (by
+        // `lane.key`): order affects effect emission order, and this must be
+        // indistinguishable from the old full-scan behavior for a given
+        // input, not merely equivalent in aggregate.
+        lanes.sort_by(|(_, left), (_, right)| left.key.cmp(&right.key));
+
+        self.apply_relay_wake(relay, auth_only, lanes, &mut effects);
+        effects.extend(self.schedule_ready(self.clock));
+        effects
+    }
+
+    /// The exact per-lane wake body `wake_relay_lanes` ran inline before
+    /// epic #507 finding E5, shared now by both its indexed fast path and
+    /// its degraded full-scan fallback so the two are behaviorally
+    /// identical for a given input. `lanes` is assumed pre-sorted by
+    /// `lane.key` (both callers already do this); it need NOT be pre-
+    /// filtered to `relay` -- the loop below still filters, since the
+    /// degraded fallback hands it every pending intent's lanes unfiltered
+    /// (exactly as the old, pre-#507 `wake_relay_lanes` body did).
+    fn apply_relay_wake(
+        &mut self,
+        relay: &RelayUrl,
+        auth_only: bool,
+        lanes: Vec<(ReceiptId, RecoveredLane)>,
+        effects: &mut Vec<Effect>,
+    ) {
         for (id, lane) in lanes {
             if &lane.key.relay != relay {
                 continue;
@@ -1213,12 +1488,10 @@ impl<S: EventStore> EngineCore<S> {
                         attempt: lane.last_ordinal,
                         eligible_at: self.clock,
                     },
-                    &mut effects,
+                    effects,
                 );
             }
         }
-        effects.extend(self.schedule_ready(self.clock));
-        effects
     }
 
     fn consume_due_outbox_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
@@ -1349,6 +1622,11 @@ impl<S: EventStore> EngineCore<S> {
         let recovered = self.resolver.store().recover_outbox();
         let mut effects = Vec::new();
         let mut recovered_ids = Vec::new();
+        // This is the one deterministic, from-scratch rebuild of `pending`
+        // (and, with it, every index derived from `pending`) -- the exact
+        // moment `receipts_by_lane_relay` can be trusted again regardless of
+        // what happened in a prior process (epic #507 finding E5).
+        self.lane_relay_index_degraded = false;
 
         for intent in recovered {
             let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
@@ -1382,8 +1660,10 @@ impl<S: EventStore> EngineCore<S> {
                     unstarted_relays: BTreeSet::new(),
                     route_blocked_relays: BTreeSet::new(),
                     attempt_ordinals: BTreeMap::new(),
+                    lane_relays: BTreeSet::new(),
                 },
             );
+            self.intent_receipts.insert(intent.intent_id, id);
             recovered_ids.push(id);
 
             if !already_signed {
@@ -1400,7 +1680,16 @@ impl<S: EventStore> EngineCore<S> {
                 .recover_route_revisions(intent.intent_id)
             {
                 Ok(revisions) => revisions,
-                Err(_) => continue,
+                Err(_) => {
+                    // This intent may already own real persisted lanes from
+                    // before this boot; skipping straight to the next intent
+                    // (as below) means `bootstrap_outbox_lanes` never runs
+                    // for it this boot, so the reverse index can never learn
+                    // those lanes -- an unprovable gap, so degrade rather
+                    // than silently under-index (epic #507 finding E5).
+                    self.lane_relay_index_degraded = true;
+                    continue;
+                }
             };
             let durable_relays = revisions
                 .iter()
@@ -1434,9 +1723,26 @@ impl<S: EventStore> EngineCore<S> {
                 .bootstrap_outbox_lanes(intent.intent_id)
             {
                 Ok(lanes) => lanes,
-                Err(_) => continue,
+                Err(_) => {
+                    // Same reasoning as the `recover_route_revisions` error
+                    // above: this is the sole call that teaches the reverse
+                    // index this intent's lanes, so a failure here is an
+                    // audit hole, not a "no lanes" fact -- degrade rather
+                    // than guess (epic #507 finding E5).
+                    self.lane_relay_index_degraded = true;
+                    continue;
+                }
             };
             for lane in lanes {
+                let relay = lane.key.relay.clone();
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    if pending.lane_relays.insert(relay.clone()) {
+                        self.receipts_by_lane_relay
+                            .entry(relay)
+                            .or_default()
+                            .insert(id);
+                    }
+                }
                 match lane.state {
                     LaneState::LegacyInFlight { ordinal }
                     | LaneState::InFlight {
@@ -1915,6 +2221,11 @@ impl<S: EventStore> EngineCore<S> {
         match msg {
             EngineMsg::Subscribe(query, sink) => self.on_subscribe(query, sink),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
+            EngineMsg::SubscribeHistory(query, sink) => self.on_subscribe_history(query, sink),
+            EngineMsg::RequestRows(id, at_least) => self.on_request_rows(id, at_least),
+            EngineMsg::CommitHistoryLoad(id) => self.on_commit_history_load(id),
+            EngineMsg::RollbackHistoryLoad(id) => self.on_rollback_history_load(id),
+            EngineMsg::UnsubscribeHistory(id) => self.on_unsubscribe_history(id),
             EngineMsg::SetActivePubkey(pk) => self.on_set_active_pubkey(pk),
             EngineMsg::Publish(intent, sink) => self.on_publish(intent, sink),
             EngineMsg::RelayConnected(handle, url) => self.on_relay_connected(handle, url),
@@ -1993,6 +2304,7 @@ impl<S: EventStore> EngineCore<S> {
         // new handle; otherwise their "current-plan" evidence can retain a
         // source that the router just dropped (or omit one it just added).
         self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories(&mut effects);
         self.handles.insert(
             id,
             HandleState {
@@ -2015,7 +2327,523 @@ impl<S: EventStore> EngineCore<S> {
         // Removing one query can free capped-plan capacity and therefore
         // change the planned sources of every surviving handle.
         self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories(&mut effects);
         effects
+    }
+
+    fn on_subscribe_history(
+        &mut self,
+        query: HistoryQuery,
+        sink: Box<dyn HistorySink>,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let (handle, _) = match self.resolver.subscribe(query.initial_demand()) {
+            Ok(value) => value,
+            Err(error) => {
+                self.degrade_store(error, &mut effects);
+                return effects;
+            }
+        };
+        let handle_id = handle.id();
+        let id = HistorySessionId(self.next_history_id);
+        self.next_history_id = self.next_history_id.wrapping_add(1).max(1);
+        self.history_by_handle.insert(handle_id, id);
+        self.histories.insert(
+            id,
+            HistoryState {
+                target_rows: query.page_size(),
+                query,
+                handles: vec![handle],
+                handle_ids: BTreeSet::from([handle_id]),
+                live_handle_id: handle_id,
+                acquisitions: BTreeMap::new(),
+                sink,
+                acquired_tie_seconds: BTreeSet::new(),
+                last_rows: BTreeMap::new(),
+                order: BTreeSet::new(),
+                last_evidence: None,
+                projection_complete: false,
+                load: WindowLoad::Idle,
+                pending_load: None,
+            },
+        );
+
+        self.recompile(&mut effects);
+        self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories_except(id, &mut effects);
+        self.refresh_history(id, WindowLoad::Idle, &mut effects);
+        effects
+    }
+
+    fn on_unsubscribe_history(&mut self, id: HistorySessionId) -> Vec<Effect> {
+        let Some(state) = self.histories.remove(&id) else {
+            return Vec::new();
+        };
+        for handle in state.handles {
+            self.history_by_handle.remove(&handle.id());
+            let _ = self.resolver.unsubscribe(handle.id());
+        }
+        let mut effects = Vec::new();
+        self.recompile(&mut effects);
+        self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories(&mut effects);
+        effects
+    }
+
+    /// Declaratively raise this window's row target (#485). Monotonic,
+    /// idempotent, and clamped to the declared `max_rows`. Replaces the old
+    /// `on_load_older` continuation-token door: there is no token to validate,
+    /// no generation to go stale, and no `LoadInProgress`/`AtBound`/
+    /// `NoBoundary` error — an in-flight advance simply raises the target, and
+    /// being at the bound is a frame fact, not an error.
+    fn on_request_rows(&mut self, id: HistorySessionId, at_least: usize) -> Vec<Effect> {
+        let Some(state) = self.histories.get(&id) else {
+            // The session was withdrawn concurrently. The facade keeps a
+            // window's session alive for its whole lifetime, so this is only
+            // reachable as a benign teardown race — report Ok, do nothing.
+            return vec![Effect::HistoryLoadResult(id, Ok(()))];
+        };
+        let max = state.query.max_rows();
+        let old_target = state.target_rows;
+        let new_target = old_target.max(at_least).min(max);
+
+        // A staged advance is already in flight. This is only reachable when a
+        // caller drives `request_rows` between stage and commit (the runtime
+        // commits within one command, so between commands there is never a
+        // lingering pending load). Raise the target and defer: the post-commit
+        // continuation converges the window to it.
+        if state.pending_load.is_some() {
+            if new_target != old_target {
+                self.histories
+                    .get_mut(&id)
+                    .expect("history remains live")
+                    .target_rows = new_target;
+            }
+            return vec![Effect::HistoryLoadResult(id, Ok(()))];
+        }
+
+        if new_target == old_target {
+            // Raising the target cannot grow the window.
+            if old_target == max {
+                // At the declared bound: emit exactly one `AtBound` frame beat
+                // (a FACT, never an error) through the normal staged
+                // EmitHistory path so mailbox conflation applies uniformly.
+                return self.stage_history_atbound(id, max);
+            }
+            // At or below the current target and below the bound: a pure
+            // no-op. Any still-unfilled gap converges through the live
+            // acquisition and the post-commit continuation, not a re-request.
+            return vec![Effect::HistoryLoadResult(id, Ok(()))];
+        }
+
+        // Real growth: raise the target and stage one advance toward it.
+        self.stage_history_advance(id, new_target)
+    }
+
+    /// The canonical older boundary of one window: its oldest retained row in
+    /// NIP-01 newest-first order (`created_at ASC`, then `event_id DESC`).
+    /// This is the cursor an advance fetches strictly older than. `None` when
+    /// the window holds no rows yet.
+    fn window_boundary(&self, id: HistorySessionId) -> Option<nmp_store::EventCursor> {
+        let state = self.histories.get(&id)?;
+        state
+            .last_rows
+            .iter()
+            .max_by(|(a_id, a), (b_id, b)| {
+                nip01_newest_first(
+                    (a.event.created_at.as_secs(), a_id),
+                    (b.event.created_at.as_secs(), b_id),
+                )
+            })
+            .map(|(event_id, row)| nmp_store::EventCursor::new(row.event.created_at, *event_id))
+    }
+
+    /// Stage one bounded advance toward `new_target`, opening the tie-second
+    /// and older-range acquisitions for the current boundary and projecting
+    /// the newly exposed lower segment as a prospective plan. Nothing becomes
+    /// observable until the runtime's synchronous reply receiver accepts
+    /// success and commits (`on_commit_history_load`); on any staging failure
+    /// the prior projection is restored exactly (`on_rollback_history_load`)
+    /// and the collapsed advance error is reported.
+    ///
+    /// The advance chunk is the actual shortfall (`target - held`), not a
+    /// fixed page size, so a single `request_rows(at_least)` asks the wire for
+    /// exactly the rows it still needs.
+    fn stage_history_advance(&mut self, id: HistorySessionId, new_target: usize) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let boundary = self.window_boundary(id);
+
+        let (
+            query,
+            prior_target,
+            prior_load,
+            prior_evidence,
+            prior_projection_complete,
+            needs_tie,
+            old_len,
+            needed,
+        ) = {
+            let state = self
+                .histories
+                .get(&id)
+                .expect("advance requires a live session");
+            let prior_target = state.target_rows;
+            let old_len = state.last_rows.len();
+            let effective_target = new_target.max(prior_target);
+            let needed = effective_target.saturating_sub(old_len);
+            let needs_tie = boundary.as_ref().is_some_and(|cursor| {
+                !state
+                    .acquired_tie_seconds
+                    .contains(&cursor.created_at.as_secs())
+            });
+            (
+                state.query.clone(),
+                prior_target,
+                state.load,
+                state.last_evidence.clone(),
+                state.projection_complete,
+                needs_tie,
+                old_len,
+                needed,
+            )
+        };
+
+        // Raise the target now: `history_rows_and_evidence_for` /
+        // `advance_history_projection` both read `target_rows`.
+        {
+            let state = self.histories.get_mut(&id).expect("history remains live");
+            state.target_rows = state.target_rows.max(new_target);
+        }
+
+        let Some(boundary) = boundary else {
+            // No retained rows: there is no older boundary to fetch behind.
+            // The target is raised; the live acquisition and future committed
+            // rows fill toward it. Nothing to stage now.
+            return vec![Effect::HistoryLoadResult(id, Ok(()))];
+        };
+        if needed == 0 {
+            // The retained set already satisfies the target (an auto-fill call
+            // raced a refresh). Nothing to stage.
+            return vec![Effect::HistoryLoadResult(id, Ok(()))];
+        }
+
+        {
+            let state = self.histories.get_mut(&id).expect("history remains live");
+            state.pending_load = Some(PendingHistoryLoad {
+                prior_target_rows: prior_target,
+                prior_load,
+                prior_evidence,
+                prior_projection_complete,
+                acquired_tie_second: needs_tie.then_some(boundary.created_at.as_secs()),
+                opened_handle_ids: Vec::new(),
+                added_row_ids: Vec::new(),
+                staged_batches: Vec::new(),
+            });
+        }
+
+        // Each opened acquisition is tagged with its kind for the #486
+        // supersede-close: `Some(second)` for the tie-second REQ, `None` for
+        // the older-range REQ.
+        let mut opened: Vec<(QueryHandle, Option<u64>)> = Vec::new();
+        let boundary_second = boundary.created_at.as_secs();
+        if needs_tie {
+            if let Some(tie) = query.tie_second_demand(boundary_second) {
+                match self.resolver.subscribe(tie) {
+                    Ok((handle, _)) => opened.push((handle, Some(boundary_second))),
+                    Err(error) => {
+                        self.degrade_store(error, &mut effects);
+                        effects.extend(self.on_rollback_history_load(id));
+                        effects.push(Effect::HistoryLoadResult(
+                            id,
+                            Err(HistoryAdvanceError::StoreUnavailable),
+                        ));
+                        return effects;
+                    }
+                }
+            }
+        }
+        if let Some(older) = query.older_demand(boundary_second, needed) {
+            match self.resolver.subscribe(older) {
+                Ok((handle, _)) => opened.push((handle, None)),
+                Err(error) => {
+                    for (handle, _) in opened {
+                        let _ = self.resolver.unsubscribe(handle.id());
+                    }
+                    self.degrade_store(error, &mut effects);
+                    effects.extend(self.on_rollback_history_load(id));
+                    effects.push(Effect::HistoryLoadResult(
+                        id,
+                        Err(HistoryAdvanceError::StoreUnavailable),
+                    ));
+                    return effects;
+                }
+            }
+        }
+
+        {
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("history remains live during synchronous advance");
+            if needs_tie {
+                state.acquired_tie_seconds.insert(boundary_second);
+            }
+            for (handle, kind) in opened {
+                let handle_id = handle.id();
+                state.handle_ids.insert(handle_id);
+                state.handles.push(handle);
+                state.acquisitions.insert(handle_id, kind);
+                self.history_by_handle.insert(handle_id, id);
+                state
+                    .pending_load
+                    .as_mut()
+                    .expect("load was staged before opening resolver handles")
+                    .opened_handle_ids
+                    .push(handle_id);
+            }
+        }
+
+        // Build the prospective plan without touching live router,
+        // attribution, diagnostics, other projections, or any sink.
+        let shadow_plan = self.history_shadow_plan();
+        let requesting = self.history_batch(id, Vec::new(), WindowLoad::Requesting);
+        let added = match self.advance_history_projection(id, boundary, old_len, &shadow_plan) {
+            Ok((batch, added)) => {
+                let added_row_ids = batch
+                    .deltas
+                    .iter()
+                    .filter_map(|delta| match delta {
+                        RowDelta::Added(row) => Some(row.event.id),
+                        RowDelta::SourcesGrew { .. } | RowDelta::Removed(_) => None,
+                    })
+                    .collect();
+                let pending = self
+                    .histories
+                    .get_mut(&id)
+                    .expect("history remains live during staged advance")
+                    .pending_load
+                    .as_mut()
+                    .expect("load remains staged until runtime acknowledgement");
+                pending.added_row_ids = added_row_ids;
+                pending.staged_batches = vec![requesting, batch];
+                added
+            }
+            Err(error) => {
+                if let Some(state) = self.histories.get_mut(&id) {
+                    state.projection_complete = false;
+                }
+                self.degrade_store(error, &mut effects);
+                effects.extend(self.on_rollback_history_load(id));
+                effects.push(Effect::HistoryLoadResult(
+                    id,
+                    Err(HistoryAdvanceError::StoreUnavailable),
+                ));
+                return effects;
+            }
+        };
+        debug_assert!(added <= needed);
+        effects.push(Effect::PreflightHistoryRelays(
+            shadow_plan.reqs.keys().cloned().collect(),
+        ));
+        effects.push(Effect::HistoryLoadResult(id, Ok(())));
+        effects
+    }
+
+    /// Stage a single `AtBound { max }` frame beat: the window is already at
+    /// its declared ceiling, so `request_rows` cannot grow it, but the caller
+    /// still gets one delivered fact. It rides the same staged commit path as
+    /// a real advance (empty relay preflight, no opened handles, no target
+    /// change) so it conflates identically and rolls back cleanly if the
+    /// runtime never accepts it.
+    fn stage_history_atbound(&mut self, id: HistorySessionId, max: usize) -> Vec<Effect> {
+        let (prior_target, prior_load, prior_evidence, prior_projection_complete) = {
+            let state = self.histories.get(&id).expect("history remains live");
+            (
+                state.target_rows,
+                state.load,
+                state.last_evidence.clone(),
+                state.projection_complete,
+            )
+        };
+        let batch = self.history_batch(id, Vec::new(), WindowLoad::AtBound { max });
+        let state = self.histories.get_mut(&id).expect("history remains live");
+        state.pending_load = Some(PendingHistoryLoad {
+            prior_target_rows: prior_target,
+            prior_load,
+            prior_evidence,
+            prior_projection_complete,
+            acquired_tie_second: None,
+            opened_handle_ids: Vec::new(),
+            added_row_ids: Vec::new(),
+            staged_batches: vec![batch],
+        });
+        vec![
+            Effect::PreflightHistoryRelays(BTreeSet::new()),
+            Effect::HistoryLoadResult(id, Ok(())),
+        ]
+    }
+
+    fn on_commit_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
+        if !self
+            .histories
+            .get(&id)
+            .is_some_and(|state| state.pending_load.is_some())
+        {
+            return Vec::new();
+        }
+
+        // #486: retire the historical tie/older acquisitions the session no
+        // longer needs, so a deep scroll of K advances never accumulates O(K)
+        // live relay subscriptions. Three classes of handle are KEPT open:
+        //   * the permanent live-top demand (`live_handle_id`);
+        //   * the advance now committing (its own just-opened handles); and
+        //   * the tie-second REQ for the CURRENT window boundary second — a
+        //     dense same-second boundary keeps that second as the boundary
+        //     across several advances (its `needs_tie` gate stays satisfied
+        //     without re-opening), and closing its REQ before the boundary has
+        //     descended below it could drop a not-yet-projected same-second
+        //     row (the #474 tie-second correctness class). It is retired only
+        //     once the boundary moves strictly older, at which point every
+        //     in-store row at that second is already projected as interior.
+        // Every OTHER acquisition — older-range REQs (always re-requestable, so
+        // never a permanent gap) and tie REQs for seconds no longer the
+        // boundary — is retired here. `acquired_tie_seconds` is deliberately
+        // retained (that is the coverage evidence) so a later advance never
+        // re-requests a tie second already covered. The recompile just below
+        // re-diffs the demand and emits the wire CLOSEs for the dropped handles.
+        let superseded: Vec<HandleId> = {
+            let state = self
+                .histories
+                .get(&id)
+                .expect("committed history remained live");
+            let current: BTreeSet<HandleId> = state
+                .pending_load
+                .as_ref()
+                .expect("commit checked the staged history load")
+                .opened_handle_ids
+                .iter()
+                .copied()
+                .collect();
+            let live = state.live_handle_id;
+            let boundary_second = self
+                .window_boundary(id)
+                .map(|cursor| cursor.created_at.as_secs());
+            let state = self
+                .histories
+                .get(&id)
+                .expect("committed history remained live");
+            state
+                .acquisitions
+                .iter()
+                .filter(|(handle, kind)| {
+                    if **handle == live || current.contains(handle) {
+                        return false;
+                    }
+                    // Keep the tie REQ whose second is still the boundary.
+                    !matches!((kind, boundary_second), (Some(second), Some(b)) if *second == b)
+                })
+                .map(|(handle, _)| *handle)
+                .collect()
+        };
+        if !superseded.is_empty() {
+            for handle_id in &superseded {
+                self.history_by_handle.remove(handle_id);
+                let _ = self.resolver.unsubscribe(*handle_id);
+            }
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("committed history remained live");
+            state
+                .handles
+                .retain(|handle| !superseded.contains(&handle.id()));
+            for handle_id in &superseded {
+                state.handle_ids.remove(handle_id);
+                state.acquisitions.remove(handle_id);
+            }
+        }
+
+        let mut effects = Vec::new();
+        self.recompile(&mut effects);
+        self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories_except(id, &mut effects);
+
+        let (made_progress, target, len, has_boundary) = {
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("committed history remained live");
+            let pending = state
+                .pending_load
+                .take()
+                .expect("commit checked the staged history load");
+            let made_progress = !pending.added_row_ids.is_empty();
+            for batch in pending.staged_batches {
+                state.sink.on_history(batch.clone());
+                effects.push(Effect::EmitHistory(id, batch));
+            }
+            (
+                made_progress,
+                state.target_rows,
+                state.last_rows.len(),
+                !state.order.is_empty(),
+            )
+        };
+
+        // Continuation loop (#485): the committed advance made progress but
+        // the target is still unmet and an older boundary remains. Stage the
+        // next advance automatically, one at a time — the runtime's commit
+        // loop drives this to convergence. The `made_progress` guard makes the
+        // loop bounded: an advance that adds no canonical row (store exhausted
+        // locally; the older-range wire request already placed) does not
+        // re-stage, so it never spins waiting on the network.
+        if made_progress && target > len && has_boundary {
+            effects.extend(self.stage_history_advance(id, target));
+        }
+        effects
+    }
+
+    fn on_rollback_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
+        let Some(pending) = self
+            .histories
+            .get_mut(&id)
+            .and_then(|state| state.pending_load.take())
+        else {
+            return Vec::new();
+        };
+
+        let opened: BTreeSet<_> = pending.opened_handle_ids.iter().copied().collect();
+        for handle_id in &opened {
+            self.history_by_handle.remove(handle_id);
+            let _ = self.resolver.unsubscribe(*handle_id);
+        }
+        let state = self
+            .histories
+            .get_mut(&id)
+            .expect("rollback target remained live while staged handles closed");
+        state
+            .handles
+            .retain(|handle| !opened.contains(&handle.id()));
+        state.handle_ids.retain(|handle| !opened.contains(handle));
+        state
+            .acquisitions
+            .retain(|handle, _| !opened.contains(handle));
+        if let Some(second) = pending.acquired_tie_second {
+            state.acquired_tie_seconds.remove(&second);
+        }
+        for event_id in pending.added_row_ids {
+            if let Some(row) = state.last_rows.remove(&event_id) {
+                state
+                    .order
+                    .remove(&(Reverse(row.event.created_at.as_secs()), event_id));
+            }
+        }
+        state.target_rows = pending.prior_target_rows;
+        state.load = pending.prior_load;
+        state.last_evidence = pending.prior_evidence;
+        state.projection_complete = pending.prior_projection_complete;
+
+        Vec::new()
     }
 
     fn on_set_active_pubkey(&mut self, pk: Option<PublicKey>) -> Vec<Effect> {
@@ -2030,6 +2858,7 @@ impl<S: EventStore> EngineCore<S> {
         }
         self.recompile(&mut effects);
         self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories(&mut effects);
         if let Some(pk) = pk {
             // The runtime moves its active signer pointer before delivering
             // this message. Re-arm matching accepted work here as well as
@@ -2203,8 +3032,15 @@ impl<S: EventStore> EngineCore<S> {
                 unstarted_relays: BTreeSet::new(),
                 route_blocked_relays: BTreeSet::new(),
                 attempt_ordinals: BTreeMap::new(),
+                lane_relays: BTreeSet::new(),
             },
         );
+        // `intent_id` is `None` only for Ephemeral, which never owns a
+        // pending row or a lane -- nothing to index for it (epic #507
+        // finding E5).
+        if let Some(intent_id) = intent_id {
+            self.intent_receipts.insert(intent_id, id);
+        }
 
         if let Some(committed) = committed {
             // A local pending row was committed before Accepted. When it did
@@ -2413,6 +3249,13 @@ impl<S: EventStore> EngineCore<S> {
             Some(Ok(relays)) => relays,
             Some(Err(reason)) => {
                 if let Some(pending) = self.pending.remove(&id) {
+                    // No lanes have been bootstrapped for this intent yet at
+                    // this point in `on_signed` (that only happens further
+                    // below, after routes resolve) -- `lane_relays` is
+                    // guaranteed empty, but `intent_receipts` was already
+                    // populated at acceptance, so this must still clean it
+                    // (epic #507 finding E5).
+                    self.forget_pending_indexes(id, &pending);
                     let status = WriteStatus::Failed(reason);
                     Self::notify(&pending, status.clone());
                     effects.push(Effect::EmitReceipt(id, status));
@@ -2443,7 +3286,13 @@ impl<S: EventStore> EngineCore<S> {
                 );
                 effects.push(Effect::PublishEvent(relay, event.clone(), correlation));
             }
-            self.pending.remove(&id);
+            // Ephemeral never owns a durable lane (`intent_id` is `None`),
+            // so there is nothing for `forget_pending_indexes` to find, but
+            // calling it keeps this a single uniform cleanup discipline for
+            // every real `pending` removal (epic #507 finding E5).
+            if let Some(pending) = self.pending.remove(&id) {
+                self.forget_pending_indexes(id, &pending);
+            }
             return;
         }
 
@@ -2468,6 +3317,12 @@ impl<S: EventStore> EngineCore<S> {
         let lanes = match self.resolver.store_mut().bootstrap_outbox_lanes(intent_id) {
             Ok(lanes) => lanes,
             Err(_) => {
+                // This is the sole call that teaches the reverse index this
+                // freshly-signed intent's lanes; a failure here means the
+                // index cannot learn whatever lanes may (or may not) exist,
+                // so degrade rather than assume "no lanes" (epic #507
+                // finding E5).
+                self.lane_relay_index_degraded = true;
                 for relay in relays {
                     self.emit_write_status(id, WriteStatus::PersistenceBlocked(relay), effects);
                 }
@@ -2479,6 +3334,15 @@ impl<S: EventStore> EngineCore<S> {
             .or_default()
             .insert(id);
         for lane in lanes {
+            let lane_relay = lane.key.relay.clone();
+            if let Some(pending) = self.pending.get_mut(&id) {
+                if pending.lane_relays.insert(lane_relay.clone()) {
+                    self.receipts_by_lane_relay
+                        .entry(lane_relay)
+                        .or_default()
+                        .insert(id);
+                }
+            }
             if matches!(lane.state, LaneState::WaitingConnection) {
                 if self.connected_relays.contains(&lane.key.relay) {
                     let _ = self.resolver.store_mut().set_lane_eligible(
@@ -2691,6 +3555,12 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
+        // Reached only when `intent_id` was `None` (Ephemeral -- nothing to
+        // clean) or compensation actually committed (a real, permanent
+        // removal): both `NotFound`/`Err` arms above reinsert `pending`
+        // untouched and return early, so the indexes must stay untouched
+        // for those (epic #507 finding E5).
+        self.forget_pending_indexes(id, &pending);
         Self::notify(&pending, WriteStatus::Failed(reason.clone()));
         effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
     }
@@ -3093,6 +3963,7 @@ impl<S: EventStore> EngineCore<S> {
         // -- refresh so that becomes observable via `EmitRows`, same as an
         // EOSE-driven watermark advance below.
         self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories(&mut effects);
         effects.extend(self.wake_relay_lanes(&url, false));
         effects
     }
@@ -3223,6 +4094,7 @@ impl<S: EventStore> EngineCore<S> {
         // Same reasoning as `on_relay_connected`: a link-status flip alone
         // must become observable via `EmitRows`.
         self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories(&mut effects);
         effects.extend(self.schedule_ready(self.clock));
         effects
     }
@@ -3387,6 +4259,7 @@ impl<S: EventStore> EngineCore<S> {
                 // with no new rows at all — refresh so that becomes
                 // observable via EmitRows, same as an ingest.
                 self.refresh_all_handles(&mut effects);
+                self.refresh_all_histories(&mut effects);
                 // Same watermark advance can also flip the diagnostic
                 // surface's own per-(filter, relay) coverage even though
                 // this arm never calls `recompile()` (M5 plan §1.2 step 3:
@@ -3570,6 +4443,30 @@ impl<S: EventStore> EngineCore<S> {
         if !kept.is_empty() {
             effects.push(Effect::Wire(WireDelta { ops: kept }));
         }
+    }
+
+    /// Compile the resolver's current (possibly staged-history) demand into
+    /// an isolated plan. A history advance changes only the outer time
+    /// window of an already-live descriptor, so every discovery dependency
+    /// is already represented by the initial session; shadow planning never
+    /// needs to mutate the widen-only discovery subscription.
+    fn history_shadow_plan(&self) -> RelayPlan {
+        let admitted = self
+            .resolver
+            .active_demand()
+            .into_iter()
+            .map(|mut atom| {
+                atom.routing_evidence
+                    .retain(|evidence| self.admission.admits_discovered(&evidence.relay));
+                atom
+            })
+            .collect();
+        let mut router = Router::new(
+            DiscoveryKinds::default(),
+            RuleRegistry::default_widen_only(),
+        );
+        let _ = router.compile(&admitted, self.directory.as_ref(), self.cap);
+        router.plan().clone()
     }
 
     /// Gate every network-sourced selector hint/provenance URL before it
@@ -3979,6 +4876,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         self.refresh_all_handles(effects);
+        self.refresh_all_histories(effects);
     }
 
     /// Abandon a live reconciliation and fall back to a plain REQ for the
@@ -4029,6 +4927,290 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    fn refresh_all_histories(&mut self, effects: &mut Vec<Effect>) {
+        let ids: Vec<_> = self.histories.keys().copied().collect();
+        for id in ids {
+            self.refresh_history(id, WindowLoad::Idle, effects);
+        }
+    }
+
+    fn refresh_all_histories_except(
+        &mut self,
+        except: HistorySessionId,
+        effects: &mut Vec<Effect>,
+    ) {
+        let ids: Vec<_> = self
+            .histories
+            .keys()
+            .copied()
+            .filter(|id| *id != except)
+            .collect();
+        for id in ids {
+            self.refresh_history(id, WindowLoad::Idle, effects);
+        }
+    }
+
+    fn history_batch(
+        &mut self,
+        id: HistorySessionId,
+        deltas: Vec<RowDelta>,
+        load: WindowLoad,
+    ) -> HistoryBatch {
+        let state = self
+            .histories
+            .get_mut(&id)
+            .expect("history batch requires a live session");
+        state.load = load;
+        let rows = state
+            .order
+            .iter()
+            .filter_map(|(_, event_id)| state.last_rows.get(event_id).cloned())
+            .collect();
+        HistoryBatch {
+            rows,
+            deltas,
+            evidence: state.last_evidence.clone().unwrap_or_default(),
+            load,
+        }
+    }
+
+    fn refresh_history(
+        &mut self,
+        id: HistorySessionId,
+        load: WindowLoad,
+        effects: &mut Vec<Effect>,
+    ) -> Option<usize> {
+        let (current, evidence) = match self.history_rows_and_evidence_for(id) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(state) = self.histories.get_mut(&id) {
+                    state.projection_complete = false;
+                }
+                self.degrade_store(error, effects);
+                return None;
+            }
+        };
+        let state = self.histories.get_mut(&id)?;
+        let current_rows = current.clone();
+        let current_order = current_rows
+            .iter()
+            .map(|(event_id, row)| (Reverse(row.event.created_at.as_secs()), *event_id))
+            .collect();
+        let mut deltas = Vec::new();
+        for (event_id, row) in current {
+            match state.last_rows.get(&event_id) {
+                None => deltas.push(RowDelta::Added(row)),
+                Some(previous) if previous.sources != row.sources => {
+                    deltas.push(RowDelta::SourcesGrew {
+                        id: event_id,
+                        sources: row.sources,
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        for event_id in state.last_rows.keys() {
+            if !current_rows.contains_key(event_id) {
+                deltas.push(RowDelta::Removed(*event_id));
+            }
+        }
+        let changed = !deltas.is_empty()
+            || state.last_evidence.as_ref() != Some(&evidence)
+            || state.load != load;
+        state.last_rows = current_rows;
+        state.order = current_order;
+        state.last_evidence = Some(evidence);
+        state.projection_complete = true;
+        let len = state.last_rows.len();
+        if changed {
+            let batch = self.history_batch(id, deltas, load);
+            if let Some(state) = self.histories.get(&id) {
+                state.sink.on_history(batch.clone());
+            }
+            effects.push(Effect::EmitHistory(id, batch));
+        }
+        Some(len)
+    }
+
+    fn history_rows_and_evidence_for(
+        &self,
+        id: HistorySessionId,
+    ) -> Result<(BTreeMap<EventId, Row>, AcquisitionEvidence), PersistenceError> {
+        let state = self
+            .histories
+            .get(&id)
+            .expect("history projection requires a live session");
+        let primary = *state
+            .handle_ids
+            .first()
+            .expect("history session always owns its initial resolver handle");
+        let root_atoms = self.resolver.root_atoms(primary);
+        let subtree_atoms = self.history_subtree_atoms(id);
+        let pinned_relays = match (
+            state.query.live_query().0.cache,
+            &state.query.live_query().0.source,
+        ) {
+            (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
+            _ => None,
+        };
+        let mut by_id = BTreeMap::new();
+        for mut atom in root_atoms {
+            atom.limit = None;
+            #[cfg(test)]
+            self.history_store_queries
+                .set(self.history_store_queries.get().saturating_add(1));
+            let filter = atom.to_nostr();
+            let rows = match pinned_relays {
+                Some(relays) => self.resolver.store().query_newest_observed_by(
+                    &filter,
+                    relays,
+                    state.target_rows,
+                )?,
+                None => self
+                    .resolver
+                    .store()
+                    .query_newest(&filter, state.target_rows)?,
+            };
+            #[cfg(test)]
+            self.history_rows_examined.set(
+                self.history_rows_examined
+                    .get()
+                    .saturating_add(rows.len() as u64),
+            );
+            for stored in rows {
+                by_id.entry(stored.event.id).or_insert_with(|| Row {
+                    event: stored.event,
+                    sources: stored.provenance.seen.into_keys().collect(),
+                });
+            }
+        }
+        if by_id.len() > state.target_rows {
+            let mut ordered: Vec<_> = by_id
+                .iter()
+                .map(|(event_id, row)| (row.event.created_at.as_secs(), *event_id))
+                .collect();
+            ordered.sort_by(|a, b| nip01_newest_first((a.0, &a.1), (b.0, &b.1)));
+            let keep: BTreeSet<_> = ordered
+                .into_iter()
+                .take(state.target_rows)
+                .map(|(_, event_id)| event_id)
+                .collect();
+            by_id.retain(|event_id, _| keep.contains(event_id));
+        }
+        let evidence = evidence::acquisition_evidence(
+            &subtree_atoms,
+            self.router.plan(),
+            self.resolver.store(),
+            &self.connected_relays,
+            &self.ever_connected_relays,
+        );
+        Ok((by_id, evidence))
+    }
+
+    /// Every active acquisition atom owned by one coordinated history
+    /// partition: initial bounded root, exact unbounded tie seconds, bounded
+    /// older ranges, and every interior Derived dependency. Set union keeps
+    /// shared atoms deduplicated while preserving distinct scoped windows.
+    fn history_subtree_atoms(&self, id: HistorySessionId) -> BTreeSet<ContextualAtom> {
+        self.histories
+            .get(&id)
+            .into_iter()
+            .flat_map(|state| state.handle_ids.iter().copied())
+            .flat_map(|handle| self.resolver.subtree_atoms(handle))
+            .collect()
+    }
+
+    fn advance_history_projection(
+        &mut self,
+        id: HistorySessionId,
+        before: nmp_store::EventCursor,
+        old_len: usize,
+        plan: &RelayPlan,
+    ) -> Result<(HistoryBatch, usize), PersistenceError> {
+        let state = self
+            .histories
+            .get(&id)
+            .expect("history advance requires a live session");
+        let primary = *state
+            .handle_ids
+            .first()
+            .expect("history session always owns its initial resolver handle");
+        let root_atoms = self.resolver.root_atoms(primary);
+        let subtree_atoms = self.history_subtree_atoms(id);
+        let needed = state.target_rows.saturating_sub(state.last_rows.len());
+        let pinned_relays = match (
+            state.query.live_query().0.cache,
+            &state.query.live_query().0.source,
+        ) {
+            (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
+            _ => None,
+        };
+        let mut candidates = BTreeMap::<EventId, Row>::new();
+        for mut atom in root_atoms {
+            atom.limit = None;
+            #[cfg(test)]
+            self.history_store_queries
+                .set(self.history_store_queries.get().saturating_add(1));
+            let filter = atom.to_nostr();
+            let rows = match pinned_relays {
+                Some(relays) => self
+                    .resolver
+                    .store()
+                    .query_newest_before_observed_by(&filter, relays, before, needed)?,
+                None => self
+                    .resolver
+                    .store()
+                    .query_newest_before(&filter, before, needed)?,
+            };
+            #[cfg(test)]
+            self.history_rows_examined.set(
+                self.history_rows_examined
+                    .get()
+                    .saturating_add(rows.len() as u64),
+            );
+            for stored in rows {
+                candidates.entry(stored.event.id).or_insert_with(|| Row {
+                    event: stored.event,
+                    sources: stored.provenance.seen.into_keys().collect(),
+                });
+            }
+        }
+        let mut ordered: Vec<Row> = candidates.into_values().collect();
+        ordered.sort_by(|a, b| {
+            nip01_newest_first(
+                (a.event.created_at.as_secs(), &a.event.id),
+                (b.event.created_at.as_secs(), &b.event.id),
+            )
+        });
+        ordered.truncate(needed);
+        let evidence = evidence::acquisition_evidence(
+            &subtree_atoms,
+            plan,
+            self.resolver.store(),
+            &self.connected_relays,
+            &self.ever_connected_relays,
+        );
+
+        let state = self
+            .histories
+            .get_mut(&id)
+            .expect("history remains live during synchronous projection");
+        let mut deltas = Vec::with_capacity(ordered.len());
+        for row in ordered {
+            let event_id = row.event.id;
+            state.last_rows.insert(event_id, row.clone());
+            state
+                .order
+                .insert((Reverse(row.event.created_at.as_secs()), event_id));
+            deltas.push(RowDelta::Added(row));
+        }
+        state.last_evidence = Some(evidence);
+        state.projection_complete = true;
+        let added = state.last_rows.len().saturating_sub(old_len);
+        let batch = self.history_batch(id, deltas, WindowLoad::Returned { added });
+        Ok((batch, added))
+    }
+
     /// Project one governed store mutation after its crash-atomic commit.
     /// Reactive demand changes may alter router/evidence shape and therefore
     /// keep the broad full-refresh oracle. A stable shape can deliver the
@@ -4071,14 +5253,341 @@ impl<S: EventStore> EngineCore<S> {
             row_changes,
         } = committed;
         let demand_changed = !delta.is_empty();
+        let affected: Vec<_> = affected_handles.into_iter().collect();
+        let affected_histories: BTreeSet<_> = affected
+            .iter()
+            .filter_map(|handle| self.history_by_handle.get(handle).copied())
+            .collect();
         if demand_changed || force_recompile {
             self.recompile(effects);
         }
         if demand_changed || force_broad_refresh {
             self.refresh_all_handles(effects);
+            self.refresh_all_histories(effects);
         } else {
-            self.apply_committed_row_changes(affected_handles, &row_changes, effects);
+            self.apply_committed_row_changes(affected.iter().copied(), &row_changes, effects);
+            for id in affected_histories {
+                if !self.try_apply_committed_history_row_changes(id, &row_changes, effects) {
+                    self.refresh_history(id, WindowLoad::Idle, effects);
+                }
+            }
         }
+    }
+
+    /// Apply one committed store batch to any stable bounded history window,
+    /// including Strict, derived, and multi-root selections. Only touched
+    /// rows plus the exact newly exposed lower segment are visited: the
+    /// canonical order index identifies eviction/backfill boundaries without
+    /// sorting or replaying the retained window.
+    fn try_apply_committed_history_row_changes(
+        &mut self,
+        id: HistorySessionId,
+        changes: &CommittedRowChanges,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let Some(state) = self.histories.get(&id) else {
+            return true;
+        };
+        let Some(primary) = state.handle_ids.first().copied() else {
+            return false;
+        };
+        let root_atoms = self.resolver.root_atoms(primary);
+        if state.last_evidence.is_none()
+            || !state.projection_complete
+            || state.pending_load.is_some()
+        {
+            return false;
+        }
+        if root_atoms.is_empty() {
+            return state.last_rows.is_empty();
+        }
+        let filters: Vec<_> = root_atoms
+            .into_iter()
+            .map(|mut atom| {
+                atom.limit = None;
+                atom.to_nostr()
+            })
+            .collect();
+        let matches = |event: &nostr::Event| {
+            filters
+                .iter()
+                .any(|filter| filter.match_event(event, MatchEventOptions::new()))
+        };
+        let pinned_relays = match (
+            state.query.live_query().0.cache,
+            &state.query.live_query().0.source,
+        ) {
+            (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays.clone()),
+            _ => None,
+        };
+        let eligible = |sources: &BTreeSet<RelayUrl>| {
+            pinned_relays
+                .as_ref()
+                .is_none_or(|relays| sources.iter().any(|relay| relays.contains(relay)))
+        };
+        let target_rows = state.target_rows;
+        let original_boundary =
+            state
+                .order
+                .iter()
+                .next_back()
+                .map(|(Reverse(created_at), event_id)| {
+                    nmp_store::EventCursor::new(Timestamp::from(*created_at), *event_id)
+                });
+        let mut before = BTreeMap::<EventId, Option<Row>>::new();
+        let mut visible_removals = 0usize;
+        let mut strict_promotions = BTreeMap::<EventId, Row>::new();
+        if pinned_relays.is_some() {
+            for changed in &changes.provenance_grew {
+                if !matches(&changed.event)
+                    || !eligible(&changed.observed_relays)
+                    || state.last_rows.contains_key(&changed.event.id)
+                {
+                    continue;
+                }
+                #[cfg(test)]
+                self.history_affected_row_queries
+                    .set(self.history_affected_row_queries.get().saturating_add(1));
+                let current = match self
+                    .resolver
+                    .store()
+                    .query(&nostr::Filter::new().id(changed.event.id))
+                {
+                    Ok(mut rows) => rows.pop().map(|stored| Row {
+                        event: stored.event,
+                        sources: stored.provenance.seen.into_keys().collect(),
+                    }),
+                    Err(error) => {
+                        self.histories
+                            .get_mut(&id)
+                            .expect("history remained live after affected-row read failure")
+                            .projection_complete = false;
+                        self.degrade_store(error, effects);
+                        return true;
+                    }
+                };
+                strict_promotions.insert(
+                    changed.event.id,
+                    current.unwrap_or_else(|| Row {
+                        event: changed.event.clone(),
+                        sources: changed.observed_relays.clone(),
+                    }),
+                );
+            }
+        }
+
+        {
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("history remained live during committed mutation");
+            let remember =
+                |event_id: EventId,
+                 state: &HistoryState,
+                 before: &mut BTreeMap<EventId, Option<Row>>| {
+                    before
+                        .entry(event_id)
+                        .or_insert_with(|| state.last_rows.get(&event_id).cloned());
+                };
+
+            for event in &changes.removed {
+                if !state.last_rows.contains_key(&event.id) {
+                    continue;
+                }
+                remember(event.id, state, &mut before);
+                if let Some(row) = state.last_rows.remove(&event.id) {
+                    state
+                        .order
+                        .remove(&(Reverse(row.event.created_at.as_secs()), event.id));
+                    visible_removals = visible_removals.saturating_add(1);
+                }
+            }
+            for row in &changes.inserted {
+                if !matches(&row.event) || !eligible(&row.observed_relays) {
+                    continue;
+                }
+                let event_id = row.event.id;
+                remember(event_id, state, &mut before);
+                if let Some(previous) = state.last_rows.remove(&event_id) {
+                    state
+                        .order
+                        .remove(&(Reverse(previous.event.created_at.as_secs()), event_id));
+                }
+                let remembered = Row {
+                    event: row.event.clone(),
+                    sources: row.observed_relays.clone(),
+                };
+                state
+                    .order
+                    .insert((Reverse(remembered.event.created_at.as_secs()), event_id));
+                state.last_rows.insert(event_id, remembered);
+            }
+            for row in &changes.provenance_grew {
+                if !matches(&row.event) {
+                    continue;
+                }
+                if state.last_rows.contains_key(&row.event.id) {
+                    remember(row.event.id, state, &mut before);
+                    state
+                        .last_rows
+                        .get_mut(&row.event.id)
+                        .expect("provenance target was checked above")
+                        .sources
+                        .extend(row.observed_relays.iter().cloned());
+                } else if pinned_relays.is_some() && eligible(&row.observed_relays) {
+                    // An event already cached from an ineligible relay can
+                    // enter a Strict projection when this committed duplicate
+                    // is its first eligible observation. Treat that transition
+                    // as an affected-row insertion, then let the same bounded
+                    // order rebalance decide whether it belongs in top-N.
+                    remember(row.event.id, state, &mut before);
+                    let projected = strict_promotions
+                        .remove(&row.event.id)
+                        .expect("eligible Strict promotion was prefetched");
+                    state.order.insert((
+                        Reverse(projected.event.created_at.as_secs()),
+                        projected.event.id,
+                    ));
+                    state.last_rows.insert(projected.event.id, projected);
+                }
+            }
+        }
+
+        // Any visible removal can expose a better row below the PRE-mutation
+        // boundary, even when a simultaneous older insertion/restoration has
+        // already brought the working set back to `target_rows`. Reconcile
+        // exactly once, merge that bounded tail with every committed affected
+        // row above, and only then truncate canonically.
+        if visible_removals > 0 {
+            let boundary =
+                original_boundary.expect("a visible removal implies a prior canonical boundary");
+            #[cfg(test)]
+            self.history_store_queries
+                .set(self.history_store_queries.get().saturating_add(1));
+            let queried = match pinned_relays.as_ref() {
+                Some(relays) => self.resolver.store().query_newest_before_any_observed_by(
+                    &filters,
+                    relays,
+                    boundary,
+                    visible_removals,
+                ),
+                None => self.resolver.store().query_newest_before_any(
+                    &filters,
+                    boundary,
+                    visible_removals,
+                ),
+            };
+            let rows = match queried {
+                Ok(rows) => rows,
+                Err(error) => {
+                    let state = self
+                        .histories
+                        .get_mut(&id)
+                        .expect("history remained live after failed backfill");
+                    for (event_id, prior) in before {
+                        if let Some(current) = state.last_rows.remove(&event_id) {
+                            state
+                                .order
+                                .remove(&(Reverse(current.event.created_at.as_secs()), event_id));
+                        }
+                        if let Some(prior) = prior {
+                            state
+                                .order
+                                .insert((Reverse(prior.event.created_at.as_secs()), event_id));
+                            state.last_rows.insert(event_id, prior);
+                        }
+                    }
+                    state.projection_complete = false;
+                    self.degrade_store(error, effects);
+                    return true;
+                }
+            };
+            #[cfg(test)]
+            self.history_rows_examined.set(
+                self.history_rows_examined
+                    .get()
+                    .saturating_add(rows.len() as u64),
+            );
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("history remained live during exact backfill");
+            for stored in rows {
+                let event_id = stored.event.id;
+                if state.last_rows.contains_key(&event_id) {
+                    continue;
+                }
+                before
+                    .entry(event_id)
+                    .or_insert_with(|| state.last_rows.get(&event_id).cloned());
+                let sources: BTreeSet<_> = stored.provenance.seen.into_keys().collect();
+                let row = Row {
+                    event: stored.event,
+                    sources: sources.clone(),
+                };
+                let remembered = row.clone();
+                state
+                    .order
+                    .insert((Reverse(remembered.event.created_at.as_secs()), event_id));
+                state.last_rows.insert(event_id, remembered);
+            }
+        }
+
+        {
+            let state = self
+                .histories
+                .get_mut(&id)
+                .expect("history remained live during canonical truncation");
+            let remember =
+                |event_id: EventId,
+                 state: &HistoryState,
+                 before: &mut BTreeMap<EventId, Option<Row>>| {
+                    before
+                        .entry(event_id)
+                        .or_insert_with(|| state.last_rows.get(&event_id).cloned());
+                };
+            while state.last_rows.len() > target_rows {
+                let Some((_, event_id)) = state.order.iter().next_back().copied() else {
+                    break;
+                };
+                remember(event_id, state, &mut before);
+                let row = state
+                    .last_rows
+                    .remove(&event_id)
+                    .expect("history order and membership stay identical");
+                state
+                    .order
+                    .remove(&(Reverse(row.event.created_at.as_secs()), event_id));
+            }
+        }
+
+        let state = self
+            .histories
+            .get(&id)
+            .expect("history remained live after committed rebalance");
+        let mut deltas = Vec::new();
+        for (event_id, prior) in &before {
+            match (prior, state.last_rows.get(event_id)) {
+                (None, Some(current)) => deltas.push(RowDelta::Added(current.clone())),
+                (Some(_), None) => deltas.push(RowDelta::Removed(*event_id)),
+                (Some(prior), Some(current)) if prior.sources != current.sources => {
+                    deltas.push(RowDelta::SourcesGrew {
+                        id: *event_id,
+                        sources: current.sources.clone(),
+                    });
+                }
+                (None, None) | (Some(_), Some(_)) => {}
+            }
+        }
+        if deltas.is_empty() {
+            return true;
+        }
+        let batch = self.history_batch(id, deltas, WindowLoad::Idle);
+        if let Some(state) = self.histories.get(&id) {
+            state.sink.on_history(batch.clone());
+        }
+        effects.push(Effect::EmitHistory(id, batch));
+        true
     }
 
     /// Apply a committed writer batch directly to ordinary one-root handle
@@ -5346,6 +6855,9 @@ mod relay_health_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod history_load_failure_tests;
 
 #[cfg(test)]
 mod affected_handle_invalidation_tests {
@@ -6869,5 +8381,1024 @@ mod affected_handle_invalidation_tests {
 
         assert_eq!(admitted.iter().next().unwrap().routing_evidence.len(), 1);
         assert_eq!(core.discovered_private_relays_rejected, 0);
+    }
+}
+
+#[cfg(test)]
+mod history_mutation_tests {
+    use std::sync::{Arc, Mutex};
+
+    use nmp_grammar::{Derived, IdentityField, IndexedTagName, Selector};
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturingHistorySink(Arc<Mutex<Vec<HistoryBatch>>>);
+
+    impl HistorySink for CapturingHistorySink {
+        fn on_history(&self, batch: HistoryBatch) {
+            self.0.lock().unwrap().push(batch);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingRowSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
+
+    impl RowSink for CapturingRowSink {
+        fn on_rows(&self, rows: Vec<RowDelta>) {
+            self.0.lock().unwrap().push(rows);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
+
+    impl ReceiptSink for CapturingReceiptSink {
+        fn on_status(&self, status: WriteStatus) {
+            self.0.lock().unwrap().push(status);
+        }
+    }
+
+    fn room_tag(room: usize) -> Tag {
+        Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap()
+    }
+
+    fn room_event(keys: &Keys, room: usize, ordinal: usize, created_at: u64) -> SignedEvent {
+        EventBuilder::new(Kind::from(9u16), format!("room-{room}-{ordinal}"))
+            .tag(room_tag(room))
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn history_query(room: usize, kinds: BTreeSet<u16>) -> HistoryQuery {
+        HistoryQuery::new(
+            LiveQuery::from_filter(Filter {
+                kinds: Some(kinds),
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('h').unwrap(),
+                    Binding::Literal(BTreeSet::from([format!("room-{room}")])),
+                )]),
+                ..Filter::default()
+            }),
+            3,
+            6,
+        )
+    }
+
+    fn open_six(
+        events: &[SignedEvent],
+        kinds: BTreeSet<u16>,
+        relay: &RelayUrl,
+    ) -> (
+        EngineCore<MemoryStore>,
+        HistorySessionId,
+        CapturingHistorySink,
+    ) {
+        let mut store = MemoryStore::new();
+        store
+            .insert_batch(
+                events
+                    .iter()
+                    .cloned()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let opened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, kinds),
+            Box::new(sink.clone()),
+        ));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let loaded = core.handle(EngineMsg::RequestRows(id, 6));
+        assert!(loaded.iter().any(|effect| matches!(
+            effect,
+            Effect::HistoryLoadResult(session, Ok(())) if *session == id
+        )));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        assert_eq!(core.histories[&id].last_rows.len(), 6);
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        (core, id, sink)
+    }
+
+    fn ordered_ids<S: EventStore>(core: &EngineCore<S>, id: HistorySessionId) -> Vec<EventId> {
+        core.histories[&id]
+            .order
+            .iter()
+            .map(|(_, event_id)| *event_id)
+            .collect()
+    }
+
+    fn ingest<S: EventStore>(
+        core: &mut EngineCore<S>,
+        event: SignedEvent,
+        relay: RelayUrl,
+        observed_at: u64,
+    ) {
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                event,
+                RelayObserved::new(relay, Timestamp::from(observed_at)),
+            )],
+            &mut effects,
+        );
+    }
+
+    fn assert_one_atomic_batch(sink: &CapturingHistorySink) -> HistoryBatch {
+        let batches = sink.0.lock().unwrap();
+        assert_eq!(
+            batches.len(),
+            1,
+            "one store commit must emit one history batch"
+        );
+        batches[0].clone()
+    }
+
+    #[test]
+    fn bounded_history_mutations_touch_only_delta_and_exact_lower_segment() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-mutation.example").unwrap();
+        let second = RelayUrl::parse("wss://history-second.example").unwrap();
+        let base: Vec<_> = (0..12)
+            .map(|index| room_event(&keys, 47, index, 100 + index as u64))
+            .collect();
+
+        // First boundary insertion is old-window + inserted -> top-N: no
+        // store read, and Added+Removed travel in one atomic batch.
+        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let inserted = room_event(&keys, 47, 99, 1_000);
+        ingest(&mut core, inserted.clone(), relay.clone(), 2_000);
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(core.history_store_queries.get(), 0);
+        assert_eq!(core.history_rows_examined.get(), 0);
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == inserted.id)));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(_))));
+        assert_eq!(core.histories[&id].last_rows.len(), 6);
+
+        // Middle provenance growth is exact from the committed fact.
+        let middle = ordered_ids(&core, id)[2];
+        let middle_event = core
+            .resolver
+            .store()
+            .query(&nostr::Filter::new().id(middle))
+            .unwrap()
+            .pop()
+            .unwrap()
+            .event;
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, middle_event, second.clone(), 2_001);
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(
+            (
+                core.history_store_queries.get(),
+                core.history_rows_examined.get()
+            ),
+            (0, 0)
+        );
+        assert!(matches!(
+            batch.deltas.as_slice(),
+            [RowDelta::SourcesGrew { id: changed, sources }]
+                if *changed == middle && sources.contains(&relay) && sources.contains(&second)
+        ));
+
+        // Middle deletion performs one exclusive cursor read for exactly one
+        // replacement row; it never replays all six retained rows.
+        let target = ordered_ids(&core, id)[2];
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(target))
+            .custom_created_at(Timestamp::from(3_000u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, deletion, relay.clone(), 3_001);
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(
+            (
+                core.history_store_queries.get(),
+                core.history_rows_examined.get()
+            ),
+            (1, 1)
+        );
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == target)));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(_))));
+
+        // The lower boundary uses the same one-row segment, proving cursor
+        // work does not depend on retained-window size.
+        let target = *ordered_ids(&core, id).last().unwrap();
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(target))
+            .custom_created_at(Timestamp::from(3_100u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, deletion, relay.clone(), 3_101);
+        assert_one_atomic_batch(&sink);
+        assert_eq!(
+            (
+                core.history_store_queries.get(),
+                core.history_rows_examined.get()
+            ),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn strict_history_counts_only_pinned_provenance_before_applying_page_bounds() {
+        let keys = Keys::generate();
+        let wanted = RelayUrl::parse("wss://history-strict.example").unwrap();
+        let other = RelayUrl::parse("wss://history-other.example").unwrap();
+        let mut store = MemoryStore::new();
+        for (created_at, relay, ordinal) in [
+            (600, other.clone(), 0),
+            (500, other.clone(), 1),
+            (400, wanted.clone(), 2),
+            (300, wanted.clone(), 3),
+            (200, wanted.clone(), 4),
+            (100, wanted.clone(), 5),
+        ] {
+            store
+                .insert(
+                    room_event(&keys, 47, ordinal, created_at),
+                    RelayObserved::new(relay, Timestamp::from(1_000u64)),
+                )
+                .unwrap();
+        }
+        let selection = history_query(47, BTreeSet::from([9]))
+            .live_query()
+            .0
+            .selection
+            .clone();
+        let query = HistoryQuery::new(
+            LiveQuery(nmp_grammar::Demand {
+                selection,
+                source: SourceAuthority::Pinned(BTreeSet::from([wanted])),
+                access: AccessContext::Public,
+                cache: CacheMode::Strict,
+            }),
+            2,
+            4,
+        );
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let opened = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            ordered_ids(&core, id)
+                .iter()
+                .map(|event_id| {
+                    core.histories[&id].last_rows[event_id]
+                        .event
+                        .created_at
+                        .as_secs()
+                })
+                .collect::<Vec<_>>(),
+            vec![400, 300]
+        );
+
+        core.handle(EngineMsg::RequestRows(id, 4));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        assert_eq!(
+            ordered_ids(&core, id)
+                .iter()
+                .map(|event_id| {
+                    core.histories[&id].last_rows[event_id]
+                        .event
+                        .created_at
+                        .as_secs()
+                })
+                .collect::<Vec<_>>(),
+            vec![400, 300, 200, 100]
+        );
+    }
+
+    #[test]
+    fn strict_and_agnostic_live_mutations_stay_distinct_and_match_their_oracles() {
+        let keys = Keys::generate();
+        let wanted = RelayUrl::parse("wss://history-live-wanted.example").unwrap();
+        let other = RelayUrl::parse("wss://history-live-other.example").unwrap();
+        let other_newest = room_event(&keys, 47, 0, 400);
+        let wanted_a = room_event(&keys, 47, 1, 300);
+        let wanted_b = room_event(&keys, 47, 2, 200);
+        let wanted_c = room_event(&keys, 47, 3, 100);
+        let mut store = MemoryStore::new();
+        for (event, source) in [
+            (other_newest.clone(), other.clone()),
+            (wanted_a.clone(), wanted.clone()),
+            (wanted_b.clone(), wanted.clone()),
+            (wanted_c.clone(), wanted.clone()),
+        ] {
+            store
+                .insert(event, RelayObserved::new(source, Timestamp::from(1_000u64)))
+                .unwrap();
+        }
+        let selection = history_query(47, BTreeSet::from([9]))
+            .live_query()
+            .0
+            .selection
+            .clone();
+        let strict_query = HistoryQuery::new(
+            LiveQuery(nmp_grammar::Demand {
+                selection,
+                source: SourceAuthority::Pinned(BTreeSet::from([wanted.clone()])),
+                access: AccessContext::Public,
+                cache: CacheMode::Strict,
+            }),
+            3,
+            3,
+        );
+        let agnostic_query = HistoryQuery::new(
+            history_query(47, BTreeSet::from([9])).live_query().clone(),
+            3,
+            3,
+        );
+        let strict_sink = CapturingHistorySink::default();
+        let agnostic_sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let strict_id = core
+            .handle(EngineMsg::SubscribeHistory(
+                strict_query,
+                Box::new(strict_sink.clone()),
+            ))
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let agnostic_id = core
+            .handle(EngineMsg::SubscribeHistory(
+                agnostic_query,
+                Box::new(agnostic_sink.clone()),
+            ))
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            ordered_ids(&core, strict_id),
+            vec![wanted_a.id, wanted_b.id, wanted_c.id]
+        );
+        assert_eq!(
+            ordered_ids(&core, agnostic_id),
+            vec![other_newest.id, wanted_a.id, wanted_b.id]
+        );
+        strict_sink.0.lock().unwrap().clear();
+        agnostic_sink.0.lock().unwrap().clear();
+
+        let new = room_event(&keys, 47, 99, 500);
+        ingest(&mut core, new.clone(), other.clone(), 2_000);
+        assert!(strict_sink.0.lock().unwrap().is_empty());
+        assert_eq!(ordered_ids(&core, strict_id)[0], wanted_a.id);
+        assert_eq!(ordered_ids(&core, agnostic_id)[0], new.id);
+
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        core.history_affected_row_queries.set(0);
+        ingest(&mut core, new.clone(), wanted.clone(), 2_001);
+        assert_eq!(core.history_store_queries.get(), 0);
+        assert_eq!(core.history_rows_examined.get(), 0);
+        assert_eq!(core.history_affected_row_queries.get(), 1);
+        assert_eq!(ordered_ids(&core, strict_id)[0], new.id);
+        let strict_new = &core.histories[&strict_id].last_rows[&new.id];
+        assert_eq!(
+            strict_new.sources,
+            BTreeSet::from([other.clone(), wanted.clone()]),
+            "a newly Strict-eligible row carries its complete canonical provenance"
+        );
+
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(new.id))
+            .custom_created_at(Timestamp::from(3_000u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        strict_sink.0.lock().unwrap().clear();
+        agnostic_sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, deletion, wanted, 3_001);
+        assert_eq!(core.history_store_queries.get(), 2);
+        assert_eq!(core.history_rows_examined.get(), 2);
+        assert_eq!(strict_sink.0.lock().unwrap().len(), 1);
+        assert_eq!(agnostic_sink.0.lock().unwrap().len(), 1);
+
+        for history_id in [strict_id, agnostic_id] {
+            let (oracle, _) = core.history_rows_and_evidence_for(history_id).unwrap();
+            assert_eq!(core.histories[&history_id].last_rows, oracle);
+        }
+    }
+
+    #[test]
+    fn replacement_and_expiry_rebalance_without_full_history_replay() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-replace-expire.example").unwrap();
+        let mut base: Vec<_> = (0..11)
+            .map(|index| room_event(&keys, 47, index, 100 + index as u64))
+            .collect();
+        let replaceable = EventBuilder::new(Kind::from(10_000u16), "old")
+            .tag(room_tag(47))
+            .custom_created_at(Timestamp::from(108u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        base.push(replaceable.clone());
+        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9, 10_000]), &relay);
+        assert!(core.histories[&id].last_rows.contains_key(&replaceable.id));
+        let replacement = EventBuilder::new(Kind::from(10_000u16), "new")
+            .tag(room_tag(47))
+            .custom_created_at(Timestamp::from(1_000u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        ingest(&mut core, replacement.clone(), relay.clone(), 2_000);
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(
+            (
+                core.history_store_queries.get(),
+                core.history_rows_examined.get()
+            ),
+            (1, 1)
+        );
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == replaceable.id)));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == replacement.id)));
+
+        let expiring = EventBuilder::new(Kind::from(9u16), "expires")
+            .tag(room_tag(47))
+            .tag(Tag::expiration(Timestamp::from(5_000u64)))
+            .custom_created_at(Timestamp::from(900u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        sink.0.lock().unwrap().clear();
+        ingest(&mut core, expiring.clone(), relay, 2_001);
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        core.tick(Timestamp::from(5_000u64));
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(
+            (
+                core.history_store_queries.get(),
+                core.history_rows_examined.get()
+            ),
+            (1, 1)
+        );
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == expiring.id)));
+    }
+
+    #[test]
+    fn replaceable_compensation_cannot_let_restored_older_row_mask_hidden_tail() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-compensation.example").unwrap();
+        let x = room_event(&keys, 47, 1, 900);
+        let y = room_event(&keys, 47, 2, 800);
+        let z = room_event(&keys, 47, 3, 700);
+        let predecessor = EventBuilder::new(Kind::from(10_000u16), "prior")
+            .tag(room_tag(47))
+            .custom_created_at(Timestamp::from(100u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut store = MemoryStore::new();
+        store
+            .insert_batch(
+                [x.clone(), y.clone(), z.clone(), predecessor.clone()]
+                    .into_iter()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        core.active_pubkey = Some(keys.public_key());
+        let opened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9, 10_000])),
+            Box::new(sink.clone()),
+        ));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
+        sink.0.lock().unwrap().clear();
+
+        let accepted = core.on_publish(
+            WriteIntent {
+                payload: WritePayload::UnsignedReplaceableEdit {
+                    unsigned: UnsignedEvent::new(
+                        keys.public_key(),
+                        Timestamp::from(1_000u64),
+                        Kind::from(10_000u16),
+                        vec![room_tag(47)],
+                        "pending replacement",
+                    ),
+                    expected_base: Some(predecessor.id),
+                },
+                durability: Durability::Durable,
+                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+            },
+            Box::new(CapturingReceiptSink::default()),
+        );
+        let receipt = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                _ => None,
+            })
+            .expect("replaceable local acceptance emits a receipt");
+        let pending = *ordered_ids(&core, id).first().unwrap();
+        assert_eq!(ordered_ids(&core, id)[1..], [x.id, y.id]);
+
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        core.on_cancel_write(receipt);
+
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(
+            (
+                core.history_store_queries.get(),
+                core.history_rows_examined.get()
+            ),
+            (1, 1),
+            "one old-boundary reconciliation finds Z despite predecessor restoring count"
+        );
+        assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
+        assert!(!core.histories[&id].last_rows.contains_key(&predecessor.id));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == pending)));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == z.id)));
+        assert!(!batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == predecessor.id)));
+    }
+
+    #[test]
+    fn fixed_seed_mixed_remove_insert_batches_match_full_history_oracle() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-differential.example").unwrap();
+        let base: Vec<_> = (0..30)
+            .map(|index| room_event(&keys, 47, index, 100 + index as u64))
+            .collect();
+        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let mut seed = 0x6a09_e667_f3bc_c909u64;
+
+        for step in 0..64usize {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let visible = ordered_ids(&core, id);
+            let removed_id = visible[(seed as usize) % visible.len()];
+            let removed = core
+                .resolver
+                .store()
+                .query(&nostr::Filter::new().id(removed_id))
+                .unwrap()
+                .pop()
+                .unwrap()
+                .event;
+            core.resolver
+                .store_mut()
+                .remove(removed_id, nmp_store::RetractReason::Rejected)
+                .unwrap();
+
+            seed = seed.rotate_left(17) ^ 0xa5a5_5a5a_0123_4567;
+            let created_at = 50 + (seed % 1_500);
+            let inserted = room_event(&keys, 47, 10_000 + step, created_at);
+            core.resolver
+                .store_mut()
+                .insert(
+                    inserted.clone(),
+                    RelayObserved::new(relay.clone(), Timestamp::from(2_000 + step as u64)),
+                )
+                .unwrap();
+            let changes = CommittedRowChanges {
+                inserted: vec![nmp_resolver::CommittedCurrentRow {
+                    event: inserted,
+                    observed_relays: BTreeSet::from([relay.clone()]),
+                }],
+                removed: vec![removed],
+                provenance_grew: Vec::new(),
+            };
+
+            sink.0.lock().unwrap().clear();
+            core.history_store_queries.set(0);
+            core.history_rows_examined.set(0);
+            let mut effects = Vec::new();
+            assert!(core.try_apply_committed_history_row_changes(id, &changes, &mut effects));
+            assert!(core.history_store_queries.get() <= 1);
+            assert!(core.history_rows_examined.get() <= 1);
+            assert!(sink.0.lock().unwrap().len() <= 1);
+
+            let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+            assert_eq!(
+                core.histories[&id].last_rows, oracle,
+                "incremental history diverged from full oracle at mixed batch {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn derived_multi_root_advanced_history_mutates_with_one_bounded_reconciliation() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-multi-root.example").unwrap();
+        let addressable = |d: &str, created_at: u64, content: &str| {
+            EventBuilder::new(Kind::from(30_003u16), content)
+                .tag(Tag::identifier(d))
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let base: Vec<_> = (0..8)
+            .map(|index| addressable(&format!("g{index}"), 100 + index, "base"))
+            .collect();
+        let mut store = MemoryStore::new();
+        store
+            .insert_batch(
+                base.iter()
+                    .cloned()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let selection = nmp_grammar::Filter {
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: nmp_grammar::Demand::from_filter(nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([30_003u16])),
+                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                    ..nmp_grammar::Filter::default()
+                }),
+                project: Selector::AddressCoord,
+            }))),
+            ..nmp_grammar::Filter::default()
+        };
+        let query = HistoryQuery::new(LiveQuery::from_filter(selection), 3, 6);
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let opened = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::RequestRows(id, 6));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        assert_eq!(core.histories[&id].last_rows.len(), 6);
+        let primary = *core.histories[&id].handle_ids.first().unwrap();
+        assert_eq!(core.resolver.root_atoms(primary).len(), 8);
+        assert!(core.resolver.subtree_atoms(primary).len() > 8);
+
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        let replacement = addressable("g7", 1_000, "replacement");
+        ingest(&mut core, replacement.clone(), relay, 2_000);
+
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(core.history_store_queries.get(), 1);
+        assert!(core.history_rows_examined.get() <= 1);
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == replacement.id)));
+        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+        assert_eq!(core.histories[&id].last_rows, oracle);
+    }
+
+    #[test]
+    fn late_same_second_boundary_insert_after_advance_is_exact_and_read_free() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-late-tie.example").unwrap();
+        let base: Vec<_> = [600u64, 500, 400, 300, 200, 100]
+            .into_iter()
+            .enumerate()
+            .map(|(index, created_at)| room_event(&keys, 47, index, created_at))
+            .collect();
+        let old_boundary = base.last().unwrap().clone();
+        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let late = (0..1_000usize)
+            .map(|ordinal| room_event(&keys, 47, 20_000 + ordinal, 100))
+            .find(|event| event.id < old_boundary.id)
+            .expect("deterministically find an id that sorts before the old tie boundary");
+
+        sink.0.lock().unwrap().clear();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, late.clone(), relay, 2_000);
+
+        let batch = assert_one_atomic_batch(&sink);
+        assert_eq!(core.history_store_queries.get(), 0);
+        assert_eq!(core.history_rows_examined.get(), 0);
+        assert!(core.histories[&id].last_rows.contains_key(&late.id));
+        assert!(!core.histories[&id].last_rows.contains_key(&old_boundary.id));
+        assert!(batch
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == late.id)));
+        assert!(batch.deltas.iter().any(
+            |delta| matches!(delta, RowDelta::Removed(event_id) if *event_id == old_boundary.id)
+        ));
+        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+        assert_eq!(core.histories[&id].last_rows, oracle);
+    }
+
+    #[test]
+    fn redb_advanced_history_matches_oracle_after_insert_and_retraction() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-redb.example").unwrap();
+        let base: Vec<_> = (0..12)
+            .map(|index| room_event(&keys, 47, index, 100 + index as u64))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = nmp_store::RedbStore::open(dir.path().join("history.redb")).unwrap();
+        store
+            .insert_batch(
+                base.iter()
+                    .cloned()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let opened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9])),
+            Box::new(sink.clone()),
+        ));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::RequestRows(id, 6));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        sink.0.lock().unwrap().clear();
+
+        let inserted = room_event(&keys, 47, 99, 1_000);
+        ingest(&mut core, inserted, relay.clone(), 2_000);
+        sink.0.lock().unwrap().clear();
+        let removed = ordered_ids(&core, id)[2];
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(removed))
+            .custom_created_at(Timestamp::from(3_000u64))
+            .sign_with_keys(&keys)
+            .unwrap();
+        core.history_store_queries.set(0);
+        core.history_rows_examined.set(0);
+        ingest(&mut core, deletion, relay, 3_001);
+
+        assert_one_atomic_batch(&sink);
+        assert_eq!(core.history_store_queries.get(), 1);
+        assert_eq!(core.history_rows_examined.get(), 1);
+        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+        assert_eq!(core.histories[&id].last_rows, oracle);
+    }
+
+    #[test]
+    fn staged_load_rollback_and_cancel_restore_exact_session_ownership() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://history-rollback.example").unwrap();
+        let events: Vec<_> = (0..9)
+            .map(|index| room_event(&keys, 47, index, 100 + index as u64))
+            .collect();
+        let mut store = MemoryStore::new();
+        store
+            .insert_batch(
+                events
+                    .iter()
+                    .cloned()
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let sink = CapturingHistorySink::default();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let opened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9])),
+            Box::new(sink.clone()),
+        ));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let row_sink = CapturingRowSink::default();
+        let ordinary = core.handle(EngineMsg::Subscribe(
+            history_query(47, BTreeSet::from([9])).live_query().clone(),
+            Box::new(row_sink.clone()),
+        ));
+        let ordinary_id = ordinary
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(handle, _, _) => Some(*handle),
+                _ => None,
+            })
+            .unwrap();
+        let second_sink = CapturingHistorySink::default();
+        let second_open = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9])),
+            Box::new(second_sink.clone()),
+        ));
+        let second_id = second_open
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(candidate, _) if *candidate != id => Some(*candidate),
+                _ => None,
+            })
+            .unwrap();
+        sink.0.lock().unwrap().clear();
+        row_sink.0.lock().unwrap().clear();
+        second_sink.0.lock().unwrap().clear();
+
+        let prior_rows = core.histories[&id].last_rows.clone();
+        let prior_order = core.histories[&id].order.clone();
+        let prior_evidence = core.histories[&id].last_evidence.clone();
+        let prior_handles = core.histories[&id].handle_ids.clone();
+        let ordinary_prior_rows = core.handles[&ordinary_id].last_rows.clone();
+        let ordinary_prior_evidence = core.handles[&ordinary_id].last_evidence.clone();
+        let second_prior_rows = core.histories[&second_id].last_rows.clone();
+        let second_prior_evidence = core.histories[&second_id].last_evidence.clone();
+        let second_prior_handles = core.histories[&second_id].handle_ids.clone();
+
+        // A staged advance mutates only this session's retained projection
+        // and is observable on NO sink until commit; every other projection
+        // is untouched.
+        let staged = core.handle(EngineMsg::RequestRows(id, 6));
+        assert!(staged.iter().any(|effect| matches!(
+            effect,
+            Effect::HistoryLoadResult(session, Ok(())) if *session == id
+        )));
+        assert!(core.histories[&id].pending_load.is_some());
+        assert_eq!(core.histories[&id].last_rows.len(), 6);
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "staged rows are not observable"
+        );
+        assert!(row_sink.0.lock().unwrap().is_empty());
+        assert!(second_sink.0.lock().unwrap().is_empty());
+        assert_eq!(core.handles[&ordinary_id].last_rows, ordinary_prior_rows);
+        assert_eq!(
+            core.handles[&ordinary_id].last_evidence,
+            ordinary_prior_evidence
+        );
+        assert_eq!(core.histories[&second_id].last_rows, second_prior_rows);
+        assert_eq!(
+            core.histories[&second_id].last_evidence,
+            second_prior_evidence
+        );
+        assert_eq!(core.histories[&second_id].handle_ids, second_prior_handles);
+
+        core.handle(EngineMsg::RollbackHistoryLoad(id));
+        let state = &core.histories[&id];
+        assert_eq!(state.last_rows, prior_rows);
+        assert_eq!(state.order, prior_order);
+        assert_eq!(state.last_evidence, prior_evidence);
+        assert_eq!(state.target_rows, 3);
+        assert_eq!(state.handle_ids, prior_handles);
+        assert!(state.pending_load.is_none());
+        assert!(row_sink.0.lock().unwrap().is_empty());
+        assert!(second_sink.0.lock().unwrap().is_empty());
+
+        // The identical declarative request retries cleanly after rollback.
+        let retried = core.handle(EngineMsg::RequestRows(id, 6));
+        assert!(retried.iter().any(|effect| matches!(
+            effect,
+            Effect::HistoryLoadResult(session, Ok(())) if *session == id
+        )));
+        core.handle(EngineMsg::CommitHistoryLoad(id));
+        assert_eq!(core.histories[&id].last_rows.len(), 6);
+        let delivered = sink.0.lock().unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0].load, WindowLoad::Requesting);
+        assert_eq!(delivered[1].load, WindowLoad::Returned { added: 3 });
+        assert_eq!(
+            delivered[1]
+                .evidence
+                .shortfall
+                .iter()
+                .filter(|fact| matches!(fact, ShortfallFact::NoPlannedSource { .. }))
+                .count(),
+            3,
+            "initial, exact tie-second, and older handles all contribute evidence"
+        );
+        drop(delivered);
+
+        let owned_handles = core.histories[&id].handle_ids.clone();
+        core.handle(EngineMsg::UnsubscribeHistory(id));
+        assert!(!core.histories.contains_key(&id));
+        assert!(core.history_by_handle.values().all(|owner| *owner != id));
+        for handle in owned_handles {
+            assert!(core.resolver.root_atoms(handle).is_empty());
+        }
+
+        let active_sink = CapturingHistorySink::default();
+        let reopened = core.handle(EngineMsg::SubscribeHistory(
+            history_query(47, BTreeSet::from([9])),
+            Box::new(active_sink),
+        ));
+        let active_id = reopened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::RequestRows(active_id, 6));
+        let active_handles = core.histories[&active_id].handle_ids.clone();
+        assert!(core.histories[&active_id].pending_load.is_some());
+        core.handle(EngineMsg::UnsubscribeHistory(active_id));
+        assert!(!core.histories.contains_key(&active_id));
+        assert!(core
+            .history_by_handle
+            .values()
+            .all(|owner| *owner != active_id));
+        for handle in active_handles {
+            assert!(core.resolver.root_atoms(handle).is_empty());
+        }
     }
 }

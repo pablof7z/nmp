@@ -823,6 +823,43 @@ enum Enum {
             ),
         },
         Variant {
+            name: "WindowZeroRows",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A windowed observe declared `initial == 0` or `max == 0` in its\n[`FfiWindow::Expandable`] -- a window must hold at least one row.\n(On sub-64-bit targets this also covers a bound too large to be a\nplatform row count -- unreachable on every supported 64-bit target --\nso \"representable non-zero row count\" is the precise invariant.)",
+            ),
+        },
+        Variant {
+            name: "WindowInitialExceedsMax",
+            discr: None,
+            fields: [
+                Field {
+                    name: "initial",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "max",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A windowed observe declared `initial > max` -- the window could never\nlegally hold its own starting set.",
+            ),
+        },
+        Variant {
+            name: "WindowSelectionHasLimit",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A windowed observe was declared over a selection that already carries\na NIP-01 `limit` -- the window IS the bound; carrying both would give\ntwo competing row ceilings (`nmp::EngineError::WindowSelectionHasLimit`\nmirror).",
+            ),
+        },
+        Variant {
             name: "NoActiveAccount",
             discr: None,
             fields: [],
@@ -2096,6 +2133,59 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiRequestRowsError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Unwindowed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "This subscription observes the full live set; there is no window to\ngrow.",
+            ),
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "StoreUnavailable",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The canonical store could not serve the advance (the staged load was\nrolled back).",
+            ),
+        },
+        Variant {
+            name: "TransportUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "No planned source could serve the advance (the staged load was rolled\nback).",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Exact failure returned by `NmpQueryHandle::request_rows`\n(`nmp::RequestRowsError` mirror). Growth is declarative -- there is no\ntoken to misuse and no generation to go stale, so the only failures left\nare the structural one (`Unwindowed`) and genuine advance failures.\n`AtBound` is deliberately NOT here: reaching the declared `max` is a FACT\ndelivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.",
+    ),
+}
+
+enum Enum {
     name: "FfiRowDelta",
     module_path: "nmp_ffi",
     remote: false,
@@ -2157,7 +2247,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp::RowDelta` mirror -- the wire is deltas, never snapshots (see that\ntype's own doc); the Swift bridge (a later builder) accumulates these\ninto a snapshot.",
+        "`nmp::RowDelta` mirror. For UNBOUNDED observations the wire is deltas,\nnever snapshots (see that type's own doc); the native bridge accumulates\nthese into a snapshot. Windowed observations instead deliver the whole\nbounded set in [`FfiFrame::window`] and carry an empty delta list --\ndelivery mode derives from boundedness, never both at once.",
     ),
 }
 
@@ -2443,6 +2533,93 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp::SourceStatus` mirror (`docs/design/scoped-evidence-49-12-plan.md`\n§4) -- the closed, honest per-source link-status vocabulary for the\nscoped, per-query [`FfiAcquisitionEvidence`] surface. Ratified names,\ncodex-nova-governed: no variant/field may be added beyond this list, and\nno query-level aggregate may ever be added anywhere on\nthis surface.",
+    ),
+}
+
+enum Enum {
+    name: "FfiWindow",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Expandable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "initial",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "max",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Bounded newest-first window: starts with `initial` canonical rows,\ngrows only by explicit `NmpQueryHandle::request_rows`, never above\n`max`.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Window policy on the read noun (#485, `nmp::Window` mirror). One real\nvariant today; future policies (latest/anchored) are new VARIANTS of this\nenum, never new nouns or parallel observe verbs. `initial`/`max` are row\ncounts -- `convert::window_from_ffi` rejects zeroes and `initial > max`\nwith a typed [`crate::convert::FfiError`], never a panic.",
+    ),
+}
+
+enum Enum {
+    name: "FfiWindowLoad",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Idle",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Requesting",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Returned",
+            discr: None,
+            fields: [
+                Field {
+                    name: "added",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "AtBound",
+            discr: None,
+            fields: [
+                Field {
+                    name: "max",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Mechanical growth state of an expandable window (`nmp::WindowLoad`\nmirror). Deliberately no Complete/End/Synced variant: `Returned { added:\n0 }` only means the planned advance added no canonical row -- consult the\nframe's per-source acquisition evidence for why, never a global verdict.",
     ),
 }
 
@@ -3365,6 +3542,52 @@ record Record {
         },
     ],
     docstring: None,
+}
+
+record Record {
+    name: "FfiFrame",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "deltas",
+            type_: Sequence {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRowDelta",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "Unbounded observations: the exact delta transition. ALWAYS empty for\nwindowed observations (see the type doc).",
+            ),
+        },
+        Field {
+            name: "window",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiWindowContents",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "Present iff the observation is windowed: the complete bounded row set\nplus the window's growth fact.",
+            ),
+        },
+        Field {
+            name: "evidence",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiAcquisitionEvidence",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One delivered observation frame (`nmp::Frame` mirror) -- the ONE\nvocabulary both observation modes share. Delivery is DERIVED from\nboundedness, never a knob, and never carried twice on the wire:\n\n- Unbounded (`window` is `None`): `deltas` is the exact lossless\ntransition from the previously delivered frame; the full row set is\nnever redelivered (full-set redelivery is the O(rows squared) P0 #485\nexists to kill).\n- Windowed (`window` is `Some`): `window.rows` is the complete current\nbounded set and `deltas` is ALWAYS empty -- bridges replace state from\nthe snapshot, so shipping deltas too would cross every row the FFI\nboundary twice just to be folded and discarded.",
+    ),
 }
 
 record Record {
@@ -4319,37 +4542,6 @@ record Record {
 }
 
 record Record {
-    name: "FfiRowBatch",
-    module_path: "nmp_ffi",
-    remote: false,
-    fields: [
-        Field {
-            name: "deltas",
-            type_: Sequence {
-                inner_type: Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiRowDelta",
-                },
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "evidence",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiAcquisitionEvidence",
-            },
-            default: None,
-            docstring: None,
-        },
-    ],
-    docstring: Some(
-        "One delivered batch: raw row deltas + the query's scoped acquisition\nevidence (mirrors `nmp::RowsMsg`).",
-    ),
-}
-
-record Record {
     name: "FfiSignEventRequest",
     module_path: "nmp_ffi",
     remote: false,
@@ -4498,6 +4690,37 @@ record Record {
         },
     ],
     docstring: None,
+}
+
+record Record {
+    name: "FfiWindowContents",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "rows",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiRow",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "load",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiWindowLoad",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "The complete current bounded row set of a windowed observation, plus its\nmechanical growth fact. Rows are canonical newest-first\n(`created_at DESC, event_id ASC`); the native bridge REPLACES its row\nstate from `rows` wholesale -- it never folds deltas for windowed frames.",
+    ),
 }
 
 record Record {
@@ -6896,6 +7119,18 @@ object Object {
                     default: None,
                 },
                 Argument {
+                    name: "window",
+                    type_: Optional {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiWindow",
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
                     name: "observer",
                     type_: CallbackInterface {
                         module_path: "nmp_ffi",
@@ -6935,6 +7170,12 @@ object Object {
                         ),
                     },
                     FfiArgument {
+                        name: "window",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
                         name: "observer",
                         type_: UInt64,
                     },
@@ -6948,7 +7189,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Open a live subscription. `observer` is driven from a dedicated drain\nthread (M4 plan §4b) -- never the engine thread itself. The returned\n[`NmpQueryHandle`]'s `Drop` withdraws the subscription (deinit-tied\ndemand drop, plan §4c); call [`NmpQueryHandle::cancel`] for an\nexplicit early teardown instead of waiting on Swift's own `deinit`\ntiming.",
+                "Open a live subscription. `observer` is driven from a dedicated drain\nthread (M4 plan §4b) -- never the engine thread itself. The returned\n[`NmpQueryHandle`]'s `Drop` withdraws the subscription (deinit-tied\ndemand drop, plan §4c); call [`NmpQueryHandle::cancel`] for an\nexplicit early teardown instead of waiting on Swift's own `deinit`\ntiming.\n\n`window` selects the observation's delivery policy (#485). `None` is\ntoday's unbounded observation: a lossless delta stream, full set\nnever redelivered. `Some(FfiWindow::Expandable { initial, max })` is\na bounded newest-first window: each frame carries the complete\ncurrent row set + growth fact in `FfiFrame::window` (deltas stay\nempty on the wire) and grows only via\n[`NmpQueryHandle::request_rows`], never above `max`. Zero bounds and\n`initial > max` fail closed here with a typed [`FfiError`]; a\nwindowed selection that already declares a NIP-01 `limit` fails with\n[`FfiError::WindowSelectionHasLimit`].",
             ),
             throws: Some(
                 Enum {
@@ -6959,7 +7200,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe",
             checksum: Some(
-                4480,
+                2370,
             ),
         },
         Method {
@@ -6974,6 +7215,18 @@ object Object {
                     type_: Record {
                         module_path: "nmp_ffi",
                         name: "FfiDemand",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "window",
+                    type_: Optional {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiWindow",
+                        },
                     },
                     by_ref: false,
                     optional: false,
@@ -7019,6 +7272,12 @@ object Object {
                         ),
                     },
                     FfiArgument {
+                        name: "window",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
                         name: "observer",
                         type_: UInt64,
                     },
@@ -7032,7 +7291,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Open a live subscription over an explicit [`FfiDemand`] (#107) --\nthe constructor an app reaches for once [`Self::observe`]'s bare\n`FfiFilter` (which always takes `Demand::from_filter`'s static\ndefault) isn't enough: declaring `Pinned` wire authority, a non-\ndefault `AccessContext`, or a non-`Agnostic` `CacheMode`. Same\ndrain-thread/cancel-handle shape as `observe` in every other respect.",
+                "Open a live subscription over an explicit [`FfiDemand`] (#107) --\nthe constructor an app reaches for once [`Self::observe`]'s bare\n`FfiFilter` (which always takes `Demand::from_filter`'s static\ndefault) isn't enough: declaring `Pinned` wire authority, a non-\ndefault `AccessContext`, or a non-`Agnostic` `CacheMode`. Same\ndrain-thread/cancel-handle/window shape as `observe` in every other\nrespect (see that method's doc for the `window` policy).",
             ),
             throws: Some(
                 Enum {
@@ -7043,7 +7302,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_demand",
             checksum: Some(
-                36486,
+                18534,
             ),
         },
         Method {
@@ -7891,6 +8150,56 @@ object Object {
                 62345,
             ),
         },
+        Method {
+            name: "request_rows",
+            object_name: "NmpQueryHandle",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "at_least",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpqueryhandle_request_rows",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpQueryHandle",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "at_least",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Windowed observations only: monotonically raise the window's row\ntarget to at least `at_least`, clamped to the declared `max`.\nIdempotent and declarative -- calling with a value at or below the\ncurrent target is a no-op; there is no continuation token to thread\nback and no generation to go stale (#485 replaced the opaque\ncontinuation entirely). Growth outcomes arrive as\n[`crate::types::FfiWindowLoad`] facts in delivered frames -- reaching\nthe declared `max` is the `AtBound` FACT there, never an error here.\nUnbounded observations fail with\n[`FfiRequestRowsError::Unwindowed`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRequestRowsError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpqueryhandle_request_rows",
+            checksum: Some(
+                58535,
+            ),
+        },
     ],
     uniffi_traits: [],
     trait_impls: [],
@@ -7930,7 +8239,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The app-facing handle to a live subscription (returned by\n[`NmpEngine::observe`]). `Drop` withdraws the subscription -- the SDK\nnever requires an app-owned container or lifecycle hook to make this\nhappen (plan §7's kill test). Holds ONLY the opaque\n[`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) -- no\n`Handle`/`QueryHandle` (the raw imperative engine-control capability)\never reaches this crate. The receiving half of the subscription is owned\nentirely by [`NmpEngine::observe`]'s drain thread, since `recv()`\nblocks; `cancel()`/`Drop` here and the drain thread's own teardown\nconverge on the token's single withdrawal guard (see that type's doc).",
+        "The app-facing handle to a live subscription (returned by\n[`NmpEngine::observe`]). `Drop` withdraws the subscription -- the SDK\nnever requires an app-owned container or lifecycle hook to make this\nhappen (plan §7's kill test). Holds ONLY two opaque capabilities: the\n[`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) and,\nfor windowed observations, the [`nmp::WindowHandle`] growth capability\n-- no `Handle`/`QueryHandle` (the raw imperative engine-control\ncapability) ever reaches this crate. The receiving half of the\nsubscription is owned entirely by [`NmpEngine::observe`]'s drain thread,\nsince `recv()` blocks; `cancel()`/`Drop` here and the drain thread's own\nteardown converge on the token's single withdrawal guard (see that\ntype's doc).",
     ),
 }
 
@@ -8513,29 +8822,17 @@ callback CallbackInterface {
     module_path: "nmp_ffi",
     methods: [
         Method {
-            name: "on_batch",
+            name: "on_frame",
             object_name: "RowObserver",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
             arguments: [
                 Argument {
-                    name: "deltas",
-                    type_: Sequence {
-                        inner_type: Enum {
-                            module_path: "nmp_ffi",
-                            name: "FfiRowDelta",
-                        },
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "evidence",
+                    name: "frame",
                     type_: Record {
                         module_path: "nmp_ffi",
-                        name: "FfiAcquisitionEvidence",
+                        name: "FfiFrame",
                     },
                     by_ref: false,
                     optional: false,
@@ -8544,7 +8841,7 @@ callback CallbackInterface {
             ],
             return_type: None,
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_rowobserver_on_batch",
+                name: "uniffi_nmp_ffi_fn_method_rowobserver_on_frame",
                 is_async: false,
                 arguments: [],
                 return_type: None,
@@ -8554,9 +8851,9 @@ callback CallbackInterface {
             docstring: None,
             throws: None,
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_rowobserver_on_batch",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_rowobserver_on_frame",
             checksum: Some(
-                608,
+                46105,
             ),
         },
         Method {
@@ -8602,7 +8899,7 @@ callback CallbackInterface {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Drains a live subscription's `Receiver<RowsMsg>` (M4 §4b). `on_batch` is\ncalled once per delivered batch, in order, on a dedicated drain thread —\nnever on the engine thread itself, so a slow Swift-side consumer cannot\nstall `EngineCore`'s own recv loop. `on_closed` fires exactly once, when\nthe engine has torn the subscription down (cancel, or the row channel's\n`Sender` was dropped for any other reason) — after which no further\n`on_batch` call will ever occur. `evidence` is the query's scoped\nper-source acquisition evidence for this batch\n(`docs/design/scoped-evidence-49-12-plan.md` §4) -- never a collapsed\ncompleteness verdict.",
+        "Drains a live subscription's frames (M4 §4b) -- the ONE observer both\nobservation modes share (#485): unbounded frames carry the exact delta\ntransition, windowed frames carry the complete bounded row set plus its\ngrowth fact (see [`FfiFrame`]'s doc for why delivery derives from\nboundedness and rows never cross the wire twice). `on_frame` is called\nonce per delivered frame, in order, on a dedicated drain thread — never\non the engine thread itself, so a slow native consumer cannot stall\n`EngineCore`'s own recv loop (windowed frames additionally conflate to\nlatest-state under backpressure, so a slow consumer sees fewer, never\nstale-ordered, frames). `on_closed` fires exactly once, when the engine\nhas torn the subscription down (cancel, or the frame channel's `Sender`\nwas dropped for any other reason) — after which no further `on_frame`\ncall will ever occur. `frame.evidence` is the query's scoped per-source\nacquisition evidence (`docs/design/scoped-evidence-49-12-plan.md` §4) --\nnever a collapsed completeness verdict.",
     ),
 }
 

@@ -261,6 +261,64 @@ pub struct FfiDemand {
     pub cache: FfiCacheMode,
 }
 
+/// Window policy on the read noun (#485, `nmp::Window` mirror). One real
+/// variant today; future policies (latest/anchored) are new VARIANTS of this
+/// enum, never new nouns or parallel observe verbs. `initial`/`max` are row
+/// counts -- `convert::window_from_ffi` rejects zeroes and `initial > max`
+/// with a typed [`crate::convert::FfiError`], never a panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiWindow {
+    /// Bounded newest-first window: starts with `initial` canonical rows,
+    /// grows only by explicit `NmpQueryHandle::request_rows`, never above
+    /// `max`.
+    Expandable { initial: u64, max: u64 },
+}
+
+/// The complete current bounded row set of a windowed observation, plus its
+/// mechanical growth fact. Rows are canonical newest-first
+/// (`created_at DESC, event_id ASC`); the native bridge REPLACES its row
+/// state from `rows` wholesale -- it never folds deltas for windowed frames.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiWindowContents {
+    pub rows: Vec<FfiRow>,
+    pub load: FfiWindowLoad,
+}
+
+/// Mechanical growth state of an expandable window (`nmp::WindowLoad`
+/// mirror). Deliberately no Complete/End/Synced variant: `Returned { added:
+/// 0 }` only means the planned advance added no canonical row -- consult the
+/// frame's per-source acquisition evidence for why, never a global verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiWindowLoad {
+    Idle,
+    Requesting,
+    Returned { added: u64 },
+    AtBound { max: u64 },
+}
+
+/// One delivered observation frame (`nmp::Frame` mirror) -- the ONE
+/// vocabulary both observation modes share. Delivery is DERIVED from
+/// boundedness, never a knob, and never carried twice on the wire:
+///
+/// - Unbounded (`window` is `None`): `deltas` is the exact lossless
+///   transition from the previously delivered frame; the full row set is
+///   never redelivered (full-set redelivery is the O(rows squared) P0 #485
+///   exists to kill).
+/// - Windowed (`window` is `Some`): `window.rows` is the complete current
+///   bounded set and `deltas` is ALWAYS empty -- bridges replace state from
+///   the snapshot, so shipping deltas too would cross every row the FFI
+///   boundary twice just to be folded and discarded.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiFrame {
+    /// Unbounded observations: the exact delta transition. ALWAYS empty for
+    /// windowed observations (see the type doc).
+    pub deltas: Vec<FfiRowDelta>,
+    /// Present iff the observation is windowed: the complete bounded row set
+    /// plus the window's growth fact.
+    pub window: Option<FfiWindowContents>,
+    pub evidence: FfiAcquisitionEvidence,
+}
+
 /// One delivered row -- RAW tokens only (ledger #12). Mirrors
 /// `nostr::Event`'s wire shape, never a formatted/localized field, plus
 /// `nmp::Row::sources` (#105): the sorted, deduplicated relay-observation
@@ -334,9 +392,11 @@ pub struct FfiRememberedGroups {
     pub has_private_content: bool,
 }
 
-/// `nmp::RowDelta` mirror -- the wire is deltas, never snapshots (see that
-/// type's own doc); the Swift bridge (a later builder) accumulates these
-/// into a snapshot.
+/// `nmp::RowDelta` mirror. For UNBOUNDED observations the wire is deltas,
+/// never snapshots (see that type's own doc); the native bridge accumulates
+/// these into a snapshot. Windowed observations instead deliver the whole
+/// bounded set in [`FfiFrame::window`] and carry an empty delta list --
+/// delivery mode derives from boundedness, never both at once.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiRowDelta {
     Added {
@@ -409,14 +469,6 @@ pub enum FfiShortfallFact {
 pub struct FfiAcquisitionEvidence {
     pub sources: Vec<FfiSourceEvidence>,
     pub shortfall: Vec<FfiShortfallFact>,
-}
-
-/// One delivered batch: raw row deltas + the query's scoped acquisition
-/// evidence (mirrors `nmp::RowsMsg`).
-#[derive(Debug, Clone, PartialEq, Eq, Record)]
-pub struct FfiRowBatch {
-    pub deltas: Vec<FfiRowDelta>,
-    pub evidence: FfiAcquisitionEvidence,
 }
 
 /// `nmp::Durability` mirror (a typed PROPERTY of a write, not a routing

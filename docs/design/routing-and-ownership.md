@@ -1,7 +1,7 @@
 # Relay routing + kind ownership — the canonical spec
 
 - **Date:** 2026-07-11
-- **Status:** Owner-confirmed default policy (Part A); designed override primitive + provenance decision (Part B); designed ownership boundary (Part C). Parts B/C carry one explicit owner-decision list (§8). Provisional-until-v2 like everything else, but Part A is the owner's settled routing model — do not re-litigate its rules, only their mechanics.
+- **Status:** Owner-confirmed default policy (Part A); designed override primitive + provenance decision (Part B); designed ownership boundary (Part C) — Part C's fold mechanism (`ClaimSet`) and workspace audit (`nmp-audit`) shipped 2026-07-15 (#521; see the §4.2 status ledger for what is built vs. Unit E-pending). Parts B/C carry one explicit owner-decision list (§8). Provisional-until-v2 like everything else, but Part A is the owner's settled routing model — do not re-litigate its rules, only their mechanics.
 - **2026-07-11 promotion correction:** ownership below is **schema ownership**, not
   ownership of every event that participates in a protocol context. A NIP module
   claims only the exact event schemas that NIP defines. Per-publication context
@@ -243,6 +243,10 @@ pub struct KindClaim {
     /// this scope. A RoutePolicy is ONLY accepted attached to a claim —
     /// this is the gate: no ownership, no route override.
     pub route_policy: Option<RoutePolicy>,
+    /// Conscious acknowledgment that the scope intersects DiscoveryKinds
+    /// ({0, 3} ∪ 10000..=19999) — audit check (c) enforces consistency in
+    /// BOTH directions (missing ack red, stale ack red). Added by #521.
+    pub discovery_ack: bool,
 }
 
 pub enum KindScope {
@@ -262,6 +266,14 @@ Range/Set kill the legacy per-kind repetition. A module exports `pub fn claims()
 
 **Dropped from legacy, deliberately:** the compile-time linker-symbol collision (fragile across feature unification/platforms, redundant once layer 2 exists and layer 1 fails fast); the source-surface regex scan (a lint by another name); the hand-maintained per-kind `match` (the table *is* the claims).
 
+**Status of the three layers (2026-07-15, #521 — this is the honest ledger, not a claim of completion):**
+
+1. **Layer 1 — MECHANISM SHIPPED, engine wiring deferred to Unit E.** The fold is `nmp_ownership::ClaimSet::build`: claims in, typed `ClaimOverlap` out (both owners, both scopes, one witness kind; Display prefixed `NMP-OWNERSHIP-COLLISION`). The `EngineCore::new` signature change is deliberately NOT done yet: no module is registered with the engine today (nip02/nip51/nip29 are composition libraries used *beside* the engine), so every construction site would pass an empty registration vec — plumbing that enforces nothing while appearing to. It lands with Unit E (claim-table routing), its first real consumer, which folds through this same function.
+2. **Layer 2 — SHIPPED (`crates/nmp-audit`).** cargo-metadata enrollment keyed on "declares a normal dependency on `nmp-ownership`" (the real module crates are `nmp-nip*`, not the plan's anticipated `nmp-mod-*`, so the name pattern was dropped for the dependency fact): an unenrolled claim-bearing crate is a red build, a stale registry entry too. Checks (a) exclusive-overlap fold via `ClaimSet::build`, (b) route authority ⊆ ownership (policy ⇒ exclusive), (c) `discovery_ack` consistency in both directions, plus fixture falsifiers per the build plan §4.3/§4.4. `nmp-nip29` is enrolled as an explicit `DeclaresNoClaims` entry (contextual publication, §3.2.1 — its no-`claims()` export stays deliberate).
+3. **Layer 3 — NOT BUILT; lands with Unit E.** The lookup it needs (`ClaimSet::route_policy(kind)`) exists and is tested; the route-resolution dispatch does not. Until Unit E, an owned kind routes like any other — today's claims all declare `route_policy: None`, so the table contains no policy the default path could violate.
+
+**Layer-3 semantics, clarified (previously ambiguous):** the refusal binds when the owning claim **carries a `RoutePolicy`**. An exclusive claim with `route_policy: None` (nip02's kind:3, nip51's kind:10009) is schema ownership for audit/collision purposes only — those kinds route under the **default** policy by the owner's own declaration (both crates document exactly that), and refusing them would break the owning modules themselves. "The default policy refuses to route it" applies to policy-bearing claims (nip17's future 1059/10050), where `Automatic` is simply not the table entry.
+
 ### 4.3 Ownership gates routing authority
 
 The rule, stated once: **a module's schema-wide `RoutePolicy` is honored for
@@ -280,7 +292,7 @@ into a module claiming unrelated content schemas.
   operation may add only its typed, per-intent contribution (§3.2.1). Drift
   therefore cannot silently turn into ownership of the foreign schema.
 - The audit's cross-workspace overlap check means a second module claiming an owned kind is a red build even if no app links both.
-- New ledger entry (proposed **#14 — Route-override without ownership / ownership collision**): "a routing override is only representable inside a `KindClaim`; overlapping exclusive claims are a red build workspace-wide; an owned kind cannot be routed by the default policy." Falsification: attempt to publish an owned kind through `Automatic`, attempt to register a bare policy, attempt two claims on one kind — each must fail to compile or fail closed.
+- New ledger entry (proposed here as "#14", **landed 2026-07-15 as bug-class-ledger row 22** — the ledger's own #14 was meanwhile taken by the schema-vs-contextual class): "a routing override is only representable inside a `KindClaim`; overlapping exclusive claims are a red build workspace-wide; an owned kind cannot be routed by the default policy (*policy-bearing* ownership — an exclusive claim with `route_policy: None` routes default by the owner's own declaration; see §4.2's layer-3 clarification)." Falsification: attempt to publish an owned kind through `Automatic`, attempt to register a bare policy, attempt two claims on one kind — each must fail to compile or fail closed. Status is PARTIAL: the first two falsifiers are live (`nmp-audit` fixtures + no bare-policy API); the `Automatic`-refusal falsifier awaits Unit E's gate.
 
 ---
 
@@ -308,7 +320,7 @@ An app that enables nip17 links DM routing; an app that doesn't links **zero** D
 3. Default write policy derived from the event (`WriteRouting::Default`): p-tag inbox fan-out (read-marked, 2-each), the >10-p-tag / kind:3 / kind:1xxxx exclusions, app-lane union; delete the flagged `ToInboxes` write-relay fallback.
 4. `RoutePolicy` + `RelaySource` + claim-table routing (read-atom splitting by policy, write-kind dispatch), `AppLanes`/`FailMode` composition.
 5. `RouteClass` (no default) threaded through `WriteStatus::Routed` + diagnostics; pre-signed publish routed only via the table.
-6. `KindClaim`/`KindScope`/`ModuleRegistration`, construction-time overlap error, the `nmp-audit` workspace test, ledger #14 + falsification tests.
+6. `KindClaim`/`KindScope`/`ModuleRegistration`, construction-time overlap error, the `nmp-audit` workspace test, ledger #14 + falsification tests. *(Status: types + `discovery_ack` + `ClaimSet` fold + `nmp-audit` + ledger row 22 landed with #521; `ModuleRegistration`/engine wiring rides Unit E — see §4.2 status ledger.)*
 7. The §2.6 scenarios as router/engine tests; a **decision-table test** covering every (lane config × policy × fail-mode × p-tag/kind exclusion) cell.
 
 Rough order: 1–3 are M-next (they close a known-gap and finish Part A); 4–5 land with the first real module need (nip17 is the forcing function); 6 lands the moment a second claim-bearing module exists — the audit is cheap and should not wait for a collision.

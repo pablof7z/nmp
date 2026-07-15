@@ -13,7 +13,15 @@
 //! Adoption -- wiring these types into `nmp-router`/`nmp-engine`, or
 //! building a real `nmp-mod-*` crate against them -- is Units E/F/G, not
 //! this crate.
+//!
+//! [`ClaimSet`] is the §4.2 layer-1 fold mechanism: it takes an ordered
+//! collection of `KindClaim`s and either returns the folded table or a
+//! typed [`ClaimOverlap`] error. It is awaiting its Unit E engine consumer
+//! (construction-time wiring into `EngineCore::new` is deliberately not
+//! done here); the workspace-wide layer-2 audit (`nmp-audit`) already folds
+//! every enrolled module's claims through this same function today.
 
+mod claim_set;
 mod kind_claim;
 mod kind_scope;
 mod module_id;
@@ -21,6 +29,7 @@ mod relay_source;
 mod route_class;
 mod route_policy;
 
+pub use claim_set::{ClaimOverlap, ClaimSet};
 pub use kind_claim::KindClaim;
 pub use kind_scope::KindScope;
 pub use module_id::ModuleId;
