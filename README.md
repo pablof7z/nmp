@@ -106,8 +106,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - **Proven:** the core store, resolver, router, transport, engine, Rust facade, Swift + Kotlin packages, and the NIP-46 remote-signer path — backed by 100+ Rust test modules, differential falsifiers against an independent store, and live-relay tests.
 - **Pending:** several promoted guarantees remain active work — see [`docs/known-gaps.md`](docs/known-gaps.md) (honest built-vs-missing record) and the [bug-class ledger](docs/bug-class-ledger.md) (target vs partial vs structurally proven).
 - The ownership boundary and behavioral invariants are the stable frame; the app-facing spelling is not.
-- **Recent hardening batch (merged):** a DNS-rebinding relay-admission gap closed, a permanently-failed-relay wedge + unbounded send queue fixed, three unbounded-memory bookkeeping structures pruned, and Swift/Kotlin cross-SDK parity gaps (config fields, content-session pause) closed.
-- **In CI now (not yet merged):** wake-relay lane indexing, `MemoryStore` secondary indexes + batched GC, real enforcement of kind-ownership exclusivity (previously documented but unenforced — [#521](https://github.com/pablof7z/nmp/issues/521)), and `remove_account` across all four surfaces.
+- **Recent hardening batch (merged):** a DNS-rebinding relay-admission gap closed, a permanently-failed-relay wedge + unbounded send queue fixed, three unbounded-memory bookkeeping structures pruned, Swift/Kotlin cross-SDK parity gaps (config fields, content-session pause) closed, wake-relay lane lookups indexed instead of full-scanned, `MemoryStore` secondary indexes + batched GC landed, and kind-ownership exclusivity now has real enforcement (it was previously documented but unenforced — [#521](https://github.com/pablof7z/nmp/issues/521)).
+- **In CI now (not yet merged):** `remove_account` across all four surfaces (Rust/FFI/Swift/Kotlin).
 
 ## Performance
 
