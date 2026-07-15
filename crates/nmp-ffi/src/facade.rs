@@ -559,12 +559,19 @@ impl NmpEngine {
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let filter = filter_from_ffi(query)?;
         let window = window_from_ffi(window)?;
-        let reservation = self.engine.reserve_native_task("row-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "row-observer")?;
+        // Validate + open the subscription BEFORE reserving a native task.
+        // A window-validation error (e.g. `WindowInitialExceedsMax`) must not
+        // leave an admitted row-observer reservation stranded in the native
+        // executor -- a dropped `StartedNativeTask` that never `run`s does not
+        // release its reservation, so reserving after this fallible step is the
+        // guard. If reservation/bridge start then fails, `subscription` drops
+        // and unsubscribes cleanly.
         let subscription = self
             .engine
             .observe(nmp::LiveQuery::from_filter(filter), window)?;
+        let reservation = self.engine.reserve_native_task("row-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "row-observer")?;
         let cancel = subscription.cancel_handle();
         // Taken BEFORE the drain thread owns the subscription: `recv` blocks
         // there forever, so this cloneable capability is the only way the
@@ -599,10 +606,14 @@ impl NmpEngine {
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let demand = demand_from_ffi(query)?;
         let window = window_from_ffi(window)?;
+        // Validate + open the subscription BEFORE reserving a native task, so a
+        // window-validation error cannot strand an admitted demand-observer
+        // reservation (a `StartedNativeTask` dropped without `run` does not
+        // release it). See `observe` for the full rationale.
+        let subscription = self.engine.observe(nmp::LiveQuery(demand), window)?;
         let reservation = self.engine.reserve_native_task("demand-observer")?;
         let task_cancel = self.engine.native_task_cancel()?;
         let starter = start_native_bridge(reservation, task_cancel, "demand-observer")?;
-        let subscription = self.engine.observe(nmp::LiveQuery(demand), window)?;
         let cancel = subscription.cancel_handle();
         let window_handle = subscription.window_handle();
 
@@ -1097,6 +1108,53 @@ mod tests {
         };
         assert_eq!(limited, FfiError::WindowSelectionHasLimit);
 
+        engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    /// Regression (#485/#486): a window-validation failure must charge NO
+    /// native task even transiently, so a saturated single-slot executor is
+    /// never stranded. The default-capacity test above drains before it
+    /// asserts, so it missed the transient reservation the old code took
+    /// *before* validating (a `StartedNativeTask` dropped without `run` never
+    /// releases it) -- Swift's capacity-1 `WindowTests` falsifier caught it.
+    /// Here the single slot must survive a rejected observe and still admit
+    /// the next valid one.
+    #[test]
+    fn ffi_window_validation_does_not_strand_a_capacity_one_executor() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_native_tasks: 1,
+            ..NmpEngineConfig::default()
+        })
+        .expect("engine must build");
+
+        let inverted = match engine.observe(
+            FfiFilter::default(),
+            Some(FfiWindow::Expandable { initial: 3, max: 2 }),
+            Box::new(CensusRowObserver),
+        ) {
+            Ok(_) => panic!("an inverted window must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            inverted,
+            FfiError::WindowInitialExceedsMax { initial: 3, max: 2 }
+        );
+        // The rejected observe took no slot: the one native task is still free.
+        assert_eq!(engine.native_task_census().admitted, 0);
+
+        let handle = engine
+            .observe(
+                FfiFilter::default(),
+                Some(FfiWindow::Expandable { initial: 1, max: 2 }),
+                Box::new(CensusRowObserver),
+            )
+            .expect("a valid windowed observe must admit the one free native task");
+        assert_eq!(engine.native_task_census().admitted, 1);
+
+        drop(handle);
         engine.await_native_tasks_idle();
         assert_eq!(engine.native_task_census().admitted, 0);
         assert_eq!(engine.native_task_census().running, 0);
