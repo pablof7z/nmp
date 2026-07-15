@@ -18,11 +18,24 @@ enum Enum {
             fields: [],
             docstring: None,
         },
+        Variant {
+            name: "Nip42",
+            discr: None,
+            fields: [
+                Field {
+                    name: "public_key",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_grammar::AccessContext` mirror. Single-variant today (#106's closed\nvocabulary); extensible the same way [`FfiIdentityField`] is.",
+        "`nmp_grammar::AccessContext` mirror with a stable expected NIP-42 key.",
     ),
 }
 
@@ -3365,11 +3378,11 @@ record Record {
             ),
         },
         Field {
-            name: "relays_rejected_over_cap",
+            name: "sessions_rejected_over_cap",
             type_: UInt64,
             default: None,
             docstring: Some(
-                "Relay dials the transport pool refused because the configured\n`max_relays` ceiling was already reached (issue #121, worker-exhaustion\ndefense). Always `0` when no cap is configured.",
+                "Session dials the transport pool refused because the configured\n`max_relays` ceiling was already reached (issue #121, worker-exhaustion\ndefense). Always `0` when no cap is configured.",
             ),
         },
         Field {
@@ -4000,6 +4013,15 @@ record Record {
         Field {
             name: "relay",
             type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "access",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiAccessContext",
+            },
             default: None,
             docstring: None,
         },
@@ -4645,6 +4667,15 @@ record Record {
         Field {
             name: "relay",
             type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "access",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiAccessContext",
+            },
             default: None,
             docstring: None,
         },
