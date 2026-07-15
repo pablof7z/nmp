@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NMP Status Report</title>
-<meta name="description" content="Automated engineering status audio for the nmp project -- hourly Pulse, deeper Briefing every four hours.">
+<meta name="description" content="Self-contained engineering briefing for the NMP project -- an embeddable Nostr client engine (Rust core + Swift/Kotlin SDKs). What it is, what it can do today, and how solid it is.">
 <link rel="alternate" type="application/rss+xml" title="NMP Status Report" href="feed.xml">
 <style>
   :root {
@@ -18,6 +18,8 @@
     --accent-bg: #e9f7ee;
     --mono-bg: #eef0f2;
     --link: #1a56db;
+    --warn: #9a6b00;
+    --warn-bg: #fbf3df;
     --shadow: rgba(20, 20, 30, 0.06);
   }
   @media (prefers-color-scheme: dark) {
@@ -31,18 +33,22 @@
       --accent-bg: #10241a;
       --mono-bg: #1d2127;
       --link: #7aa2f7;
+      --warn: #e0b64d;
+      --warn-bg: #2a230f;
       --shadow: rgba(0, 0, 0, 0.35);
     }
   }
   :root[data-theme="dark"] {
     --bg: #0e1013; --fg: #e8eaed; --muted: #9aa2b1; --card: #171a1f;
     --border: #2a2e35; --accent: #3ddc73; --accent-bg: #10241a;
-    --mono-bg: #1d2127; --link: #7aa2f7; --shadow: rgba(0,0,0,0.35);
+    --mono-bg: #1d2127; --link: #7aa2f7; --warn: #e0b64d; --warn-bg: #2a230f;
+    --shadow: rgba(0,0,0,0.35);
   }
   :root[data-theme="light"] {
     --bg: #f7f7f5; --fg: #16181c; --muted: #5b6270; --card: #ffffff;
     --border: #e3e5e8; --accent: #1f7a3f; --accent-bg: #e9f7ee;
-    --mono-bg: #eef0f2; --link: #1a56db; --shadow: rgba(20,20,30,0.06);
+    --mono-bg: #eef0f2; --link: #1a56db; --warn: #9a6b00; --warn-bg: #fbf3df;
+    --shadow: rgba(20,20,30,0.06);
   }
   * { box-sizing: border-box; }
   body {
@@ -50,10 +56,10 @@
     background: var(--bg);
     color: var(--fg);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.5;
+    line-height: 1.6;
   }
   main {
-    max-width: 760px;
+    max-width: 780px;
     margin: 0 auto;
     padding: 2rem 1.25rem 4rem;
   }
@@ -70,7 +76,7 @@
     align-items: baseline;
     flex-wrap: wrap;
     gap: 0.5rem;
-    margin-bottom: 1.5rem;
+    margin-bottom: 1.25rem;
   }
   .masthead h1 {
     font-size: 1.15rem;
@@ -87,124 +93,120 @@
   }
   .rss-link:hover { border-color: var(--link); }
 
-  .headline-card {
+  .player-card {
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 16px;
-    padding: 1.5rem;
+    padding: 1.25rem 1.5rem 1.4rem;
     box-shadow: 0 1px 3px var(--shadow);
-    margin-bottom: 1.25rem;
+    margin-bottom: 1.75rem;
   }
-  .status-line {
-    font-size: 1.5rem;
-    font-weight: 700;
-    margin: 0 0 0.35rem;
-  }
-  .status-sub {
+  .player-card .status-sub {
     color: var(--muted);
     font-size: 0.9rem;
-    margin: 0 0 1.1rem;
+    margin: 0 0 0.9rem;
+  }
+  .player-card .kicker {
+    font-size: 1.35rem;
+    font-weight: 700;
+    margin: 0 0 0.15rem;
   }
   audio {
     width: 100%;
-    margin: 0.25rem 0 1.1rem;
+    margin: 0.35rem 0 0;
     height: 40px;
   }
-  .lens {
-    margin: 0 0 0.85rem;
-    font-size: 0.98rem;
+
+  section.briefing > h2 {
+    font-size: 1.05rem;
+    letter-spacing: 0.01em;
+    margin: 2rem 0 0.4rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 2px solid var(--accent);
+    display: inline-block;
   }
-  .lens b {
-    color: var(--accent);
-    letter-spacing: 0.02em;
-  }
-  .bullets {
-    margin: 1rem 0;
-    padding: 0;
-    list-style: none;
-    display: grid;
-    gap: 0.55rem;
-  }
-  .bullets li {
-    font-size: 0.93rem;
-    padding: 0.55rem 0.75rem;
-    background: var(--mono-bg);
-    border-radius: 10px;
-  }
-  .bullets li b { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.2rem; }
-  .next-hour {
-    margin-top: 1.1rem;
-    background: var(--accent-bg);
-    border: 1px solid var(--accent);
-    border-radius: 12px;
-    padding: 0.9rem 1rem;
-  }
-  .next-hour .tag {
-    font-size: 0.72rem;
-    font-weight: 700;
+  section.briefing p { margin: 0.65rem 0; font-size: 0.97rem; }
+  .lead { font-size: 1.05rem; }
+
+  .cap-group { margin: 0.9rem 0; }
+  .cap-group h3 {
+    font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--accent);
-    display: block;
-    margin-bottom: 0.3rem;
+    margin: 0 0 0.3rem;
   }
+  .cap-group p { margin: 0.2rem 0 0; font-size: 0.95rem; }
+
+  .tag-exp, .tag-gap {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.05rem 0.4rem;
+    border-radius: 5px;
+    vertical-align: middle;
+  }
+  .tag-exp { background: var(--warn-bg); color: var(--warn); }
+  .tag-gap { background: var(--mono-bg); color: var(--muted); }
+
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; background: var(--mono-bg); padding: 0.05rem 0.3rem; border-radius: 4px; }
+
+  .edges {
+    list-style: none;
+    margin: 0.6rem 0 0;
+    padding: 0;
+    display: grid;
+    gap: 0.4rem;
+  }
+  .edges li {
+    font-size: 0.92rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--warn-bg);
+    border-radius: 8px;
+  }
+
+  .thishour {
+    margin-top: 0.6rem;
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 0.9rem 1.1rem;
+    font-size: 0.95rem;
+  }
+
   .meta-row {
     display: flex;
     justify-content: space-between;
     color: var(--muted);
     font-size: 0.78rem;
-    margin-top: 1rem;
+    margin-top: 2rem;
     flex-wrap: wrap;
     gap: 0.4rem;
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
   }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
 
   details.archive {
-    margin-top: 2rem;
+    margin-top: 1.75rem;
     border: 1px solid var(--border);
     border-radius: 12px;
     background: var(--card);
     padding: 0.9rem 1.1rem;
   }
-  details.archive summary {
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 0.95rem;
-  }
-  .archive-item {
-    border-top: 1px solid var(--border);
-    padding: 0.85rem 0;
-  }
+  details.archive summary { cursor: pointer; font-weight: 600; font-size: 0.95rem; }
+  .archive-item { border-top: 1px solid var(--border); padding: 0.85rem 0; }
   .archive-item:first-of-type { border-top: none; padding-top: 0.9rem; }
-  .archive-item h3 {
-    font-size: 0.92rem;
-    margin: 0 0 0.3rem;
-  }
-  .archive-item pre {
-    white-space: pre-wrap;
-    font-family: inherit;
-    font-size: 0.85rem;
-    color: var(--muted);
-    margin: 0.4rem 0;
-  }
+  .archive-item h3 { font-size: 0.92rem; margin: 0 0 0.3rem; }
+  .archive-item pre { white-space: pre-wrap; font-family: inherit; font-size: 0.85rem; color: var(--muted); margin: 0.4rem 0; }
   .archive-item audio { height: 34px; margin: 0.3rem 0; }
   .tier-pill {
-    display: inline-block;
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 0.1rem 0.5rem;
-    border-radius: 999px;
-    background: var(--mono-bg);
-    color: var(--muted);
-    margin-left: 0.4rem;
+    display: inline-block; font-size: 0.68rem; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 0.1rem 0.5rem; border-radius: 999px;
+    background: var(--mono-bg); color: var(--muted); margin-left: 0.4rem;
   }
-  footer {
-    margin-top: 2.5rem;
-    text-align: center;
-    font-size: 0.78rem;
-    color: var(--muted);
-  }
+  footer { margin-top: 2.5rem; text-align: center; font-size: 0.78rem; color: var(--muted); }
   footer a { color: var(--muted); }
 </style>
 </head>
@@ -213,36 +215,77 @@
   <div class="masthead">
     <div>
       <div class="eyebrow">nmp status report</div>
-      <h1>Automated engineering pulse for pablof7z/nmp</h1>
+      <h1>Self-contained briefing for pablof7z/nmp</h1>
     </div>
     <a class="rss-link" href="feed.xml">Subscribe (RSS)</a>
   </div>
 
-  <section class="headline-card" id="latest">
-    <p class="status-line">🟢 Progressing</p>
-    <p class="status-sub">NMP Pulse &mdash; 2026-07-15 11:00 UTC &middot; architecture-hardening sweep, five merges, clean CI</p>
-
-    <audio controls preload="none" src="reports/pulse-0001.mp3">
-      Your browser does not support the audio element. <a href="reports/pulse-0001.mp3">Download the mp3</a>.
+  <section class="player-card">
+    <p class="kicker">NMP Pulse &mdash; Briefing</p>
+    <p class="status-sub">2026-07-15 11:30 UTC &middot; state-of-the-project, read top to bottom &middot; ~4 min audio</p>
+    <audio controls preload="none" src="reports/pulse-0002.mp3">
+      Your browser does not support the audio element. <a href="reports/pulse-0002.mp3">Download the mp3</a>.
     </audio>
+  </section>
 
-    <p class="lens"><b>USER &mdash;</b> NIP-02 follow/unfollow now behaves identically on iOS and Android; apps built on nmp get consistent social-graph state cross-platform, today.</p>
-    <p class="lens"><b>DEVELOPER &mdash;</b> nmp is still two nouns: live queries and write intents. Describe intent, the engine owns relays, subscriptions, canonical state. Newly adoptable: <code>RelayIngestResult</code> now embeds the canonical <code>CommittedMutationResult</code> instead of hand-copying its fields, so relay-ingest and local-accept share one invalidation path.</p>
+  <section class="briefing">
+    <h2>What NMP is</h2>
+    <p class="lead">NMP (Nostr Mobile Primitives) is an embeddable Nostr client engine &mdash; a Rust core with Swift and Kotlin SDKs &mdash; that owns the machinery apps otherwise rebuild badly: the event store, relay connections, subscription routing, canonical state, signing, and durable publishing. You talk to it with two nouns: a <b>live query</b> (a declarative demand observed through your platform's native reactive primitive) and a <b>write intent</b> (a durable publish obligation tracked through a reattachable receipt). It is a library you call, not a framework you live inside &mdash; your app keeps its own architecture, navigation, accounts, and UI.</p>
 
-    <ul class="bullets">
-      <li><b>This hour</b>Merged: #498 (arch-review guardrails + cross-SDK parity script), #499 (Kotlin NIP-02 parity), #500 (mutation-result unification), #501 (test-relay teardown state), #497 (live-store reset guard &mdash; the corruption-class fix). In review: #502 (typed FFI error taxonomy), #503 (bool-lifecycle refactors) &mdash; both green except swift-package still pending.</li>
-      <li><b>Verified</b>The #490 epic's review named this violation class after one instance merged uncaught elsewhere. All five merges ride green CI (fmt, clippy, workspace tests) plus #498's new cross-language surface governance. #501 swaps a locale-fragile string match for real closed-state truth.</li>
-      <li><b>Performance</b>Build farm spiked to 14.78 one-minute load on 8 cores (likely this session's CI); 15-min average 4.79 is more typical. Public surface holds near 29.7k of the 30k-line ceiling.</li>
-    </ul>
+    <h2>What it can do today</h2>
 
-    <div class="next-hour">
-      <span class="tag">Next hour</span>
-      #502's typed FFI errors and #503's bool-lifecycle types are expected to land &mdash; unblocking the queued #491 signer/FFI cleanup burst behind them.
+    <div class="cap-group">
+      <h3>Reading &amp; state</h3>
+      <p>Declarative live queries with reactive bindings (literal sets, <code>$currentPubkey</code>, derived projections, set algebra). A canonical redb-backed store handles provenance-preserving dedup, replaceable events, NIP-40 expiry (event-driven, no polling), kind:5 deletion with tombstones, and supersession with exact negative-delta invalidation. Snapshots return matching rows plus scoped acquisition evidence &mdash; NMP never claims a global <i>synced</i> or <i>complete</i>. EOSE, negentropy, and AUTH are facts about specific planned sources, not proof the network is empty.</p>
     </div>
 
-    <div class="meta-row">
-      <span>Tier: Pulse (hourly) &middot; next tier: Briefing (~4h)</span>
-      <span>Generated 2026-07-15 11:03 UTC</span>
+    <div class="cap-group">
+      <h3>Relays &amp; networking</h3>
+      <p>Full connection lifecycle with one finite fan-out ceiling over the whole read plan (local, private, and <code>.onion</code> targets rejected by default). NIP-65 outbox routing is self-bootstrapping: you configure only indexer relays and the engine discovers each author's write/inbox relays via kind:10002. Parse-once typed ingest with bounded parallel signature verification. NIP-11 relay metadata (single-flight, LRU-bounded) and NIP-77 negentropy sync are wired. NIP-42 AUTH participates, but its reserved evidence states are still partial. <span class="tag-exp">experimental: AUTH evidence</span></p>
+    </div>
+
+    <div class="cap-group">
+      <h3>Signing &amp; identity</h3>
+      <p>Local keys and full NIP-46 remote signing (bunker): independent signer-relay connection, NIP-42 AUTH, request correlation, <code>auth_url</code>/<code>switch_relays</code>, NIP-44 crypto, reconnect across a store close/reopen, and a bounded sign-only path across all four surfaces. Swift projects Primal discovery; Kotlin projects an Android package handoff. <span class="tag-gap">gap: Keychain/Keystore providers, NIP-55, per-write identity override, secret zeroization</span></p>
+    </div>
+
+    <div class="cap-group">
+      <h3>Publishing</h3>
+      <p>Durable write intents: <code>Accepted</code> is one atomic persistence boundary (frozen body, receipt, and a pending canonical row visible to ordinary queries), then signature promotion, cancellation with compensation, and a persisted outbox that retries with bounded backoff (32 global / 1 per relay, 30s ACK expiry). At-most-once ambiguity is reported as <code>OutcomeUnknown</code>, never a blind resend. Pre-signed events from an external signer publish verbatim.</p>
+    </div>
+
+    <div class="cap-group">
+      <h3>Protocol modules (opt-in)</h3>
+      <p>NIP-02 following (canonical kind:3, guarded tag-preserving follow/unfollow) on Swift and Kotlin. NIP-29 groups (metadata/membership/moderation; remembered-group browsing via NIP-51 kind:10009). NIP-51 relay-list reading, with guarded favorite-relay <i>editing</i> landing now. An optional content module (plaintext/Markdown, NIP-19, kind:0/NIP-23) plus a SwiftUI component family. <span class="tag-gap">not built: NIP-25 reactions, general draft composition, media/Blossom</span></p>
+    </div>
+
+    <div class="cap-group">
+      <h3>Storage &amp; diagnostics</h3>
+      <p>Crash-safe redb store with binary canonical rows, secondary + tag + cardinality indexes, and interned relay URLs; an in-memory store for tests; a destructive reset that refuses to delete a live store. Diagnostics are a permanent proof surface: per-relay plan, exact wire filters, connection/AUTH state, EOSE/watermarks, and routing explanation.</p>
+    </div>
+
+    <div class="cap-group">
+      <h3>Platforms</h3>
+      <p>The Rust core is the truth. The Swift SDK is qualified on the macOS host (XCFramework simulator slices compile; an iOS-Simulator runtime test target is still pending). The Kotlin SDK is a desktop-JVM projection &mdash; no Android AAR is qualified yet. <span class="tag-exp">iOS/Android device qualification pending</span></p>
+    </div>
+
+    <h2>How solid it is</h2>
+    <p>The core is genuinely proven: 100+ Rust test modules plus differential falsifiers against an independent in-memory store, headless outbox/discovery proofs, live-relay tests against <code>purplepag.es</code> and <code>relay.primal.net</code>, and cross-SDK parity tests. CI runs fmt, clippy, workspace tests, Swift and Kotlin package builds, and a trusted-base surface-governance gate that rejects any unaudited change to the public API.</p>
+    <ul class="edges">
+      <li>An M5 iOS main-thread jank whose root cause is fixed (Swift frame coalescing + Rust indexing + a discovery-churn fix) but <b>not yet re-measured on device</b> with all three live.</li>
+      <li>NIP-29 storage wins are verified as microbenchmarks, not end-to-end device room-open.</li>
+      <li>NIP-42 AUTH evidence states, cross-process store-reset exclusion, and full end-to-end boundedness remain open.</li>
+    </ul>
+
+    <h2>Performance</h2>
+    <p>Designed for bounded memory and streaming, never first-N truncation. Query planning picks one best index and stops at the visible limit: the busiest-room query fell from <b>5.15&nbsp;ms to 0.26&nbsp;ms</b>, a rejected-heavy search from <b>0.188&nbsp;ms to 0.005&nbsp;ms</b>, and a derived-set resolver over a 59,915-row bucket from <b>3,786&nbsp;ms to 0.73&nbsp;ms</b>. The NIP-11 cache has a proven ~67&nbsp;MiB raw-body ceiling. Native threads are bounded (roughly <code>7 + 2&middot;relays + 12&nbsp;tasks</code>), not stream-proportional. The public Rust facade sits at <b>29,734 lines against its governed 30,000 ceiling</b> &mdash; deliberately tight; a proposed history API would need the ceiling raised to 32,000. CI is green.</p>
+
+    <h2>Where it's heading</h2>
+    <p>Governing the provisional demand/receipt/signer shapes toward a v2 freeze; encoding lifecycle invariants as types instead of conventions (the current sweep); closing platform qualification (an iOS-Simulator test target and an Android AAR); shipping standard secure-storage signer providers; and finishing bounded delivery with explicit shortfall everywhere.</p>
+
+    <h2>This hour</h2>
+    <div class="thishour">
+      <b>Merged</b>, closing last hour's in-flight work: #502 (typed FFI error taxonomy for NIP-11/NIP-46 &mdash; SDK consumers can branch on failure kind again) and #503 (two bool lifecycle gates re-encoded as <code>Reservation</code>/<code>AsyncWait</code> types). <b>In flight, both green</b>: #504 (session-executor ownership as a <code>SessionExecutor</code> type) and #488 (guarded NIP-51 favorite-relay editing).
     </div>
   </section>
 
@@ -253,8 +296,13 @@
     </div>
   </details>
 
+  <div class="meta-row">
+    <span>Audience: human operator &middot; candid by design</span>
+    <span>Generated 2026-07-15 11:30 UTC</span>
+  </div>
+
   <footer>
-    <p>Audience: human operator. Voice: crisp analyst. Candid by design &mdash; risks and unverified items are named, not smoothed over.</p>
+    <p>Each publication is complete and self-contained &mdash; risks and unverified items are named, not smoothed over.</p>
     <p><a href="plans/index.html">Planning pages archive</a></p>
   </footer>
 </main>
@@ -275,7 +323,6 @@
         list.innerHTML = '<p>No episodes yet.</p>';
         return;
       }
-      // Newest first
       const sorted = episodes.slice().sort(function (a, b) {
         return new Date(b.utc) - new Date(a.utc);
       });

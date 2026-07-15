@@ -2,23 +2,46 @@
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom">
 <channel>
 <title>NMP Status Report</title>
-<link>https://pablof7z.github.io/nmp/</link>
-<atom:link href="https://pablof7z.github.io/nmp/feed.xml" rel="self" type="application/rss+xml"/>
-<description>Automated engineering status audio for the nmp (Nostr Mobile Primitives) project. Hourly "Pulse" episodes and a deeper "Briefing" every four hours -- candid, technical, for the human operator.</description>
+<link>https://pablof7z.github.io/nmp/status/</link>
+<atom:link href="https://pablof7z.github.io/nmp/status/feed.xml" rel="self" type="application/rss+xml"/>
+<description>Automated engineering status audio for the nmp (Nostr Mobile Primitives) project -- an embeddable Nostr client engine (Rust core + Swift/Kotlin SDKs). Each episode is a self-contained, candid, technical briefing for the human operator.</description>
 <language>en-us</language>
 <itunes:explicit>false</itunes:explicit>
 <itunes:author>nmp status reporter</itunes:author>
-<itunes:summary>Automated engineering status audio for the nmp project: hourly Pulse episodes plus a deeper Briefing every four hours.</itunes:summary>
+<itunes:summary>Automated, self-contained engineering status audio for the nmp project: what it is, what it can do today, and how solid it is.</itunes:summary>
 <itunes:owner>
 <itunes:name>nmp status reporter</itunes:name>
 <itunes:email>marinadiazc@gmail.com</itunes:email>
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 11:03:30 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 11:34:00 GMT</lastBuildDate>
+<item>
+<title>NMP Briefing — 2026-07-15 11:30 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0002.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0002</guid>
+<pubDate>Wed, 15 Jul 2026 11:34:00 GMT</pubDate>
+<description><![CDATA[
+WHAT NMP IS -- NMP (Nostr Mobile Primitives) is an embeddable Nostr client engine: a Rust core with Swift and Kotlin SDKs, owning the machinery apps otherwise rebuild badly (event store, relay connections, subscription routing, canonical state, signing, durable publishing). Two nouns: a live query (a declarative demand observed through your platform's native reactive primitive) and a write intent (a durable publish obligation tracked through a reattachable receipt). A library you call, not a framework you live inside.
+
+WHAT IT CAN DO TODAY. Reading & state: declarative live queries with reactive bindings; a redb-backed canonical store with provenance-preserving dedup, replaceable events, NIP-40 expiry, kind:5 deletion, and negative-delta supersession; snapshots return rows plus scoped evidence, never a global "synced". Relays: full connection lifecycle with one finite fan-out ceiling; self-bootstrapping NIP-65 outbox routing (configure only indexers); parse-once ingest with bounded parallel verification; NIP-11 metadata and NIP-77 negentropy wired; NIP-42 AUTH partial. Signing: local keys plus full NIP-46 bunker with reconnect and a bounded sign-only path across all four surfaces; Keychain/Keystore providers and secret zeroization are gaps. Publishing: durable write intents with atomic Accepted, pending rows, signature promotion, compensation, and a bounded-retry outbox; at-most-once ambiguity becomes OutcomeUnknown. Modules (opt-in): NIP-02 following (Swift + Kotlin), NIP-29 groups, NIP-51 relay-list reading with editing landing now, an optional content module and SwiftUI components; NIP-25 reactions and media are not built. Platforms: Rust core is the truth; Swift qualified on macOS host (iOS-Simulator target pending); Kotlin is desktop-JVM only (no Android AAR yet).
+
+HOW SOLID -- 100+ Rust test modules, differential falsifiers against an independent store, live-relay tests, cross-SDK parity, and a trusted-base surface-governance CI gate. Sharp edges: an M5 iOS main-thread jank fixed at the root but not re-measured on device; NIP-29 wins are microbenchmarks not device room-open; AUTH evidence states, cross-process reset exclusion, and full boundedness still open.
+
+PERFORMANCE -- bounded memory and streaming, not first-N truncation. Busiest-room query 5.15ms to 0.26ms; rejected-heavy search 0.188ms to 0.005ms; derived-set resolver over 59,915 rows 3,786ms to 0.73ms. NIP-11 cache has a proven ~67 MiB raw-body ceiling. Public facade 29,734 lines against a 30,000 ceiling. CI green.
+
+WHERE IT'S HEADING -- govern the provisional shapes toward a v2 freeze; encode lifecycle invariants as types; close platform qualification; standard secure-storage signer providers; finish bounded delivery.
+
+THIS HOUR -- merged: #502 (typed FFI error taxonomy for NIP-11/NIP-46) and #503 (bool lifecycle gates re-encoded as Reservation/AsyncWait types). In flight, both green: #504 (SessionExecutor ownership type) and #488 (guarded NIP-51 favorite-relay editing).
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0002.mp3" type="audio/mpeg" length="5551148"/>
+<itunes:title>NMP Briefing — 2026-07-15 11:30 UTC</itunes:title>
+<itunes:duration>347</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-15 11:00 UTC</title>
-<link>https://pablof7z.github.io/nmp/reports/pulse-0001.mp3</link>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0001.mp3</link>
 <guid isPermaLink="false">nmp-pulse-0001</guid>
 <pubDate>Wed, 15 Jul 2026 11:03:30 GMT</pubDate>
 <description><![CDATA[
@@ -36,7 +59,7 @@ PERFORMANCE: build farm spiked to 14.78 one-minute load on 8 cores (likely this 
 
 NEXT HOUR: #502's typed FFI errors and #503's bool-lifecycle types are expected to land -- unblocking the queued #491 signer/FFI cleanup burst behind them.
 ]]></description>
-<enclosure url="https://pablof7z.github.io/nmp/reports/pulse-0001.mp3" type="audio/mpeg" length="1591724"/>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0001.mp3" type="audio/mpeg" length="1591724"/>
 <itunes:title>NMP Pulse — 2026-07-15 11:00 UTC</itunes:title>
 <itunes:duration>99</itunes:duration>
 <itunes:explicit>false</itunes:explicit>
