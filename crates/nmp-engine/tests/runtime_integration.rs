@@ -985,13 +985,13 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
     methods.sort_unstable();
     let mut expected = vec![
         "add_signer",
-        "load_older",
         "observe_diagnostics",
         "publish",
         "publish_tracked",
         "reattach_receipt",
         "relay_information",
         "remove_signer",
+        "request_rows",
         "set_active_account",
         "shutdown",
         "sign_event",

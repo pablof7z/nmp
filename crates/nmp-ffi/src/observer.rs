@@ -5,34 +5,27 @@
 //! thin Swift layer (a later builder) adapts into `AsyncStream`.
 
 use crate::types::{
-    FfiAcquisitionEvidence, FfiDiagnosticsSnapshot, FfiHistoryBatch, FfiRowDelta,
-    FfiSignEventFailure, FfiSignedEvent, FfiWriteStatus,
+    FfiDiagnosticsSnapshot, FfiFrame, FfiSignEventFailure, FfiSignedEvent, FfiWriteStatus,
 };
 
-/// Drains a live subscription's `Receiver<RowsMsg>` (M4 §4b). `on_batch` is
-/// called once per delivered batch, in order, on a dedicated drain thread —
-/// never on the engine thread itself, so a slow Swift-side consumer cannot
-/// stall `EngineCore`'s own recv loop. `on_closed` fires exactly once, when
-/// the engine has torn the subscription down (cancel, or the row channel's
-/// `Sender` was dropped for any other reason) — after which no further
-/// `on_batch` call will ever occur. `evidence` is the query's scoped
-/// per-source acquisition evidence for this batch
-/// (`docs/design/scoped-evidence-49-12-plan.md` §4) -- never a collapsed
-/// completeness verdict.
+/// Drains a live subscription's frames (M4 §4b) -- the ONE observer both
+/// observation modes share (#485): unbounded frames carry the exact delta
+/// transition, windowed frames carry the complete bounded row set plus its
+/// growth fact (see [`FfiFrame`]'s doc for why delivery derives from
+/// boundedness and rows never cross the wire twice). `on_frame` is called
+/// once per delivered frame, in order, on a dedicated drain thread — never
+/// on the engine thread itself, so a slow native consumer cannot stall
+/// `EngineCore`'s own recv loop (windowed frames additionally conflate to
+/// latest-state under backpressure, so a slow consumer sees fewer, never
+/// stale-ordered, frames). `on_closed` fires exactly once, when the engine
+/// has torn the subscription down (cancel, or the frame channel's `Sender`
+/// was dropped for any other reason) — after which no further `on_frame`
+/// call will ever occur. `frame.evidence` is the query's scoped per-source
+/// acquisition evidence (`docs/design/scoped-evidence-49-12-plan.md` §4) --
+/// never a collapsed completeness verdict.
 #[uniffi::export(callback_interface)]
 pub trait RowObserver: Send + Sync {
-    fn on_batch(&self, deltas: Vec<FfiRowDelta>, evidence: FfiAcquisitionEvidence);
-    fn on_closed(&self);
-}
-
-/// Drains one coordinated bounded-history session. Each callback is one
-/// atomic incremental frame containing rows, scoped acquisition evidence,
-/// mechanical load state, and the only continuation valid for that exact
-/// generation. `on_closed` fires exactly once after cancellation or engine
-/// shutdown.
-#[uniffi::export(callback_interface)]
-pub trait HistoryObserver: Send + Sync {
-    fn on_batch(&self, batch: FfiHistoryBatch);
+    fn on_frame(&self, frame: FfiFrame);
     fn on_closed(&self);
 }
 

@@ -135,14 +135,27 @@ class NMPEngine(
      * cold-`Flow`/teardown discipline as the `NMPFilter` overload. */
     fun observe(demand: NMPDemand): Flow<RowBatch> = observeQuery(ffi, demand)
 
-    /** Open one coordinated, bounded history session. The returned object
-     * owns both its conflated full-state [NMPHistoryQuery.batches] flow and
-     * the only capability that can advance that exact session. */
-    fun observeHistory(
-        demand: NMPDemand,
-        pageSize: ULong,
-        maxRows: ULong,
-    ): NMPHistoryQuery = NMPHistoryQuery(ffi, demand, pageSize, maxRows)
+    /** Open a bounded, growable observation over the SAME read noun --
+     * windowing is a policy parameter on `observe`, not a separate verb.
+     * The returned [NMPQuery] owns its conflated full-snapshot
+     * [NMPQuery.frames] flow plus the [NMPQuery.requestRows] growth
+     * capability; delivery is derived from boundedness (see Window.kt's
+     * header for why bounded means snapshots and unbounded means deltas).
+     * Throws typed [NMPError.WindowZeroRows] /
+     * [NMPError.WindowInitialExceedsMax] /
+     * [NMPError.WindowSelectionHasLimit] on an invalid window. */
+    fun observe(filter: NMPFilter, window: Window): NMPQuery =
+        NMPQuery { observer ->
+            nmpRethrowing { ffi.observe(filter.toFfi(), window.toFfi(), observer) }
+        }
+
+    /** The explicit-`NMPDemand` windowed overload (#107 x #485): same
+     * bounded snapshot/growth discipline as the `NMPFilter` overload, for
+     * demands that declare wire authority, access context, or cache mode. */
+    fun observe(demand: NMPDemand, window: Window): NMPQuery =
+        NMPQuery { observer ->
+            nmpRethrowing { ffi.observeDemand(demand.toFfi(), window.toFfi(), observer) }
+        }
 
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,

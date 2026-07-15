@@ -43,7 +43,7 @@ use crate::error::EngineError;
 use crate::relay_information::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
 };
-use crate::subscription::{DiagnosticsSubscription, HistorySubscription, Subscription};
+use crate::subscription::{DiagnosticsSubscription, Subscription, Window};
 
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`
@@ -282,33 +282,57 @@ impl Engine {
         })
     }
 
-    /// Noun 1: open a live query. The returned [`Subscription`] withdraws
-    /// itself on `Drop` (see that type's doc).
-    pub fn observe(&self, query: LiveQuery) -> Result<Subscription, EngineError> {
-        self.with_handle(|handle| {
-            handle
-                .subscribe(query)
-                .map(|(query_handle, rows)| Subscription::new(handle.clone(), query_handle, rows))
-        })?
-        .map_err(EngineError::from_thread_error)
-    }
-
-    /// Open a coordinated, bounded history specialization of the read noun.
-    /// Continuations remain process-local capabilities owned by the returned
-    /// subscription; dropping it withdraws every engine-owned acquisition
-    /// handle opened by prior `load_older` calls.
-    pub fn observe_history(
+    /// Noun 1: open a live query (#485). `window: None` ⇒ the unbounded delta
+    /// observation (semantics unchanged from the pre-#485 `observe`).
+    /// `Some(`[`Window::Expandable`]`)` ⇒ a bounded newest-first snapshot
+    /// observation, growable via [`Subscription::request_rows`]. Delivery mode
+    /// is DERIVED from boundedness (see [`crate::Subscription`]'s doc), never a
+    /// separate knob. The returned [`Subscription`] withdraws itself on `Drop`.
+    ///
+    /// Windowed validation (typed on [`EngineError`], caught here BEFORE the
+    /// engine is touched):
+    /// - `initial > max` ⇒ [`EngineError::WindowInitialExceedsMax`].
+    /// - a selection that already carries a NIP-01 `limit` ⇒
+    ///   [`EngineError::WindowSelectionHasLimit`] (a window and a `limit` would
+    ///   be two competing owners of row membership).
+    ///
+    /// Zero-sized windows are unrepresentable: [`Window::Expandable`] uses
+    /// `NonZeroUsize`.
+    pub fn observe(
         &self,
-        query: nmp_engine::core::HistoryQuery,
-    ) -> Result<HistorySubscription, EngineError> {
-        self.with_handle(|handle| {
-            handle
-                .subscribe_history(query)
-                .map(|(history_handle, batches)| {
-                    HistorySubscription::new(handle.clone(), history_handle, batches)
-                })
-        })?
-        .map_err(EngineError::from_thread_error)
+        query: LiveQuery,
+        window: Option<Window>,
+    ) -> Result<Subscription, EngineError> {
+        match window {
+            None => self
+                .with_handle(|handle| {
+                    handle.subscribe(query).map(|(query_handle, rows)| {
+                        Subscription::new(handle.clone(), query_handle, rows)
+                    })
+                })?
+                .map_err(EngineError::from_thread_error),
+            Some(Window::Expandable { initial, max }) => {
+                if initial > max {
+                    return Err(EngineError::WindowInitialExceedsMax {
+                        initial: initial.get(),
+                        max: max.get(),
+                    });
+                }
+                if query.0.selection.limit.is_some() {
+                    return Err(EngineError::WindowSelectionHasLimit);
+                }
+                let history_query =
+                    nmp_engine::core::HistoryQuery::new(query, initial.get(), max.get());
+                self.with_handle(|handle| {
+                    handle
+                        .subscribe_history(history_query)
+                        .map(|(history_handle, batches)| {
+                            Subscription::new_windowed(handle.clone(), history_handle, batches)
+                        })
+                })?
+                .map_err(EngineError::from_thread_error)
+            }
+        }
     }
 
     /// Noun 2: enqueue a write -- the call itself never blocks on routing/
@@ -1365,7 +1389,7 @@ mod tests {
         engine.shutdown();
 
         assert_eq!(
-            engine.observe(probe_query()).err(),
+            engine.observe(probe_query(), None).err(),
             Some(EngineError::EngineClosed)
         );
         assert_eq!(
@@ -1373,7 +1397,7 @@ mod tests {
             Some(EngineError::EngineClosed)
         );
         assert_eq!(
-            engine.observe_history(history_probe_query()).err(),
+            engine.observe(probe_query(), Some(window_probe())).err(),
             Some(EngineError::EngineClosed)
         );
         assert_eq!(
@@ -1457,7 +1481,7 @@ mod tests {
     fn drop_with_live_observers_tears_down_within_bound_and_disconnects_cleanly() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
 
-        let subscription = engine.observe(probe_query()).expect("engine is open");
+        let subscription = engine.observe(probe_query(), None).expect("engine is open");
         let diagnostics = engine.observe_diagnostics().expect("engine is open");
 
         // Drain the one proactive delivery each stream makes on open (a
@@ -1519,7 +1543,7 @@ mod tests {
     #[test]
     fn cancel_handle_unblocks_a_genuinely_blocked_recv_within_a_bound() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
-        let subscription = engine.observe(probe_query()).expect("engine is open");
+        let subscription = engine.observe(probe_query(), None).expect("engine is open");
 
         // Drain the one proactive delivery a fresh subscribe always makes,
         // so the drain thread's `recv()` below has nothing already queued
@@ -1560,11 +1584,11 @@ mod tests {
     fn history_cancel_handle_unblocks_idle_recv_within_a_bound() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let subscription = engine
-            .observe_history(history_probe_query())
+            .observe(probe_query(), Some(window_probe()))
             .expect("engine is open");
         subscription
             .recv()
-            .expect("a fresh history subscription delivers its current state");
+            .expect("a fresh windowed subscription delivers its current state");
         let cancel = subscription.cancel_handle();
 
         let (result_tx, result_rx) = std::sync::mpsc::channel();
@@ -1582,11 +1606,11 @@ mod tests {
     fn shutdown_wakes_a_live_history_receiver_within_a_bound() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let subscription = engine
-            .observe_history(history_probe_query())
+            .observe(probe_query(), Some(window_probe()))
             .expect("engine is open");
         subscription
             .recv()
-            .expect("a fresh history subscription delivers its current state");
+            .expect("a fresh windowed subscription delivers its current state");
 
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1632,57 +1656,65 @@ mod tests {
             ..EngineConfig::default()
         })
         .expect("engine must build");
-        let query = nmp_engine::core::HistoryQuery::new(
-            LiveQuery::from_filter(nmp_grammar::Filter {
-                kinds: Some(std::collections::BTreeSet::from([7_777])),
-                authors: Some(nmp_grammar::Binding::Literal(
-                    std::collections::BTreeSet::from([keys.public_key().to_hex()]),
-                )),
-                ..nmp_grammar::Filter::default()
-            }),
-            1,
-            3,
-        )
-        .unwrap();
-        let subscription = engine.observe_history(query).expect("history must open");
-        let first = subscription.recv().expect("initial frame must arrive");
-        let continuation = first.continuation.expect("one visible row has a boundary");
-        let advance = subscription.advance_handle();
+        let query = LiveQuery::from_filter(nmp_grammar::Filter {
+            kinds: Some(std::collections::BTreeSet::from([7_777])),
+            authors: Some(nmp_grammar::Binding::Literal(
+                std::collections::BTreeSet::from([keys.public_key().to_hex()]),
+            )),
+            ..nmp_grammar::Filter::default()
+        });
+        let window = Window::Expandable {
+            initial: std::num::NonZeroUsize::new(1).unwrap(),
+            max: std::num::NonZeroUsize::new(3).unwrap(),
+        };
+        let subscription = engine
+            .observe(query, Some(window))
+            .expect("window must open");
+        subscription.recv().expect("initial frame must arrive");
+        let window_handle = subscription
+            .window_handle()
+            .expect("a windowed observation exposes a window handle");
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (batch_tx, batch_rx) = std::sync::mpsc::channel();
         let drain = std::thread::spawn(move || {
             ready_tx.send(()).unwrap();
             loop {
-                let batch = subscription.recv();
+                let frame = subscription.recv();
                 let returned = matches!(
-                    batch.as_ref().map(|batch| batch.load),
-                    Ok(nmp_engine::core::HistoryLoadFact::Returned { .. })
+                    frame
+                        .as_ref()
+                        .ok()
+                        .and_then(|frame| frame.window.as_ref())
+                        .map(|window| window.load),
+                    Some(nmp_engine::core::WindowLoad::Returned { .. })
                 );
-                if returned || batch.is_err() {
-                    batch_tx.send(batch).unwrap();
+                if returned || frame.is_err() {
+                    batch_tx.send(frame).unwrap();
                     break;
                 }
             }
         });
         ready_rx.recv().unwrap();
-        advance
-            .load_older(continuation)
-            .expect("separate capability must advance while recv owns delivery");
-        let batch = batch_rx
+        window_handle
+            .request_rows(2)
+            .expect("separate capability must grow the window while recv owns delivery");
+        let frame = batch_rx
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("advance must unblock the independently-owned receiver")
-            .expect("history channel stays open");
+            .expect("growth must unblock the independently-owned receiver")
+            .expect("window channel stays open");
+        let contents = frame.window.expect("windowed frames carry window contents");
         assert_eq!(
-            batch.load,
-            nmp_engine::core::HistoryLoadFact::Returned { added: 1 }
+            contents.load,
+            nmp_engine::core::WindowLoad::Returned { added: 1 }
         );
+        assert_eq!(contents.rows.len(), 2);
         drain.join().unwrap();
 
         // The drain's subscription has already dropped and cancelled the
-        // shared session. A retained advance clone converges on that same
-        // idempotent guard rather than issuing a second withdrawal.
-        advance.cancel();
+        // shared session. A retained window-handle clone converges on that
+        // same idempotent guard rather than issuing a second withdrawal.
+        window_handle.cancel();
         engine.shutdown();
     }
 
@@ -1696,7 +1728,7 @@ mod tests {
     fn shutdown_stays_clean_with_outstanding_cancel_tokens_for_query_and_diagnostics() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
 
-        let subscription = engine.observe(probe_query()).expect("engine is open");
+        let subscription = engine.observe(probe_query(), None).expect("engine is open");
         let diagnostics = engine.observe_diagnostics().expect("engine is open");
 
         // Obtain (but deliberately never call before shutdown) a cancel
@@ -1761,7 +1793,7 @@ mod tests {
             .expect("engine must build"),
         );
         let retained_engine = Arc::clone(&engine);
-        let subscription = engine.observe(probe_query()).expect("engine is open");
+        let subscription = engine.observe(probe_query(), None).expect("engine is open");
         subscription
             .recv()
             .expect("a fresh subscription delivers its initial frame");
@@ -1885,7 +1917,55 @@ mod tests {
         })
     }
 
-    fn history_probe_query() -> nmp_engine::core::HistoryQuery {
-        nmp_engine::core::HistoryQuery::new(probe_query(), 1, 2).unwrap()
+    fn window_probe() -> Window {
+        Window::Expandable {
+            initial: std::num::NonZeroUsize::new(1).unwrap(),
+            max: std::num::NonZeroUsize::new(2).unwrap(),
+        }
+    }
+
+    /// An unbounded observation has no window: `request_rows` is a typed
+    /// `Unwindowed` refusal and `window_handle()` is `None`. The growth
+    /// capability's very existence is derived from the window policy.
+    #[test]
+    fn unwindowed_observation_has_no_growth_capability() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let subscription = engine.observe(probe_query(), None).expect("engine is open");
+        subscription
+            .recv()
+            .expect("a fresh subscribe delivers one batch");
+        assert!(subscription.window_handle().is_none());
+        assert_eq!(
+            subscription.request_rows(10),
+            Err(crate::RequestRowsError::Unwindowed)
+        );
+        engine.shutdown();
+    }
+
+    /// `initial > max` and a selection that already carries a NIP-01 `limit`
+    /// are typed `EngineError`s caught at `observe`, before the engine is
+    /// touched.
+    #[test]
+    fn windowed_observe_rejects_bad_bounds_and_competing_limit() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        assert_eq!(
+            engine
+                .observe(
+                    probe_query(),
+                    Some(Window::Expandable {
+                        initial: std::num::NonZeroUsize::new(5).unwrap(),
+                        max: std::num::NonZeroUsize::new(2).unwrap(),
+                    })
+                )
+                .err(),
+            Some(EngineError::WindowInitialExceedsMax { initial: 5, max: 2 })
+        );
+        let mut limited = probe_query();
+        limited.0.selection.limit = Some(3);
+        assert_eq!(
+            engine.observe(limited, Some(window_probe())).err(),
+            Some(EngineError::WindowSelectionHasLimit)
+        );
+        engine.shutdown();
     }
 }

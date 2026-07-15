@@ -1,19 +1,21 @@
-use std::sync::Arc;
-
 use nmp_resolver::LiveQuery;
-use nmp_store::EventCursor;
 
 use super::{AcquisitionEvidence, Row, RowDelta};
 
-pub(crate) const HISTORY_CONTINUATION_VERSION: u16 = 1;
-
-/// A validated declaration for one coordinated, bounded history session.
+/// A validated declaration for one coordinated, bounded window session (#485).
 ///
 /// This remains a specialization of NMP's read noun: the selection/source/
 /// access/cache identity is the ordinary [`LiveQuery`], while `page_size`
-/// and `max_rows` bound only the session's active projection. A history
-/// selection cannot also carry NIP-01 `limit`; that would create two
-/// competing owners for row membership.
+/// (the window's initial row count) and `max_rows` (its declared ceiling)
+/// bound only the session's active projection. A windowed selection cannot
+/// also carry NIP-01 `limit`; that would create two competing owners for row
+/// membership.
+///
+/// The public facade (`crates/nmp`) validates `initial <= max` and the
+/// no-selection-limit rule BEFORE constructing this value (surfacing typed
+/// `EngineError`s), so the constructor is infallible and only debug-asserts
+/// those invariants. `NonZeroUsize` at the facade makes the zero cases
+/// unrepresentable before they ever reach here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryQuery {
     query: LiveQuery,
@@ -22,31 +24,29 @@ pub struct HistoryQuery {
 }
 
 impl HistoryQuery {
-    pub fn new(
-        query: LiveQuery,
-        page_size: usize,
-        max_rows: usize,
-    ) -> Result<Self, HistoryQueryError> {
-        if page_size == 0 {
-            return Err(HistoryQueryError::ZeroPageSize);
-        }
-        if max_rows == 0 {
-            return Err(HistoryQueryError::ZeroMaxRows);
-        }
-        if page_size > max_rows {
-            return Err(HistoryQueryError::PageExceedsMaxRows {
-                page_size,
-                max_rows,
-            });
-        }
-        if query.0.selection.limit.is_some() {
-            return Err(HistoryQueryError::SelectionHasLimit);
-        }
-        Ok(Self {
+    /// Construct an already-valid window declaration. `page_size` is the
+    /// initial window size; `max_rows` is the declared growth ceiling. The
+    /// facade guarantees `0 < page_size <= max_rows` and that `query` has no
+    /// NIP-01 `limit`; those are debug-asserted, never re-reported as a
+    /// public error (there is no dead public error enum for a state the
+    /// facade already made unrepresentable).
+    #[must_use]
+    pub fn new(query: LiveQuery, page_size: usize, max_rows: usize) -> Self {
+        debug_assert!(page_size > 0, "window initial size must be non-zero");
+        debug_assert!(max_rows > 0, "window max_rows must be non-zero");
+        debug_assert!(
+            page_size <= max_rows,
+            "window initial size must not exceed max_rows"
+        );
+        debug_assert!(
+            query.0.selection.limit.is_none(),
+            "windowed selection must not also declare a NIP-01 limit"
+        );
+        Self {
             query,
             page_size,
             max_rows,
-        })
+        }
     }
 
     #[must_use]
@@ -84,7 +84,12 @@ impl HistoryQuery {
         Some(LiveQuery(demand))
     }
 
-    pub(crate) fn older_demand(&self, created_at: u64) -> Option<LiveQuery> {
+    /// The bounded older-range acquisition for one advance. `limit` is the
+    /// number of rows still needed to reach the current target (the actual
+    /// advance chunk `new_target - already_held`), not a fixed page size:
+    /// `request_rows(at_least)` can raise the target by an arbitrary amount,
+    /// so the wire request must ask for exactly the shortfall.
+    pub(crate) fn older_demand(&self, created_at: u64, limit: usize) -> Option<LiveQuery> {
         let older_until = created_at.checked_sub(1)?;
         let mut demand = self.query.0.clone();
         let selection = &mut demand.selection;
@@ -95,115 +100,79 @@ impl HistoryQuery {
             return None;
         }
         selection.until = Some(until);
-        selection.limit = Some(self.page_size);
+        selection.limit = Some(limit);
         Some(LiveQuery(demand))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HistoryQueryError {
-    ZeroPageSize,
-    ZeroMaxRows,
-    PageExceedsMaxRows { page_size: usize, max_rows: usize },
-    SelectionHasLimit,
-}
-
-impl std::fmt::Display for HistoryQueryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ZeroPageSize => f.write_str("history page_size must be non-zero"),
-            Self::ZeroMaxRows => f.write_str("history max_rows must be non-zero"),
-            Self::PageExceedsMaxRows {
-                page_size,
-                max_rows,
-            } => write!(
-                f,
-                "history page_size {page_size} exceeds max_rows {max_rows}"
-            ),
-            Self::SelectionHasLimit => {
-                f.write_str("history selection must not also declare a limit")
-            }
-        }
-    }
-}
-
-impl std::error::Error for HistoryQueryError {}
-
-/// Opaque process-local capability for advancing one exact session state.
-/// Every field is private: callers can only return a value NMP issued.
-#[derive(Debug, Clone)]
-pub struct HistoryContinuation {
-    pub(crate) version: u16,
-    pub(crate) engine_identity: Arc<()>,
-    pub(crate) session_identity: Arc<()>,
-    pub(crate) descriptor: LiveQuery,
-    pub(crate) generation: u64,
-    pub(crate) boundary: EventCursor,
-}
-
+/// Mechanical growth state of an expandable window, delivered as a fact in
+/// every window frame (#485). This is the exact vocabulary the facade
+/// re-exports and the FFI/Swift/Kotlin layers mirror.
+///
+/// Deliberately no `Complete`/`End`/`Synced` variant: `Returned { added: 0 }`
+/// only means the planned advance added no canonical row (the per-source
+/// [`AcquisitionEvidence`] carried alongside says whether that is a true
+/// bound or merely an as-yet-unanswered relay). `AtBound { max }` is the only
+/// terminal fact, and it means the declared ceiling was reached — it is a
+/// FACT in a frame, never a thrown error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryLoadFact {
+#[non_exhaustive]
+pub enum WindowLoad {
     Idle,
     Requesting,
     Returned { added: usize },
-    AtBound { max_rows: usize },
+    AtBound { max: usize },
 }
 
+/// The surviving advance failures for `request_rows` (#485). Every prior
+/// continuation-token misuse variant (`WrongVersion`/`WrongEngine`/
+/// `WrongSession`/`WrongDescriptor`/`StaleGeneration`) is gone: growth is
+/// declarative (`at_least: usize`), so there is no opaque token to mismatch.
+/// `LoadInProgress`/`AtBound`/`NoBoundary` are gone too: an in-flight advance
+/// simply raises the target, and being at the bound is a frame fact. What
+/// remains is the two ways a staged advance can be rolled back before it ever
+/// becomes observable. The facade maps these into its public
+/// `RequestRowsError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HistoryLoadError {
-    WrongVersion,
-    WrongEngine,
-    WrongSession,
-    WrongDescriptor,
-    StaleGeneration,
-    LoadInProgress,
-    AtBound { max_rows: usize },
-    NoBoundary,
+pub enum HistoryAdvanceError {
+    /// The canonical store could not read or resolve the advance; the staged
+    /// load was rolled back with exact prior-projection restoration.
     StoreUnavailable,
+    /// No planned relay worker could be acquired for the advance; the staged
+    /// load was rolled back with exact prior-projection restoration.
     TransportUnavailable { reason: String },
 }
 
-impl std::fmt::Display for HistoryLoadError {
+impl std::fmt::Display for HistoryAdvanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WrongVersion => f.write_str("history continuation version is unsupported"),
-            Self::WrongEngine => f.write_str("history continuation belongs to another engine"),
-            Self::WrongSession => f.write_str("history continuation belongs to another session"),
-            Self::WrongDescriptor => {
-                f.write_str("history continuation belongs to another demand descriptor")
-            }
-            Self::StaleGeneration => f.write_str("history continuation is stale"),
-            Self::LoadInProgress => f.write_str("history session already has a staged load"),
-            Self::AtBound { max_rows } => {
-                write!(f, "history session is at its max_rows bound {max_rows}")
-            }
-            Self::NoBoundary => f.write_str("history session has no row boundary to advance"),
             Self::StoreUnavailable => {
-                f.write_str("history advance could not read or resolve the canonical store")
+                f.write_str("window advance could not read or resolve the canonical store")
             }
             Self::TransportUnavailable { reason } => {
-                write!(f, "history advance transport unavailable: {reason}")
+                write!(f, "window advance transport unavailable: {reason}")
             }
         }
     }
 }
 
-impl std::error::Error for HistoryLoadError {}
+impl std::error::Error for HistoryAdvanceError {}
 
-/// One self-contained bounded history frame.
+/// One self-contained bounded window frame.
 ///
 /// `rows` is the authoritative canonical current set, ordered newest-first.
 /// `deltas` describes the transition from the reducer's immediately prior
-/// state; the runtime history receiver re-derives it from its own last
+/// state; the runtime window receiver re-derives it from its own last
 /// delivered `rows` after latest-wins coalescing, so skipped frames never
-/// create a lossy incremental contract.
+/// create a lossy incremental contract. (The public facade drops `deltas` on
+/// the wire for bounded windows — delivery is a conflated snapshot, derived
+/// from boundedness; rows never cross the FFI boundary twice.)
 #[derive(Debug, Clone)]
 pub struct HistoryBatch {
     pub rows: Vec<Row>,
     pub deltas: Vec<RowDelta>,
-    pub continuation: Option<HistoryContinuation>,
     pub evidence: AcquisitionEvidence,
-    pub load: HistoryLoadFact,
+    pub load: WindowLoad,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -225,33 +194,8 @@ mod tests {
     }
 
     #[test]
-    fn declaration_rejects_every_competing_or_unbounded_shape() {
-        assert_eq!(
-            HistoryQuery::new(query(), 0, 10),
-            Err(HistoryQueryError::ZeroPageSize)
-        );
-        assert_eq!(
-            HistoryQuery::new(query(), 1, 0),
-            Err(HistoryQueryError::ZeroMaxRows)
-        );
-        assert_eq!(
-            HistoryQuery::new(query(), 11, 10),
-            Err(HistoryQueryError::PageExceedsMaxRows {
-                page_size: 11,
-                max_rows: 10,
-            })
-        );
-        let mut limited = query();
-        limited.0.selection.limit = Some(5);
-        assert_eq!(
-            HistoryQuery::new(limited, 5, 10),
-            Err(HistoryQueryError::SelectionHasLimit)
-        );
-    }
-
-    #[test]
     fn acquisition_windows_keep_tie_proof_distinct_from_limited_older_work() {
-        let history = HistoryQuery::new(query(), 5, 20).unwrap();
+        let history = HistoryQuery::new(query(), 5, 20);
         assert_eq!(history.initial_demand().0.selection.limit, Some(5));
 
         let tie = history.tie_second_demand(100).unwrap();
@@ -259,9 +203,11 @@ mod tests {
         assert_eq!(tie.0.selection.until, Some(100));
         assert_eq!(tie.0.selection.limit, None);
 
-        let older = history.older_demand(100).unwrap();
+        // The older range asks for exactly the advance chunk it is handed,
+        // not a fixed page size.
+        let older = history.older_demand(100, 3).unwrap();
         assert_eq!(older.0.selection.until, Some(99));
-        assert_eq!(older.0.selection.limit, Some(5));
-        assert!(history.older_demand(0).is_none());
+        assert_eq!(older.0.selection.limit, Some(3));
+        assert!(history.older_demand(0, 3).is_none());
     }
 }

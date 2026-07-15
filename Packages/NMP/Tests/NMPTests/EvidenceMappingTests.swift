@@ -163,10 +163,15 @@ final class EvidenceMappingTests: XCTestCase {
             sig: "sig",
             sources: ["wss://r0.example"]
         )
-        bridge.onBatch(deltas: [.added(row: ffiRow)], evidence: emptyEvidence)
-        bridge.onBatch(
-            deltas: [.sourcesGrew(id: "abc", sources: ["wss://r0.example", "wss://r1.example"])],
-            evidence: emptyEvidence
+        bridge.onFrame(
+            frame: FfiFrame(deltas: [.added(row: ffiRow)], window: nil, evidence: emptyEvidence)
+        )
+        bridge.onFrame(
+            frame: FfiFrame(
+                deltas: [.sourcesGrew(id: "abc", sources: ["wss://r0.example", "wss://r1.example"])],
+                window: nil,
+                evidence: emptyEvidence
+            )
         )
         bridge.onClosed()
 

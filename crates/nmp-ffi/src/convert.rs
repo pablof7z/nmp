@@ -9,14 +9,14 @@
 //! (plan §2/§6).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::num::NonZeroUsize;
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, CoverageInterval, DiagnosticsSnapshot,
-    Durability as GDurability, FilterCoverageEntry, HistoryBatch, HistoryLoadError,
-    HistoryLoadFact, HistoryQuery, HistoryQueryError, Lane, RelayDiagnosticsSnapshot, Row,
-    RowDelta, ShortfallFact, SourceEvidence, SourceStatus, WriteIntent as GWriteIntent,
-    WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
+    Durability as GDurability, FilterCoverageEntry, Frame, Lane, RelayDiagnosticsSnapshot,
+    RequestRowsError, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus, Window,
+    WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
+    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
     AccessContext as GAccessContext, Binding as GBinding, CacheMode as GCacheMode,
@@ -32,11 +32,11 @@ use nostr::{
 use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCacheMode,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
-    FfiFilterCoverage, FfiHistoryBatch, FfiHistoryLoadFact, FfiHistoryQuery, FfiIdentityField,
-    FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
-    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus, NmpHistoryContinuation,
+    FfiFilterCoverage, FfiFrame, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics,
+    FfiRelayInformationErrorKind, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp,
+    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority,
+    FfiSourceEvidence, FfiSourceStatus, FfiWindow, FfiWindowContents, FfiWindowLoad,
+    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -148,19 +148,23 @@ pub enum FfiError {
     /// (`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,
     /// #107 Contract: "the pinned relay set must be nonempty").
     EmptyPinnedRelaySet,
-    HistoryPageSizeOutOfRange {
-        value: u64,
+    /// A windowed observe declared `initial == 0` or `max == 0` in its
+    /// [`FfiWindow::Expandable`] -- a window must hold at least one row.
+    /// (On sub-64-bit targets this also covers a bound too large to be a
+    /// platform row count -- unreachable on every supported 64-bit target --
+    /// so "representable non-zero row count" is the precise invariant.)
+    WindowZeroRows,
+    /// A windowed observe declared `initial > max` -- the window could never
+    /// legally hold its own starting set.
+    WindowInitialExceedsMax {
+        initial: u64,
+        max: u64,
     },
-    HistoryMaxRowsOutOfRange {
-        value: u64,
-    },
-    HistoryZeroPageSize,
-    HistoryZeroMaxRows,
-    HistoryPageExceedsMaxRows {
-        page_size: u64,
-        max_rows: u64,
-    },
-    HistorySelectionHasLimit,
+    /// A windowed observe was declared over a selection that already carries
+    /// a NIP-01 `limit` -- the window IS the bound; carrying both would give
+    /// two competing row ceilings (`nmp::EngineError::WindowSelectionHasLimit`
+    /// mirror).
+    WindowSelectionHasLimit,
     /// #156: `NmpEngine::group_message_intent` requires an active account
     /// because NMP, not the native caller, owns the unsigned event author.
     NoActiveAccount,
@@ -185,21 +189,26 @@ pub enum FfiError {
     },
 }
 
-/// Exact failure returned by `NmpHistoryHandle::load_older`. Continuations
-/// stay opaque, but misuse never collapses into a string or a generic engine
-/// failure.
+/// Exact failure returned by `NmpQueryHandle::request_rows`
+/// (`nmp::RequestRowsError` mirror). Growth is declarative -- there is no
+/// token to misuse and no generation to go stale, so the only failures left
+/// are the structural one (`Unwindowed`) and genuine advance failures.
+/// `AtBound` is deliberately NOT here: reaching the declared `max` is a FACT
+/// delivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
-pub enum FfiHistoryLoadError {
-    WrongVersion,
-    WrongEngine,
-    WrongSession,
-    WrongDescriptor,
-    StaleGeneration,
-    LoadInProgress,
-    AtBound { max_rows: u64 },
-    NoBoundary,
+pub enum FfiRequestRowsError {
+    /// This subscription observes the full live set; there is no window to
+    /// grow.
+    Unwindowed,
+    EngineClosed,
+    /// The canonical store could not serve the advance (the staged load was
+    /// rolled back).
     StoreUnavailable,
-    TransportUnavailable { reason: String },
+    /// No planned source could serve the advance (the staged load was rolled
+    /// back).
+    TransportUnavailable {
+        reason: String,
+    },
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -225,6 +234,13 @@ impl From<nmp::EngineError> for FfiError {
             },
             nmp::EngineError::ReceiptCorrelationIdExhausted => Self::ReceiptCorrelationIdExhausted,
             nmp::EngineError::EngineClosed => Self::EngineClosed,
+            nmp::EngineError::WindowInitialExceedsMax { initial, max } => {
+                Self::WindowInitialExceedsMax {
+                    initial: initial as u64,
+                    max: max as u64,
+                }
+            }
+            nmp::EngineError::WindowSelectionHasLimit => Self::WindowSelectionHasLimit,
         }
     }
 }
@@ -276,23 +292,14 @@ impl std::fmt::Display for FfiError {
             Self::EmptyPinnedRelaySet => {
                 write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
             }
-            Self::HistoryPageSizeOutOfRange { value } => {
-                write!(f, "history page_size {value} does not fit this platform")
+            Self::WindowZeroRows => {
+                write!(f, "window initial/max must be representable non-zero row counts")
             }
-            Self::HistoryMaxRowsOutOfRange { value } => {
-                write!(f, "history max_rows {value} does not fit this platform")
+            Self::WindowInitialExceedsMax { initial, max } => {
+                write!(f, "window initial {initial} exceeds max {max}")
             }
-            Self::HistoryZeroPageSize => write!(f, "history page_size must be non-zero"),
-            Self::HistoryZeroMaxRows => write!(f, "history max_rows must be non-zero"),
-            Self::HistoryPageExceedsMaxRows {
-                page_size,
-                max_rows,
-            } => write!(
-                f,
-                "history page_size {page_size} exceeds max_rows {max_rows}"
-            ),
-            Self::HistorySelectionHasLimit => {
-                write!(f, "history selection must not also declare a limit")
+            Self::WindowSelectionHasLimit => {
+                write!(f, "a windowed selection must not also declare a limit")
             }
             Self::NoActiveAccount => write!(f, "group messages require an active account"),
             Self::IntentAlreadyConsumed => {
@@ -439,53 +446,44 @@ pub fn sign_event_failure(error: nmp::SignEventError) -> FfiSignEventFailure {
 
 impl std::error::Error for FfiError {}
 
-impl From<HistoryLoadError> for FfiHistoryLoadError {
-    fn from(error: HistoryLoadError) -> Self {
+impl From<RequestRowsError> for FfiRequestRowsError {
+    fn from(error: RequestRowsError) -> Self {
         match error {
-            HistoryLoadError::WrongVersion => Self::WrongVersion,
-            HistoryLoadError::WrongEngine => Self::WrongEngine,
-            HistoryLoadError::WrongSession => Self::WrongSession,
-            HistoryLoadError::WrongDescriptor => Self::WrongDescriptor,
-            HistoryLoadError::StaleGeneration => Self::StaleGeneration,
-            HistoryLoadError::LoadInProgress => Self::LoadInProgress,
-            HistoryLoadError::AtBound { max_rows } => Self::AtBound {
-                max_rows: max_rows as u64,
-            },
-            HistoryLoadError::NoBoundary => Self::NoBoundary,
-            HistoryLoadError::StoreUnavailable => Self::StoreUnavailable,
-            HistoryLoadError::TransportUnavailable { reason } => {
+            RequestRowsError::Unwindowed => Self::Unwindowed,
+            RequestRowsError::EngineClosed => Self::EngineClosed,
+            RequestRowsError::StoreUnavailable => Self::StoreUnavailable,
+            RequestRowsError::TransportUnavailable { reason } => {
                 Self::TransportUnavailable { reason }
             }
+            // `nmp::RequestRowsError` is `#[non_exhaustive]`: a variant added
+            // upstream before this seam learns it must still cross typed --
+            // as an advance failure carrying the upstream Display -- never a
+            // panic across the FFI boundary.
+            other => Self::TransportUnavailable {
+                reason: other.to_string(),
+            },
         }
     }
 }
 
-impl std::fmt::Display for FfiHistoryLoadError {
+impl std::fmt::Display for FfiRequestRowsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WrongVersion => f.write_str("history continuation version is unsupported"),
-            Self::WrongEngine => f.write_str("history continuation belongs to another engine"),
-            Self::WrongSession => f.write_str("history continuation belongs to another session"),
-            Self::WrongDescriptor => {
-                f.write_str("history continuation belongs to another demand descriptor")
-            }
-            Self::StaleGeneration => f.write_str("history continuation is stale"),
-            Self::LoadInProgress => f.write_str("history session already has a staged load"),
-            Self::AtBound { max_rows } => {
-                write!(f, "history session is at its max_rows bound {max_rows}")
-            }
-            Self::NoBoundary => f.write_str("history session has no row boundary to advance"),
+            Self::Unwindowed => f.write_str(
+                "this subscription observes the full live set; there is no window to grow",
+            ),
+            Self::EngineClosed => f.write_str("engine already shut down"),
             Self::StoreUnavailable => {
-                f.write_str("history advance could not read or resolve the canonical store")
+                f.write_str("window advance could not read or resolve the canonical store")
             }
             Self::TransportUnavailable { reason } => {
-                write!(f, "history advance transport unavailable: {reason}")
+                write!(f, "window advance transport unavailable: {reason}")
             }
         }
     }
 }
 
-impl std::error::Error for FfiHistoryLoadError {}
+impl std::error::Error for FfiRequestRowsError {}
 
 impl From<GDemandError> for FfiError {
     fn from(err: GDemandError) -> Self {
@@ -540,78 +538,152 @@ mod engine_error_tests {
 }
 
 #[cfg(test)]
-mod history_conversion_tests {
+mod window_conversion_tests {
     use super::*;
 
-    fn query(page_size: u64, max_rows: u64, limit: Option<u32>) -> FfiHistoryQuery {
-        FfiHistoryQuery {
-            demand: FfiDemand {
-                selection: FfiFilter {
-                    limit,
-                    ..FfiFilter::default()
-                },
-                source: FfiSourceAuthority::Public,
-                access: FfiAccessContext::Public,
-                cache: FfiCacheMode::Agnostic,
-            },
-            page_size,
-            max_rows,
+    fn expandable(initial: u64, max: u64) -> Option<FfiWindow> {
+        Some(FfiWindow::Expandable { initial, max })
+    }
+
+    #[test]
+    fn absent_window_passes_through_as_the_unbounded_observation() {
+        assert_eq!(window_from_ffi(None).unwrap(), None);
+    }
+
+    #[test]
+    fn window_validation_stays_typed_at_the_ffi_boundary() {
+        assert_eq!(
+            window_from_ffi(expandable(0, 10)).unwrap_err(),
+            FfiError::WindowZeroRows
+        );
+        assert_eq!(
+            window_from_ffi(expandable(1, 0)).unwrap_err(),
+            FfiError::WindowZeroRows
+        );
+        assert_eq!(
+            window_from_ffi(expandable(11, 10)).unwrap_err(),
+            FfiError::WindowInitialExceedsMax {
+                initial: 11,
+                max: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn valid_window_builds_exact_non_zero_bounds() {
+        match window_from_ffi(expandable(2, 50)).unwrap() {
+            Some(Window::Expandable { initial, max }) => {
+                assert_eq!(initial.get(), 2);
+                assert_eq!(max.get(), 50);
+            }
+            other => panic!("expected Window::Expandable, got {other:?}"),
         }
     }
 
     #[test]
-    fn history_query_validation_stays_typed_at_the_ffi_boundary() {
+    fn window_load_facts_map_variant_for_variant() {
+        assert_eq!(window_load_to_ffi(WindowLoad::Idle), FfiWindowLoad::Idle);
         assert_eq!(
-            history_query_from_ffi(query(0, 10, None)).unwrap_err(),
-            FfiError::HistoryZeroPageSize
+            window_load_to_ffi(WindowLoad::Requesting),
+            FfiWindowLoad::Requesting
         );
         assert_eq!(
-            history_query_from_ffi(query(1, 0, None)).unwrap_err(),
-            FfiError::HistoryZeroMaxRows
+            window_load_to_ffi(WindowLoad::Returned { added: 3 }),
+            FfiWindowLoad::Returned { added: 3 }
         );
         assert_eq!(
-            history_query_from_ffi(query(11, 10, None)).unwrap_err(),
-            FfiError::HistoryPageExceedsMaxRows {
-                page_size: 11,
-                max_rows: 10,
-            }
-        );
-        assert_eq!(
-            history_query_from_ffi(query(1, 10, Some(1))).unwrap_err(),
-            FfiError::HistorySelectionHasLimit
+            window_load_to_ffi(WindowLoad::AtBound { max: 20 }),
+            FfiWindowLoad::AtBound { max: 20 }
         );
     }
 
     #[test]
-    fn history_load_errors_preserve_every_misuse_axis() {
+    fn request_rows_errors_preserve_every_failure_axis() {
         assert_eq!(
-            FfiHistoryLoadError::from(HistoryLoadError::WrongEngine),
-            FfiHistoryLoadError::WrongEngine
+            FfiRequestRowsError::from(RequestRowsError::Unwindowed),
+            FfiRequestRowsError::Unwindowed
         );
         assert_eq!(
-            FfiHistoryLoadError::from(HistoryLoadError::WrongSession),
-            FfiHistoryLoadError::WrongSession
+            FfiRequestRowsError::from(RequestRowsError::EngineClosed),
+            FfiRequestRowsError::EngineClosed
         );
         assert_eq!(
-            FfiHistoryLoadError::from(HistoryLoadError::WrongDescriptor),
-            FfiHistoryLoadError::WrongDescriptor
+            FfiRequestRowsError::from(RequestRowsError::StoreUnavailable),
+            FfiRequestRowsError::StoreUnavailable
         );
         assert_eq!(
-            FfiHistoryLoadError::from(HistoryLoadError::StaleGeneration),
-            FfiHistoryLoadError::StaleGeneration
-        );
-        assert_eq!(
-            FfiHistoryLoadError::from(HistoryLoadError::AtBound { max_rows: 20 }),
-            FfiHistoryLoadError::AtBound { max_rows: 20 }
-        );
-        assert_eq!(
-            FfiHistoryLoadError::from(HistoryLoadError::TransportUnavailable {
+            FfiRequestRowsError::from(RequestRowsError::TransportUnavailable {
                 reason: "offline".to_string(),
             }),
-            FfiHistoryLoadError::TransportUnavailable {
+            FfiRequestRowsError::TransportUnavailable {
                 reason: "offline".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn windowed_frame_ships_the_snapshot_and_drops_deltas_on_the_wire() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9_999), "windowed")
+            .sign_with_keys(&keys)
+            .expect("test fixture must sign cleanly");
+        let relay = RelayUrl::parse("wss://window.example").unwrap();
+        let row = Row {
+            event: event.clone(),
+            sources: std::collections::BTreeSet::from([relay]),
+        };
+        let frame = Frame {
+            // Receiver-derived deltas exist Rust-side for windowed frames --
+            // the wire must drop them (never carry rows twice).
+            deltas: vec![RowDelta::Added(row.clone())],
+            window: Some(nmp::WindowContents {
+                rows: vec![row],
+                load: WindowLoad::Returned { added: 1 },
+            }),
+            evidence: AcquisitionEvidence {
+                sources: vec![],
+                shortfall: vec![],
+            },
+        };
+
+        let ffi = frame_to_ffi(frame);
+        assert!(
+            ffi.deltas.is_empty(),
+            "windowed frames must never ship wire deltas alongside the snapshot"
+        );
+        let window = ffi.window.expect("windowed frame must carry its contents");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(window.rows[0].id, event.id.to_hex());
+        assert_eq!(window.load, FfiWindowLoad::Returned { added: 1 });
+    }
+
+    #[test]
+    fn unbounded_frame_ships_deltas_and_no_window() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9_999), "unbounded")
+            .sign_with_keys(&keys)
+            .expect("test fixture must sign cleanly");
+        let relay = RelayUrl::parse("wss://unbounded.example").unwrap();
+        let row = Row {
+            event: event.clone(),
+            sources: std::collections::BTreeSet::from([relay]),
+        };
+        let frame = Frame {
+            deltas: vec![RowDelta::Added(row)],
+            window: None,
+            evidence: AcquisitionEvidence {
+                sources: vec![],
+                shortfall: vec![],
+            },
+        };
+
+        let ffi = frame_to_ffi(frame);
+        assert_eq!(ffi.window, None);
+        assert_eq!(ffi.deltas.len(), 1);
+        match &ffi.deltas[0] {
+            FfiRowDelta::Added { row } => assert_eq!(row.id, event.id.to_hex()),
+            other => panic!("expected FfiRowDelta::Added, got {other:?}"),
+        }
     }
 }
 
@@ -967,10 +1039,10 @@ fn shortfall_fact_to_ffi(f: ShortfallFact) -> FfiShortfallFact {
 }
 
 /// `nmp::AcquisitionEvidence -> FfiAcquisitionEvidence` (the scoped,
-/// per-query surface `RowsMsg`/`RowObserver::on_batch` carries -- ratified
-/// codex-nova names, see `types.rs`'s own doc). Replaces the deleted
-/// query-level collapse: every source's facts map
-/// faithfully, never rolled up into a verdict.
+/// per-query surface every `FfiFrame`/`RowObserver::on_frame` carries --
+/// ratified codex-nova names, see `types.rs`'s own doc). Replaces the
+/// deleted query-level collapse: every source's facts map faithfully, never
+/// rolled up into a verdict.
 pub fn evidence_to_ffi(e: AcquisitionEvidence) -> FfiAcquisitionEvidence {
     FfiAcquisitionEvidence {
         sources: e.sources.into_iter().map(source_evidence_to_ffi).collect(),
@@ -978,52 +1050,85 @@ pub fn evidence_to_ffi(e: AcquisitionEvidence) -> FfiAcquisitionEvidence {
     }
 }
 
-pub fn history_query_from_ffi(query: FfiHistoryQuery) -> Result<HistoryQuery, FfiError> {
-    let page_size =
-        usize::try_from(query.page_size).map_err(|_| FfiError::HistoryPageSizeOutOfRange {
-            value: query.page_size,
-        })?;
-    let max_rows =
-        usize::try_from(query.max_rows).map_err(|_| FfiError::HistoryMaxRowsOutOfRange {
-            value: query.max_rows,
-        })?;
-    let demand = demand_from_ffi(query.demand)?;
-    HistoryQuery::new(nmp::LiveQuery(demand), page_size, max_rows).map_err(|error| match error {
-        HistoryQueryError::ZeroPageSize => FfiError::HistoryZeroPageSize,
-        HistoryQueryError::ZeroMaxRows => FfiError::HistoryZeroMaxRows,
-        HistoryQueryError::PageExceedsMaxRows {
-            page_size,
-            max_rows,
-        } => FfiError::HistoryPageExceedsMaxRows {
-            page_size: page_size as u64,
-            max_rows: max_rows as u64,
-        },
-        HistoryQueryError::SelectionHasLimit => FfiError::HistorySelectionHasLimit,
-    })
-}
-
-fn history_load_fact_to_ffi(load: HistoryLoadFact) -> FfiHistoryLoadFact {
-    match load {
-        HistoryLoadFact::Idle => FfiHistoryLoadFact::Idle,
-        HistoryLoadFact::Requesting => FfiHistoryLoadFact::Requesting,
-        HistoryLoadFact::Returned { added } => FfiHistoryLoadFact::Returned {
-            added: added as u64,
-        },
-        HistoryLoadFact::AtBound { max_rows } => FfiHistoryLoadFact::AtBound {
-            max_rows: max_rows as u64,
-        },
+/// `Option<FfiWindow> -> Option<nmp::Window>` -- the windowed-observe
+/// validation seam (#485). `None` passes through untouched (the unbounded
+/// delta observation, semantics unchanged). `Some` is validated here, before
+/// any engine resource is reserved: a zero bound is
+/// [`FfiError::WindowZeroRows`], `initial > max` is
+/// [`FfiError::WindowInitialExceedsMax`] -- typed values, never a panic.
+/// (`WindowSelectionHasLimit` is NOT checked here: only the engine sees the
+/// resolved selection, so that conflict surfaces from `Engine::observe`
+/// through the same typed [`FfiError`].)
+pub fn window_from_ffi(window: Option<FfiWindow>) -> Result<Option<Window>, FfiError> {
+    match window {
+        None => Ok(None),
+        Some(FfiWindow::Expandable { initial, max }) => {
+            if initial == 0 || max == 0 {
+                return Err(FfiError::WindowZeroRows);
+            }
+            if initial > max {
+                return Err(FfiError::WindowInitialExceedsMax { initial, max });
+            }
+            // `usize::try_from` can only fail on sub-64-bit targets (a bound
+            // wider than the platform's addressable row count); it shares
+            // the "not a representable non-zero row count" variant with the
+            // zero case rather than panicking across the boundary.
+            let initial = usize::try_from(initial)
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .ok_or(FfiError::WindowZeroRows)?;
+            let max = usize::try_from(max)
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .ok_or(FfiError::WindowZeroRows)?;
+            Ok(Some(Window::Expandable { initial, max }))
+        }
     }
 }
 
-pub fn history_batch_to_ffi(batch: HistoryBatch) -> FfiHistoryBatch {
-    FfiHistoryBatch {
-        rows: batch.rows.iter().map(row_to_ffi_row).collect(),
-        deltas: batch.deltas.iter().map(row_delta_to_ffi).collect(),
-        continuation: batch
-            .continuation
-            .map(|inner| Arc::new(NmpHistoryContinuation { inner })),
-        evidence: evidence_to_ffi(batch.evidence),
-        load: history_load_fact_to_ffi(batch.load),
+/// `nmp::WindowLoad -> FfiWindowLoad` -- the mechanical growth fact of an
+/// expandable window, mapped variant-for-variant.
+pub fn window_load_to_ffi(load: WindowLoad) -> FfiWindowLoad {
+    match load {
+        WindowLoad::Idle => FfiWindowLoad::Idle,
+        WindowLoad::Requesting => FfiWindowLoad::Requesting,
+        WindowLoad::Returned { added } => FfiWindowLoad::Returned {
+            added: added as u64,
+        },
+        WindowLoad::AtBound { max } => FfiWindowLoad::AtBound { max: max as u64 },
+        // `nmp::WindowLoad` is `#[non_exhaustive]`: a growth fact added
+        // upstream before this seam learns it must degrade to the quiescent
+        // fact, never panic across the FFI boundary. (Adding the real mirror
+        // variant is the mechanical fix when the upstream enum grows.)
+        _ => FfiWindowLoad::Idle,
+    }
+}
+
+/// `nmp::Frame -> FfiFrame` -- the ONE wire shape both observation modes
+/// share, with delivery derived from boundedness (#485):
+///
+/// - Unbounded (`frame.window == None`): map the engine-computed lossless
+///   deltas exactly as before; the full set is never redelivered (full-set
+///   redelivery is the O(rows squared) P0).
+/// - Windowed: ship the complete bounded row set + growth fact and DROP the
+///   receiver-derived deltas on the wire -- the native bridges replace their
+///   row state from the snapshot, so carrying deltas too would cross every
+///   row the FFI boundary twice only to be folded and discarded.
+pub fn frame_to_ffi(frame: Frame) -> FfiFrame {
+    match frame.window {
+        Some(contents) => FfiFrame {
+            deltas: Vec::new(),
+            window: Some(FfiWindowContents {
+                rows: contents.rows.iter().map(row_to_ffi_row).collect(),
+                load: window_load_to_ffi(contents.load),
+            }),
+            evidence: evidence_to_ffi(frame.evidence),
+        },
+        None => FfiFrame {
+            deltas: frame.deltas.iter().map(row_delta_to_ffi).collect(),
+            window: None,
+            evidence: evidence_to_ffi(frame.evidence),
+        },
     }
 }
 

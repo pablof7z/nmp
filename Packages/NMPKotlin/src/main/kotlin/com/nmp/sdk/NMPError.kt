@@ -68,21 +68,20 @@ sealed class NMPError(message: String) : Exception(message) {
     object EmptyPinnedRelaySet :
         NMPError("SourceAuthority.Pinned requires a nonempty relay set")
 
-    data class HistoryPageSizeOutOfRange(val value: ULong) :
-        NMPError("history pageSize $value does not fit this platform")
+    /** A windowed `observe` declared a zero `initial` or `max` row count
+     * (#485) -- an empty window could never deliver a row. */
+    object WindowZeroRows : NMPError("window initial and max row counts must be non-zero")
 
-    data class HistoryMaxRowsOutOfRange(val value: ULong) :
-        NMPError("history maxRows $value does not fit this platform")
+    /** A windowed `observe` declared `initial > max` (#485) -- the window
+     * would start above its own declared ceiling. */
+    data class WindowInitialExceedsMax(val initial: ULong, val max: ULong) :
+        NMPError("window initial $initial exceeds max $max")
 
-    object HistoryZeroPageSize : NMPError("history pageSize must be non-zero")
-
-    object HistoryZeroMaxRows : NMPError("history maxRows must be non-zero")
-
-    data class HistoryPageExceedsMaxRows(val pageSize: ULong, val maxRows: ULong) :
-        NMPError("history pageSize $pageSize exceeds maxRows $maxRows")
-
-    object HistorySelectionHasLimit :
-        NMPError("history selection must not also declare a limit")
+    /** A windowed `observe` selection already declares a NIP-01 `limit`
+     * (#485) -- the window IS the bound; carrying a second bound in the
+     * selection would let the two silently fight. */
+    object WindowSelectionHasLimit :
+        NMPError("windowed selection must not also declare a limit")
 
     /** #156: `groupMessageIntent` has no active account from which NMP can
      * derive the unsigned event author. */
@@ -124,15 +123,10 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.NostrEntitySecretKeyRejected -> NostrEntitySecretKeyRejected
                 is FfiException.AuthorOutboxesRequiresBoundAuthors -> AuthorOutboxesRequiresBoundAuthors
                 is FfiException.EmptyPinnedRelaySet -> EmptyPinnedRelaySet
-                is FfiException.HistoryPageSizeOutOfRange ->
-                    HistoryPageSizeOutOfRange(ffi.value)
-                is FfiException.HistoryMaxRowsOutOfRange ->
-                    HistoryMaxRowsOutOfRange(ffi.value)
-                is FfiException.HistoryZeroPageSize -> HistoryZeroPageSize
-                is FfiException.HistoryZeroMaxRows -> HistoryZeroMaxRows
-                is FfiException.HistoryPageExceedsMaxRows ->
-                    HistoryPageExceedsMaxRows(ffi.pageSize, ffi.maxRows)
-                is FfiException.HistorySelectionHasLimit -> HistorySelectionHasLimit
+                is FfiException.WindowZeroRows -> WindowZeroRows
+                is FfiException.WindowInitialExceedsMax ->
+                    WindowInitialExceedsMax(ffi.initial, ffi.max)
+                is FfiException.WindowSelectionHasLimit -> WindowSelectionHasLimit
                 is FfiException.NoActiveAccount -> NoActiveAccount
                 is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
                 is FfiException.RelayInformationUnavailable ->

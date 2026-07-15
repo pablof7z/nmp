@@ -28,23 +28,20 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::convert::{
-    demand_from_ffi, diagnostics_snapshot_to_ffi, evidence_to_ffi, filter_from_ffi,
-    history_batch_to_ffi, history_query_from_ffi, parse_pubkey, relay_information_error_kind,
-    row_delta_to_ffi, sign_event_failure, sign_event_request_from_ffi, sign_event_start_error,
-    signed_event_to_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError,
-    FfiHistoryLoadError, WriteStatusRef,
+    demand_from_ffi, diagnostics_snapshot_to_ffi, filter_from_ffi, frame_to_ffi, parse_pubkey,
+    relay_information_error_kind, sign_event_failure, sign_event_request_from_ffi,
+    sign_event_start_error, signed_event_to_ffi, window_from_ffi, write_intent_from_ffi,
+    write_status_to_ffi, FfiError, FfiRequestRowsError, WriteStatusRef,
 };
 use crate::nip02::{
     action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
     FollowObserver, NmpFollowHandle,
 };
-use crate::observer::{
-    DiagnosticsObserver, HistoryObserver, ReceiptObserver, RowObserver, SignEventObserver,
-};
+use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
 use crate::types::{
-    FfiDemand, FfiFilter, FfiHistoryQuery, FfiReceiptReattachment, FfiRelayInformation,
+    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiRelayInformation,
     FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
-    FfiRelayInformationLimitations, FfiSignEventRequest, FfiWriteIntent, NmpHistoryContinuation,
+    FfiRelayInformationLimitations, FfiSignEventRequest, FfiWindow, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -543,27 +540,48 @@ impl NmpEngine {
     /// demand drop, plan §4c); call [`NmpQueryHandle::cancel`] for an
     /// explicit early teardown instead of waiting on Swift's own `deinit`
     /// timing.
+    ///
+    /// `window` selects the observation's delivery policy (#485). `None` is
+    /// today's unbounded observation: a lossless delta stream, full set
+    /// never redelivered. `Some(FfiWindow::Expandable { initial, max })` is
+    /// a bounded newest-first window: each frame carries the complete
+    /// current row set + growth fact in `FfiFrame::window` (deltas stay
+    /// empty on the wire) and grows only via
+    /// [`NmpQueryHandle::request_rows`], never above `max`. Zero bounds and
+    /// `initial > max` fail closed here with a typed [`FfiError`]; a
+    /// windowed selection that already declares a NIP-01 `limit` fails with
+    /// [`FfiError::WindowSelectionHasLimit`].
     pub fn observe(
         &self,
         query: FfiFilter,
+        #[uniffi(default = None)] window: Option<FfiWindow>,
         observer: Box<dyn RowObserver>,
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let filter = filter_from_ffi(query)?;
+        let window = window_from_ffi(window)?;
         let reservation = self.engine.reserve_native_task("row-observer")?;
         let task_cancel = self.engine.native_task_cancel()?;
         let starter = start_native_bridge(reservation, task_cancel, "row-observer")?;
-        let subscription = self.engine.observe(nmp::LiveQuery::from_filter(filter))?;
+        let subscription = self
+            .engine
+            .observe(nmp::LiveQuery::from_filter(filter), window)?;
         let cancel = subscription.cancel_handle();
+        // Taken BEFORE the drain thread owns the subscription: `recv` blocks
+        // there forever, so this cloneable capability is the only way the
+        // handle can grow the window from another thread.
+        let window_handle = subscription.window_handle();
 
         starter.run(move || {
-            while let Ok((deltas, evidence)) = subscription.recv() {
-                let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
-                observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
+            while let Ok(frame) = subscription.recv() {
+                observer.on_frame(frame_to_ffi(frame));
             }
             observer.on_closed();
         });
 
-        Ok(Arc::new(NmpQueryHandle { cancel }))
+        Ok(Arc::new(NmpQueryHandle {
+            cancel,
+            window: window_handle,
+        }))
     }
 
     /// Open a live subscription over an explicit [`FfiDemand`] (#107) --
@@ -571,54 +589,34 @@ impl NmpEngine {
     /// `FfiFilter` (which always takes `Demand::from_filter`'s static
     /// default) isn't enough: declaring `Pinned` wire authority, a non-
     /// default `AccessContext`, or a non-`Agnostic` `CacheMode`. Same
-    /// drain-thread/cancel-handle shape as `observe` in every other respect.
+    /// drain-thread/cancel-handle/window shape as `observe` in every other
+    /// respect (see that method's doc for the `window` policy).
     pub fn observe_demand(
         &self,
         query: FfiDemand,
+        #[uniffi(default = None)] window: Option<FfiWindow>,
         observer: Box<dyn RowObserver>,
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let demand = demand_from_ffi(query)?;
+        let window = window_from_ffi(window)?;
         let reservation = self.engine.reserve_native_task("demand-observer")?;
         let task_cancel = self.engine.native_task_cancel()?;
         let starter = start_native_bridge(reservation, task_cancel, "demand-observer")?;
-        let subscription = self.engine.observe(nmp::LiveQuery(demand))?;
+        let subscription = self.engine.observe(nmp::LiveQuery(demand), window)?;
         let cancel = subscription.cancel_handle();
+        let window_handle = subscription.window_handle();
 
         starter.run(move || {
-            while let Ok((deltas, evidence)) = subscription.recv() {
-                let ffi_deltas = deltas.iter().map(row_delta_to_ffi).collect();
-                observer.on_batch(ffi_deltas, evidence_to_ffi(evidence));
+            while let Ok(frame) = subscription.recv() {
+                observer.on_frame(frame_to_ffi(frame));
             }
             observer.on_closed();
         });
 
-        Ok(Arc::new(NmpQueryHandle { cancel }))
-    }
-
-    /// Open one coordinated bounded-history session. The drain task owns the
-    /// blocking receiver exclusively; the returned handle owns only the
-    /// opaque advance/cancel capability for that same session. Every older
-    /// request must return a continuation issued in the latest callback.
-    pub fn observe_history(
-        &self,
-        query: FfiHistoryQuery,
-        observer: Box<dyn HistoryObserver>,
-    ) -> Result<Arc<NmpHistoryHandle>, FfiError> {
-        let query = history_query_from_ffi(query)?;
-        let reservation = self.engine.reserve_native_task("history-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "history-observer")?;
-        let subscription = self.engine.observe_history(query)?;
-        let advance = subscription.advance_handle();
-
-        starter.run(move || {
-            while let Ok(batch) = subscription.recv() {
-                observer.on_batch(history_batch_to_ffi(batch));
-            }
-            observer.on_closed();
-        });
-
-        Ok(Arc::new(NmpHistoryHandle { advance }))
+        Ok(Arc::new(NmpQueryHandle {
+            cancel,
+            window: window_handle,
+        }))
     }
 
     /// Enqueue a write. `observer` streams every `WriteStatus` this intent
@@ -783,16 +781,23 @@ impl NmpEngine {
 /// The app-facing handle to a live subscription (returned by
 /// [`NmpEngine::observe`]). `Drop` withdraws the subscription -- the SDK
 /// never requires an app-owned container or lifecycle hook to make this
-/// happen (plan §7's kill test). Holds ONLY the opaque
-/// [`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) -- no
-/// `Handle`/`QueryHandle` (the raw imperative engine-control capability)
-/// ever reaches this crate. The receiving half of the subscription is owned
-/// entirely by [`NmpEngine::observe`]'s drain thread, since `recv()`
-/// blocks; `cancel()`/`Drop` here and the drain thread's own teardown
-/// converge on the token's single withdrawal guard (see that type's doc).
+/// happen (plan §7's kill test). Holds ONLY two opaque capabilities: the
+/// [`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) and,
+/// for windowed observations, the [`nmp::WindowHandle`] growth capability
+/// -- no `Handle`/`QueryHandle` (the raw imperative engine-control
+/// capability) ever reaches this crate. The receiving half of the
+/// subscription is owned entirely by [`NmpEngine::observe`]'s drain thread,
+/// since `recv()` blocks; `cancel()`/`Drop` here and the drain thread's own
+/// teardown converge on the token's single withdrawal guard (see that
+/// type's doc).
 #[derive(uniffi::Object)]
 pub struct NmpQueryHandle {
     cancel: nmp::ObservationCancel,
+    /// `Some` iff the observation was opened with a window -- the growth
+    /// capability's existence is DERIVED from the window policy, never a
+    /// separate handle type. Cloned off the subscription before the drain
+    /// thread took ownership of it.
+    window: Option<nmp::WindowHandle>,
 }
 
 #[uniffi::export]
@@ -804,41 +809,35 @@ impl NmpQueryHandle {
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
+
+    /// Windowed observations only: monotonically raise the window's row
+    /// target to at least `at_least`, clamped to the declared `max`.
+    /// Idempotent and declarative -- calling with a value at or below the
+    /// current target is a no-op; there is no continuation token to thread
+    /// back and no generation to go stale (#485 replaced the opaque
+    /// continuation entirely). Growth outcomes arrive as
+    /// [`crate::types::FfiWindowLoad`] facts in delivered frames -- reaching
+    /// the declared `max` is the `AtBound` FACT there, never an error here.
+    /// Unbounded observations fail with
+    /// [`FfiRequestRowsError::Unwindowed`].
+    pub fn request_rows(&self, at_least: u64) -> Result<(), FfiRequestRowsError> {
+        let Some(window) = &self.window else {
+            return Err(FfiRequestRowsError::Unwindowed);
+        };
+        // Saturating u64→usize: `at_least` is a declarative lower bound the
+        // engine clamps to the window's `max` anyway, so a value beyond the
+        // platform's addressable row count is behaviorally identical to
+        // usize::MAX (only reachable on sub-64-bit targets).
+        let at_least = usize::try_from(at_least).unwrap_or(usize::MAX);
+        window
+            .request_rows(at_least)
+            .map_err(FfiRequestRowsError::from)
+    }
 }
 
 impl Drop for NmpQueryHandle {
     fn drop(&mut self) {
         self.cancel.cancel();
-    }
-}
-
-/// Native owner for one bounded-history session. `Drop` and explicit
-/// `cancel` share the subscription's one withdrawal guard, closing every
-/// engine-owned acquisition handle opened by prior advances.
-#[derive(uniffi::Object)]
-pub struct NmpHistoryHandle {
-    advance: nmp::HistoryAdvance,
-}
-
-#[uniffi::export]
-impl NmpHistoryHandle {
-    pub fn load_older(
-        &self,
-        continuation: Arc<NmpHistoryContinuation>,
-    ) -> Result<(), FfiHistoryLoadError> {
-        self.advance
-            .load_older(continuation.inner.clone())
-            .map_err(FfiHistoryLoadError::from)
-    }
-
-    pub fn cancel(&self) {
-        self.advance.cancel();
-    }
-}
-
-impl Drop for NmpHistoryHandle {
-    fn drop(&mut self) {
-        self.advance.cancel();
     }
 }
 
@@ -891,10 +890,9 @@ impl Drop for NmpDiagnosticsHandle {
 mod tests {
     use super::*;
     use crate::types::{
-        FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter,
-        FfiHistoryBatch, FfiHistoryLoadFact, FfiHistoryQuery, FfiSignEventFailure,
-        FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting,
-        FfiWriteStatus,
+        FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter, FfiFrame,
+        FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiWindow,
+        FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -905,14 +903,14 @@ mod tests {
         closes: Arc<AtomicUsize>,
     }
 
-    struct RecordingHistoryObserver {
-        batches: mpsc::Sender<FfiHistoryBatch>,
+    struct RecordingRowObserver {
+        frames: mpsc::Sender<FfiFrame>,
         closes: Arc<AtomicUsize>,
     }
 
-    impl HistoryObserver for RecordingHistoryObserver {
-        fn on_batch(&self, batch: FfiHistoryBatch) {
-            let _ = self.batches.send(batch);
+    impl RowObserver for RecordingRowObserver {
+        fn on_frame(&self, frame: FfiFrame) {
+            let _ = self.frames.send(frame);
         }
 
         fn on_closed(&self) {
@@ -920,47 +918,57 @@ mod tests {
         }
     }
 
-    fn ffi_history_query(author: String, page_size: u64, max_rows: u64) -> FfiHistoryQuery {
-        FfiHistoryQuery {
-            demand: FfiDemand {
-                selection: FfiFilter {
-                    kinds: Some(vec![7_778]),
-                    authors: Some(FfiBinding::Literal {
-                        values: vec![author],
-                    }),
-                    ..FfiFilter::default()
-                },
-                source: FfiSourceAuthority::AuthorOutboxes,
-                access: FfiAccessContext::Public,
-                cache: FfiCacheMode::Agnostic,
+    fn ffi_windowed_demand(author: String) -> FfiDemand {
+        FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![7_778]),
+                authors: Some(FfiBinding::Literal {
+                    values: vec![author],
+                }),
+                ..FfiFilter::default()
             },
-            page_size,
-            max_rows,
+            source: FfiSourceAuthority::AuthorOutboxes,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
         }
     }
 
-    fn recv_history_fact(
-        batches: &mpsc::Receiver<FfiHistoryBatch>,
-        wanted: impl Fn(FfiHistoryLoadFact) -> bool,
-    ) -> FfiHistoryBatch {
+    fn recv_window_load(
+        frames: &mpsc::Receiver<FfiFrame>,
+        wanted: impl Fn(FfiWindowLoad) -> bool,
+    ) -> FfiFrame {
         loop {
-            let batch = batches
+            let frame = frames
                 .recv_timeout(Duration::from_secs(5))
-                .expect("history callback must arrive within the lifecycle bound");
-            if wanted(batch.load) {
-                return batch;
+                .expect("windowed frame must arrive within the lifecycle bound");
+            assert!(
+                frame.deltas.is_empty(),
+                "windowed frames must never ship wire deltas alongside the snapshot"
+            );
+            let load = frame
+                .window
+                .as_ref()
+                .expect("windowed observation frames must carry window contents")
+                .load;
+            if wanted(load) {
+                return frame;
             }
         }
     }
 
+    /// #485's FFI drain proof, replacing the deleted continuation-token
+    /// history test while keeping every behavioral guarantee it pinned:
+    /// bounded delivery over tie-second rows, explicit declarative growth,
+    /// AtBound as a delivered FACT (never a thrown error), the
+    /// windowed/unbounded split on the same handle type, and teardown-once.
     #[test]
-    fn ffi_history_projects_exact_batches_misuse_errors_and_drop_lifecycle() {
+    fn ffi_windowed_observe_delivers_snapshot_frames_grows_and_reports_at_bound() {
         use nmp_store::EventStore;
 
         let fixture = tempfile::tempdir().unwrap();
-        let path = fixture.path().join("ffi-history.redb");
+        let path = fixture.path().join("ffi-window.redb");
         let keys = nostr::Keys::generate();
-        let relay = nostr::RelayUrl::parse("wss://ffi-history.example").unwrap();
+        let relay = nostr::RelayUrl::parse("wss://ffi-window.example").unwrap();
         {
             let mut store = nmp_store::RedbStore::open(&path).unwrap();
             for index in 0..3 {
@@ -969,7 +977,7 @@ mod tests {
                     nostr::Timestamp::from(100),
                     nostr::Kind::Custom(7_778),
                     Vec::new(),
-                    format!("ffi-history-{index}"),
+                    format!("ffi-window-{index}"),
                 )
                 .sign_with_keys(&keys)
                 .unwrap();
@@ -988,101 +996,142 @@ mod tests {
             ..NmpEngineConfig::default()
         })
         .unwrap();
-        let query = ffi_history_query(keys.public_key().to_hex(), 1, 2);
-        let (batch_tx, batch_rx) = mpsc::channel();
+        let (frame_tx, frame_rx) = mpsc::channel();
         let closes = Arc::new(AtomicUsize::new(0));
         let handle = engine
-            .observe_history(
-                query.clone(),
-                Box::new(RecordingHistoryObserver {
-                    batches: batch_tx,
+            .observe_demand(
+                ffi_windowed_demand(keys.public_key().to_hex()),
+                Some(FfiWindow::Expandable { initial: 1, max: 2 }),
+                Box::new(RecordingRowObserver {
+                    frames: frame_tx,
                     closes: Arc::clone(&closes),
                 }),
             )
             .unwrap();
-        let first = recv_history_fact(&batch_rx, |fact| fact == FfiHistoryLoadFact::Idle);
-        assert_eq!(first.rows.len(), 1);
-        assert_eq!(first.deltas.len(), 1);
-        let first_continuation = first.continuation.unwrap();
 
-        handle.load_older(Arc::clone(&first_continuation)).unwrap();
-        let second = recv_history_fact(&batch_rx, |fact| {
-            fact == FfiHistoryLoadFact::Returned { added: 1 }
+        let first = recv_window_load(&frame_rx, |load| load == FfiWindowLoad::Idle);
+        assert_eq!(first.window.unwrap().rows.len(), 1);
+
+        // Declarative growth: no token to thread back, just a row target.
+        handle.request_rows(2).unwrap();
+        let second = recv_window_load(&frame_rx, |load| {
+            load == FfiWindowLoad::Returned { added: 1 }
         });
-        assert_eq!(second.rows.len(), 2);
-        assert_eq!(second.deltas.len(), 1);
-        let second_continuation = second.continuation.unwrap();
-        assert_eq!(
-            handle
-                .load_older(Arc::clone(&first_continuation))
-                .unwrap_err(),
-            FfiHistoryLoadError::StaleGeneration
-        );
+        assert_eq!(second.window.unwrap().rows.len(), 2);
 
-        let (other_tx, _other_rx) = mpsc::channel();
-        let other_closes = Arc::new(AtomicUsize::new(0));
-        let other_session = engine
-            .observe_history(
-                query.clone(),
-                Box::new(RecordingHistoryObserver {
-                    batches: other_tx,
-                    closes: Arc::clone(&other_closes),
+        // Raising the target past `max` clamps and is NEVER an error --
+        // being at the bound arrives as the AtBound FACT in a frame.
+        handle.request_rows(5).unwrap();
+        let bounded = recv_window_load(&frame_rx, |load| load == FfiWindowLoad::AtBound { max: 2 });
+        assert_eq!(bounded.window.unwrap().rows.len(), 2);
+
+        // An UNBOUNDED handle on the same engine has no window to grow --
+        // the same verb fails closed, typed.
+        let (unbounded_tx, _unbounded_rx) = mpsc::channel();
+        let unbounded_closes = Arc::new(AtomicUsize::new(0));
+        let unbounded = engine
+            .observe(
+                FfiFilter {
+                    kinds: Some(vec![7_778]),
+                    ..FfiFilter::default()
+                },
+                None,
+                Box::new(RecordingRowObserver {
+                    frames: unbounded_tx,
+                    closes: Arc::clone(&unbounded_closes),
                 }),
             )
             .unwrap();
         assert_eq!(
-            other_session
-                .load_older(Arc::clone(&second_continuation))
-                .unwrap_err(),
-            FfiHistoryLoadError::WrongSession
+            unbounded.request_rows(10).unwrap_err(),
+            FfiRequestRowsError::Unwindowed
         );
-        let refreshed_original =
-            recv_history_fact(&batch_rx, |fact| fact == FfiHistoryLoadFact::Idle);
-        let current_original_continuation = refreshed_original
-            .continuation
-            .expect("session refresh retains its exact boundary");
-
-        let other_engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
-        let (wrong_tx, _wrong_rx) = mpsc::channel();
-        let wrong_closes = Arc::new(AtomicUsize::new(0));
-        let wrong_engine_session = other_engine
-            .observe_history(
-                query,
-                Box::new(RecordingHistoryObserver {
-                    batches: wrong_tx,
-                    closes: Arc::clone(&wrong_closes),
-                }),
-            )
-            .unwrap();
-        assert_eq!(
-            wrong_engine_session
-                .load_older(Arc::clone(&second_continuation))
-                .unwrap_err(),
-            FfiHistoryLoadError::WrongEngine
-        );
-
-        assert_eq!(
-            handle
-                .load_older(current_original_continuation)
-                .unwrap_err(),
-            FfiHistoryLoadError::AtBound { max_rows: 2 }
-        );
-        let at_bound = recv_history_fact(&batch_rx, |fact| {
-            fact == FfiHistoryLoadFact::AtBound { max_rows: 2 }
-        });
-        assert!(at_bound.continuation.is_some());
 
         drop(handle);
-        drop(other_session);
+        drop(unbounded);
         engine.await_native_tasks_idle();
         assert_eq!(closes.load(Ordering::SeqCst), 1);
-        assert_eq!(other_closes.load(Ordering::SeqCst), 1);
-
-        drop(wrong_engine_session);
-        other_engine.await_native_tasks_idle();
-        assert_eq!(wrong_closes.load(Ordering::SeqCst), 1);
+        assert_eq!(unbounded_closes.load(Ordering::SeqCst), 1);
         engine.shutdown();
-        other_engine.shutdown();
+    }
+
+    /// Window validation fails closed at the conversion/facade seam, typed,
+    /// BEFORE any drain thread or native-task slot is charged.
+    #[test]
+    fn ffi_window_validation_is_typed_and_charges_no_native_task() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+
+        let zero = match engine.observe(
+            FfiFilter::default(),
+            Some(FfiWindow::Expandable { initial: 0, max: 4 }),
+            Box::new(CensusRowObserver),
+        ) {
+            Ok(_) => panic!("a zero window bound must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(zero, FfiError::WindowZeroRows);
+
+        let inverted = match engine.observe(
+            FfiFilter::default(),
+            Some(FfiWindow::Expandable { initial: 5, max: 2 }),
+            Box::new(CensusRowObserver),
+        ) {
+            Ok(_) => panic!("an inverted window must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            inverted,
+            FfiError::WindowInitialExceedsMax { initial: 5, max: 2 }
+        );
+
+        let limited = match engine.observe(
+            FfiFilter {
+                limit: Some(1),
+                ..FfiFilter::default()
+            },
+            Some(FfiWindow::Expandable { initial: 1, max: 4 }),
+            Box::new(CensusRowObserver),
+        ) {
+            Ok(_) => panic!("a limit-carrying windowed selection must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(limited, FfiError::WindowSelectionHasLimit);
+
+        engine.await_native_tasks_idle();
+        assert_eq!(engine.native_task_census().admitted, 0);
+        assert_eq!(engine.native_task_census().running, 0);
+        engine.shutdown();
+    }
+
+    /// Engine shutdown closes a windowed observer exactly once, and a
+    /// post-shutdown growth request fails closed, typed.
+    #[test]
+    fn ffi_shutdown_closes_windowed_observer_and_fails_request_rows_closed() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let (frame_tx, _frame_rx) = mpsc::channel();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handle = engine
+            .observe(
+                FfiFilter {
+                    kinds: Some(vec![7_778]),
+                    ..FfiFilter::default()
+                },
+                Some(FfiWindow::Expandable { initial: 1, max: 4 }),
+                Box::new(RecordingRowObserver {
+                    frames: frame_tx,
+                    closes: Arc::clone(&closes),
+                }),
+            )
+            .expect("windowed observation must start");
+
+        engine.shutdown();
+        engine.await_native_tasks_idle();
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert!(
+            handle.request_rows(2).is_err(),
+            "growth after shutdown must fail closed, never hang or panic"
+        );
+        drop(handle);
     }
 
     impl DiagnosticsObserver for CensusDiagnosticsObserver {
@@ -1096,12 +1145,7 @@ mod tests {
     struct CensusRowObserver;
 
     impl RowObserver for CensusRowObserver {
-        fn on_batch(
-            &self,
-            _deltas: Vec<crate::types::FfiRowDelta>,
-            _evidence: crate::types::FfiAcquisitionEvidence,
-        ) {
-        }
+        fn on_frame(&self, _frame: FfiFrame) {}
 
         fn on_closed(&self) {}
     }
@@ -1118,7 +1162,7 @@ mod tests {
     fn simultaneous_query_demand_follow_and_receipt_drains_charge_five_tasks() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let query = engine
-            .observe(FfiFilter::default(), Box::new(CensusRowObserver))
+            .observe(FfiFilter::default(), None, Box::new(CensusRowObserver))
             .expect("query observer must start");
         let demand = engine
             .observe_demand(
@@ -1128,6 +1172,7 @@ mod tests {
                     access: crate::types::FfiAccessContext::Public,
                     cache: crate::types::FfiCacheMode::Agnostic,
                 },
+                None,
                 Box::new(CensusRowObserver),
             )
             .expect("demand observer must start");
@@ -1826,13 +1871,14 @@ mod tests {
         cache_probe.source = nmp::SourceAuthority::Public;
         let subscription = engine
             .engine
-            .observe(nmp::LiveQuery(cache_probe))
+            .observe(nmp::LiveQuery(cache_probe), None)
             .expect("canonical query must open");
-        let (deltas, _evidence) = subscription
+        let frame = subscription
             .recv_timeout(Duration::from_secs(5))
             .expect("canonical query must deliver its current empty snapshot");
         assert!(
-            !deltas
+            !frame
+                .deltas
                 .iter()
                 .any(|delta| matches!(delta, nmp::RowDelta::Added(_))),
             "a pre-acceptance rejection must create no canonical row"
@@ -2097,12 +2143,7 @@ mod tests {
     }
 
     impl RowObserver for ClosedCountingRowObserver {
-        fn on_batch(
-            &self,
-            _deltas: Vec<crate::types::FfiRowDelta>,
-            _evidence: crate::types::FfiAcquisitionEvidence,
-        ) {
-        }
+        fn on_frame(&self, _frame: FfiFrame) {}
 
         fn on_closed(&self) {
             let _ = self.closed_tx.lock().unwrap().send(());
@@ -2130,7 +2171,7 @@ mod tests {
             ..FfiFilter::default()
         };
         let handle = engine
-            .observe(filter, observer)
+            .observe(filter, None, observer)
             .expect("a well-formed filter must be accepted");
 
         // Two independent `Arc` owners of the SAME `NmpQueryHandle` -- both

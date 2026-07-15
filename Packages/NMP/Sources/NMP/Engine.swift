@@ -166,34 +166,28 @@ public final class NMPEngine: Sendable {
     /// primary read handle -- iterate it directly with `for await`; demand
     /// is dropped automatically when the query (or its iterator) is
     /// released (see `NMPQuery`'s own doc).
-    public func observe(_ filter: NMPFilter) throws -> NMPQuery {
-        try NMPQuery(engine: ffi, filter: filter.toFfi())
+    ///
+    /// `window` is the one bounding policy on this read noun (#485).
+    /// `nil` (the default) observes the full live set as a lossless delta
+    /// stream. `.expandable(initial:max:)` bounds the observation to a
+    /// newest-first window delivered as authoritative snapshots, grown only
+    /// by `NMPQuery.requestRows(atLeast:)` -- delivery mode is derived from
+    /// that boundedness, never chosen separately (see `Window`'s doc).
+    /// Throws `NMPError.windowZeroRows` / `.windowInitialExceedsMax` for an
+    /// invalid window, and `.windowSelectionHasLimit` when a windowed
+    /// selection already carries its own NIP-01 `limit`.
+    public func observe(_ filter: NMPFilter, window: Window? = nil) throws -> NMPQuery {
+        try NMPQuery(engine: ffi, filter: filter.toFfi(), window: window?.toFfi())
     }
 
     /// Open a live, detachable query over an explicit `NMPDemand` (#107) --
     /// the constructor to reach for once `observe(_ filter:)`'s implicit
     /// `AuthorOutboxes`/`Public` default isn't enough: declaring `.pinned`
     /// wire authority, a non-default `NMPAccessContext`, or a non-
-    /// `.agnostic` `NMPCacheMode`. Same deinit-tied teardown as the
-    /// `NMPFilter` overload.
-    public func observe(_ demand: NMPDemand) throws -> NMPQuery {
-        try NMPQuery(engine: ffi, demand: demand.toFfi())
-    }
-
-    /// Open one coordinated bounded-history specialization of the read noun.
-    /// The demand owns selection/source/access/cache identity; `pageSize`
-    /// bounds each advance and `maxRows` bounds every engine/FFI/Swift state.
-    public func observeHistory(
-        _ demand: NMPDemand,
-        pageSize: UInt64,
-        maxRows: UInt64
-    ) throws -> NMPHistoryQuery {
-        try NMPHistoryQuery(
-            engine: ffi,
-            demand: demand.toFfi(),
-            pageSize: pageSize,
-            maxRows: maxRows
-        )
+    /// `.agnostic` `NMPCacheMode`. Same deinit-tied teardown and same
+    /// optional `window` policy as the `NMPFilter` overload.
+    public func observe(_ demand: NMPDemand, window: Window? = nil) throws -> NMPQuery {
+        try NMPQuery(engine: ffi, demand: demand.toFfi(), window: window?.toFfi())
     }
 
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_engine::core::{
-    Effect, EngineCore, EngineMsg, HistoryBatch, HistoryLoadError, HistoryLoadFact, HistoryQuery,
-    HistorySessionId, HistorySink, RowDelta,
+    Effect, EngineCore, EngineMsg, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink,
+    RowDelta, WindowLoad,
 };
 use nmp_grammar::{Binding, Filter};
 use nmp_resolver::LiveQuery;
@@ -41,7 +41,6 @@ fn query(keys: &Keys, page_size: usize, max_rows: usize) -> HistoryQuery {
         page_size,
         max_rows,
     )
-    .unwrap()
 }
 
 fn seeded(count: usize) -> (EngineCore<MemoryStore>, Keys, RelayUrl, Vec<Event>) {
@@ -75,16 +74,23 @@ fn returned(effects: &[Effect]) -> (HistorySessionId, HistoryBatch) {
         .rev()
         .find_map(|effect| match effect {
             Effect::EmitHistory(id, batch)
-                if matches!(
-                    batch.load,
-                    HistoryLoadFact::Idle | HistoryLoadFact::Returned { .. }
-                ) =>
+                if matches!(batch.load, WindowLoad::Idle | WindowLoad::Returned { .. }) =>
             {
                 Some((*id, batch.clone()))
             }
             _ => None,
         })
-        .expect("history operation emits a current batch")
+        .expect("window operation emits a current batch")
+}
+
+fn open(effects: &[Effect]) -> HistorySessionId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitHistory(id, _) => Some(*id),
+            _ => None,
+        })
+        .expect("subscribe emits the initial window frame")
 }
 
 fn apply(rows: &mut BTreeMap<nostr::EventId, Event>, batch: &HistoryBatch) {
@@ -119,34 +125,40 @@ fn assert_canonical_snapshot(batch: &HistoryBatch, max_rows: usize) {
     );
 }
 
+/// The tie-second walk (#484) driven by the #485 declarative `request_rows`:
+/// raising the target across a dense same-second boundary acquires the exact
+/// tie-second proof once and the older range for the actual shortfall, with no
+/// gap or duplicate.
 #[test]
 fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() {
     let (mut core, keys, relay, events) = seeded(13);
-    let open = core.handle(EngineMsg::SubscribeHistory(
+    let opened = core.handle(EngineMsg::SubscribeHistory(
         query(&keys, 5, 13),
         Box::new(NullHistorySink),
     ));
-    let (id, first) = returned(&open);
+    let (id, first) = returned(&opened);
     assert_eq!(first.deltas.len(), 5);
     assert_eq!(first.rows.len(), 5);
     assert_canonical_snapshot(&first, 13);
     let mut rows = BTreeMap::new();
     apply(&mut rows, &first);
-    let first_continuation = first.continuation.clone().unwrap();
 
-    let staged_second = core.handle(EngineMsg::LoadOlder(id, first_continuation.clone()));
+    // Raise the target to 10. Growth outcomes arrive at commit as a frame.
+    let staged_second = core.handle(EngineMsg::RequestRows(id, 10));
     assert!(staged_second.iter().any(|effect| matches!(
         effect,
         Effect::HistoryLoadResult(session, Ok(())) if *session == id
     )));
     let second_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
     let (_, second) = returned(&second_effects);
-    assert_eq!(second.load, HistoryLoadFact::Returned { added: 5 });
+    assert_eq!(second.load, WindowLoad::Returned { added: 5 });
     assert_eq!(second.rows.len(), 10);
     assert_canonical_snapshot(&second, 13);
     apply(&mut rows, &second);
     assert_eq!(rows.len(), 10);
 
+    // The advance acquires the exact tie-second proof (since==until==100, no
+    // limit) and an older range bounded by the actual shortfall (5 rows).
     let reqs: Vec<_> = second_effects
         .iter()
         .filter_map(|effect| match effect {
@@ -168,24 +180,31 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
         .iter()
         .any(|filter| filter.until == Some(99) && filter.limit == Some(5)));
 
-    let stale = core.handle(EngineMsg::LoadOlder(id, first_continuation));
-    assert!(stale.iter().any(|effect| matches!(
-        effect,
-        Effect::HistoryLoadResult(session, Err(HistoryLoadError::StaleGeneration))
-            if *session == id
-    )));
+    // request_rows is monotonic + idempotent + clamped: a value at or below the
+    // current target is a pure no-op — no new frame, no staged load.
+    for at_or_below in [4usize, 10usize] {
+        let noop = core.handle(EngineMsg::RequestRows(id, at_or_below));
+        assert!(noop.iter().any(|effect| matches!(
+            effect,
+            Effect::HistoryLoadResult(session, Ok(())) if *session == id
+        )));
+        assert!(!noop
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)));
+        // No pending load and the window is unchanged.
+        assert!(core.handle(EngineMsg::CommitHistoryLoad(id)).is_empty());
+    }
 
-    let staged_third = core.handle(EngineMsg::LoadOlder(
-        id,
-        second.continuation.clone().unwrap(),
-    ));
+    // Raise the target to the ceiling (13). The tie-second is already proven,
+    // so only the older range for the 3-row shortfall is added.
+    let staged_third = core.handle(EngineMsg::RequestRows(id, 13));
     assert!(staged_third.iter().any(|effect| matches!(
         effect,
         Effect::HistoryLoadResult(session, Ok(())) if *session == id
     )));
     let third_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
     let (_, third) = returned(&third_effects);
-    assert_eq!(third.load, HistoryLoadFact::Returned { added: 3 });
+    assert_eq!(third.load, WindowLoad::Returned { added: 3 });
     assert_eq!(third.rows.len(), 13);
     assert_canonical_snapshot(&third, 13);
     apply(&mut rows, &third);
@@ -194,44 +213,130 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
         rows.keys().copied().collect::<BTreeSet<_>>(),
         events.iter().map(|e| e.id).collect()
     );
-
-    let at_bound = core.handle(EngineMsg::LoadOlder(
-        id,
-        third.continuation.clone().unwrap(),
-    ));
-    assert!(at_bound.iter().any(|effect| matches!(
-        effect,
-        Effect::HistoryLoadResult(session, Err(HistoryLoadError::AtBound { max_rows: 13 }))
-            if *session == id
-    )));
 }
 
+/// At the declared ceiling, `request_rows` cannot grow the window — but the
+/// caller still gets a delivered FACT (`AtBound`), never a thrown error. No
+/// `Effect::HistoryLoadResult` is ever `Err` on this path.
 #[test]
-fn continuation_is_engine_and_session_bound_and_cancel_releases_session() {
-    let (mut first_core, keys, _, _) = seeded(3);
-    let first_open = first_core.handle(EngineMsg::SubscribeHistory(
-        query(&keys, 1, 3),
+fn at_bound_is_a_delivered_frame_fact_not_an_error() {
+    let (mut core, keys, _relay, _events) = seeded(4);
+    // initial == max == 4: the window opens already at its ceiling.
+    let opened = core.handle(EngineMsg::SubscribeHistory(
+        query(&keys, 4, 4),
         Box::new(NullHistorySink),
     ));
-    let (first_id, first_batch) = returned(&first_open);
-    let token = first_batch.continuation.unwrap();
+    let id = open(&opened);
 
-    let (mut other_core, other_keys, _, _) = seeded(2);
-    let other_open = other_core.handle(EngineMsg::SubscribeHistory(
-        query(&other_keys, 1, 2),
+    let at_bound = core.handle(EngineMsg::RequestRows(id, 10));
+    // Always Ok — being at the bound is not an error.
+    assert!(at_bound.iter().any(|effect| matches!(
+        effect,
+        Effect::HistoryLoadResult(session, Ok(())) if *session == id
+    )));
+    assert!(!at_bound
+        .iter()
+        .any(|effect| matches!(effect, Effect::HistoryLoadResult(_, Err(_)))));
+
+    // The AtBound beat is delivered through the normal staged commit path.
+    let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let beat = committed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitHistory(session, batch) if *session == id => Some(batch),
+            _ => None,
+        })
+        .expect("at-bound request emits one frame beat");
+    assert_eq!(beat.load, WindowLoad::AtBound { max: 4 });
+    assert!(!committed
+        .iter()
+        .any(|effect| matches!(effect, Effect::HistoryLoadResult(_, Err(_)))));
+}
+
+/// A `request_rows` that arrives while an advance is staged (not yet committed)
+/// raises the target; committing the in-flight advance then auto-stages the
+/// continuation so the session converges to the raised target.
+#[test]
+fn request_rows_during_in_flight_advance_converges_after_commit() {
+    let (mut core, keys, _relay, _events) = seeded(13);
+    let opened = core.handle(EngineMsg::SubscribeHistory(
+        query(&keys, 5, 13),
         Box::new(NullHistorySink),
     ));
-    let (other_id, _) = returned(&other_open);
-    let wrong_engine = other_core.handle(EngineMsg::LoadOlder(other_id, token.clone()));
-    assert!(wrong_engine.iter().any(|effect| matches!(
+    let id = open(&opened);
+
+    // Stage an advance toward 10, but do NOT commit yet.
+    let staged = core.handle(EngineMsg::RequestRows(id, 10));
+    assert!(staged.iter().any(|effect| matches!(
         effect,
-        Effect::HistoryLoadResult(_, Err(HistoryLoadError::WrongEngine))
+        Effect::HistoryLoadResult(session, Ok(())) if *session == id
     )));
 
-    first_core.handle(EngineMsg::UnsubscribeHistory(first_id));
-    let after_cancel = first_core.handle(EngineMsg::LoadOlder(first_id, token));
-    assert!(after_cancel.iter().any(|effect| matches!(
+    // A second request while the first is in flight simply raises the target.
+    let raised = core.handle(EngineMsg::RequestRows(id, 13));
+    assert!(raised.iter().any(|effect| matches!(
         effect,
-        Effect::HistoryLoadResult(_, Err(HistoryLoadError::WrongSession))
+        Effect::HistoryLoadResult(session, Ok(())) if *session == id
     )));
+
+    // Committing the in-flight advance delivers its 10-row frame AND auto-stages
+    // the continuation toward the raised target of 13.
+    let commit_one = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let (_, first) = returned(&commit_one);
+    assert_eq!(first.rows.len(), 10);
+    assert!(commit_one.iter().any(|effect| matches!(
+        effect,
+        Effect::HistoryLoadResult(session, Ok(())) if *session == id
+    )));
+
+    // Committing the auto-staged continuation converges the window to 13.
+    let commit_two = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let (_, converged) = returned(&commit_two);
+    assert_eq!(converged.rows.len(), 13);
+    assert_eq!(converged.load, WindowLoad::Returned { added: 3 });
+
+    // Fully converged: a further commit is a no-op.
+    assert!(core.handle(EngineMsg::CommitHistoryLoad(id)).is_empty());
+}
+
+/// Unsubscribing a window releases every wire subscription the session placed
+/// (initial + tie-second + older). Afterwards the session is gone and a stray
+/// `request_rows` for it is a harmless no-op.
+#[test]
+fn unsubscribe_releases_every_session_subscription() {
+    let (mut core, keys, relay, _events) = seeded(13);
+    let opened = core.handle(EngineMsg::SubscribeHistory(
+        query(&keys, 5, 13),
+        Box::new(NullHistorySink),
+    ));
+    let id = open(&opened);
+    core.handle(EngineMsg::RequestRows(id, 10));
+    core.handle(EngineMsg::CommitHistoryLoad(id));
+
+    let withdrawn = core.handle(EngineMsg::UnsubscribeHistory(id));
+    let closes = withdrawn
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| &delta.ops)
+        .filter(|(url, _)| url == &relay)
+        .flat_map(|(_, ops)| ops)
+        .filter(|op| matches!(op, WireOp::Close(_)))
+        .count();
+    assert!(
+        closes > 0,
+        "withdrawing a window must close its placed wire subscriptions"
+    );
+
+    // The session is gone: a stray request is Ok and emits nothing.
+    let stray = core.handle(EngineMsg::RequestRows(id, 13));
+    assert!(stray.iter().any(|effect| matches!(
+        effect,
+        Effect::HistoryLoadResult(session, Ok(())) if *session == id
+    )));
+    assert!(!stray
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)));
 }

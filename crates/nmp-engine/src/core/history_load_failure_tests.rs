@@ -223,13 +223,12 @@ impl HistorySink for CapturingHistorySink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HistorySnapshot {
     target_rows: usize,
-    generation: u64,
     acquired_tie_seconds: BTreeSet<u64>,
     last_rows: BTreeMap<EventId, Row>,
     order: BTreeSet<(Reverse<u64>, EventId)>,
     last_evidence: Option<AcquisitionEvidence>,
     projection_complete: bool,
-    load: HistoryLoadFact,
+    load: WindowLoad,
     handle_ids: BTreeSet<HandleId>,
     history_by_handle: HashMap<HandleId, HistorySessionId>,
 }
@@ -239,7 +238,6 @@ fn snapshot(core: &EngineCore<FailingReadStore>, id: HistorySessionId) -> Histor
     assert!(state.pending_load.is_none());
     HistorySnapshot {
         target_rows: state.target_rows,
-        generation: state.generation,
         acquired_tie_seconds: state.acquired_tie_seconds.clone(),
         last_rows: state.last_rows.clone(),
         order: state.order.clone(),
@@ -293,7 +291,6 @@ fn derived_history_query() -> HistoryQuery {
         2,
         4,
     )
-    .unwrap()
 }
 
 fn literal_history_query() -> HistoryQuery {
@@ -305,7 +302,17 @@ fn literal_history_query() -> HistoryQuery {
         2,
         4,
     )
-    .unwrap()
+}
+
+/// The oldest retained row's second: the boundary an advance would fetch
+/// behind. Derived from state now that windows carry no continuation token.
+fn boundary_second(core: &EngineCore<FailingReadStore>, id: HistorySessionId) -> u64 {
+    core.histories[&id]
+        .last_rows
+        .values()
+        .map(|row| row.event.created_at.as_secs())
+        .min()
+        .expect("an opened window holds at least one row")
 }
 
 fn open_history(
@@ -316,7 +323,6 @@ fn open_history(
 ) -> (
     EngineCore<FailingReadStore>,
     HistorySessionId,
-    HistoryContinuation,
     CapturingHistorySink,
 ) {
     let mut core = EngineCore::new(
@@ -329,15 +335,15 @@ fn open_history(
     }
     let sink = CapturingHistorySink::default();
     let effects = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
-    let (id, continuation) = effects
+    let id = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitHistory(id, batch) => Some((*id, batch.continuation.clone().unwrap())),
+            Effect::EmitHistory(id, _) => Some(*id),
             _ => None,
         })
-        .expect("fixture must open a history frame with a continuation");
+        .expect("fixture must open a history frame");
     sink.0.lock().unwrap().clear();
-    (core, id, continuation, sink)
+    (core, id, sink)
 }
 
 fn assert_failed_load(
@@ -359,7 +365,7 @@ fn assert_failed_load(
         .iter()
         .position(|effect| {
             matches!(effect,
-                Effect::HistoryLoadResult(session, Err(HistoryLoadError::StoreUnavailable))
+                Effect::HistoryLoadResult(session, Err(HistoryAdvanceError::StoreUnavailable))
                     if *session == id)
         })
         .expect("store failure must retain its typed load result");
@@ -377,7 +383,6 @@ fn assert_failed_load(
 fn derived_fixture() -> (
     EngineCore<FailingReadStore>,
     HistorySessionId,
-    HistoryContinuation,
     CapturingHistorySink,
     ReadFailureControl,
 ) {
@@ -392,22 +397,22 @@ fn derived_fixture() -> (
     let rows = (100..106).map(|created_at| event(&followed, 1, created_at));
     let store = seeded_store(std::iter::once(contact_list).chain(rows), &relay);
     let control = ReadFailureControl::default();
-    let (core, id, continuation, sink) = open_history(
+    let (core, id, sink) = open_history(
         store,
         control.clone(),
         derived_history_query(),
         Some(me.public_key()),
     );
-    (core, id, continuation, sink, control)
+    (core, id, sink, control)
 }
 
 #[test]
 fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (mut core, id, continuation, sink, control) = derived_fixture();
+    let (mut core, id, sink, control) = derived_fixture();
     let before = snapshot(&core, id);
     control.fail_query("tie-second read failed");
 
-    let effects = core.handle(EngineMsg::LoadOlder(id, continuation.clone()));
+    let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
     assert_failed_load(
         &core,
@@ -419,7 +424,7 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
     );
 
     control.fail_query("later failure must not replace first");
-    let repeated = core.handle(EngineMsg::LoadOlder(id, continuation));
+    let repeated = core.handle(EngineMsg::RequestRows(id, 4));
     assert_failed_load(
         &core,
         id,
@@ -432,16 +437,17 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
 
 #[test]
 fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (mut core, id, continuation, sink, control) = derived_fixture();
+    let (mut core, id, sink, control) = derived_fixture();
+    let boundary_secs = boundary_second(&core, id);
     core.histories
         .get_mut(&id)
         .unwrap()
         .acquired_tie_seconds
-        .insert(continuation.boundary.created_at.as_secs());
+        .insert(boundary_secs);
     let before = snapshot(&core, id);
     control.fail_query("older-window read failed");
 
-    let effects = core.handle(EngineMsg::LoadOlder(id, continuation));
+    let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
     assert_failed_load(
         &core,
@@ -462,12 +468,11 @@ fn projection_advance_read_failure_dispatches_diagnostics_and_exact_rollback() {
         &relay,
     );
     let control = ReadFailureControl::default();
-    let (mut core, id, continuation, sink) =
-        open_history(store, control.clone(), literal_history_query(), None);
+    let (mut core, id, sink) = open_history(store, control.clone(), literal_history_query(), None);
     let before = snapshot(&core, id);
     control.fail_newest_before("projection advance read failed");
 
-    let effects = core.handle(EngineMsg::LoadOlder(id, continuation));
+    let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
     assert_failed_load(
         &core,
@@ -498,8 +503,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         }),
         2,
         6,
-    )
-    .unwrap();
+    );
     let directory = FixtureDirectory::new().with_write(keys.public_key().to_hex(), [first, second]);
     let control = ReadFailureControl::default();
     let mut core = EngineCore::new(
@@ -522,17 +526,19 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         generation: 1,
     };
     core.handle(EngineMsg::RelayConnected(relay_handle, selected.clone()));
-    let disconnected = core.handle(EngineMsg::RelayDisconnected(relay_handle));
-    let continuation = disconnected
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::EmitHistory(session, batch) if *session == id => batch.continuation.clone(),
-            _ => None,
-        })
-        .expect("disconnect evidence refresh must issue the current continuation");
+    let disconnected = core.handle(EngineMsg::RelayDisconnected(
+        relay_handle,
+        DisconnectReason::Error,
+    ));
+    assert!(
+        disconnected
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)),
+        "disconnect evidence refresh must issue a current frame"
+    );
     sink.0.lock().unwrap().clear();
 
-    let staged = core.handle(EngineMsg::LoadOlder(id, continuation));
+    let staged = core.handle(EngineMsg::RequestRows(id, 4));
     assert!(staged.iter().any(|effect| {
         matches!(effect, Effect::HistoryLoadResult(session, Ok(())) if *session == id)
     }));
@@ -541,8 +547,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         .iter()
         .find_map(|effect| match effect {
             Effect::EmitHistory(session, batch)
-                if *session == id
-                    && matches!(batch.load, HistoryLoadFact::Returned { added: 1 }) =>
+                if *session == id && matches!(batch.load, WindowLoad::Returned { added: 1 }) =>
             {
                 Some(batch)
             }
@@ -550,10 +555,9 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         })
         .expect("the short page must remain an explicit under-return fact");
 
-    assert!(
-        returned.continuation.is_some(),
-        "a short local page is not proof that history ended"
-    );
+    // A short local page is `Returned { added }`, never a synthetic "end":
+    // there is no Complete/End variant, and the per-source evidence below
+    // carries the real reason the page was short.
     assert!(returned
         .evidence
         .shortfall

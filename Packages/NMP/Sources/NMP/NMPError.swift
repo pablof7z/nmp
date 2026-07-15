@@ -53,12 +53,16 @@ public enum NMPError: Error, Sendable, Equatable {
     /// An `NMPDemand` declared `.pinned([])` -- an empty relay set (#107
     /// Contract: "the pinned relay set must be nonempty").
     case emptyPinnedRelaySet
-    case historyPageSizeOutOfRange(UInt64)
-    case historyMaxRowsOutOfRange(UInt64)
-    case historyZeroPageSize
-    case historyZeroMaxRows
-    case historyPageExceedsMaxRows(pageSize: UInt64, maxRows: UInt64)
-    case historySelectionHasLimit
+    /// A windowed `observe` declared a zero `initial` or `max` row count
+    /// (#485) -- an empty window can neither deliver nor grow.
+    case windowZeroRows
+    /// A windowed `observe` declared `initial > max` (#485).
+    case windowInitialExceedsMax(initial: UInt64, max: UInt64)
+    /// A windowed `observe` was given a selection that already carries its
+    /// own NIP-01 `limit` (#485) -- the window IS the bound; carrying a
+    /// second, competing bound on the wire filter is refused rather than
+    /// silently reconciled.
+    case windowSelectionHasLimit
     /// #156: `groupMessageIntent` has no active account from which NMP can
     /// derive the unsigned event author.
     case noActiveAccount
@@ -97,13 +101,10 @@ public enum NMPError: Error, Sendable, Equatable {
         case .NostrEntitySecretKeyRejected: self = .nostrEntitySecretKeyRejected
         case .AuthorOutboxesRequiresBoundAuthors: self = .authorOutboxesRequiresBoundAuthors
         case .EmptyPinnedRelaySet: self = .emptyPinnedRelaySet
-        case .HistoryPageSizeOutOfRange(let value): self = .historyPageSizeOutOfRange(value)
-        case .HistoryMaxRowsOutOfRange(let value): self = .historyMaxRowsOutOfRange(value)
-        case .HistoryZeroPageSize: self = .historyZeroPageSize
-        case .HistoryZeroMaxRows: self = .historyZeroMaxRows
-        case .HistoryPageExceedsMaxRows(let pageSize, let maxRows):
-            self = .historyPageExceedsMaxRows(pageSize: pageSize, maxRows: maxRows)
-        case .HistorySelectionHasLimit: self = .historySelectionHasLimit
+        case .WindowZeroRows: self = .windowZeroRows
+        case .WindowInitialExceedsMax(let initial, let max):
+            self = .windowInitialExceedsMax(initial: initial, max: max)
+        case .WindowSelectionHasLimit: self = .windowSelectionHasLimit
         case .NoActiveAccount: self = .noActiveAccount
         case .IntentAlreadyConsumed: self = .intentAlreadyConsumed
         case .RelayInformationUnavailable(let kind):

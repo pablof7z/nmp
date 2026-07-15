@@ -84,9 +84,9 @@ use nostr::{
 use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 
 use crate::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg, HistoryBatch,
-    HistoryContinuation, HistoryLoadError, HistoryQuery, HistorySessionId, HistorySink,
-    PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row, RowDelta, RowSink,
+    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
+    HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink, PublishError,
+    ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row, RowDelta, RowSink,
 };
 use crate::outbox::{ReceiptSink, WriteStatus};
 use crate::relay_information::{
@@ -216,7 +216,7 @@ mod history_mailbox_tests {
     use nostr::{Keys, Kind, UnsignedEvent};
 
     use super::*;
-    use crate::core::{HistoryLoadFact, ShortfallFact};
+    use crate::core::{ShortfallFact, WindowLoad};
 
     fn row(keys: &Keys, created_at: u64, content: &str) -> Row {
         Row {
@@ -247,20 +247,8 @@ mod history_mailbox_tests {
         HistoryBatch {
             rows,
             deltas: Vec::new(),
-            continuation: None,
             evidence: AcquisitionEvidence::default(),
-            load: HistoryLoadFact::Idle,
-        }
-    }
-
-    fn continuation(row: &Row, generation: u64) -> HistoryContinuation {
-        HistoryContinuation {
-            version: 1,
-            engine_identity: Arc::new(()),
-            session_identity: Arc::new(()),
-            descriptor: LiveQuery::from_filter(nmp_grammar::Filter::default()),
-            generation,
-            boundary: nmp_store::EventCursor::from_event(&row.event),
+            load: WindowLoad::Idle,
         }
     }
 
@@ -350,22 +338,20 @@ mod history_mailbox_tests {
 
         let initial_rows = canonical(vec![removed.clone(), provenance_grew.clone()]);
         tx.send(HistoryBatch {
-            continuation: Some(continuation(initial_rows.last().unwrap(), 1)),
             rows: initial_rows,
             deltas: Vec::new(),
             evidence: AcquisitionEvidence::default(),
-            load: HistoryLoadFact::Idle,
+            load: WindowLoad::Idle,
         });
         let initial = rx.recv().unwrap();
         let mut delivered = BTreeMap::new();
         apply(&mut delivered, &initial.deltas);
 
         tx.send(HistoryBatch {
-            continuation: Some(continuation(&overwritten, 2)),
             rows: canonical(vec![provenance_grew.clone(), overwritten]),
             deltas: Vec::new(),
             evidence: AcquisitionEvidence::default(),
-            load: HistoryLoadFact::Requesting,
+            load: WindowLoad::Requesting,
         });
 
         provenance_grew.sources.insert(relay);
@@ -374,23 +360,17 @@ mod history_mailbox_tests {
             sources: Vec::new(),
             shortfall: vec![ShortfallFact::NoResolvedDemand],
         };
-        let latest_continuation = continuation(latest_rows.last().unwrap(), 3);
-        let latest_boundary = latest_continuation.boundary;
         tx.send(HistoryBatch {
-            continuation: Some(latest_continuation),
             rows: latest_rows.clone(),
             deltas: Vec::new(),
             evidence: latest_evidence.clone(),
-            load: HistoryLoadFact::Returned { added: 1 },
+            load: WindowLoad::Returned { added: 1 },
         });
 
         let latest = rx.recv().unwrap();
         assert_eq!(latest.rows, latest_rows);
         assert_eq!(latest.evidence, latest_evidence);
-        assert_eq!(latest.load, HistoryLoadFact::Returned { added: 1 });
-        let continuation = latest.continuation.unwrap();
-        assert_eq!(continuation.generation, 3);
-        assert_eq!(continuation.boundary, latest_boundary);
+        assert_eq!(latest.load, WindowLoad::Returned { added: 1 });
         assert!(latest
             .deltas
             .iter()
@@ -457,8 +437,7 @@ mod history_mailbox_tests {
             }),
             1,
             3,
-        )
-        .unwrap();
+        );
         let (engine_thread, handle) = EngineThread::spawn(
             store,
             FixtureDirectory::new(),
@@ -469,32 +448,34 @@ mod history_mailbox_tests {
         .unwrap();
 
         let (history_handle, receiver) = handle.subscribe_history(query.clone()).unwrap();
-        let first = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        let continuation = first.continuation.unwrap();
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        // A request whose reply receiver is already dropped stages, fails to
+        // reply, and rolls back — leaving the window exactly as before.
         let (reply, dropped_reply) = mpsc::channel();
         drop(dropped_reply);
         handle
             .inbox
-            .send(Cmd::LoadOlder {
+            .send(Cmd::RequestRows {
                 id: history_handle.0,
-                continuation: continuation.clone(),
+                at_least: 2,
                 reply,
             })
             .unwrap();
         handle
-            .load_older(history_handle, continuation)
-            .expect("same continuation must retry after reply-drop rollback");
+            .request_rows(history_handle, 2)
+            .expect("engine thread alive")
+            .expect("the same request must retry after reply-drop rollback");
         let deadline = Instant::now() + Duration::from_secs(1);
         let loaded = loop {
             let batch = receiver
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap();
-            if matches!(batch.load, HistoryLoadFact::Returned { .. }) {
+            if matches!(batch.load, WindowLoad::Returned { .. }) {
                 break batch;
             }
         };
         assert_eq!(loaded.rows.len(), 2);
-        assert_eq!(loaded.load, HistoryLoadFact::Returned { added: 1 });
+        assert_eq!(loaded.load, WindowLoad::Returned { added: 1 });
 
         let (idle_ready, idle_started) = mpsc::channel();
         let (idle_result, idle_done) = mpsc::channel();
@@ -655,10 +636,10 @@ enum Cmd {
         query: HistoryQuery,
         reply: Sender<Result<(HistorySessionId, HistoryReceiver), EngineThreadError>>,
     },
-    LoadOlder {
+    RequestRows {
         id: HistorySessionId,
-        continuation: HistoryContinuation,
-        reply: Sender<Result<(), HistoryLoadError>>,
+        at_least: usize,
+        reply: Sender<Result<(), HistoryAdvanceError>>,
     },
     UnsubscribeHistory(HistorySessionId),
     PublishTracked {
@@ -2326,12 +2307,12 @@ fn engine_loop<S, D>(
                     dispatch_runtime,
                 );
             }
-            Cmd::LoadOlder {
+            Cmd::RequestRows {
                 id,
-                continuation,
+                at_least,
                 reply,
             } => {
-                let effects = core.handle(EngineMsg::LoadOlder(id, continuation));
+                let effects = core.handle(EngineMsg::RequestRows(id, at_least));
                 let result = effects.iter().find_map(|effect| match effect {
                     Effect::HistoryLoadResult(session, result) if *session == id => {
                         Some(result.clone())
@@ -2339,6 +2320,8 @@ fn engine_loop<S, D>(
                     _ => None,
                 });
                 if result.as_ref().is_some_and(Result::is_ok) {
+                    // Preflight the staged advance's (possibly empty) relay
+                    // workers before it becomes observable.
                     if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
                         let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
                         dispatch_core_effects(
@@ -2352,7 +2335,7 @@ fn engine_loop<S, D>(
                             &registry,
                             dispatch_runtime,
                         );
-                        let _ = reply.send(Err(HistoryLoadError::TransportUnavailable {
+                        let _ = reply.send(Err(HistoryAdvanceError::TransportUnavailable {
                             reason: error.to_string(),
                         }));
                         continue;
@@ -2372,21 +2355,68 @@ fn engine_loop<S, D>(
                         );
                         continue;
                     }
-                    let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
-                    dispatch_core_effects(
-                        &core,
-                        committed,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &mut preambles,
-                        &registry,
-                        dispatch_runtime,
-                    );
+                    // Commit, then drive the post-commit continuation loop to
+                    // convergence (#485): each commit may auto-stage the next
+                    // advance (target still unmet, older boundary present,
+                    // progress made). Bounded by `max_rows` — a non-progressing
+                    // advance never re-stages.
+                    let mut committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+                    loop {
+                        let restaged = committed.iter().any(|effect| {
+                            matches!(
+                                effect,
+                                Effect::HistoryLoadResult(session, Ok(())) if *session == id
+                            )
+                        });
+                        if restaged && preflight_query_relay_workers(&committed, &pool).is_err() {
+                            // The continuation advance's workers are
+                            // unavailable. Frames already delivered stand; roll
+                            // the staged continuation back and stop growing.
+                            let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
+                            dispatch_core_effects(
+                                &core,
+                                committed,
+                                &pool,
+                                &mut row_channels,
+                                &mut history_channels,
+                                &mut diag_channels,
+                                &mut preambles,
+                                &registry,
+                                dispatch_runtime,
+                            );
+                            dispatch_core_effects(
+                                &core,
+                                rollback,
+                                &pool,
+                                &mut row_channels,
+                                &mut history_channels,
+                                &mut diag_channels,
+                                &mut preambles,
+                                &registry,
+                                dispatch_runtime,
+                            );
+                            break;
+                        }
+                        dispatch_core_effects(
+                            &core,
+                            committed,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        if !restaged {
+                            break;
+                        }
+                        committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+                    }
                     continue;
                 } else {
-                    let _ = reply.send(result.unwrap_or(Err(HistoryLoadError::StoreUnavailable)));
+                    let _ =
+                        reply.send(result.unwrap_or(Err(HistoryAdvanceError::StoreUnavailable)));
                 }
                 dispatch_core_effects(
                     &core,
@@ -3347,20 +3377,26 @@ impl Handle {
         Ok((HistoryHandle(id), history_rx))
     }
 
-    pub fn load_older(
+    /// Declaratively raise a window's row target to at least `at_least`
+    /// (#485). Monotonic, idempotent, and clamped to the window's declared
+    /// `max_rows`. Returns `None` when the engine thread is gone (the facade
+    /// maps this to `EngineClosed`); `Some(Ok(()))` when the advance was
+    /// accepted (or was a no-op / `AtBound` beat); `Some(Err(_))` for a staged
+    /// advance the store or transport could not serve.
+    pub fn request_rows(
         &self,
         handle: HistoryHandle,
-        continuation: HistoryContinuation,
-    ) -> Result<(), HistoryLoadError> {
+        at_least: usize,
+    ) -> Option<Result<(), HistoryAdvanceError>> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
-            .send(Cmd::LoadOlder {
+            .send(Cmd::RequestRows {
                 id: handle.0,
-                continuation,
+                at_least,
                 reply: reply_tx,
             })
-            .map_err(|_| HistoryLoadError::WrongEngine)?;
-        reply_rx.recv().map_err(|_| HistoryLoadError::WrongEngine)?
+            .ok()?;
+        reply_rx.recv().ok()
     }
 
     pub fn unsubscribe_history(&self, handle: HistoryHandle) {

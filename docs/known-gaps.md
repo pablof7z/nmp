@@ -100,20 +100,27 @@ about current code:
   refcount-shared across different selectors, and projected singleton ids are
   widen-only packed into wire filters capped at 256 ids. Sliding recent-window
   semantics remain separate; explicit NIP-01 inner limits are covered by #187.
-- **Coordinated bounded history sessions are built; durable resume, global end,
-  and product adoption are deliberately separate (#474).** Rust now owns one
-  canonical `created_at DESC, event_id ASC` active partition, exact exclusive
-  tie-second continuation, live rebalancing, scoped evidence, mechanical load
-  facts, and deterministic withdrawal across ordinary demand, the store, the
-  runtime, UniFFI, Swift, and Kotlin. The host can return only the latest opaque
-  process-local continuation; it cannot construct a timestamp cursor, assemble
-  independent pages, or retain an SDK backlog beyond `max_rows`. Store/read and
-  transport failures remain typed and never become a false `Complete`/`End` or
-  fabricated retraction. Intentional v1 limits remain visible: a continuation
-  is not a durable restart token, no load fact claims a network-global end, and
-  app presentation may reorder rows but cannot redefine cursor membership.
-  29er's scroll anchoring, display order, end-state policy, and on-device
-  adoption remain in pablof7z/29er-next#77 rather than moving into NMP.
+- **Expandable observation windows are built; durable resume, global end, and
+  product adoption are deliberately separate (#474, #485).** Windowing is a
+  policy on the one read noun: `observe(query, window)` with
+  `Window::Expandable { initial, max }` owns one canonical
+  `created_at DESC, event_id ASC` active partition, exact exclusive tie-second
+  paging, live rebalancing, scoped evidence, mechanical `WindowLoad` facts, and
+  deterministic withdrawal across ordinary demand, the store, the runtime,
+  UniFFI, Swift, and Kotlin. Growth is the declarative, monotonic, idempotent
+  `request_rows(at_least:)`; delivery mode derives from boundedness (unbounded
+  observations stay exact delta streams — full-set redelivery is the known
+  O(rows²) class — while windowed observations deliver conflated authoritative
+  snapshots), and the host cannot construct a timestamp cursor, hold a
+  continuation token, assemble independent pages, or retain an SDK backlog
+  beyond the declared `max`. Store/read and transport failures remain typed and
+  never become a false `Complete`/`End` or fabricated retraction; `AtBound` is
+  a frame fact, never an error. Intentional v1 limits remain visible: a window
+  target is not a durable restart token, no load fact claims a network-global
+  end, and app presentation may reorder rows but cannot redefine cursor
+  membership. 29er's scroll anchoring, display order, end-state policy, and
+  on-device adoption remain in pablof7z/29er-next#77 rather than moving into
+  NMP.
 - **The optional content substrate and first SwiftUI family are built; the
   multi-platform/open-code ecosystem remains open (#75).** `nmp-content`,
   governed UniFFI values, and Swift/Kotlin content
@@ -155,10 +162,10 @@ about current code:
   before it can ship. See `docs/design/ui-components-strategy.md` and issue
   #75.
 - **Boundedness is only partial.** Swift newest-frame buffering, indexed queries,
-  router caps, and #474's coordinated history window are bounded, but graph,
-  derived-set, wire, relay, ordinary-result, receipt, ingestion, and scheduler
-  bounds do not yet share an explicit shortfall contract. Silent first-N
-  behavior is forbidden.
+  router caps, and #474/#485's expandable observation window are bounded, but
+  graph, derived-set, wire, relay, ordinary-result, receipt, ingestion, and
+  scheduler bounds do not yet share an explicit shortfall contract. Silent
+  first-N behavior is forbidden.
 - **NIP-11 cache is process-local.** The engine now owns bounded one-shot
   acquisition, per-relay single-flight, finite typed waiter admission, HTTP
   validators/freshness directives, typed advisory limitation claims, raw JSON,

@@ -9,8 +9,8 @@
 //! - [`Engine::new`] -- config in, a running engine out. Owns
 //!   config -> store/directory selection and the router cap that
 //!   `nmp-ffi`/`nmp-demo` used to each assemble by hand.
-//! - [`Engine::observe`] -- a live query in, a [`Subscription`] streaming
-//!   [`RowsMsg`] out.
+//! - [`Engine::observe`] -- a live query (and an optional [`Window`]) in, a
+//!   [`Subscription`] streaming [`Frame`]s out.
 //! - [`Engine::publish`] -- a [`WriteIntent`] in, a `Receiver<`[`WriteStatus`]`>`
 //!   out.
 //!
@@ -69,7 +69,8 @@ pub use relay_information::{
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
 pub use subscription::{
-    DiagnosticsSubscription, HistoryAdvance, HistorySubscription, ObservationCancel, Subscription,
+    DiagnosticsSubscription, Frame, ObservationCancel, RequestRowsError, Subscription, Window,
+    WindowContents, WindowHandle,
 };
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
@@ -132,17 +133,16 @@ pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 // Two distinct coverage surfaces live here, deliberately not conflated
 // (`docs/design/scoped-evidence-49-12-plan.md` §4): `AcquisitionEvidence`
 // (+ `SourceEvidence`/`SourceStatus`/`AuthPhase`/`ShortfallFact`) is the
-// scoped, per-query acquisition evidence delivered alongside every
-// `RowsMsg` -- per-source facts, never a collapsed completeness verdict.
+// scoped, per-query acquisition evidence delivered on every `Frame` --
+// per-source facts, never a collapsed completeness verdict.
 // `FilterCoverageEntry.coverage` (an `Option<CoverageInterval>`) is the
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
 pub use nmp_engine::core::{
-    AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry, HistoryBatch,
-    HistoryContinuation, HistoryLoadError, HistoryLoadFact, HistoryQuery, HistoryQueryError,
+    AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry,
     RelayDiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
+    WindowLoad,
 };
-pub use nmp_engine::runtime::RowsMsg;
 pub use nmp_router::Lane;
 pub use nmp_store::CoverageInterval;
 
