@@ -224,6 +224,102 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiBunkerParseError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Empty",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "TooLong",
+            discr: None,
+            fields: [
+                Field {
+                    name: "len",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "WrongScheme",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingRemoteSignerKey",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidRemoteSignerKey",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingRelay",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "TooManyRelays",
+            discr: None,
+            fields: [
+                Field {
+                    name: "count",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidRelay",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Malformed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_signer::BunkerParseError` mirror (#494) -- strict `bunker://` token\nparsing, carried instead of collapsing into `Nip46Error::InvalidBunkerUri`'s\nown `.to_string()`.",
+    ),
+}
+
+enum Enum {
     name: "FfiCacheMode",
     module_path: "nmp_ffi",
     remote: false,
@@ -747,14 +843,17 @@ enum Enum {
             discr: None,
             fields: [
                 Field {
-                    name: "reason",
-                    type_: String,
+                    name: "kind",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRelayInformationErrorKind",
+                    },
                     default: None,
                     docstring: None,
                 },
             ],
             docstring: Some(
-                "NIP-11 acquisition failed before any last-good document existed.",
+                "NIP-11 acquisition failed before any last-good document existed.\n`ExecutorSaturated`/`RelayInformationWaitersSaturated`/\n`ThreadUnavailable` above already carry these three acquisition\ndiscriminants with full fidelity (#494); every other\n`nmp::RelayInformationError` variant carries here instead of\ncollapsing to a message string.",
             ),
         },
         Variant {
@@ -1396,6 +1495,165 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiNip46Failure",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidBunkerUri",
+            discr: None,
+            fields: [
+                Field {
+                    name: "source",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBunkerParseError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingRelay",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "TooManyRelays",
+            discr: None,
+            fields: [
+                Field {
+                    name: "count",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvitationTooLong",
+            discr: None,
+            fields: [
+                Field {
+                    name: "len",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidLaunchScheme",
+            discr: None,
+            fields: [
+                Field {
+                    name: "scheme",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Timeout",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Disconnected",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Rejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidResponse",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ThreadUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ExecutorSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "component",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SignerMissingPublicKey",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`nmp::Engine::add_signer` maps every internal `AddSignerError` to\n`EngineError::SignerMissingPublicKey` (crates/nmp/src/engine.rs). This\nis the signer-side engine-attach failure; the other reachable\n`add_signer` outcome, `EngineError::EngineClosed` (engine shut down\nmid-handshake), is surfaced as `Disconnected` instead so the two are\nnot conflated. It is not a `Nip46Error` variant; it crosses a different\ninternal taxonomy (`nmp::EngineError`) at the same observer seam.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_signer::Nip46Error` mirror (#494) -- every live discriminant a NIP-46\nconnection attempt can fail with, so a native caller can branch on\n\"auth required\" vs. \"timeout\" vs. \"malformed\" instead of parsing English.\n`Nip46Error::InvalidRelay`/`InvalidInvitation`/`SecretMismatch` are not\nmirrored: nothing in the workspace ever constructs them (see that type's\nown doc).",
+    ),
+}
+
+enum Enum {
     name: "FfiNostrEntity",
     module_path: "nmp_ffi",
     remote: false,
@@ -1707,6 +1965,110 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: None,
+}
+
+enum Enum {
+    name: "FfiRelayInformationErrorKind",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "ExecutorSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "WaiterSaturated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ThreadUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ServiceClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "CredentialedRelayUrl",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Http",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ResponseTooLarge",
+            discr: None,
+            fields: [
+                Field {
+                    name: "limit_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidDocument",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::RelayInformationError` mirror (#494) -- typed failure of one\nbounded NIP-11 acquisition, carried instead of collapsing into a\n`.to_string()` at either NIP-11 FFI seam (the stale-on-error\n`FfiRelayInformation.last_error` evidence below, and the acquisition\nthrow in `convert::FfiError::RelayInformationUnavailable`).",
+    ),
 }
 
 enum Enum {
@@ -3613,7 +3975,10 @@ record Record {
         Field {
             name: "last_error",
             type_: Optional {
-                inner_type: String,
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRelayInformationErrorKind",
+                },
             },
             default: None,
             docstring: None,
@@ -7985,8 +8350,11 @@ callback CallbackInterface {
             object_impl: Struct,
             arguments: [
                 Argument {
-                    name: "reason",
-                    type_: String,
+                    name: "failure",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiNip46Failure",
+                    },
                     by_ref: false,
                     optional: false,
                     default: None,
@@ -8006,7 +8374,7 @@ callback CallbackInterface {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connectionobserver_on_failed",
             checksum: Some(
-                25737,
+                6563,
             ),
         },
         Method {
