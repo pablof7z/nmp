@@ -2,6 +2,7 @@
 // (plan §7): everything past `init` is a method call on this object, never
 // a second container/provider the app must adopt.
 
+import Foundation
 import NMPFFI
 
 /// Construction config for `NMPEngine`. The only relay facts this app ever
@@ -74,9 +75,19 @@ public struct NMPConfig: Sendable {
 /// concepts -- no scene-phase hook, no required provider/environment
 /// wrapper. `import NMP; let nmp = try NMPEngine(config: .init(...))` is the
 /// entire adoption cost.
-public final class NMPEngine: Sendable {
+public final class NMPEngine: @unchecked Sendable {
     let ffi: NmpEngineProtocol
     private let localAccountStore: NMPInsecureFileAccountStore?
+    /// Guards `checkpointedPubkey`, the only mutable state this class holds
+    /// (#507/#495's checkpoint-resurrection fix needs it to be settable from
+    /// both `init`'s restore path and `addAccount`/`removeAccount`).
+    private let lock = NSLock()
+    /// The pubkey currently checkpointed to `localAccountStore`, if any --
+    /// tracked so `removeAccount` can clear the on-disk checkpoint exactly
+    /// when it removes the account that owns it, rather than leaving a
+    /// removed account to silently resurrect on the next restart's
+    /// `init`-time restore.
+    private var checkpointedPubkey: String?
 
     /// Destructively remove one closed persistent NMP store. A live engine in
     /// this process using the same canonical path throws
@@ -105,6 +116,7 @@ public final class NMPEngine: Sendable {
                     try ffi.addAccount(secretKey: secretKey)
                 }
                 try nmpRethrowing { try ffi.setActiveAccount(pubkey: pubkey) }
+                checkpointedPubkey = pubkey
             }
         } catch {
             ffi.shutdown()
@@ -131,7 +143,44 @@ public final class NMPEngine: Sendable {
             try ffi.addAccount(secretKey: secretKey)
         }
         try localAccountStore?.saveSecretKey(secretKey)
+        if localAccountStore != nil {
+            lock.lock()
+            checkpointedPubkey = pubkey
+            lock.unlock()
+        }
         return pubkey
+    }
+
+    /// Detach the signing capability `addAccount` registered for `pubkey`
+    /// (#507/#495: closes the gap where a local-key signer capability was
+    /// permanently resident once added -- `setActiveAccount(nil)` alone only
+    /// deactivates routing, it never detaches the capability, so making the
+    /// same pubkey active again silently re-armed signing). Key material
+    /// stays engine-side either way; this only un-registers the capability
+    /// that let it sign. Orthogonal to `setActiveAccount`: routing/active
+    /// identity are unaffected -- a full log out is `setActiveAccount(nil)`
+    /// *and* `removeAccount(pubkey:)` together.
+    ///
+    /// When `pubkey` is the account currently checkpointed to
+    /// `localAccountStore`, this also clears that on-disk checkpoint (the
+    /// store's own `clear()`) so the removed account does not resurrect the
+    /// next time this engine restarts and restores from the checkpoint --
+    /// removing a DIFFERENT pubkey leaves an existing checkpoint untouched.
+    /// Returns `true` if a capability was detached, `false` if `pubkey` was
+    /// never added via `addAccount` (or was already removed).
+    @discardableResult
+    public func removeAccount(pubkey: String) throws -> Bool {
+        let removed = try nmpRethrowing { try ffi.removeAccount(pubkey: pubkey) }
+        lock.lock()
+        let isCheckpointed = checkpointedPubkey == pubkey
+        lock.unlock()
+        if isCheckpointed {
+            try localAccountStore?.clear()
+            lock.lock()
+            checkpointedPubkey = nil
+            lock.unlock()
+        }
+        return removed
     }
 
     /// Re-root every reactive query AND the active signing capability

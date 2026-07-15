@@ -41,6 +41,48 @@ final class InsecureFileAccountStoreTests: XCTestCase {
         signedOut.shutdown()
     }
 
+    /// #507/#495: removing the checkpointed account must clear the on-disk
+    /// checkpoint too, or the removed account resurrects on the very next
+    /// restore -- proving `addAccount`'s side effect has a symmetric undo.
+    /// Removing an unrelated pubkey must leave an existing checkpoint alone.
+    func testRemoveAccountClearsCheckpointAndLeavesUnrelatedCheckpointIntact() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // The x-only pubkey for secret key `2` -- a distinct, valid, but
+        // never-`addAccount`-ed account, used only to prove removal of an
+        // unrelated pubkey is a no-op that does not touch the checkpoint.
+        let otherPubkey = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+
+        let engine = try NMPEngine(config: NMPConfig(), localAccountStore: fixture.store)
+        let pubkey = try await engine.addAccount(secretKey: secretOne)
+        try engine.setActiveAccount(pubkey)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.checkpoint.path))
+
+        XCTAssertEqual(
+            try engine.removeAccount(pubkey: otherPubkey),
+            false,
+            "an unrelated, never-added pubkey has nothing to remove"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fixture.checkpoint.path),
+            "removing an unrelated pubkey must not touch an existing checkpoint"
+        )
+
+        XCTAssertEqual(try engine.removeAccount(pubkey: pubkey), true)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.checkpoint.path),
+            "removing the checkpointed account must clear its on-disk checkpoint"
+        )
+        engine.shutdown()
+
+        let restarted = try NMPEngine(config: NMPConfig(), localAccountStore: fixture.store)
+        XCTAssertNil(
+            try restarted.activeAccount(),
+            "a removed-and-cleared account must not resurrect on the next restart"
+        )
+        restarted.shutdown()
+    }
+
     func testInvalidCheckpointFailsClosedDuringConstruction() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
