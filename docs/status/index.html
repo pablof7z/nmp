@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-15 22:51 UTC</p>
-    <p class="ep-sub">2026-07-15 &middot; no new merge &middot; AUTH Wave 1 build-gate progress &middot; ~3.5 min</p>
-    <audio controls preload="none" src="reports/pulse-0008.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0008.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-15 23:54 UTC</p>
+    <p class="ep-sub">2026-07-15 &middot; NIP-42 Wave 1 merged &middot; the first brick of content-relay AUTH &middot; ~3.6 min</p>
+    <audio controls preload="none" src="reports/pulse-0009.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0009.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">No new merge this hour — master still sits at #535's relay-ingest scale proof. Behind it, NIP-42 content-relay AUTH Wave 1's session-identity work keeps moving through the full workspace build/CI gate: a direct/FFI write-status parity divergence is fixed (write plane reverted to Public, authenticated writes deferred), a Swift SDK test compile gap is fixed, and a transport regression — session-keyed admission not honoring the local-host allowlist, caught by #535's new ingest smoke test — is being fixed now. Still pre-merge, engine-internal, no app-facing AUTH API yet. <code>remove_account</code> (#529) stays held pending #8's account-handle shape.</p>
+    <p class="ep-blurb">NIP-42 Wave 1 merged (<a href="https://github.com/pablof7z/nmp/pull/539">#539</a>): a closed <code>AccessContext</code> + <code>RelaySessionKey</code> now keys relay identity/attribution/coverage/admission by session, not URL, closing the structural cross-account-credit gap before any AUTH negotiation exists — passed an adversarial identity-isolation review clean. Honest framing: this is the foundation, not shippable AUTH — no reducer, no challenge/response, no app-facing API yet, and writes still ride the <code>Public</code> session. Wave 2 (the AUTH reducer) just started. Also landed: a 64&nbsp;MiB redb page-cache bound cutting the million-event ingest run's peak RSS 803&nbsp;MB&nbsp;→&nbsp;123&nbsp;MB (<a href="https://github.com/pablof7z/nmp/pull/540">#540</a>, closes #534). <code>remove_account</code> (#529) stays held pending #8's account-handle shape.</p>
   </section>
 
   <details class="archive" id="archive">
