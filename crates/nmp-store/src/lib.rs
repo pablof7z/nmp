@@ -243,6 +243,37 @@ pub struct StoredEvent {
     pub provenance: Provenance,
 }
 
+/// The closed canonical continuation key for newest-first event selection.
+///
+/// Store pages are ordered by `created_at` descending, then event id
+/// ascending. A cursor is exclusive: the next page may contain exactly rows
+/// whose timestamp is lower, or whose timestamp is equal and id is greater.
+/// Keeping both protocol facts in one typed key prevents callers from
+/// approximating a continuation by decrementing Nostr's one-second timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EventCursor {
+    pub created_at: Timestamp,
+    pub event_id: EventId,
+}
+
+impl EventCursor {
+    pub const fn new(created_at: Timestamp, event_id: EventId) -> Self {
+        Self {
+            created_at,
+            event_id,
+        }
+    }
+
+    pub fn from_event(event: &Event) -> Self {
+        Self::new(event.created_at, event.id)
+    }
+
+    fn admits(&self, event: &Event) -> bool {
+        event.created_at < self.created_at
+            || (event.created_at == self.created_at && event.id > self.event_id)
+    }
+}
+
 /// Which relay delivered an event, and the engine's wall-clock time at
 /// receipt — the `insert` door's second argument (M3 §3.1's `from:
 /// RelayObserved`).
@@ -1057,6 +1088,181 @@ pub trait EventStore {
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let mut rows = self.query(filter)?;
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Return the first `limit` canonical newest rows whose canonical relay
+    /// provenance intersects `relays`.
+    ///
+    /// This is the store-side projection required by a Strict pinned cache:
+    /// the bound applies *after* provenance eligibility, never before it.
+    /// Filtering an already-limited agnostic page can under-fill the result
+    /// even when older eligible rows exist. Persistent backends should test
+    /// provenance while walking their ordered index and stop only after
+    /// `limit` eligible rows have been accepted.
+    fn query_newest_observed_by(
+        &self,
+        filter: &Filter,
+        relays: &BTreeSet<RelayUrl>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || relays.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut rows = self.query(filter)?;
+        rows.retain(|row| {
+            row.provenance
+                .seen
+                .keys()
+                .any(|relay| relays.contains(relay))
+        });
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Return at most `limit` current matches strictly after `before` in the
+    /// canonical newest-first order used by [`EventStore::query_newest`].
+    ///
+    /// The exact exclusive predicate is:
+    /// `created_at < before.created_at ||
+    /// (created_at == before.created_at && id > before.event_id)`.
+    /// This predicate intersects the filter's ordinary inclusive time window;
+    /// it never rewrites that window or turns a cursor into relay acquisition
+    /// authority. The default implementation is the `MemoryStore` oracle;
+    /// persistent backends override it with an exact ordered-index range.
+    fn query_newest_before(
+        &self,
+        filter: &Filter,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self.query(filter)?;
+        rows.retain(|row| before.admits(&row.event));
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Strict-provenance counterpart of [`EventStore::query_newest_before`].
+    /// The cursor remains exact and exclusive, while `limit` counts only
+    /// rows observed from at least one relay in `relays`.
+    fn query_newest_before_observed_by(
+        &self,
+        filter: &Filter,
+        relays: &BTreeSet<RelayUrl>,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || relays.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut rows = self.query(filter)?;
+        rows.retain(|row| {
+            before.admits(&row.event)
+                && row
+                    .provenance
+                    .seen
+                    .keys()
+                    .any(|relay| relays.contains(relay))
+        });
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Return one canonical newest-first page from the UNION of `filters`,
+    /// strictly after `before` in that order.
+    ///
+    /// A row matching more than one filter appears once. The global `limit`
+    /// applies only after that de-duplication and merge, so callers can repair
+    /// one bounded projection with one logical store read even when its
+    /// resolved selection has multiple concrete roots. Persistent backends
+    /// may evaluate each root with an ordered bounded scan: no row ranked
+    /// below the first `limit` matches of its own root can enter the global
+    /// first `limit` of the union.
+    /// This remains selection-only; callers own presentation ordering.
+    fn query_newest_before_any(
+        &self,
+        filters: &[Filter],
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            for row in self.query(filter)? {
+                if before.admits(&row.event) {
+                    by_id.entry(row.event.id).or_insert(row);
+                }
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
+        rows.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Strict-provenance counterpart of
+    /// [`EventStore::query_newest_before_any`]. The page bound counts only
+    /// de-duplicated union rows observed by at least one eligible relay.
+    fn query_newest_before_any_observed_by(
+        &self,
+        filters: &[Filter],
+        relays: &BTreeSet<RelayUrl>,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if limit == 0 || filters.is_empty() || relays.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = BTreeMap::new();
+        for filter in filters {
+            for row in self.query(filter)? {
+                if before.admits(&row.event)
+                    && row
+                        .provenance
+                        .seen
+                        .keys()
+                        .any(|relay| relays.contains(relay))
+                {
+                    by_id.entry(row.event.id).or_insert(row);
+                }
+            }
+        }
+        let mut rows: Vec<_> = by_id.into_values().collect();
         rows.sort_by(|a, b| {
             b.event
                 .created_at

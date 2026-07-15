@@ -42,6 +42,15 @@ pub enum EngineError {
     InvalidSecretKey,
     /// A custom capability did not expose a stable registry identity.
     SignerMissingPublicKey,
+    /// A windowed [`Engine::observe`](crate::Engine::observe) declared an
+    /// `initial` window size greater than its `max` ceiling (#485). Caught
+    /// before the engine is touched; zero sizes are unrepresentable via
+    /// `NonZeroUsize`.
+    WindowInitialExceedsMax { initial: usize, max: usize },
+    /// A windowed [`Engine::observe`](crate::Engine::observe) was given a
+    /// selection that already carries a NIP-01 `limit` (#485). A window and a
+    /// `limit` would be two competing owners of row membership.
+    WindowSelectionHasLimit,
     /// The upper-half namespace reserved for failures rejected before
     /// durable acceptance has been completely consumed.
     ReceiptCorrelationIdExhausted,
@@ -73,6 +82,12 @@ impl std::fmt::Display for EngineError {
             ),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
+            Self::WindowInitialExceedsMax { initial, max } => {
+                write!(f, "window initial size {initial} exceeds its max {max}")
+            }
+            Self::WindowSelectionHasLimit => {
+                write!(f, "a windowed selection must not also declare a limit")
+            }
             Self::ReceiptCorrelationIdExhausted => {
                 write!(f, "receipt correlation id namespace exhausted")
             }

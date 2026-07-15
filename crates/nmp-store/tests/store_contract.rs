@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_store::{
-    coverage_key, sentinel_signature, AcceptWrite, ClaimSet, CoverageInterval, EventStore,
-    InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore, RefuseReason, RelayObserved,
-    RetractReason, StoredEvent, WriteDurability,
+    coverage_key, sentinel_signature, AcceptWrite, ClaimSet, CoverageInterval, EventCursor,
+    EventStore, InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore, RefuseReason,
+    RelayObserved, RetractReason, StoredEvent, WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -396,6 +396,269 @@ fn query_newest_is_an_explicit_bounded_door_on_both_backends() {
                 .map(|row| row.event.created_at.as_secs())
                 .collect::<Vec<_>>(),
             vec![500, 400, 300]
+        );
+    });
+}
+
+#[test]
+fn query_newest_before_pages_same_second_rows_without_gaps_or_duplicates() {
+    for_each_backend(|store| {
+        let k = keys();
+        let mut expected = Vec::new();
+        for i in 0..11u64 {
+            let event = regular_event_at(&k, &format!("same-second-{i}"), 500);
+            expected.push((event.created_at, event.id));
+            store.insert(event, observed("wss://r1", 600 + i)).unwrap();
+        }
+        for (created_at, content) in [(499, "older-a"), (498, "older-b")] {
+            let event = regular_event_at(&k, content, created_at);
+            expected.push((event.created_at, event.id));
+            store
+                .insert(event, observed("wss://r1", created_at + 100))
+                .unwrap();
+        }
+        expected.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let expected = expected.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+
+        let filter = Filter::new().kind(Kind::TextNote).author(k.public_key());
+        let mut page = store.query_newest(&filter, 4).unwrap();
+        let mut actual = page.iter().map(|row| row.event.id).collect::<Vec<_>>();
+        while let Some(last) = page.last() {
+            let before = EventCursor::from_event(&last.event);
+            page = store.query_newest_before(&filter, before, 4).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.iter().all(|row| {
+                row.event.created_at < before.created_at
+                    || (row.event.created_at == before.created_at && row.event.id > before.event_id)
+            }));
+            actual.extend(page.iter().map(|row| row.event.id));
+        }
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.iter().copied().collect::<BTreeSet<_>>().len(), 13);
+        assert!(store
+            .query_newest_before(
+                &filter,
+                EventCursor::new(Timestamp::from(500u64), expected[4]),
+                3,
+            )
+            .unwrap()
+            .iter()
+            .all(
+                |row| row.event.created_at < Timestamp::from(500u64) || row.event.id > expected[4]
+            ));
+    });
+}
+
+#[test]
+fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
+    for_each_backend(|store| {
+        let k = keys();
+        let wanted = RelayUrl::parse("wss://wanted.example").unwrap();
+        let other = RelayUrl::parse("wss://other.example").unwrap();
+
+        for (created_at, relay, content) in [
+            (500, other.clone(), "newest-ineligible"),
+            (400, other.clone(), "next-ineligible"),
+            (300, wanted.clone(), "eligible-a"),
+            (200, wanted.clone(), "eligible-b"),
+            (100, wanted.clone(), "eligible-c"),
+        ] {
+            store
+                .insert(
+                    regular_event_at(&k, content, created_at),
+                    RelayObserved::new(relay, Timestamp::from(600u64)),
+                )
+                .unwrap();
+        }
+
+        let filter = Filter::new().kind(Kind::TextNote).author(k.public_key());
+        let eligible = BTreeSet::from([wanted]);
+        let first = store
+            .query_newest_observed_by(&filter, &eligible, 2)
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![300, 200],
+            "the output limit must apply after Strict provenance eligibility"
+        );
+
+        let older = store
+            .query_newest_before_observed_by(
+                &filter,
+                &eligible,
+                EventCursor::from_event(&first[0].event),
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            older
+                .iter()
+                .map(|row| row.event.created_at.as_secs())
+                .collect::<Vec<_>>(),
+            vec![200, 100]
+        );
+    });
+}
+
+#[test]
+fn union_replacement_page_is_global_deduplicated_exclusive_and_strict_eligible() {
+    for_each_backend(|store| {
+        let a = keys();
+        let b = keys();
+        let wanted = relay("wss://wanted-union.example");
+        let other = relay("wss://other-union.example");
+
+        let same_a = regular_event_at(&a, "same-a", 500);
+        let same_b = regular_event_at(&b, "same-b", 500);
+        let ineligible = regular_event_at(&a, "ineligible", 450);
+        let eligible_b = regular_event_at(&b, "eligible-b", 400);
+        let eligible_a = regular_event_at(&a, "eligible-a", 300);
+        for (event, source) in [
+            (same_a.clone(), wanted.clone()),
+            (same_b.clone(), wanted.clone()),
+            (ineligible.clone(), other),
+            (eligible_b.clone(), wanted.clone()),
+            (eligible_a, wanted.clone()),
+        ] {
+            store
+                .insert(event, RelayObserved::new(source, Timestamp::from(700u64)))
+                .unwrap();
+        }
+
+        // The broad third root deliberately overlaps both author roots. The
+        // union door must still return each canonical id exactly once.
+        let filters = vec![
+            Filter::new().kind(Kind::TextNote).author(a.public_key()),
+            Filter::new().kind(Kind::TextNote).author(b.public_key()),
+            Filter::new().kind(Kind::TextNote),
+        ];
+        let (first, second) = if same_a.id < same_b.id {
+            (same_a.id, same_b.id)
+        } else {
+            (same_b.id, same_a.id)
+        };
+        let before = EventCursor::new(Timestamp::from(500u64), first);
+
+        let agnostic = store.query_newest_before_any(&filters, before, 2).unwrap();
+        assert_eq!(
+            agnostic.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![second, ineligible.id],
+            "the cursor is id-exclusive inside the tie second and overlapping roots dedupe"
+        );
+
+        let strict = store
+            .query_newest_before_any_observed_by(&filters, &BTreeSet::from([wanted]), before, 2)
+            .unwrap();
+        assert_eq!(
+            strict.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![second, eligible_b.id],
+            "wrong-relay rows cannot consume the union page bound"
+        );
+    });
+}
+
+#[test]
+fn query_newest_before_preserves_filter_winner_and_provenance_semantics() {
+    for_each_backend(|store| {
+        let author = keys();
+        let old_profile = EventBuilder::new(Kind::Metadata, "old")
+            .custom_created_at(Timestamp::from(100u64))
+            .sign_with_keys(&author)
+            .unwrap();
+        let current_profile = EventBuilder::new(Kind::Metadata, "current")
+            .custom_created_at(Timestamp::from(200u64))
+            .sign_with_keys(&author)
+            .unwrap();
+        let cursor_event = regular_event_at(&author, "cursor", 300);
+
+        store
+            .insert(old_profile.clone(), observed("wss://r1", 101))
+            .unwrap();
+        assert!(matches!(
+            store
+                .insert(current_profile.clone(), observed("wss://r1", 201))
+                .unwrap(),
+            InsertOutcome::Superseded { .. }
+        ));
+        store
+            .insert(current_profile.clone(), observed("wss://r2", 202))
+            .unwrap();
+        store
+            .insert(cursor_event.clone(), observed("wss://r1", 301))
+            .unwrap();
+
+        let rows = store
+            .query_newest_before(
+                &Filter::new()
+                    .kind(Kind::Metadata)
+                    .author(author.public_key()),
+                EventCursor::from_event(&cursor_event),
+                10,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.id, current_profile.id);
+        assert_ne!(rows[0].event.id, old_profile.id);
+        assert_eq!(rows[0].provenance.seen.len(), 2);
+    });
+}
+
+#[test]
+fn query_newest_before_handles_zero_empty_and_filter_window_intersection() {
+    for_each_backend(|store| {
+        let k = keys();
+        let newer = regular_event_at(&k, "newer", 300);
+        let middle = regular_event_at(&k, "middle", 200);
+        let older = regular_event_at(&k, "older", 100);
+        for event in [newer.clone(), middle.clone(), older.clone()] {
+            store.insert(event, observed("wss://r1", 400)).unwrap();
+        }
+
+        let all = Filter::new().kind(Kind::TextNote);
+        assert!(store
+            .query_newest_before(&all, EventCursor::from_event(&newer), 0)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .query_newest_before(
+                &Filter::new()
+                    .kind(Kind::TextNote)
+                    .since(Timestamp::from(250u64)),
+                EventCursor::from_event(&middle),
+                10,
+            )
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .query_newest_before(
+                &Filter::new()
+                    .kind(Kind::TextNote)
+                    .since(Timestamp::from(250u64))
+                    .until(Timestamp::from(150u64)),
+                EventCursor::from_event(&newer),
+                10,
+            )
+            .unwrap()
+            .is_empty());
+
+        let bounded = store
+            .query_newest_before(
+                &Filter::new()
+                    .kind(Kind::TextNote)
+                    .until(Timestamp::from(200u64)),
+                EventCursor::from_event(&newer),
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            bounded.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![middle.id, older.id]
         );
     });
 }

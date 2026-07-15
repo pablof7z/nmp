@@ -302,7 +302,7 @@ fn observe_following_with_spawn(
     spawn: impl FnOnce(nmp::NativeTaskReservation, Box<dyn FnOnce() + Send + 'static>) -> io::Result<()>,
 ) -> Result<FollowObservation, nmp::EngineError> {
     let reservation = engine.reserve_native_task("NIP-02 follow observer")?;
-    let subscription = engine.observe(nmp::LiveQuery(active_account_demand()))?;
+    let subscription = engine.observe(nmp::LiveQuery(active_account_demand()), None)?;
     let cancel = subscription.cancel_handle();
     let latest = Arc::new(LatestSlot::default());
     let producer = latest.clone();
@@ -311,10 +311,10 @@ fn observe_following_with_spawn(
         reservation,
         Box::new(move || {
             let mut accumulator = Accumulator::default();
-            while let Ok((deltas, evidence)) = subscription.recv() {
-                accumulator.apply(deltas);
+            while let Ok(frame) = subscription.recv() {
+                accumulator.apply(frame.deltas);
                 let active = engine.active_account().ok().flatten();
-                producer.send(project(active, target, &accumulator, &evidence));
+                producer.send(project(active, target, &accumulator, &frame.evidence));
             }
             producer.close();
         }),
@@ -459,7 +459,7 @@ fn prepare_set_following_with_timeout(
             }
         };
 
-        let subscription = match engine.observe(nmp::LiveQuery(active_account_demand())) {
+        let subscription = match engine.observe(nmp::LiveQuery(active_account_demand()), None) {
             Ok(subscription) => subscription,
             Err(error) => {
                 let _ = tx.send(FollowActionStatus::Failed(engine_failure(error)));
@@ -479,8 +479,8 @@ fn prepare_set_following_with_timeout(
             }
             remaining_snapshots -= 1;
             match subscription.recv_timeout(timeout) {
-                Ok((deltas, evidence)) => {
-                    accumulator.apply(deltas);
+                Ok(frame) => {
+                    accumulator.apply(frame.deltas);
                     let active = match engine.active_account() {
                         Ok(active) => active,
                         Err(error) => {
@@ -494,7 +494,7 @@ fn prepare_set_following_with_timeout(
                         ));
                         return;
                     }
-                    last_availability = availability(active, &evidence);
+                    last_availability = availability(active, &frame.evidence);
                     if last_availability == FollowAvailability::SourceUnavailable {
                         let _ = tx.send(FollowActionStatus::Failed(
                             FollowActionFailure::SourceUnavailable,
