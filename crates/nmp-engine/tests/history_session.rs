@@ -447,3 +447,106 @@ fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
         live_subs.len()
     );
 }
+
+/// #486 correctness guard against the #474 tie-second class: while a DENSE
+/// same-second boundary stays the window boundary, its tie-second REQ
+/// (`since==until==T`) must NOT be retired by the supersede-close — closing it
+/// before the boundary descends could drop a not-yet-projected same-second
+/// row. A subsequent same-second advance therefore never emits a `Close` for
+/// the boundary second's tie subscription; it is retired only when the whole
+/// session is withdrawn.
+#[test]
+fn dense_boundary_tie_subscription_survives_same_second_advances() {
+    // 13 rows all at second 100: every advance keeps second 100 the boundary.
+    let (mut core, keys, relay, _events) = seeded(13);
+    let opened = core.handle(EngineMsg::SubscribeHistory(
+        query(&keys, 5, 13),
+        Box::new(NullHistorySink),
+    ));
+    let id = open(&opened);
+
+    // First advance opens the tie-second REQ for second 100 (since==until==100,
+    // no limit) alongside an older-range REQ. Capture the tie subscription id.
+    core.handle(EngineMsg::RequestRows(id, 10));
+    let first = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let tie_sub = first
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| &delta.ops)
+        .filter(|(url, _)| url == &relay)
+        .flat_map(|(_, ops)| ops)
+        .find_map(|op| match op {
+            WireOp::Req(sub, filter)
+                if filter.since == Some(100)
+                    && filter.until == Some(100)
+                    && filter.limit.is_none() =>
+            {
+                Some(sub.clone())
+            }
+            _ => None,
+        })
+        .expect("first same-second advance must place the tie-second REQ");
+
+    // A second same-second advance (boundary still 100) must NOT close the tie
+    // subscription for the dense boundary second — it is still the only source
+    // that can yield an un-projected same-second row (the #474 class). (Older
+    // acquisitions from the first advance ARE legitimately retired here, since
+    // their range is re-requestable.)
+    let staged = core.handle(EngineMsg::RequestRows(id, 13));
+    let mut tie_closed = false;
+    let mut scan = |effects: &[Effect]| {
+        for effect in effects {
+            let Effect::Wire(delta) = effect else {
+                continue;
+            };
+            for (url, ops) in &delta.ops {
+                if url != &relay {
+                    continue;
+                }
+                for op in ops {
+                    if matches!(op, WireOp::Close(sub) if *sub == tie_sub) {
+                        tie_closed = true;
+                    }
+                }
+            }
+        }
+    };
+    scan(&staged);
+    loop {
+        let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+        if committed.is_empty() {
+            break;
+        }
+        scan(&committed);
+        let restaged = committed.iter().any(
+            |effect| matches!(effect, Effect::HistoryLoadResult(session, Ok(())) if *session == id),
+        );
+        if !restaged {
+            break;
+        }
+    }
+    assert!(
+        !tie_closed,
+        "a same-second advance must not retire the dense boundary second's tie REQ"
+    );
+
+    // Only withdrawing the whole session finally closes the retained tie REQ.
+    let withdrawn = core.handle(EngineMsg::UnsubscribeHistory(id));
+    let tie_closed_on_teardown = withdrawn
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| &delta.ops)
+        .filter(|(url, _)| url == &relay)
+        .flat_map(|(_, ops)| ops)
+        .any(|op| matches!(op, WireOp::Close(sub) if *sub == tie_sub));
+    assert!(
+        tie_closed_on_teardown,
+        "teardown must close the retained tie subscription"
+    );
+}

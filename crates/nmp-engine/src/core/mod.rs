@@ -551,10 +551,18 @@ struct HistoryState {
     handle_ids: BTreeSet<HandleId>,
     /// The initial, permanent live-top demand opened at
     /// [`Self::on_subscribe_history`]. It is never a historical acquisition
-    /// and is retired only when the whole session is dropped; the #486
-    /// supersede-close keeps exactly this handle plus the in-flight advance's
-    /// own handles, closing every earlier tie/older acquisition.
+    /// and is retired only when the whole session is dropped.
     live_handle_id: HandleId,
+    /// Every engine-owned acquisition handle the session currently holds open,
+    /// mapped to `Some(second)` for a tie-second REQ (`since==until==second`)
+    /// or `None` for an older-range REQ. The live-top handle is never in this
+    /// map. This is what the #486 supersede-close consults: an older handle is
+    /// always safe to retire once superseded (its range is re-requestable, so
+    /// no permanent gap), while a tie handle is kept open until the window
+    /// boundary descends strictly below its second — only then is that dense
+    /// second fully materialized as an interior region and its REQ redundant,
+    /// so retiring it can never drop an un-projected same-second row.
+    acquisitions: BTreeMap<HandleId, Option<u64>>,
     sink: Box<dyn HistorySink>,
     target_rows: usize,
     acquired_tie_seconds: BTreeSet<u64>,
@@ -2348,6 +2356,7 @@ impl<S: EventStore> EngineCore<S> {
                 handles: vec![handle],
                 handle_ids: BTreeSet::from([handle_id]),
                 live_handle_id: handle_id,
+                acquisitions: BTreeMap::new(),
                 sink,
                 acquired_tie_seconds: BTreeSet::new(),
                 last_rows: BTreeMap::new(),
@@ -2532,11 +2541,15 @@ impl<S: EventStore> EngineCore<S> {
             });
         }
 
-        let mut opened = Vec::new();
+        // Each opened acquisition is tagged with its kind for the #486
+        // supersede-close: `Some(second)` for the tie-second REQ, `None` for
+        // the older-range REQ.
+        let mut opened: Vec<(QueryHandle, Option<u64>)> = Vec::new();
+        let boundary_second = boundary.created_at.as_secs();
         if needs_tie {
-            if let Some(tie) = query.tie_second_demand(boundary.created_at.as_secs()) {
+            if let Some(tie) = query.tie_second_demand(boundary_second) {
                 match self.resolver.subscribe(tie) {
-                    Ok((handle, _)) => opened.push(handle),
+                    Ok((handle, _)) => opened.push((handle, Some(boundary_second))),
                     Err(error) => {
                         self.degrade_store(error, &mut effects);
                         effects.extend(self.on_rollback_history_load(id));
@@ -2549,11 +2562,11 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
         }
-        if let Some(older) = query.older_demand(boundary.created_at.as_secs(), needed) {
+        if let Some(older) = query.older_demand(boundary_second, needed) {
             match self.resolver.subscribe(older) {
-                Ok((handle, _)) => opened.push(handle),
+                Ok((handle, _)) => opened.push((handle, None)),
                 Err(error) => {
-                    for handle in opened {
+                    for (handle, _) in opened {
                         let _ = self.resolver.unsubscribe(handle.id());
                     }
                     self.degrade_store(error, &mut effects);
@@ -2573,14 +2586,13 @@ impl<S: EventStore> EngineCore<S> {
                 .get_mut(&id)
                 .expect("history remains live during synchronous advance");
             if needs_tie {
-                state
-                    .acquired_tie_seconds
-                    .insert(boundary.created_at.as_secs());
+                state.acquired_tie_seconds.insert(boundary_second);
             }
-            for handle in opened {
+            for (handle, kind) in opened {
                 let handle_id = handle.id();
                 state.handle_ids.insert(handle_id);
                 state.handles.push(handle);
+                state.acquisitions.insert(handle_id, kind);
                 self.history_by_handle.insert(handle_id, id);
                 state
                     .pending_load
@@ -2680,15 +2692,25 @@ impl<S: EventStore> EngineCore<S> {
             return Vec::new();
         }
 
-        // #486: retire every historical tie/older acquisition opened by a
-        // PRIOR advance. Only the permanent live-top handle and the advance
-        // now committing keep their subscriptions; a completed until-bounded
-        // acquisition's rows are already durable and its coverage was recorded
-        // at EOSE, so holding its REQ open only leaks one subscription per
-        // relay per advance. `acquired_tie_seconds` is deliberately retained
-        // (that IS the coverage evidence) so a later advance never re-requests
-        // a tie second already proven. The recompile just below re-diffs the
-        // demand and emits the wire CLOSEs for the handles dropped here.
+        // #486: retire the historical tie/older acquisitions the session no
+        // longer needs, so a deep scroll of K advances never accumulates O(K)
+        // live relay subscriptions. Three classes of handle are KEPT open:
+        //   * the permanent live-top demand (`live_handle_id`);
+        //   * the advance now committing (its own just-opened handles); and
+        //   * the tie-second REQ for the CURRENT window boundary second — a
+        //     dense same-second boundary keeps that second as the boundary
+        //     across several advances (its `needs_tie` gate stays satisfied
+        //     without re-opening), and closing its REQ before the boundary has
+        //     descended below it could drop a not-yet-projected same-second
+        //     row (the #474 tie-second correctness class). It is retired only
+        //     once the boundary moves strictly older, at which point every
+        //     in-store row at that second is already projected as interior.
+        // Every OTHER acquisition — older-range REQs (always re-requestable, so
+        // never a permanent gap) and tie REQs for seconds no longer the
+        // boundary — is retired here. `acquired_tie_seconds` is deliberately
+        // retained (that is the coverage evidence) so a later advance never
+        // re-requests a tie second already covered. The recompile just below
+        // re-diffs the demand and emits the wire CLOSEs for the dropped handles.
         let superseded: Vec<HandleId> = {
             let state = self
                 .histories
@@ -2703,11 +2725,24 @@ impl<S: EventStore> EngineCore<S> {
                 .copied()
                 .collect();
             let live = state.live_handle_id;
+            let boundary_second = self
+                .window_boundary(id)
+                .map(|cursor| cursor.created_at.as_secs());
+            let state = self
+                .histories
+                .get(&id)
+                .expect("committed history remained live");
             state
-                .handle_ids
+                .acquisitions
                 .iter()
-                .copied()
-                .filter(|handle| *handle != live && !current.contains(handle))
+                .filter(|(handle, kind)| {
+                    if **handle == live || current.contains(handle) {
+                        return false;
+                    }
+                    // Keep the tie REQ whose second is still the boundary.
+                    !matches!((kind, boundary_second), (Some(second), Some(b)) if *second == b)
+                })
+                .map(|(handle, _)| *handle)
                 .collect()
         };
         if !superseded.is_empty() {
@@ -2724,6 +2759,7 @@ impl<S: EventStore> EngineCore<S> {
                 .retain(|handle| !superseded.contains(&handle.id()));
             for handle_id in &superseded {
                 state.handle_ids.remove(handle_id);
+                state.acquisitions.remove(handle_id);
             }
         }
 
@@ -2789,6 +2825,9 @@ impl<S: EventStore> EngineCore<S> {
             .handles
             .retain(|handle| !opened.contains(&handle.id()));
         state.handle_ids.retain(|handle| !opened.contains(handle));
+        state
+            .acquisitions
+            .retain(|handle, _| !opened.contains(handle));
         if let Some(second) = pending.acquired_tie_second {
             state.acquired_tie_seconds.remove(&second);
         }
