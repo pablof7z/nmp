@@ -1,0 +1,13 @@
+{
+  "before_commit": "6aa80b43fa3e383c9c66facf90f0b97f15d11148",
+  "after_commit": "2b24dd9451dc9d5888e896183321f3e0fa4f9d29",
+  "before_peak_anonymous_bytes": 803774464,
+  "after_peak_anonymous_bytes": 122511360,
+  "anonymous_reduction_bytes": 681263104,
+  "anonymous_reduction_percent": 84.75799300834717,
+  "before_frames_per_second": 4111.558031767804,
+  "after_frames_per_second": 4669.5312158968045,
+  "throughput_change_percent": 13.570845402590475,
+  "before_database_bytes": 1576013824,
+  "after_database_bytes": 1291849728
+}
