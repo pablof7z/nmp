@@ -516,3 +516,121 @@ async fn durable_event_resolves_written_exactly_once() {
     pool.shutdown();
     relay.shutdown();
 }
+
+/// Issue #506 Fix 2, end-to-end deadlock falsifier. Retiring a worker (here
+/// via [`Pool::close`], which runs while holding the pool
+/// `Mutex<PoolInner>`) must COMPLETE — never wedge the whole pool — even with
+/// BOTH per-relay data lanes saturated. That is the exact burst-publish-to-a-
+/// stalled-relay scenario #506 targets.
+///
+/// The worker-level deadlock LINK is guarded deterministically by
+/// `pool::worker`'s
+/// `retire_is_non_blocking_when_the_command_queue_is_full_and_undrained`
+/// (retire must not block on a full, undrained command queue). This is the
+/// live-`Pool` companion the review asked for: a real relay, a real worker, a
+/// real burst filling the cap-1 ingest queue while a send-spam fills the
+/// cap-1 command queue, and a concurrent `close` that must return promptly.
+/// On the rejected blocking-send retirement this deadlocks — `close` holds
+/// the lock while `retire` parks on the full command queue, whose only
+/// drainer (the worker) is itself blocked on the full event queue behind the
+/// very lock `close` holds. The atomic-flag design returns at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn close_under_saturated_data_lanes_never_deadlocks_the_pool() {
+    let _serial_guard = RECONNECT_TEST_GUARD.lock().await;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .try_init();
+
+    let port = free_port();
+    let keys = Keys::generate();
+
+    let relay = LocalRelay::builder()
+        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .port(port)
+        .build();
+    relay.run().await.expect("run relay");
+
+    // A burst large enough that draining it keeps the cap-1 ingest queue
+    // saturated — and the worker parked in a blocking `event_tx.send` — for a
+    // real window, which is exactly when a lock-holding `close` must not wedge.
+    const BURST: usize = 200;
+    for i in 0..BURST {
+        let event: Event = EventBuilder::text_note(format!("burst {i}"))
+            .finalize(&keys)
+            .expect("sign burst event");
+        relay.add_event(event).await.expect("seed burst event");
+    }
+    let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
+
+    let (tx, rx) = mpsc::channel::<PoolEvent>();
+    let pool = Pool::new(
+        PoolConfig {
+            // Both per-relay data lanes deliberately tiny so the burst + a
+            // send-spam saturate them, recreating #506's deadlock precondition.
+            command_queue_capacity: 1,
+            ingest_queue_capacity: 1,
+            verifier_queue_capacity: 1,
+            reconnect_jitter_max: Some(Duration::ZERO),
+            ..PoolConfig::default()
+        },
+        tx,
+    )
+    .expect("test pool construction");
+
+    let h1 = pool.ensure_open(&url).expect("relay admitted");
+    // 15s — see test 7's identical first-connect wait for the CONNECT_TIMEOUT
+    // rationale.
+    recv_matching(&rx, Duration::from_secs(15), is_connected);
+
+    // Kick off the burst.
+    let req = format!(
+        r#"["REQ","burst",{{"authors":["{}"]}}]"#,
+        keys.public_key().to_hex()
+    );
+    assert!(pool.send(h1, WireFrame::Text(req)), "send burst REQ");
+
+    // Saturate the bounded command queue with frames the worker cannot drain
+    // while it is busy pumping the burst into a full ingest queue. `send`
+    // returns false the moment the queue is full (the #506 HIGH backpressure
+    // signal), so this spam cannot itself grow unbounded. Whether the queue is
+    // observably full at any given instant is timing-dependent, so it is not
+    // asserted — the point is to stress the exact saturated state under which
+    // the close below must stay prompt.
+    for _ in 0..64 {
+        if !pool.send(h1, WireFrame::Text(r#"["CLOSE","noop"]"#.to_string())) {
+            break;
+        }
+    }
+
+    // The falsifier: run `close` on its own thread and REQUIRE prompt
+    // completion. A blocking-send retirement would park the pool lock forever
+    // here; the timeout below would then fire.
+    let pool_for_close = pool.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        let outcome = pool_for_close.close(h1);
+        let _ = done_tx.send(outcome.is_some());
+    });
+    let closed = done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("close() must not block on the pool lock under saturated data lanes (#506)");
+    assert!(
+        closed,
+        "closing a live slot yields its synchronous disconnect fact"
+    );
+    closer.join().expect("close thread must not panic");
+
+    // The pool is still fully responsive: another lock-taking call returns at
+    // once, and the retired slot reports no live worker.
+    assert!(
+        pool.live_handle(&url).is_none(),
+        "the closed slot has no live worker and the pool lock is not wedged"
+    );
+
+    // Drain whatever burst frames already landed; unbounded test sink, so this
+    // never blocks.
+    let _ = rx.try_iter().count();
+
+    pool.shutdown();
+    relay.shutdown();
+}
