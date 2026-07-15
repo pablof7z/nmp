@@ -15,7 +15,36 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 21:56:00 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 22:51:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-15 22:51 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0008.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0008</guid>
+<pubDate>Wed, 15 Jul 2026 22:51:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse. No new merge this hour -- master sits exactly where it was after last hour's relay-ingest scale proof. But there's a genuinely interesting story happening just behind that line, worth walking through, because it's process working exactly the way it's supposed to.
+
+The content-relay authentication work -- proving who you are to a relay before it'll serve certain data, not just before you publish -- is a seven-part landing plan, and wave one is the foundation: giving every session a properly scoped identity, so an anonymous reader and two different logged-in accounts on the same relay can never quietly bleed into each other. That piece already passed its adversarial review, a review built specifically to try to break that isolation. It held. Sound, no leaks.
+
+But passing that review didn't mean it was done, and this hour shows exactly why. Once the work moved into the full workspace gate -- the one that also builds Swift and Kotlin, not just Rust -- it caught a sequence of real issues the focused review never touched.
+
+First, a parity divergence between how a write's status gets reported directly from Rust versus through the FFI boundary Swift and Kotlin talk to. Two different tellings of the same fact. Fixed now, in the conservative direction: the write plane reverts cleanly back to public status, and authenticated write sessions get deferred to a later wave instead of shipping half right.
+
+Second, the new access-context variant needed a Swift SDK test updated just to compile against it. Also fixed -- small, but exactly the kind of thing a Rust-only review can't see.
+
+Third, and this is the one worth pausing on: a transport regression where session-keyed admission -- the new logic deciding which relay connections get access under the new identity model -- stopped honoring the local-host allowlist. Plainly: a relay that should have been allowed to connect, because it was explicitly permitted as a local loopback relay, wouldn't connect at all. Here's the interesting part -- that wasn't caught by a dedicated auth test. It was caught by the ingest smoke test that came out of last hour's million-event scale proof, a completely different piece of proof infrastructure, built for a different reason, catching a regression in a feature it wasn't even testing for. That fix is in progress right now.
+
+So, nothing merged this hour, but don't read that as nothing happening. This is what a security-sensitive refactor is supposed to look like: land it in careful, reviewed waves, keep the parity oracle and the full cross-language gate running the whole time, and let them catch the kind of subtle, cross-boundary bug that one rigorous review alone can miss. All of this stays pre-merge and engine-internal -- there's no app-facing AUTH API yet, and there won't be until this wave lands.
+
+Meanwhile, remove-account stays exactly where it's been: drafted, held, waiting on this same work to settle its account-handle shape first.
+
+That's the pulse -- no merge to report, but real, careful progress on the hardest, most security-sensitive piece of work in flight, caught being careful in exactly the way you'd want it to be.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0008.mp3" type="audio/mpeg" length="3337004"/>
+<itunes:title>NMP Pulse — 2026-07-15 22:51 UTC</itunes:title>
+<itunes:duration>209</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-15 21:56 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0007.mp3</link>
