@@ -763,15 +763,24 @@ fn serve_corpus(
             return Err(error.to_string());
         }
     }
+    let send_elapsed = started.elapsed();
     if !config.expect_rejection {
-        // Finish the finite fixture with an ordered WebSocket close frame.
-        // The client cannot observe it before every preceding EVENT/EOSE.
-        socket.close(None).map_err(|error| error.to_string())?;
+        // Real subscription sockets remain open after EOSE. Waiting for the
+        // client close also proves it consumed the final TCP window.
+        loop {
+            match socket.read() {
+                Ok(Message::Close(_))
+                | Err(tungstenite::Error::ConnectionClosed)
+                | Err(tungstenite::Error::AlreadyClosed) => break,
+                Ok(_) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
     }
     Ok(ServerStats {
         frames,
         bytes,
-        send_elapsed: started.elapsed(),
+        send_elapsed,
     })
 }
 
