@@ -880,8 +880,7 @@ impl RelayInformationService {
             receiver,
             shared: Arc::clone(&self.shared),
             relay: relay_for_cancel,
-            ticket,
-            armed: true,
+            ticket: WaitTicket::Armed(ticket),
         }
         .await
     }
@@ -1271,12 +1270,25 @@ fn freshness_at(fresh_until: u64, now: u64) -> RelayInformationFreshness {
     }
 }
 
+/// Cancellation-on-drop state for an [`AsyncWait`]. Replaces a bare `armed`
+/// bool paired with a separately-read `ticket` field: once the wait resolves
+/// there is no representable way to still hold a ticket worth cancelling,
+/// because `Disarmed` discards it.
+#[derive(Clone, Copy)]
+enum WaitTicket {
+    /// Still outstanding. `Some((generation, waiter_id))` when registered in
+    /// a flight; `None` when the result was already delivered via cache, so
+    /// there is nothing to cancel.
+    Armed(Option<(u64, u64)>),
+    /// `poll` already observed a terminal result; dropping is a no-op.
+    Disarmed,
+}
+
 struct AsyncWait {
     receiver: oneshot::Receiver<Result<RelayInformationSnapshot, RelayInformationError>>,
     shared: Arc<Shared>,
     relay: RelayUrl,
-    ticket: Option<(u64, u64)>,
-    armed: bool,
+    ticket: WaitTicket,
 }
 
 impl Future for AsyncWait {
@@ -1285,11 +1297,11 @@ impl Future for AsyncWait {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.receiver).poll(cx) {
             Poll::Ready(Ok(value)) => {
-                self.armed = false;
+                self.ticket = WaitTicket::Disarmed;
                 Poll::Ready(value)
             }
             Poll::Ready(Err(_)) => {
-                self.armed = false;
+                self.ticket = WaitTicket::Disarmed;
                 Poll::Ready(Err(RelayInformationError::ServiceClosed))
             }
             Poll::Pending => Poll::Pending,
@@ -1299,10 +1311,7 @@ impl Future for AsyncWait {
 
 impl Drop for AsyncWait {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if let Some((generation, waiter_id)) = self.ticket {
+        if let WaitTicket::Armed(Some((generation, waiter_id))) = self.ticket {
             cancel_waiter(&self.shared, &self.relay, generation, waiter_id);
         }
     }

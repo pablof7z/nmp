@@ -203,8 +203,7 @@ impl Executor {
         Ok(Reservation {
             core: Arc::clone(&self.core),
             component,
-            reservation_id,
-            live: true,
+            reservation_id: Some(reservation_id),
         })
     }
 
@@ -346,8 +345,11 @@ pub enum ExecutorError {
 pub struct Reservation {
     core: Arc<Core>,
     component: String,
-    reservation_id: u64,
-    live: bool,
+    /// `Some` while the reservation is live and unclaimed; taken (leaving
+    /// `None`) the moment it is either started or released, so a
+    /// double-release or a release-after-start is unrepresentable instead of
+    /// relying on a separate liveness flag.
+    reservation_id: Option<u64>,
 }
 
 impl Reservation {
@@ -378,7 +380,14 @@ impl Reservation {
             Box<dyn FnOnce() + Send + 'static>,
         ) -> std::io::Result<JoinHandle<()>>,
     ) -> Result<StartedTask, SpawnError> {
-        let task_id = self.reservation_id;
+        // Taking the id here marks the reservation consumed for the rest of
+        // this call, on every path (early-return, spawn failure, or success)
+        // — mirroring the old `self.live = false` that was set on all three
+        // paths, but now impossible to forget on a future new path.
+        let task_id = self
+            .reservation_id
+            .take()
+            .expect("Reservation::start_with_cancel_and_spawn called twice");
         let component = self.component.clone();
         let thread_name = format!("nmp-native-{}", sanitize_name(&component));
         let executor_id = self.core.id;
@@ -395,7 +404,6 @@ impl Reservation {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if !state.reservations.contains(&task_id) {
-            self.live = false;
             return Err(SpawnError::ExecutorShutDown { component });
         }
         let handle = match spawn(
@@ -417,7 +425,6 @@ impl Reservation {
                 state.reservations.remove(&task_id);
                 state.admitted -= 1;
                 self.core.shared.changed.notify_all();
-                self.live = false;
                 return Err(SpawnError::ThreadUnavailable { component, error });
             }
         };
@@ -430,22 +437,23 @@ impl Reservation {
             },
         );
         drop(state);
-        self.live = false;
         Ok(StartedTask { start: start_tx })
     }
 
     fn release(&mut self) {
-        if !self.live {
+        // `take()` both reads the id (if still live) and disarms the
+        // reservation in one step, so a second call — e.g. from `Drop` after
+        // an explicit `release()` — observes `None` and is a no-op.
+        let Some(reservation_id) = self.reservation_id.take() else {
             return;
-        }
-        self.live = false;
+        };
         let mut state = self
             .core
             .shared
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if state.reservations.remove(&self.reservation_id) {
+        if state.reservations.remove(&reservation_id) {
             state.admitted -= 1;
             // A waiter may already have observed this reservation in the
             // admitted count. SlotReleased wakes the reaper, not this
