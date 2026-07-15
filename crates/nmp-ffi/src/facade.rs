@@ -630,9 +630,9 @@ impl NmpEngine {
     /// (#156). The caller supplies no author, timestamp, kind, bech32
     /// encoding, or raw tags: NMP reads the active account, owns event time,
     /// materializes ordered/deduplicated `nostr:npub…` content references,
-    /// and composes `p`/reply-`e`/`h`/`previous` plus pinned-host routing.
-    /// `previous` comes from an engine-owned strict-cache snapshot for this
-    /// exact host/group; no caller row or provenance claim enters the path.
+    /// and composes `p`/reply-`e`/`h` plus pinned-host routing. `previous` is
+    /// temporarily omitted until NMP can prove a live host acceptance window;
+    /// no caller row or provenance claim enters the path.
     /// Publish the returned take-once value through [`Self::publish_composed`].
     pub fn group_message_intent(
         &self,

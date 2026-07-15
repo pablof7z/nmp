@@ -152,7 +152,7 @@ pub enum FfiError {
     /// #115: `NmpEngine::publish_composed` was called a second time on the
     /// same `FfiComposedWriteIntent` handle -- it is take-once by design
     /// (recompose via `group_message_intent` again is the correct retry path,
-    /// since NMP-owned time and couriered `previous` evidence should refresh).
+    /// since NMP-owned event time must refresh).
     IntentAlreadyConsumed,
     /// NIP-11 acquisition failed before any last-good document existed.
     /// `ExecutorSaturated`/`RelayInformationWaitersSaturated`/
