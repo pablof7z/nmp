@@ -34,7 +34,6 @@ mod history;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
-use std::sync::Arc;
 
 #[cfg(test)]
 use std::cell::Cell;

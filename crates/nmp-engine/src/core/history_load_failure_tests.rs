@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureDirectory;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
-    CoverageKey, EventCursor, EventStore, FinishAttemptOutcome, GcReport, InsertOutcome,
+    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval,
+    CoverageKey, EventCursor, EventStore, GcReport, InsertOutcome,
     MemoryStore, PersistenceError, PromoteOutcome, RecoveredAttempt, RecoveredIntent,
     RecoveredReceipt, RecoveredRouteRevision, RelayObserved, RetractReason, StoredEvent,
 };
@@ -173,26 +173,6 @@ impl EventStore for FailingReadStore {
         intent_id: IntentId,
     ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
-    }
-
-    fn start_attempt(
-        &mut self,
-        intent_id: IntentId,
-        relay: RelayUrl,
-        event: Event,
-    ) -> Result<RecoveredAttempt, PersistenceError> {
-        self.inner.start_attempt(intent_id, relay, event)
-    }
-
-    fn finish_attempt(
-        &mut self,
-        intent_id: IntentId,
-        relay: &RelayUrl,
-        ordinal: u64,
-        outcome: AttemptOutcome,
-    ) -> Result<FinishAttemptOutcome, PersistenceError> {
-        self.inner
-            .finish_attempt(intent_id, relay, ordinal, outcome)
     }
 
     fn recover_attempts(

@@ -554,7 +554,7 @@ impl NmpEngine {
     pub fn observe(
         &self,
         query: FfiFilter,
-        #[uniffi(default = None)] window: Option<FfiWindow>,
+        window: Option<FfiWindow>,
         observer: Box<dyn RowObserver>,
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let filter = filter_from_ffi(query)?;
@@ -594,7 +594,7 @@ impl NmpEngine {
     pub fn observe_demand(
         &self,
         query: FfiDemand,
-        #[uniffi(default = None)] window: Option<FfiWindow>,
+        window: Option<FfiWindow>,
         observer: Box<dyn RowObserver>,
     ) -> Result<Arc<NmpQueryHandle>, FfiError> {
         let demand = demand_from_ffi(query)?;
