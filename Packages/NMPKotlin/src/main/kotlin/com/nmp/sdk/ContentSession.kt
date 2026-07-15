@@ -19,25 +19,37 @@ import uniffi.nmp_ffi.FfiContentResolutionDecision
 import uniffi.nmp_ffi.evaluateContentClaim
 import uniffi.nmp_ffi.evaluateContentResolution
 
-data class NostrContentPolicy(
-    val maxActiveReferences: Int = 24,
-    val maxResolvedReferences: Int = 96,
-    val maxDepth: Int = 3,
-    val releaseGraceMilliseconds: Long = 350,
+data class NostrContentPolicy private constructor(
+    val maxActiveReferences: Int,
+    val maxResolvedReferences: Int,
+    val maxDepth: Int,
+    val releaseGraceMilliseconds: Long,
 ) {
-    init {
-        require(maxActiveReferences > 0)
-        require(maxResolvedReferences > 0)
-        require(maxDepth >= 0)
-        require(releaseGraceMilliseconds >= 0)
-    }
-
     internal fun toFfi() =
         FfiContentHydrationPolicy(
             maxActiveReferences.toUInt(),
             maxResolvedReferences.toUInt(),
             maxDepth.coerceAtMost(UByte.MAX_VALUE.toInt()).toUByte(),
         )
+
+    companion object {
+        /**
+         * Mirrors Swift's [NostrContentPolicy] contract: invalid bounds are
+         * silently clamped to the nearest valid value rather than throwing.
+         */
+        operator fun invoke(
+            maxActiveReferences: Int = 24,
+            maxResolvedReferences: Int = 96,
+            maxDepth: Int = 3,
+            releaseGraceMilliseconds: Long = 350,
+        ): NostrContentPolicy =
+            NostrContentPolicy(
+                maxActiveReferences.coerceAtLeast(1),
+                maxResolvedReferences.coerceAtLeast(1),
+                maxDepth.coerceAtLeast(0),
+                releaseGraceMilliseconds,
+            )
+    }
 }
 
 data class NostrContentRenderContext(
