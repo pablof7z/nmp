@@ -26,6 +26,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -141,6 +142,16 @@ pub(super) fn worker_id_of(generation: u64) -> u32 {
 /// its backoff wait between sockets, where it just blocks on `recv_timeout`).
 pub(super) struct WorkerHandle {
     command_tx: SyncSender<WorkerCommand>,
+    /// Out-of-band terminal signal (issue #506). Retirement must NEVER travel
+    /// through the bounded `command_tx` data lane: a caller retires a worker
+    /// while holding the pool `Mutex<PoolInner>` (every `retire` call site
+    /// does), so a blocking send here — if the bounded command queue were
+    /// full and the worker were transitively blocked draining it (its own
+    /// `event_tx.send` waits on the translator, which needs that same pool
+    /// lock) — would be a whole-pool circular-wait deadlock. This atomic is
+    /// the source of truth the worker checks at EVERY drain/wait point; it is
+    /// set (and the worker woken) without ever touching the data queue.
+    shutdown: Arc<AtomicBool>,
     waker: Arc<Mutex<Option<Waker>>>,
     join: Option<JoinHandle<()>>,
 }
@@ -159,38 +170,57 @@ impl WorkerHandle {
         if self.command_tx.try_send(command).is_err() {
             return false;
         }
-        if let Ok(guard) = self.waker.lock() {
-            if let Some(waker) = guard.as_ref() {
-                let _ = waker.wake();
-            }
-        }
+        self.wake();
         true
     }
 
-    /// Request shutdown and return the worker's join handle.
-    ///
-    /// Deliberately NOT [`Self::push`]: `Shutdown` must never be rejected by
-    /// a saturated data queue, so this uses a plain (potentially blocking)
-    /// `send` on the SAME bounded channel rather than `try_send`. This is
-    /// safe from deadlock/stall by construction, not by luck: every caller
-    /// of `retire` (`PoolInner::close`/`shutdown`, and the permanent-`Failed`
-    /// arm of `apply_worker_event_with_verdict`) has ALREADY taken
-    /// `state.worker` out of the slot table under the pool's own lock before
-    /// calling this, so `PoolInner::command_tx_for` refuses every future
-    /// `Pool::send`/`send_durable` against this exact handle from that
-    /// instant on — the channel can only ever drain from here, never refill.
-    /// The worker's own receive loop drains commands at CPU speed with no
-    /// socket I/O in the way (`drain_commands`/`wait_before_reconnect`), so
-    /// a blocking `send` resolves in bounded time (at most whatever backlog
-    /// was already queued) rather than silently losing the shutdown request
-    /// the way a `try_send` could under a full queue.
-    pub(super) fn retire(mut self) -> JoinHandle<()> {
-        let _ = self.command_tx.send(WorkerCommand::Shutdown);
+    /// Wake the worker if it is parked in `mio::Poll::poll` for a live
+    /// socket. During the backoff wait between sockets the waker slot is
+    /// empty (the worker blocks on `command_rx.recv_timeout` there instead —
+    /// see [`RelayPoller`]'s doc); the retirement nudge below handles that
+    /// case, so a no-op here is correct, not a missed wake.
+    fn wake(&self) {
         if let Ok(guard) = self.waker.lock() {
             if let Some(waker) = guard.as_ref() {
                 let _ = waker.wake();
             }
         }
+    }
+
+    /// Request shutdown and return the worker's join handle. NON-BLOCKING and
+    /// lock-safe by construction — this is the whole point of the #506 Fix 2
+    /// correction.
+    ///
+    /// Every caller runs while holding the pool `Mutex<PoolInner>`
+    /// (`PoolInner::close`/`shutdown` and the permanent-`Failed` arm of the
+    /// translator, which locks `PoolInner` to apply the event). So retirement
+    /// must not perform ANY operation that could block on the bounded data
+    /// queue: doing so risks a cross-channel circular wait (this thread waits
+    /// on a full `command_tx`; the worker that would drain it is blocked on a
+    /// full `event_tx`; the translator that would drain THAT needs the pool
+    /// lock this thread is holding). Instead:
+    ///
+    /// 1. Set the terminal `shutdown` atomic — the source of truth the worker
+    ///    re-checks at every drain/wait point.
+    /// 2. Wake the mio waker so a worker parked in `poll` returns at once.
+    /// 3. Best-effort `try_send(Shutdown)` — NEVER a blocking send — purely to
+    ///    nudge a worker parked in a `command_rx.recv`/`recv_timeout` (the
+    ///    backoff wait or the permanent-failure drain, where the mio waker is
+    ///    inactive). If the queue is full this `try_send` is simply dropped,
+    ///    and that is safe: a full queue means `recv` already has a command to
+    ///    return, so the worker wakes on its own and observes the atomic on
+    ///    the very next loop iteration. A dropped nudge therefore costs at
+    ///    most one already-queued command of latency, never correctness.
+    ///
+    /// All three steps are non-blocking, so `retire` cannot stall the pool
+    /// lock. The returned `JoinHandle` is joined LATER, off-lock, by the
+    /// retirement reaper (`spawn_reaper`).
+    pub(super) fn retire(mut self) -> JoinHandle<()> {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.wake();
+        // Best-effort nudge for a recv-parked worker; dropped-if-full is safe
+        // (see the doc above). Deliberately `try_send`, never `send`.
+        let _ = self.command_tx.try_send(WorkerCommand::Shutdown);
         self.join
             .take()
             .expect("a live relay worker owns exactly one join handle")
@@ -219,6 +249,12 @@ pub(super) fn spawn(
     let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(command_queue_capacity);
     let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
     let waker_for_thread = Arc::clone(&waker_slot);
+    // Out-of-band terminal signal (issue #506 Fix 2). Shared with the
+    // `WorkerHandle` the pool keeps; `retire` sets it without ever touching
+    // the bounded `command_tx`, and the worker re-checks it at every
+    // drain/wait point so shutdown never depends on the data queue.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_for_thread = Arc::clone(&shutdown);
     let join = spawner
         .spawn(
             thread::Builder::new().name(format!("nmp-transport-relay-{slot}")),
@@ -230,6 +266,7 @@ pub(super) fn spawn(
                     event_tx,
                     command_rx,
                     waker_for_thread,
+                    &shutdown_for_thread,
                     keepalive_idle,
                     keepalive_pong_timeout,
                     reconnect_delay_initial,
@@ -243,9 +280,18 @@ pub(super) fn spawn(
         })?;
     Ok(WorkerHandle {
         command_tx,
+        shutdown,
         waker: waker_slot,
         join: Some(join),
     })
+}
+
+/// Read the out-of-band retirement signal. Every `command_rx.recv`/
+/// `recv_timeout`/`try_recv` wait in this module pairs with a check of this
+/// so a retired worker exits promptly regardless of the bounded data queue's
+/// occupancy (issue #506 Fix 2).
+fn shutdown_requested(shutdown: &AtomicBool) -> bool {
+    shutdown.load(Ordering::SeqCst)
 }
 
 enum ConnectedOutcome {
@@ -264,6 +310,7 @@ fn run_worker(
     event_tx: SyncSender<WorkerEvent>,
     command_rx: Receiver<WorkerCommand>,
     waker_slot: Arc<Mutex<Option<Waker>>>,
+    shutdown: &AtomicBool,
     keepalive_idle: Duration,
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
@@ -282,6 +329,11 @@ fn run_worker(
     let mut backoff_delay = reconnect_delay_initial;
 
     loop {
+        // Retired between sockets (e.g. during a backoff wait that returned to
+        // reconnect): never dial again.
+        if shutdown_requested(shutdown) {
+            return;
+        }
         let generation = pack_generation(worker_id, attempt);
         match open_relay_socket(&url) {
             Ok(mut socket) => {
@@ -310,6 +362,7 @@ fn run_worker(
                     &event_tx,
                     &command_rx,
                     &waker_slot,
+                    shutdown,
                     &mut pending,
                     &mut socket,
                     &mut keepalive,
@@ -336,6 +389,7 @@ fn run_worker(
                             drain_permanently_disconnected(
                                 &command_rx,
                                 &event_tx,
+                                shutdown,
                                 slot,
                                 generation,
                             );
@@ -350,6 +404,7 @@ fn run_worker(
                             &mut preamble,
                             delay,
                             &event_tx,
+                            shutdown,
                             slot,
                             pack_generation(worker_id, attempt),
                         ) {
@@ -376,7 +431,13 @@ fn run_worker(
                     return;
                 }
                 if permanent {
-                    drain_permanently_disconnected(&command_rx, &event_tx, slot, generation);
+                    drain_permanently_disconnected(
+                        &command_rx,
+                        &event_tx,
+                        shutdown,
+                        slot,
+                        generation,
+                    );
                     return;
                 }
                 let base = retry_in.expect("retry_in set above for non-permanent");
@@ -388,6 +449,7 @@ fn run_worker(
                     &mut preamble,
                     delay,
                     &event_tx,
+                    shutdown,
                     slot,
                     pack_generation(worker_id, attempt),
                 ) {
@@ -399,19 +461,32 @@ fn run_worker(
 }
 
 /// Keep the worker's command receiver alive after a permanent connection
-/// failure until the pool explicitly closes the slot. This closes the race
+/// failure until the pool explicitly retires the slot. This closes the race
 /// between `Pool::send_durable` successfully enqueueing a command and the
 /// worker returning after its final dial/session failure: every command the
 /// sender accepted before the pool observed the permanent failure is
 /// drained and resolved `NotHandedOff`, while commands submitted after the
 /// health transition are rejected synchronously by `PoolInner`.
+///
+/// Terminates on the out-of-band `shutdown` atomic (issue #506 Fix 2), NOT
+/// solely on a queued `Shutdown` command: `retire`'s nudge `try_send` is
+/// best-effort and may be dropped if the bounded command queue is full, so
+/// the atomic — re-checked before every blocking `recv` and after every
+/// command — is the authoritative exit. When the atomic is set, `recv`
+/// either already has the dropped-nudge's would-be slot's worth of data to
+/// return (queue was full) or the nudge landed; either way this loop wakes
+/// and observes the flag rather than blocking forever.
 fn drain_permanently_disconnected(
     command_rx: &Receiver<WorkerCommand>,
     event_tx: &SyncSender<WorkerEvent>,
+    shutdown: &AtomicBool,
     slot: u32,
     generation: u64,
 ) {
     loop {
+        if shutdown_requested(shutdown) {
+            return;
+        }
         match command_rx.recv() {
             Ok(WorkerCommand::SendDurable { correlation, .. }) => resolve_correlation(
                 event_tx,
@@ -499,11 +574,20 @@ fn wait_before_reconnect(
     preamble: &mut Vec<String>,
     delay: Duration,
     event_tx: &SyncSender<WorkerEvent>,
+    shutdown: &AtomicBool,
     slot: u32,
     generation: u64,
 ) -> bool {
     let deadline = Instant::now() + delay;
     loop {
+        // Authoritative terminal check (issue #506 Fix 2): a retirement during
+        // the backoff wait sets this atomic and nudges the channel; the mio
+        // waker is inactive here (no live socket), so the atomic — checked
+        // before every blocking `recv_timeout` and after every command — is
+        // what guarantees a prompt exit rather than sleeping out `remaining`.
+        if shutdown_requested(shutdown) {
+            return false;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return true;
@@ -540,6 +624,7 @@ fn run_connected(
     event_tx: &SyncSender<WorkerEvent>,
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
+    shutdown: &AtomicBool,
     pending: &mut VecDeque<String>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
@@ -553,6 +638,7 @@ fn run_connected(
         event_tx,
         command_rx,
         waker_slot,
+        shutdown,
         pending,
         socket,
         keepalive,
@@ -571,6 +657,7 @@ fn run_connected_inner(
     event_tx: &SyncSender<WorkerEvent>,
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
+    shutdown: &AtomicBool,
     pending: &mut VecDeque<String>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
@@ -589,6 +676,16 @@ fn run_connected_inner(
     };
 
     loop {
+        // Authoritative terminal check (issue #506 Fix 2): `retire` wakes the
+        // mio waker (unparking `poller.wait` below) and sets this atomic. The
+        // best-effort `Shutdown` nudge may be dropped if the bounded command
+        // queue is full, so a queued `Shutdown` alone is NOT relied on — this
+        // check is what guarantees the loop exits even when the nudge was
+        // dropped and `drain_commands` only saw ordinary data.
+        if shutdown_requested(shutdown) {
+            let _ = socket.close(None);
+            return ConnectedOutcome::Shutdown;
+        }
         match drain_commands(
             command_rx, pending, preamble, durable, event_tx, slot, generation,
         ) {
@@ -1148,8 +1245,9 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
         let first = AttemptCorrelation(21);
         let second = AttemptCorrelation(22);
+        let shutdown = Arc::new(AtomicBool::new(false));
         let drain = std::thread::spawn(move || {
-            drain_permanently_disconnected(&command_rx, &event_tx, 1, 9);
+            drain_permanently_disconnected(&command_rx, &event_tx, &shutdown, 1, 9);
         });
         command_tx
             .send(WorkerCommand::SendDurable {
@@ -1180,10 +1278,12 @@ mod tests {
 
     fn test_worker_handle(
         command_tx: SyncSender<WorkerCommand>,
-    ) -> (WorkerHandle, Arc<Mutex<Option<Waker>>>) {
+    ) -> (WorkerHandle, Arc<Mutex<Option<Waker>>>, Arc<AtomicBool>) {
         let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let shutdown = Arc::new(AtomicBool::new(false));
         let handle = WorkerHandle {
             command_tx,
+            shutdown: Arc::clone(&shutdown),
             waker: Arc::clone(&waker_slot),
             // No real worker thread backs this handle in these tests --
             // `retire`/`push` never touch `join` (`retire` only takes it out
@@ -1191,7 +1291,7 @@ mod tests {
             // faithful enough stand-in.
             join: Some(thread::spawn(|| {})),
         };
-        (handle, waker_slot)
+        (handle, waker_slot, shutdown)
     }
 
     /// The HIGH falsifier (issue #506): a stalled-but-connected relay must
@@ -1204,7 +1304,7 @@ mod tests {
     #[test]
     fn push_reports_backpressure_once_the_bounded_queue_is_full() {
         let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(2);
-        let (handle, _waker_slot) = test_worker_handle(command_tx);
+        let (handle, _waker_slot, _shutdown) = test_worker_handle(command_tx);
 
         assert!(handle.push(WorkerCommand::Send("a".into())));
         assert!(handle.push(WorkerCommand::Send("b".into())));
@@ -1227,43 +1327,79 @@ mod tests {
         handle.join.expect("join handle retained").join().unwrap();
     }
 
-    /// The other half of the HIGH falsifier: `Shutdown`/retire must never
-    /// be rejected by the same saturated queue that legitimately backpressures
-    /// ordinary `Send`/`SendDurable` traffic. This drives `WorkerHandle::
-    /// retire` (not a raw channel `send`) against a queue that starts FULL,
-    /// with a background thread standing in for the real worker's own
-    /// receive loop -- draining the pre-existing backlog before `Shutdown`
-    /// can land, exactly the bounded-wait `retire`'s doc describes.
+    /// The deadlock falsifier (issue #506 Fix 2): `retire` must be
+    /// non-blocking even when the bounded command queue is FULL and NOBODY is
+    /// draining it. That "full + undrained" state is exactly the worker's
+    /// situation in the whole-pool deadlock -- it is transitively blocked on a
+    /// full `event_tx` (waiting on the translator, which needs the pool lock
+    /// the retiring thread holds), so it cannot drain its command queue. The
+    /// earlier (rejected) version routed `Shutdown` through a BLOCKING `send`
+    /// on this same queue: under this precondition that send parks forever,
+    /// the lock is never released, and the whole pool wedges. This test would
+    /// hang on that version (caught by the timeout below) and passes on the
+    /// atomic-flag design, which never touches the data queue to signal
+    /// shutdown.
     #[test]
-    fn retire_shutdown_lands_even_when_the_data_queue_is_saturated() {
+    fn retire_is_non_blocking_when_the_command_queue_is_full_and_undrained() {
         let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
-        command_tx
-            .send(WorkerCommand::Send("queued".into()))
-            .unwrap();
+        command_tx.send(WorkerCommand::Send("only-slot".into())).unwrap();
         assert!(
-            command_tx
-                .try_send(WorkerCommand::Send("overflow".into()))
-                .is_err(),
-            "the queue must be observably full before this falsifier means anything"
+            command_tx.try_send(WorkerCommand::Send("overflow".into())).is_err(),
+            "the command queue must be observably full for this falsifier to mean anything"
         );
 
-        // Stand-in for the real worker's own receive loop: drains whatever
-        // was already queued (the ordinary backlog `retire`'s doc allows
-        // for), THEN observes the `Shutdown` `retire` is about to send.
-        let backlog_drained = std::thread::spawn(move || {
-            assert!(matches!(command_rx.recv(), Ok(WorkerCommand::Send(text)) if text == "queued"));
-            assert!(matches!(command_rx.recv(), Ok(WorkerCommand::Shutdown)));
-        });
+        let (handle, _waker_slot, shutdown) = test_worker_handle(command_tx);
 
-        let (handle, _waker_slot) = test_worker_handle(command_tx);
-        // Must not be silently dropped by the initially-full queue: `retire`
-        // blocks (briefly -- the "worker" above is already draining) rather
-        // than using the same `try_send` a saturated-queue `push` now
-        // legitimately fails.
+        // Drive retire on its own thread and REQUIRE prompt completion. There
+        // is deliberately NO drainer: the only way this finishes is if retire
+        // never blocks on the full queue. A blocking `send` would park this
+        // thread forever and the timeout below would fire.
+        let (done_tx, done_rx) = mpsc::channel();
+        let retired = std::thread::spawn(move || {
+            let join = handle.retire();
+            let _ = done_tx.send(());
+            join
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("retire must not block on a full, undrained command queue (#506)");
+
+        // Shutdown is signalled out-of-band, without consuming a queue slot.
+        assert!(
+            shutdown.load(Ordering::SeqCst),
+            "retire must set the terminal atomic as the authoritative signal"
+        );
+        // The pre-existing command is untouched: retire never needed to drain
+        // it (and could not have -- the queue was full). The best-effort
+        // `Shutdown` nudge was simply dropped, which is safe.
+        assert!(
+            matches!(command_rx.recv(), Ok(WorkerCommand::Send(text)) if text == "only-slot"),
+            "the queued data command must survive retirement intact"
+        );
+
+        let join = retired.join().expect("retire thread must not panic");
+        join.join().expect("stand-in worker join");
+        drop(command_rx);
+    }
+
+    /// Companion to the deadlock falsifier: when the command queue has room,
+    /// the best-effort `Shutdown` nudge DOES land on the channel (so a worker
+    /// parked in a `recv`-based wait -- backoff / permanent-drain, where the
+    /// mio waker is inactive -- is unparked immediately, not only via the
+    /// atomic on the next timeout). Proves the nudge is wired, complementing
+    /// the "dropped-if-full is safe" case above.
+    #[test]
+    fn retire_nudges_the_channel_when_the_queue_has_room() {
+        let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
+        let (handle, _waker_slot, shutdown) = test_worker_handle(command_tx);
+
         let join = handle.retire();
-        join.join().unwrap();
-        backlog_drained
-            .join()
-            .expect("retire's Shutdown must reach the receive loop");
+
+        assert!(shutdown.load(Ordering::SeqCst));
+        assert!(
+            matches!(command_rx.recv(), Ok(WorkerCommand::Shutdown)),
+            "with room in the queue, retire's nudge must reach a recv-parked worker"
+        );
+        join.join().expect("stand-in worker join");
     }
 }
