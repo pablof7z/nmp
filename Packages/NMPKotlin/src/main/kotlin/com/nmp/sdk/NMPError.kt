@@ -78,8 +78,8 @@ sealed class NMPError(message: String) : Exception(message) {
     object IntentAlreadyConsumed :
         NMPError("this composed write intent was already published once")
 
-    data class RelayInformationUnavailable(val reason: String) :
-        NMPError("relay information unavailable: $reason")
+    data class RelayInformationUnavailable(val kind: RelayInformationErrorKind) :
+        NMPError("relay information unavailable: ${kind.describe()}")
 
     data class RelayInformationWaitersSaturated(val capacity: ULong) :
         NMPError("relay information refused: per-relay waiter capacity $capacity is full")
@@ -110,7 +110,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.EmptyPinnedRelaySet -> EmptyPinnedRelaySet
                 is FfiException.NoActiveAccount -> NoActiveAccount
                 is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
-                is FfiException.RelayInformationUnavailable -> RelayInformationUnavailable(ffi.reason)
+                is FfiException.RelayInformationUnavailable ->
+                    RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
                 is FfiException.RelayInformationWaitersSaturated ->
                     RelayInformationWaitersSaturated(ffi.capacity)
             }

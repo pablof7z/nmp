@@ -107,16 +107,18 @@ pub enum Nip46ConnectionEvent {
     Connected { user_public_key: PublicKey },
 }
 
+// #494: `InvalidRelay`, `InvalidInvitation`, and `SecretMismatch` were
+// removed here -- a repo-wide grep found zero construction sites for any of
+// the three (only their own `Display` arms referenced them), so the FFI
+// projection had no reachable variant to mirror. `InvalidLaunchScheme`
+// stays: `Nip46Invitation::uri_with_scheme` constructs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Nip46Error {
     InvalidBunkerUri(BunkerParseError),
     MissingRelay,
     TooManyRelays(usize),
     InvitationTooLong(usize),
-    InvalidRelay(String),
     InvalidLaunchScheme(String),
-    InvalidInvitation,
-    SecretMismatch,
     Timeout,
     Disconnected,
     Rejected(String),
@@ -139,12 +141,9 @@ impl fmt::Display for Nip46Error {
                     "NIP-46 invitation exceeds {MAX_BUNKER_URI_LEN} bytes: {len}"
                 )
             }
-            Self::InvalidRelay(relay) => write!(f, "invalid NIP-46 relay: {relay}"),
             Self::InvalidLaunchScheme(scheme) => {
                 write!(f, "invalid NIP-46 launch scheme: {scheme}")
             }
-            Self::InvalidInvitation => f.write_str("invalid NIP-46 invitation"),
-            Self::SecretMismatch => f.write_str("NIP-46 connect secret mismatch"),
             Self::Timeout => f.write_str("NIP-46 connection timed out"),
             Self::Disconnected => f.write_str("NIP-46 connection ended"),
             Self::Rejected(reason) => write!(f, "NIP-46 signer rejected request: {reason}"),

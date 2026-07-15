@@ -30,10 +30,11 @@ use nostr::{
 use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCacheMode,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
-    FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
-    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiFilterCoverage, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics,
+    FfiRelayInformationErrorKind, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp,
+    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority,
+    FfiSourceEvidence, FfiSourceStatus, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -154,8 +155,13 @@ pub enum FfiError {
     /// since NMP-owned time and couriered `previous` evidence should refresh).
     IntentAlreadyConsumed,
     /// NIP-11 acquisition failed before any last-good document existed.
+    /// `ExecutorSaturated`/`RelayInformationWaitersSaturated`/
+    /// `ThreadUnavailable` above already carry these three acquisition
+    /// discriminants with full fidelity (#494); every other
+    /// `nmp::RelayInformationError` variant carries here instead of
+    /// collapsing to a message string.
     RelayInformationUnavailable {
-        reason: String,
+        kind: FfiRelayInformationErrorKind,
     },
     /// A single relay's in-flight NIP-11 waiter set reached its finite
     /// admission bound. The refused caller was not retained.
@@ -242,8 +248,8 @@ impl std::fmt::Display for FfiError {
             Self::IntentAlreadyConsumed => {
                 write!(f, "this composed write intent was already published once")
             }
-            Self::RelayInformationUnavailable { reason } => {
-                write!(f, "relay information unavailable: {reason}")
+            Self::RelayInformationUnavailable { kind } => {
+                write!(f, "relay information unavailable: {kind:?}")
             }
             Self::RelayInformationWaitersSaturated { capacity } => write!(
                 f,
@@ -276,9 +282,47 @@ impl From<nmp::RelayInformationRequestError> for FfiError {
             },
             nmp::RelayInformationRequestError::Acquisition(error) => {
                 Self::RelayInformationUnavailable {
-                    reason: error.to_string(),
+                    kind: relay_information_error_kind(error),
                 }
             }
+        }
+    }
+}
+
+/// `nmp::RelayInformationError` -> [`FfiRelayInformationErrorKind`] (#494).
+/// Every discriminant, not just the three the throw seam above special-cases
+/// into shared/dedicated `FfiError` variants -- this is also the exact
+/// conversion the `last_error` stale-on-error evidence field uses, so a
+/// single typed carrier crosses both NIP-11 seams.
+pub fn relay_information_error_kind(
+    error: nmp::RelayInformationError,
+) -> FfiRelayInformationErrorKind {
+    match error {
+        nmp::RelayInformationError::ExecutorSaturated { capacity } => {
+            FfiRelayInformationErrorKind::ExecutorSaturated {
+                capacity: capacity as u64,
+            }
+        }
+        nmp::RelayInformationError::WaiterSaturated { capacity } => {
+            FfiRelayInformationErrorKind::WaiterSaturated {
+                capacity: capacity as u64,
+            }
+        }
+        nmp::RelayInformationError::ThreadUnavailable { reason } => {
+            FfiRelayInformationErrorKind::ThreadUnavailable { reason }
+        }
+        nmp::RelayInformationError::ServiceClosed => FfiRelayInformationErrorKind::ServiceClosed,
+        nmp::RelayInformationError::CredentialedRelayUrl => {
+            FfiRelayInformationErrorKind::CredentialedRelayUrl
+        }
+        nmp::RelayInformationError::Http { reason } => {
+            FfiRelayInformationErrorKind::Http { reason }
+        }
+        nmp::RelayInformationError::ResponseTooLarge { limit_bytes } => {
+            FfiRelayInformationErrorKind::ResponseTooLarge { limit_bytes }
+        }
+        nmp::RelayInformationError::InvalidDocument { reason } => {
+            FfiRelayInformationErrorKind::InvalidDocument { reason }
         }
     }
 }

@@ -24,6 +24,61 @@ public enum RelayInformationFreshness: Sendable, Equatable {
     }
 }
 
+/// Typed failure of one bounded NIP-11 acquisition (mirrors `nmp-ffi`'s own
+/// `FfiRelayInformationErrorKind`; see that type's doc for the Rust side of
+/// each case). Carried by `RelayInformation.lastError` as stale-on-error
+/// evidence, and by `NMPError.relayInformationUnavailable` when acquisition
+/// fails before any last-good document exists.
+public enum RelayInformationErrorKind: Sendable, Equatable {
+    case executorSaturated(capacity: UInt64)
+    case waiterSaturated(capacity: UInt64)
+    case threadUnavailable(reason: String)
+    case serviceClosed
+    case credentialedRelayUrl
+    case http(reason: String)
+    case responseTooLarge(limitBytes: UInt64)
+    case invalidDocument(reason: String)
+
+    init(_ ffi: FfiRelayInformationErrorKind) {
+        switch ffi {
+        case .executorSaturated(let capacity): self = .executorSaturated(capacity: capacity)
+        case .waiterSaturated(let capacity): self = .waiterSaturated(capacity: capacity)
+        case .threadUnavailable(let reason): self = .threadUnavailable(reason: reason)
+        case .serviceClosed: self = .serviceClosed
+        case .credentialedRelayUrl: self = .credentialedRelayUrl
+        case .http(let reason): self = .http(reason: reason)
+        case .responseTooLarge(let limitBytes): self = .responseTooLarge(limitBytes: limitBytes)
+        case .invalidDocument(let reason): self = .invalidDocument(reason: reason)
+        }
+    }
+}
+
+extension RelayInformationErrorKind: CustomStringConvertible {
+    /// Human-readable text mirroring `nmp::RelayInformationError`'s own
+    /// `Display` impl (crates/nmp/src/relay_information.rs), for callers that
+    /// only want a message rather than a branch on the typed kind.
+    public var description: String {
+        switch self {
+        case .executorSaturated(let capacity):
+            "NIP-11 acquisition refused: native task capacity \(capacity) is full"
+        case .waiterSaturated(let capacity):
+            "NIP-11 acquisition refused: per-relay waiter capacity \(capacity) is full"
+        case .threadUnavailable(let reason):
+            "NIP-11 acquisition thread unavailable: \(reason)"
+        case .serviceClosed:
+            "NIP-11 acquisition service is closed"
+        case .credentialedRelayUrl:
+            "NIP-11 acquisition refuses relay URL userinfo"
+        case .http(let reason):
+            "NIP-11 HTTP request failed: \(reason)"
+        case .responseTooLarge(let limitBytes):
+            "NIP-11 response exceeds \(limitBytes) bytes"
+        case .invalidDocument(let reason):
+            "invalid NIP-11 document: \(reason)"
+        }
+    }
+}
+
 /// Advisory limits claimed by the relay. Omitted fields remain `nil`; they
 /// are never inferred as zero/false or treated as runtime proof.
 public struct RelayInformationLimitations: Sendable, Equatable {
@@ -104,7 +159,7 @@ public struct RelayInformation: Sendable, Equatable {
     public let lastModified: String?
     public let cacheControl: String?
     public let expires: String?
-    public let lastError: String?
+    public let lastError: RelayInformationErrorKind?
 
     init(_ ffi: FfiRelayInformation) {
         relay = ffi.relay
@@ -118,6 +173,6 @@ public struct RelayInformation: Sendable, Equatable {
         lastModified = ffi.lastModified
         cacheControl = ffi.cacheControl
         expires = ffi.expires
-        lastError = ffi.lastError
+        lastError = ffi.lastError.map(RelayInformationErrorKind.init)
     }
 }

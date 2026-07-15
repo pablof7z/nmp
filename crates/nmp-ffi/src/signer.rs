@@ -46,14 +46,125 @@ pub enum FfiNip46ConnectionEvent {
     Connected { user_public_key: String },
 }
 
+/// `nmp_signer::BunkerParseError` mirror (#494) -- strict `bunker://` token
+/// parsing, carried instead of collapsing into `Nip46Error::InvalidBunkerUri`'s
+/// own `.to_string()`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiBunkerParseError {
+    Empty,
+    TooLong { len: u64 },
+    WrongScheme,
+    MissingRemoteSignerKey,
+    InvalidRemoteSignerKey,
+    MissingRelay,
+    TooManyRelays { count: u64 },
+    InvalidRelay { relay: String },
+    Malformed { reason: String },
+}
+
+/// `nmp_signer::Nip46Error` mirror (#494) -- every live discriminant a NIP-46
+/// connection attempt can fail with, so a native caller can branch on
+/// "auth required" vs. "timeout" vs. "malformed" instead of parsing English.
+/// `Nip46Error::InvalidRelay`/`InvalidInvitation`/`SecretMismatch` are not
+/// mirrored: nothing in the workspace ever constructs them (see that type's
+/// own doc).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiNip46Failure {
+    InvalidBunkerUri { source: FfiBunkerParseError },
+    MissingRelay,
+    TooManyRelays { count: u64 },
+    InvitationTooLong { len: u64 },
+    InvalidLaunchScheme { scheme: String },
+    Timeout,
+    Disconnected,
+    Rejected { reason: String },
+    InvalidResponse { reason: String },
+    ThreadUnavailable { component: String, reason: String },
+    ExecutorSaturated { component: String, capacity: u64 },
+    /// `nmp::Engine::add_signer` unconditionally maps every internal
+    /// `AddSignerError` to `EngineError::SignerMissingPublicKey`
+    /// (crates/nmp/src/engine.rs) -- the only engine-side failure reachable
+    /// when a NIP-46 signer is (re)attached after the relay handshake
+    /// completes. It is not a `Nip46Error` variant; it crosses a different
+    /// internal taxonomy (`nmp::EngineError`) at the same observer seam.
+    SignerMissingPublicKey,
+}
+
 #[uniffi::export(callback_interface)]
 pub trait Nip46ConnectionObserver: Send + Sync {
     fn on_event(&self, event: FfiNip46ConnectionEvent);
     /// The relay handshake is complete and the signer has been attached to
     /// this engine. A callback/deep-link alone never produces this fact.
     fn on_ready(&self, user_public_key: String);
-    fn on_failed(&self, reason: String);
+    fn on_failed(&self, failure: FfiNip46Failure);
     fn on_closed(&self);
+}
+
+fn bunker_parse_error_to_ffi(error: nmp_signer::BunkerParseError) -> FfiBunkerParseError {
+    match error {
+        nmp_signer::BunkerParseError::Empty => FfiBunkerParseError::Empty,
+        nmp_signer::BunkerParseError::TooLong(len) => {
+            FfiBunkerParseError::TooLong { len: len as u64 }
+        }
+        nmp_signer::BunkerParseError::WrongScheme => FfiBunkerParseError::WrongScheme,
+        nmp_signer::BunkerParseError::MissingRemoteSignerKey => {
+            FfiBunkerParseError::MissingRemoteSignerKey
+        }
+        nmp_signer::BunkerParseError::InvalidRemoteSignerKey => {
+            FfiBunkerParseError::InvalidRemoteSignerKey
+        }
+        nmp_signer::BunkerParseError::MissingRelay => FfiBunkerParseError::MissingRelay,
+        nmp_signer::BunkerParseError::TooManyRelays(count) => FfiBunkerParseError::TooManyRelays {
+            count: count as u64,
+        },
+        nmp_signer::BunkerParseError::InvalidRelay(relay) => {
+            FfiBunkerParseError::InvalidRelay { relay }
+        }
+        nmp_signer::BunkerParseError::Malformed(reason) => {
+            FfiBunkerParseError::Malformed { reason }
+        }
+    }
+}
+
+fn nip46_failure_to_ffi(error: nmp_signer::Nip46Error) -> FfiNip46Failure {
+    match error {
+        nmp_signer::Nip46Error::InvalidBunkerUri(source) => FfiNip46Failure::InvalidBunkerUri {
+            source: bunker_parse_error_to_ffi(source),
+        },
+        nmp_signer::Nip46Error::MissingRelay => FfiNip46Failure::MissingRelay,
+        nmp_signer::Nip46Error::TooManyRelays(count) => FfiNip46Failure::TooManyRelays {
+            count: count as u64,
+        },
+        nmp_signer::Nip46Error::InvitationTooLong(len) => FfiNip46Failure::InvitationTooLong {
+            len: len as u64,
+        },
+        nmp_signer::Nip46Error::InvalidLaunchScheme(scheme) => {
+            FfiNip46Failure::InvalidLaunchScheme { scheme }
+        }
+        nmp_signer::Nip46Error::Timeout => FfiNip46Failure::Timeout,
+        nmp_signer::Nip46Error::Disconnected => FfiNip46Failure::Disconnected,
+        nmp_signer::Nip46Error::Rejected(reason) => FfiNip46Failure::Rejected { reason },
+        nmp_signer::Nip46Error::InvalidResponse(reason) => {
+            FfiNip46Failure::InvalidResponse { reason }
+        }
+        nmp_signer::Nip46Error::ThreadUnavailable { component, reason } => {
+            FfiNip46Failure::ThreadUnavailable { component, reason }
+        }
+        nmp_signer::Nip46Error::ExecutorSaturated {
+            component,
+            capacity,
+        } => FfiNip46Failure::ExecutorSaturated {
+            component,
+            capacity: capacity as u64,
+        },
+    }
+}
+
+/// `nmp::Engine::add_signer` (re)attachment failure -> [`FfiNip46Failure`].
+/// See that variant's own doc: this call site can only ever observe
+/// `EngineError::SignerMissingPublicKey`.
+fn engine_attach_failure_to_ffi(_error: nmp::EngineError) -> FfiNip46Failure {
+    FfiNip46Failure::SignerMissingPublicKey
 }
 
 #[derive(uniffi::Object)]
@@ -70,7 +181,7 @@ struct Nip46Attachment {
 enum ObserverDelivery {
     Event(FfiNip46ConnectionEvent),
     Ready(String),
-    Failed(String),
+    Failed(FfiNip46Failure),
     Closed,
 }
 
@@ -142,7 +253,9 @@ impl Nip46Connection {
                                     reattached_public_key = Some(registration.public_key());
                                     attachment.registration = Some(registration);
                                 }
-                                Err(error) => failure = Some(error.to_string()),
+                                Err(error) => {
+                                    failure = Some(engine_attach_failure_to_ffi(error))
+                                }
                             }
                         }
                     }
@@ -203,29 +316,29 @@ impl Nip46Connection {
                 }
                 Err(error) => {
                     drop(attachment);
-                    self.fail_locked(error.to_string())
+                    self.fail_locked(engine_attach_failure_to_ffi(error))
                 }
             }
         };
         self.drain_deliveries(should_drain);
     }
 
-    fn fail(&self, reason: String) {
+    fn fail(&self, failure: FfiNip46Failure) {
         let should_drain = {
             let _lifecycle = self
                 .lifecycle
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            self.fail_locked(reason)
+            self.fail_locked(failure)
         };
         self.drain_deliveries(should_drain);
     }
 
-    fn fail_locked(&self, reason: String) -> bool {
+    fn fail_locked(&self, failure: FfiNip46Failure) -> bool {
         if self.closed.swap(true, Ordering::AcqRel) {
             return false;
         }
-        let mut should_drain = self.enqueue_delivery(ObserverDelivery::Failed(reason));
+        let mut should_drain = self.enqueue_delivery(ObserverDelivery::Failed(failure));
         self.detach_locked();
         should_drain |= self.enqueue_delivery(ObserverDelivery::Closed);
         should_drain
@@ -306,7 +419,7 @@ impl Nip46Connection {
             match delivery {
                 ObserverDelivery::Event(event) => self.observer.on_event(event),
                 ObserverDelivery::Ready(public_key) => self.observer.on_ready(public_key),
-                ObserverDelivery::Failed(reason) => self.observer.on_failed(reason),
+                ObserverDelivery::Failed(failure) => self.observer.on_failed(failure),
                 ObserverDelivery::Closed => self.observer.on_closed(),
             }
         }
@@ -506,7 +619,7 @@ fn spawn_bunker_connection(
                 };
                 match result {
                     Ok(signer) => connection.attach(signer),
-                    Err(error) => connection.fail(error.to_string()),
+                    Err(error) => connection.fail(nip46_failure_to_ffi(error)),
                 }
             },
         )
@@ -541,7 +654,7 @@ fn spawn_invitation_connection(
                 };
                 match result {
                     Ok(signer) => connection.attach(signer),
-                    Err(error) => connection.fail(error.to_string()),
+                    Err(error) => connection.fail(nip46_failure_to_ffi(error)),
                 }
             },
         )
@@ -601,7 +714,7 @@ mod tests {
 
         fn on_ready(&self, _user_public_key: String) {}
 
-        fn on_failed(&self, _reason: String) {}
+        fn on_failed(&self, _failure: FfiNip46Failure) {}
 
         fn on_closed(&self) {
             self.closed.fetch_add(1, Ordering::SeqCst);
@@ -636,7 +749,7 @@ mod tests {
             }
         }
 
-        fn on_failed(&self, _reason: String) {
+        fn on_failed(&self, _failure: FfiNip46Failure) {
             self.deliveries
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
