@@ -438,7 +438,7 @@ class NIP29Test {
     }
 
     @Test
-    fun engineOwnedPreviousAdmitsOnlyTheSelectedHostsDeliveredRows() {
+    fun cachedRowsCannotLeakIntoTypedGroupMessagePreviousTags() {
         LocalAckRelay().use { relayX ->
             LocalAckRelay().use { relayY ->
                 runBlocking {
@@ -498,13 +498,17 @@ class NIP29Test {
                             }
                         assertTrue(acked is WriteStatus.Acked)
                         val wire = relayY.awaitEvent()
-                        assertTrue(
-                            wire.contains("[\"previous\",\"${yId.take(8)}\"]"),
-                            "Y-delivered evidence must contribute previous: $wire",
+                        assertFalse(
+                            wire.contains("[\"previous\""),
+                            "cached rows must not contribute unsafe previous tags: $wire",
                         )
                         assertFalse(
                             wire.contains(xId.take(8)),
                             "X-only evidence must not influence a Y-pinned write: $wire",
+                        )
+                        assertFalse(
+                            wire.contains(yId.take(8)),
+                            "Y cache evidence must not influence previous until live proof exists: $wire",
                         )
                     }
                 }

@@ -835,7 +835,7 @@ enum Enum {
             discr: None,
             fields: [],
             docstring: Some(
-                "#115: `NmpEngine::publish_composed` was called a second time on the\nsame `FfiComposedWriteIntent` handle -- it is take-once by design\n(recompose via `group_message_intent` again is the correct retry path,\nsince NMP-owned time and couriered `previous` evidence should refresh).",
+                "#115: `NmpEngine::publish_composed` was called a second time on the\nsame `FfiComposedWriteIntent` handle -- it is take-once by design\n(recompose via `group_message_intent` again is the correct retry path,\nsince NMP-owned event time must refresh).",
             ),
         },
         Variant {
@@ -6721,7 +6721,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Compose an ordinary kind:9 NIP-29 message from semantic inputs\n(#156). The caller supplies no author, timestamp, kind, bech32\nencoding, or raw tags: NMP reads the active account, owns event time,\nmaterializes ordered/deduplicated `nostr:npub…` content references,\nand composes `p`/reply-`e`/`h`/`previous` plus pinned-host routing.\n`previous` comes from an engine-owned strict-cache snapshot for this\nexact host/group; no caller row or provenance claim enters the path.\nPublish the returned take-once value through [`Self::publish_composed`].",
+                "Compose an ordinary kind:9 NIP-29 message from semantic inputs\n(#156). The caller supplies no author, timestamp, kind, bech32\nencoding, or raw tags: NMP reads the active account, owns event time,\nmaterializes ordered/deduplicated `nostr:npub…` content references,\nand composes `p`/reply-`e`/`h` plus pinned-host routing. `previous` is\ntemporarily omitted until NMP can prove a live host acceptance window;\nno caller row or provenance claim enters the path.\nPublish the returned take-once value through [`Self::publish_composed`].",
             ),
             throws: Some(
                 Enum {
@@ -6732,7 +6732,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_group_message_intent",
             checksum: Some(
-                63838,
+                50602,
             ),
         },
         Method {

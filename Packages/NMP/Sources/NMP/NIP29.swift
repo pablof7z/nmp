@@ -6,7 +6,7 @@
 // `NMPEngine.groupMessageIntent`/`GroupSendIntent` (#156) are this file's
 // write-side counterpart. The app supplies semantic composer state; NMP owns
 // author/time/kind, NIP-27 mention materialization, `p`/reply-`e` tags, and
-// the existing `h`/`previous`/pinned-host composition.
+// `h`/pinned-host composition.
 
 import NMPFFI
 
@@ -103,8 +103,8 @@ extension NMPEngine {
     /// composer actually owns. `recipients` retain selection order; NMP
     /// deduplicates them, prefixes their `nostr:npub…` references to
     /// `content`, and emits matching `p` rows. `reply` contributes the marked
-    /// direct-parent `e` row and its author recipient. NMP derives NIP-29
-    /// `previous` from its own strict-cache snapshot for `host`/`groupID`;
+    /// direct-parent `e` row and its author recipient. NMP temporarily omits
+    /// NIP-29 `previous` until it can prove a live host acceptance window;
     /// native code cannot supply or forge relay provenance.
     ///
     /// The active account supplies the author and NMP supplies event time.

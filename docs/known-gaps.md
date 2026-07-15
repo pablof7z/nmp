@@ -83,6 +83,13 @@ about current code:
   only exact NIP-defined schemas while typed contextual operations may add their
   own tags and route facts to immutable foreign-owned drafts. No kind:1-first
   core catalog is part of the target.
+- **Typed NIP-29 group messages temporarily omit `previous` (#515).** The old
+  composer treated a pinned strict-cache snapshot as live recency proof, but a
+  host may validate only its current rolling event window. A stale mobile cache
+  could therefore mint a reference the host correctly rejected. The typed
+  composer now sends no optional `previous` tag until NMP has current-window
+  evidence matching the selected host's acceptance semantics. The lower-level
+  explicit protocol seam remains available to trusted Rust module authors.
 - **~~Selector-projected values lost their only routable lane~~ CLOSED
   (#11).** `Tag(e/a/p)` now retains a valid tag relay hint or falls back to
   the source row's observed-relay provenance; `AddressCoord` retains source
