@@ -38,8 +38,8 @@ use serde::{Deserialize, Serialize};
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
 use crate::binary_event::{self, decode_hex_32, IndexedMatch, PreparedFilter, StoredEventView};
 use crate::coverage::{
-    coverage_key as compute_coverage_key, merge_interval, shape_matches, shrink_after_eviction,
-    window_erase, ShapeRecord,
+    coverage_key as compute_coverage_key, merge_interval, shrink_after_eviction, window_erase,
+    GcVictimIndex, ShapeRecord,
 };
 use crate::persistent_store_lifetime::{
     open_and_register, reset_store, OpenStoreRegistration, RegisteredOpen,
@@ -4393,11 +4393,20 @@ impl EventStore for RedbStore {
                 report.events_evicted += 1;
             }
 
-            // Pass 2: shrink/delete every coverage row an evicted event
-            // falls inside AND whose retained shape matches it. Same write
-            // transaction as the event removals above — the shrink/delete
-            // and the event delete commit atomically together (ruling §5:
-            // never leave a watermark claiming coverage of evicted data).
+            // Pass 2 (issue #507): a SINGLE pass over coverage rows,
+            // using `GcVictimIndex` (shared verbatim with
+            // `MemoryStore::gc` — see its doc comment for the proof) to
+            // find each row's maximum matching victim timestamp directly,
+            // instead of re-walking the full victim list per row. Same
+            // write transaction as the event removals above — the
+            // shrink/delete and the event delete commit atomically
+            // together (ruling §5: never leave a watermark claiming
+            // coverage of evicted data). `coverage_rows_shrunk`/
+            // `coverage_rows_deleted` stay per-ROW, unchanged from
+            // before (this was already `RedbStore`'s counting; only
+            // `MemoryStore`'s per-(victim, row) counting needed
+            // unifying).
+            let victim_index = GcVictimIndex::new(&victims);
             let mut row_updates: Vec<(String, Option<CoverageRowRecord>)> = Vec::new();
             let mut legacy_row_keys: Vec<String> = Vec::new();
             for entry in coverage.iter().map_err(persist_err)? {
@@ -4421,38 +4430,22 @@ impl EventStore for RedbStore {
                 let mut record: CoverageRowRecord =
                     serde_json::from_str(value.value()).expect("redb: decode coverage row");
                 let shape: ConcreteFilter = (&record.shape).into();
-                let mut interval = CoverageInterval::new(
+                let interval = CoverageInterval::new(
                     Timestamp::from(record.from),
                     Timestamp::from(record.through),
                 );
 
-                let mut deleted = false;
-                let mut shrunk = false;
-                for event in &victims {
-                    let evicted_at = event.created_at;
-                    if interval.from <= evicted_at
-                        && evicted_at <= interval.through
-                        && shape_matches(&shape, event)
-                    {
-                        match shrink_after_eviction(interval, evicted_at) {
-                            Some(next) => {
-                                interval = next;
-                                shrunk = true;
-                            }
-                            None => {
-                                deleted = true;
-                                break;
-                            }
+                if let Some(m) = victim_index.max_matching_within(&shape, interval) {
+                    match shrink_after_eviction(interval, m) {
+                        Some(next) => {
+                            record.from = next.from.as_secs();
+                            record.through = next.through.as_secs();
+                            row_updates.push((row_key.value().to_string(), Some(record)));
+                        }
+                        None => {
+                            row_updates.push((row_key.value().to_string(), None));
                         }
                     }
-                }
-
-                if deleted {
-                    row_updates.push((row_key.value().to_string(), None));
-                } else if shrunk {
-                    record.from = interval.from.as_secs();
-                    record.through = interval.through.as_secs();
-                    row_updates.push((row_key.value().to_string(), Some(record)));
                 }
             }
 
