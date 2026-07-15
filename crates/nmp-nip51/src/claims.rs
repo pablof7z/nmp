@@ -13,6 +13,9 @@ const CLAIMS: [KindClaim; 1] = [KindClaim {
     scope: KindScope::Kind(10009),
     exclusive: true,
     route_policy: None,
+    // Kind 10009 falls in the 1xxxx replaceable-list discovery range
+    // (10000..=19999, DiscoveryKinds) -- consciously acknowledged.
+    discovery_ack: true,
 }];
 
 pub fn claims() -> &'static [KindClaim] {
@@ -31,5 +34,8 @@ mod tests {
         assert!(claims[0].exclusive);
         assert!(claims[0].scope.contains(10009));
         assert!(claims[0].route_policy.is_none());
+        // Kind 10009 is a discovery kind -- the claim must consciously
+        // acknowledge that (routing-and-ownership.md §4.2 layer 2 check c).
+        assert!(claims[0].discovery_ack);
     }
 }
