@@ -550,9 +550,9 @@ struct PendingWrite {
     /// dropped pending relay always resolves to `GaveUp`, never a retry
     /// `PublishEvent` (no blind retry, ledger's `AtMostOnce` amendment).
     pending_relays: BTreeSet<RelayUrl>,
-    /// Routed lanes for which `start_attempt` failed. They remain explicitly
-    /// owned and nonterminal, but never enter `pending_relays` because no
-    /// Started fact exists and no wire EVENT was emitted.
+    /// Routed lanes for which `start_lane_attempt` failed. They remain
+    /// explicitly owned and nonterminal, but never enter `pending_relays`
+    /// because no Started fact exists and no wire EVENT was emitted.
     unstarted_relays: BTreeSet<RelayUrl>,
     /// Resolved URLs whose route revision did not persist. Owned only for
     /// this process lifetime; crash recovery may re-resolve policy but cannot

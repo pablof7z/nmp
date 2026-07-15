@@ -935,7 +935,7 @@ pub enum CloseIntentOutcome {
 
 /// One append-only snapshot of the exact relay set resolved for an intent.
 /// It is committed before any corresponding attempt may start, so a failed
-/// `start_attempt` cannot erase the lane across restart when dynamic directory
+/// attempt-start cannot erase the lane across restart when dynamic directory
 /// state is empty or has changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredRouteRevision {
@@ -956,14 +956,6 @@ pub enum AttemptOutcome {
     Rejected(String),
     GaveUp,
     OutcomeUnknown,
-}
-
-/// Successful result of making one attempt ordinal terminal. Missing rows
-/// and contradictory terminals are errors, never false-success.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FinishAttemptOutcome {
-    Committed,
-    AlreadySame,
 }
 
 /// The single mutating door onto the event store.
@@ -1268,7 +1260,7 @@ pub trait EventStore {
     ) -> Result<Option<RecoveredReceipt>, PersistenceError>;
 
     /// Append the next canonical resolved-route revision for an open intent.
-    /// This must commit before any `start_attempt` or wire publication for a
+    /// This must commit before any attempt starts or wire publication for a
     /// relay in the revision.
     fn record_route_revision(
         &mut self,
@@ -1281,26 +1273,6 @@ pub trait EventStore {
         &self,
         intent_id: IntentId,
     ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError>;
-
-    /// Atomically append the next attempt ordinal for `(intent, relay)` and
-    /// its exact signed bytes. This door must return successfully before a
-    /// caller may place those bytes on the wire.
-    fn start_attempt(
-        &mut self,
-        intent_id: IntentId,
-        relay: RelayUrl,
-        event: Event,
-    ) -> Result<RecoveredAttempt, PersistenceError>;
-
-    /// Make one started ordinal terminal. The full key prevents a late ACK
-    /// from closing a newer attempt.
-    fn finish_attempt(
-        &mut self,
-        intent_id: IntentId,
-        relay: &RelayUrl,
-        ordinal: u64,
-        outcome: AttemptOutcome,
-    ) -> Result<FinishAttemptOutcome, PersistenceError>;
 
     /// Read all retained attempt facts for one intent in stable key order.
     fn recover_attempts(

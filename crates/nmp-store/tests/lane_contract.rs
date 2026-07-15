@@ -200,9 +200,6 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
             .start_lane_attempt(&key, 6, signed, Timestamp::from(131))
             .unwrap();
         assert_eq!(second.ordinal, 2);
-        assert!(store
-            .finish_attempt(intent, &key.relay, 1, AttemptOutcome::Acked)
-            .is_err());
         assert_eq!(
             store.recover_outbox_lanes(intent).unwrap()[0].last_ordinal,
             2
@@ -495,32 +492,16 @@ fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
 }
 
 #[test]
-fn legacy_start_rejects_a_second_live_ordinal_and_bootstrap_cannot_hide_one() {
-    for_each_backend(|store| {
-        let relay = RelayUrl::parse("wss://legacy-live.example").unwrap();
-        let (intent, _, signed, _, _) = seed(store, "legacy-live", 720, relay.clone());
-        store
-            .start_attempt(intent, relay.clone(), signed.clone())
-            .unwrap();
-        assert!(store
-            .start_attempt(intent, relay, signed)
-            .unwrap_err()
-            .to_string()
-            .contains("current attempt is live"));
-        assert_eq!(store.recover_attempts(intent).unwrap().len(), 1);
-    });
-
+fn bootstrap_cannot_hide_two_contradictory_live_ordinals() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("existing-lane-contradiction.redb");
     let relay = RelayUrl::parse("wss://existing-lane.example").unwrap();
     let (intent, signed) = {
         let mut store = reopen(&path);
         let (intent, _, signed, _, _) = seed(&mut store, "existing-lane", 721, relay.clone());
-        store
-            .start_attempt(intent, relay.clone(), signed.clone())
-            .unwrap();
         (intent, signed)
     };
+    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Started);
     insert_legacy_attempt(&path, intent, &relay, 2, &signed, AttemptOutcome::Started);
     let mut store = reopen(&path);
     assert!(store
@@ -647,11 +628,23 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
         .unwrap();
         let intent = {
             let mut store = reopen(&path);
-            let (intent, _, signed, _, _) = seed(&mut store, "state-mismatch", 274, relay.clone());
-            store.start_attempt(intent, relay.clone(), signed).unwrap();
+            let (intent, _, signed, key, lane) =
+                seed(&mut store, "state-mismatch", 274, relay.clone());
+            let lane = store
+                .set_lane_eligible(&key, lane.revision, Timestamp::from(275))
+                .unwrap();
+            let (_, lane) = store
+                .start_lane_attempt(&key, lane.revision, signed, Timestamp::from(276))
+                .unwrap();
             if terminal_attempt {
                 store
-                    .finish_attempt(intent, &relay, 1, AttemptOutcome::Acked)
+                    .finish_lane_attempt(
+                        &key,
+                        lane.revision,
+                        1,
+                        AttemptOutcome::Acked,
+                        Timestamp::from(277),
+                    )
                     .unwrap();
             }
             intent
@@ -949,98 +942,82 @@ fn legacy_v1_bootstrap_is_deterministic_and_rejects_contradictory_live_history()
 }
 
 #[test]
-fn genuine_detail_less_legacy_rows_adopt_for_current_recovery_doors() {
-    for (name, raw_outcome) in [
-        ("at-most-once", AttemptOutcome::Started),
-        ("durable-current", AttemptOutcome::Started),
-        ("durable-planned", AttemptOutcome::Started),
-        ("old-terminal", AttemptOutcome::Acked),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(format!("{name}.redb"));
-        let relay = RelayUrl::parse(&format!("wss://{name}.legacy.example")).unwrap();
-        let (intent, signed) = {
-            let mut store = reopen(&path);
-            let keys = Keys::generate();
-            let (signed, frozen) = signed_and_frozen(&keys, name, 260);
-            let intent = store
-                .accept_write(accept(frozen, &keys, 260))
-                .unwrap()
-                .journaled_intent_id()
-                .unwrap();
-            store.promote_signed(intent, signed.sig).unwrap();
-            store
-                .record_route_revision(intent, BTreeSet::from([relay.clone()]))
-                .unwrap();
-            (intent, signed)
-        };
-        insert_legacy_attempt(&path, intent, &relay, 1, &signed, raw_outcome.clone());
-
+fn genuine_detail_less_legacy_row_adopts_as_legacy_in_flight_for_bootstrap() {
+    let name = "durable-planned";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.redb"));
+    let relay = RelayUrl::parse(&format!("wss://{name}.legacy.example")).unwrap();
+    let (intent, signed) = {
         let mut store = reopen(&path);
-        match name {
-            "at-most-once" => {
-                assert_eq!(
-                    store
-                        .finish_attempt(intent, &relay, 1, AttemptOutcome::OutcomeUnknown)
-                        .unwrap(),
-                    nmp_store::FinishAttemptOutcome::Committed
-                );
-                assert_eq!(
-                    store.recover_attempts(intent).unwrap()[0].outcome,
-                    AttemptOutcome::OutcomeUnknown
-                );
-            }
-            "durable-current" => {
-                assert_eq!(
-                    store
-                        .finish_attempt(intent, &relay, 1, AttemptOutcome::Acked)
-                        .unwrap(),
-                    nmp_store::FinishAttemptOutcome::Committed
-                );
-                assert_eq!(
-                    store.recover_attempts(intent).unwrap()[0].outcome,
-                    AttemptOutcome::Acked
-                );
-            }
-            "durable-planned" => {
-                let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
-                assert_eq!(lane.state, LaneState::LegacyInFlight { ordinal: 1 });
-                assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
-                store
-                    .set_lane_transient(
-                        &lane.key,
-                        lane.revision,
-                        1,
-                        Timestamp::from(280),
-                        TransientCause::Interrupted,
-                        None,
-                    )
-                    .unwrap();
-            }
-            "old-terminal" => {
-                assert_eq!(
-                    store
-                        .finish_attempt(intent, &relay, 1, AttemptOutcome::Acked)
-                        .unwrap(),
-                    nmp_store::FinishAttemptOutcome::AlreadySame
-                );
-                assert!(store
-                    .finish_attempt(intent, &relay, 1, AttemptOutcome::GaveUp)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("conflicting"));
-                assert_eq!(
-                    store.recover_outbox_lanes(intent).unwrap()[0].state,
-                    LaneState::Terminal {
-                        ordinal: 1,
-                        outcome: AttemptOutcome::Acked,
-                    }
-                );
-                assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
-            }
-            _ => unreachable!(),
+        let keys = Keys::generate();
+        let (signed, frozen) = signed_and_frozen(&keys, name, 260);
+        let intent = store
+            .accept_write(accept(frozen, &keys, 260))
+            .unwrap()
+            .journaled_intent_id()
+            .unwrap();
+        store.promote_signed(intent, signed.sig).unwrap();
+        store
+            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+            .unwrap();
+        (intent, signed)
+    };
+    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Started);
+
+    let mut store = reopen(&path);
+    let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+    assert_eq!(lane.state, LaneState::LegacyInFlight { ordinal: 1 });
+    assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
+    store
+        .set_lane_transient(
+            &lane.key,
+            lane.revision,
+            1,
+            Timestamp::from(280),
+            TransientCause::Interrupted,
+            None,
+        )
+        .unwrap();
+}
+
+/// A legacy v1 attempt row whose OWN outcome is already terminal (written
+/// before the additive detail table existed, so no DETAILS row overlays it)
+/// must bootstrap straight to `LaneState::Terminal`. This is the live
+/// upgrade-read branch (`redb_store.rs` / `memory_store.rs` bootstrap
+/// `Some(attempt) => LaneState::Terminal`) that the lane doors never produce
+/// themselves: they keep the attempt row's outcome `Started` and record the
+/// terminal outcome in DETAILS instead.
+#[test]
+fn genuine_terminal_legacy_row_adopts_as_terminal_lane_for_bootstrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-terminal.redb");
+    let relay = RelayUrl::parse("wss://legacy-terminal.example").unwrap();
+    let (intent, signed) = {
+        let mut store = reopen(&path);
+        let keys = Keys::generate();
+        let (signed, frozen) = signed_and_frozen(&keys, "legacy-terminal", 262);
+        let intent = store
+            .accept_write(accept(frozen, &keys, 262))
+            .unwrap()
+            .journaled_intent_id()
+            .unwrap();
+        store.promote_signed(intent, signed.sig).unwrap();
+        store
+            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+            .unwrap();
+        (intent, signed)
+    };
+    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Acked);
+
+    let mut store = reopen(&path);
+    let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+    assert_eq!(
+        lane.state,
+        LaneState::Terminal {
+            ordinal: 1,
+            outcome: AttemptOutcome::Acked,
         }
-    }
+    );
 }
 
 #[test]
