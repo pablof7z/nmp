@@ -70,17 +70,35 @@ pub enum FfiBunkerParseError {
 /// own doc).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiNip46Failure {
-    InvalidBunkerUri { source: FfiBunkerParseError },
+    InvalidBunkerUri {
+        source: FfiBunkerParseError,
+    },
     MissingRelay,
-    TooManyRelays { count: u64 },
-    InvitationTooLong { len: u64 },
-    InvalidLaunchScheme { scheme: String },
+    TooManyRelays {
+        count: u64,
+    },
+    InvitationTooLong {
+        len: u64,
+    },
+    InvalidLaunchScheme {
+        scheme: String,
+    },
     Timeout,
     Disconnected,
-    Rejected { reason: String },
-    InvalidResponse { reason: String },
-    ThreadUnavailable { component: String, reason: String },
-    ExecutorSaturated { component: String, capacity: u64 },
+    Rejected {
+        reason: String,
+    },
+    InvalidResponse {
+        reason: String,
+    },
+    ThreadUnavailable {
+        component: String,
+        reason: String,
+    },
+    ExecutorSaturated {
+        component: String,
+        capacity: u64,
+    },
     /// `nmp::Engine::add_signer` unconditionally maps every internal
     /// `AddSignerError` to `EngineError::SignerMissingPublicKey`
     /// (crates/nmp/src/engine.rs) -- the only engine-side failure reachable
@@ -135,9 +153,9 @@ fn nip46_failure_to_ffi(error: nmp_signer::Nip46Error) -> FfiNip46Failure {
         nmp_signer::Nip46Error::TooManyRelays(count) => FfiNip46Failure::TooManyRelays {
             count: count as u64,
         },
-        nmp_signer::Nip46Error::InvitationTooLong(len) => FfiNip46Failure::InvitationTooLong {
-            len: len as u64,
-        },
+        nmp_signer::Nip46Error::InvitationTooLong(len) => {
+            FfiNip46Failure::InvitationTooLong { len: len as u64 }
+        }
         nmp_signer::Nip46Error::InvalidLaunchScheme(scheme) => {
             FfiNip46Failure::InvalidLaunchScheme { scheme }
         }
@@ -253,9 +271,7 @@ impl Nip46Connection {
                                     reattached_public_key = Some(registration.public_key());
                                     attachment.registration = Some(registration);
                                 }
-                                Err(error) => {
-                                    failure = Some(engine_attach_failure_to_ffi(error))
-                                }
+                                Err(error) => failure = Some(engine_attach_failure_to_ffi(error)),
                             }
                         }
                     }
