@@ -470,7 +470,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 
 - **Failure evidence:** the protocol-module sweep found Swift `NostrContentSession` has `stop()` (withdraws content demand but leaves the session alive/reusable — used by NMPUI for a nested session outliving a view's `onDisappear`), but Kotlin had only the terminal `close()`; a Compose UI mirroring the Swift pattern had no way to pause observation without leaking or destroying the session.
 - **Changed projections:** kotlin
-- **Rust / FFI / Swift impact:** none. Kotlin `ContentSession` gains `stop()` mirroring Swift's `ContentSession.swift` `stop()` exactly: cancels observation/release jobs, clears active/waiting targets, applies the identical per-state reset (loading/shortfall/stopped/withdrawn → idle; refreshing → resolved; idle/resolved/collapsed untouched, exhaustive over all 8 states), leaving `scope`/`sessionJob` alive for reuse. `close()` is unchanged. Uses the existing `ReentrantLock`/`withLock` idiom.
+- **Rust / FFI / Swift / Kotlin impact:** none. Kotlin `ContentSession` gains `stop()` mirroring Swift's `ContentSession.swift` `stop()` exactly: cancels observation/release jobs, clears active/waiting targets, applies the identical per-state reset (loading/shortfall/stopped/withdrawn → idle; refreshing → resolved; idle/resolved/collapsed untouched, exhaustive over all 8 states), leaving `scope`/`sessionJob` alive for reuse. `close()` is unchanged. Uses the existing `ReentrantLock`/`withLock` idiom.
 - **Persistence impact:** none.
 - **Diagnostics impact:** none.
 - **Updated falsifiers:** new Kotlin test `stopWithdrawsDemandButSessionIsReusable` (claim → stop withdraws demand → fresh claim re-arms, proving reusability); `gradlew test` on JDK 17 green.
