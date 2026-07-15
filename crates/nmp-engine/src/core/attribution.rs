@@ -50,9 +50,12 @@ pub(crate) struct AttributionState {
     /// no longer be enough to reconstruct the right key at EOSE time).
     /// `EngineCore` only ever has a `CoverageKey` at attribution time (from
     /// `WireReq::absorbed`), so it must retain the FULL atom separately to
-    /// be able to call that door at all. Grows monotonically; a stale
-    /// entry for a shape no longer in demand is harmless (worst case: an
-    /// unreachable key that is never looked up again).
+    /// be able to call that door at all. Pruned each recompile by
+    /// [`Self::prune_shapes`] (mirroring `EngineCore`'s own
+    /// `nip11_information` pruning in `core/mod.rs::recompile`) against the
+    /// union of the current `active_demand()` and every `CoverageKey` still
+    /// `absorbed` by an outstanding `inflight` snapshot — see that method's
+    /// doc for why both sets are required.
     shape_by_key: HashMap<CoverageKey, ContextualAtom>,
 }
 
@@ -82,6 +85,46 @@ impl AttributionState {
     /// observed via [`Self::observe_demand`].
     pub(crate) fn shape_of(&self, key: CoverageKey) -> Option<ContextualAtom> {
         self.shape_by_key.get(&key).cloned()
+    }
+
+    /// Prune `shape_by_key` down to keys still reachable from SOMEWHERE
+    /// (finding E3, epic #507): called once per recompile, right after
+    /// [`Self::observe_demand`] (same `demand` argument), mirroring
+    /// `EngineCore`'s own `nip11_information.retain(..)` immediately below
+    /// it in `core/mod.rs::recompile` -- without this, `shape_by_key` grows
+    /// once per distinct atom shape ever demanded for the life of the
+    /// process, which for a long-running client visiting many distinct
+    /// profiles/queries over a session is unbounded.
+    ///
+    /// A key is still reachable, and MUST be retained, if EITHER:
+    /// - it is `coverage_key(atom)` for some atom in the CURRENT `demand`
+    ///   (the same set [`Self::observe_demand`] was just called with), or
+    /// - it is still `absorbed` by some snapshot outstanding in `inflight`.
+    ///
+    /// The second clause is load-bearing, not defensive: `attribute_eose`
+    /// intersects EVERY still-outstanding snapshot on a sub (ruling §2,
+    /// see its own doc), and a sub's outstanding snapshots can span
+    /// multiple recompiles -- an atom can leave `active_demand()` (the
+    /// resolver moves on) while its already-sent REQ is still awaiting
+    /// EOSE, and that REQ's `absorbed` keys must keep resolving via
+    /// `shape_of` whenever that EOSE (or NEG-MSG completion) finally
+    /// arrives, arbitrarily many recompiles later. Pruning against
+    /// `demand` alone would silently turn that later `shape_of` lookup
+    /// into `None` and drop a coverage credit that was legitimately
+    /// earned -- over-pruning, a correctness bug. Retaining a key that
+    /// satisfies neither clause is merely a stale entry: still harmless,
+    /// per this struct's own doc, exactly as it was before this method
+    /// existed -- so under-pruning here is the acceptable failure mode,
+    /// never over-pruning.
+    pub(crate) fn prune_shapes<'a>(
+        &mut self,
+        demand: impl IntoIterator<Item = &'a ContextualAtom>,
+    ) {
+        let mut live: BTreeSet<CoverageKey> = demand.into_iter().map(coverage_key).collect();
+        for fifo in self.inflight.values() {
+            live.extend(fifo.iter().flat_map(|snap| snap.absorbed.iter().copied()));
+        }
+        self.shape_by_key.retain(|key, _| live.contains(key));
     }
 
     /// Record a send-time snapshot for a REQ just placed on the wire for

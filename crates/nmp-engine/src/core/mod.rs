@@ -3466,6 +3466,14 @@ impl<S: EventStore> EngineCore<S> {
         self.sync_discovery(effects);
         let demand = self.resolver.active_demand();
         self.attribution.observe_demand(demand.iter());
+        // Finding E3 (epic #507): prune `shape_by_key` against the SAME
+        // `demand` just observed above, plus every key still `absorbed` by
+        // an outstanding attribution snapshot (see `prune_shapes`'s own
+        // doc for why the latter is required) -- mirrors the
+        // `nip11_information.retain(..)` a few lines below, in the same
+        // function, against the same kind of "current authoritative set"
+        // (`planned`/`demand`) recompile just established.
+        self.attribution.prune_shapes(demand.iter());
         let admitted_demand = self.admit_projected_routing_evidence(&demand);
         let wire_delta: WireDelta =
             self.router
