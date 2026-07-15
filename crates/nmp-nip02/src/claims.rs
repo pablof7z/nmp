@@ -5,6 +5,10 @@ const CLAIMS: [KindClaim; 1] = [KindClaim {
     scope: KindScope::Kind(3),
     exclusive: true,
     route_policy: None,
+    // Kind 3 is in DiscoveryKinds ({0, 3} ∪ 10000..=19999): contact lists
+    // are discovery data, and the module's acquisition rides
+    // indexer-eligible routing -- consciously acknowledged.
+    discovery_ack: true,
 }];
 
 /// NIP-02 owns the kind:3 contact-list schema. Acquisition and publication
@@ -25,5 +29,8 @@ mod tests {
         assert!(claims()[0].exclusive);
         assert!(claims()[0].scope.contains(3));
         assert!(claims()[0].route_policy.is_none());
+        // Kind 3 is a discovery kind -- the claim must consciously
+        // acknowledge that (routing-and-ownership.md §4.2 layer 2 check c).
+        assert!(claims()[0].discovery_ack);
     }
 }

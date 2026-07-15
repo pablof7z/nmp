@@ -1,0 +1,25 @@
+[package]
+name = "nmp-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The routing-and-ownership.md §4.2 layer-2 audit -- the workspace-wide,
+# load-bearing kind-ownership enforcement (routing-build-plan.md §4). This
+# crate has NO library code and NO [dependencies]: it exists solely to hold
+# `tests/workspace_audit.rs`. Every claim-bearing module crate (one that
+# declares a normal dependency on `nmp-ownership` to export `KindClaim`s)
+# MUST be a dev-dependency here -- `enrollment_matches_cargo_metadata`
+# derives the enrolled set from `cargo metadata` and compares it against
+# this crate's own registry, so a new module crate that forgets to enroll
+# (or a stale registry entry for a crate that no longer exists) is itself a
+# red build, not a silent gap.
+
+[dev-dependencies]
+nmp-ownership.workspace = true
+nmp-router.workspace = true
+nmp-nip02.workspace = true
+nmp-nip51.workspace = true
+nmp-nip29.workspace = true
+serde_json.workspace = true
