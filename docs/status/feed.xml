@@ -15,7 +15,32 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 20:55:00 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 21:56:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-15 21:56 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0007.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0007</guid>
+<pubDate>Wed, 15 Jul 2026 21:56:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse. Two things this hour: one real merge with hard numbers, and one honest look at foundation work still mid-flight.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin SDKs, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+First, the merge. Up to now, NMP had good evidence that a large local cache answers queries fast, but no real proof it could become a large cache under actual relay load without falling over. That gap just closed. A new end-to-end harness pushed one million genuinely signed events through the real path -- websocket framing, signature verification, bounded transport queues, the engine, all the way into the redb store -- and every frame was accounted for and came back exactly right after a full shutdown and reopen. Throughput held around forty-three hundred events per second, ninety-fifth-percentile apply latency under five seconds, store size around two gigabytes. The same shape of test on the pre-hardening code managed sixty-three events per second and didn't even finish a ten-thousand-event run in five minutes. That's a real, measured floor under a number this project has been claiming for a while.
+
+Here's the honest part, though: proving it also found the next problem. During that million-event run, the process held onto around six hundred and thirty megabytes at peak, and most of that didn't come back after shutdown. On a phone, that's the kind of pressure that gets a process killed. So alongside the proof, a new issue is now open to attribute exactly where that memory is going and get it bounded, before this becomes a mobile-scale claim instead of a desktop one. That's the project's ethos in one sentence: don't just claim it, measure it, and when the measurement finds a new problem, write it down instead of hiding it.
+
+Second, quieter story: the content-relay authentication work, wave one of a seven-part plan, keeps moving. The piece that scopes identity to a session -- so an anonymous reader and two different logged-in accounts on the same relay can never quietly bleed into each other -- just passed an adversarial review built to try to break that isolation. It held, sound, no leaks. It's now in the build lane: the linter's clean, but the full workspace gate caught a real mismatch between how a write's status is reported directly from Rust versus through the FFI boundary Swift and Kotlin talk to. Two different tellings of the same fact -- exactly what a facade can hide if nothing's watching. It's being fixed now, before merge, alongside Swift and Kotlin wrapper updates for the new identity variant. Still pre-merge, still engine-internal, no app-facing AUTH API yet, but real progress on the actual foundation.
+
+Meanwhile, remove-account stays exactly where it was: drafted, paused, waiting for that same session-identity work to settle first.
+
+That's the pulse -- a real scale proof with the numbers to back it, an honestly-reported memory gap right behind it, and quiet, careful progress on the harder authentication foundation underneath.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0007.mp3" type="audio/mpeg" length="3375788"/>
+<itunes:title>NMP Pulse — 2026-07-15 21:56 UTC</itunes:title>
+<itunes:duration>211</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Briefing — 2026-07-15 20:55 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0006.mp3</link>

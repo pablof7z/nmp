@@ -109,7 +109,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - The ownership boundary and behavioral invariants are the stable frame; the app-facing spelling is not.
 - **Headline (merged):** history is no longer a second noun — `observe(query, window)` makes windowing a policy on the one read noun, delivery mode derives from boundedness, and the #486 per-advance relay-REQ leak is fixed (deep scroll now holds O(1) live subscriptions per relay). Closes [#474](https://github.com/pablof7z/nmp/issues/474)/[#485](https://github.com/pablof7z/nmp/issues/485)/[#486](https://github.com/pablof7z/nmp/issues/486) — [#531](https://github.com/pablof7z/nmp/pull/531).
 - **Recent hardening batch (merged):** a DNS-rebinding relay-admission gap closed, a permanently-failed-relay wedge + unbounded send queue fixed, three unbounded-memory bookkeeping structures pruned, Swift/Kotlin cross-SDK parity gaps (config fields, content-session pause) closed, wake-relay lane lookups indexed instead of full-scanned, `MemoryStore` secondary indexes + batched GC landed, and kind-ownership exclusivity now has real enforcement (it was previously documented but unenforced — [#521](https://github.com/pablof7z/nmp/issues/521)).
-- **In progress:** NIP-42 content-relay AUTH ([#8](https://github.com/pablof7z/nmp/issues/8)) — Wave 1 of a 7-PR landing plan (closed access-scoped session identity) just started; only the NIP-46 bunker AUTH path works today.
+- **Proven this session:** end-to-end relay ingest holds up at real scale — a real websocket-to-redb harness pushed 1,000,000 signed events through the actual transport/verifier/resolver path with exact persistence on reopen ([#535](https://github.com/pablof7z/nmp/pull/535), closes [#530](https://github.com/pablof7z/nmp/issues/530)). It also found the next gap honestly: peak process memory during that run isn't bounded yet, tracked as [#534](https://github.com/pablof7z/nmp/issues/534).
+- **In progress:** NIP-42 content-relay AUTH ([#8](https://github.com/pablof7z/nmp/issues/8)) — Wave 1's access-scoped session identity is built and passed an adversarial identity-isolation review; it's now in the build/CI gate (pre-merge, engine-internal, no app-facing AUTH API yet). Only the NIP-46 bunker AUTH path works today.
 - **Held:** [`remove_account`](https://github.com/pablof7z/nmp/pull/529) is drafted but paused pending reconciliation to #8's ratified account-handle shape.
 
 ## Performance
@@ -121,6 +122,7 @@ Built for **bounded memory and streaming — never first-N truncation.** Measure
 - Rejected-heavy search: **0.188 ms → 0.005 ms**
 - Router coalesce fixed-point: **O(n³) → O(n²)**, plan-identical output
 - Query planning picks one best index and **stops at the visible limit** — no full-history materialization
+- **Relay ingest proven end-to-end at real scale** — 1,000,000 signed events over the actual websocket/transport/verifier/resolver/redb path, all frames accounted for and exactly recovered on reopen: ~4,333 events/s, 4.96s p95 apply latency, 2.08 GB store ([#535](https://github.com/pablof7z/nmp/pull/535), closes [#530](https://github.com/pablof7z/nmp/issues/530)). Peak RSS during that run (~630 MB) is *not yet bounded* — tracked as a new open gap ([#534](https://github.com/pablof7z/nmp/issues/534))
 - NIP-11 cache carries a **proven ~67 MiB raw-body ceiling** (not a total-RSS claim)
 - Public Rust facade governed under a **30,000-line surface ceiling**, enforced by a trusted-base CI gate
 
