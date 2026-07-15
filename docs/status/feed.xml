@@ -15,7 +15,34 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 11:34:00 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 11:54:00 GMT</lastBuildDate>
+<item>
+<title>NMP — The Audio Tour: What It Is &amp; How Solid It Is</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0003.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0003</guid>
+<pubDate>Wed, 15 Jul 2026 11:54:00 GMT</pubDate>
+<description><![CDATA[
+A conversational, listen-first tour of NMP — the embeddable Nostr client engine (Rust core + Swift/Kotlin SDKs). Not the README read aloud: what NMP is, what it can do today, how solid it is, and what's moving. ~3.5 min.
+
+So, what is NMP, and why should you care? You're building a Nostr app. The wire protocol looks tiny — a handful of event kinds, some relays, done. And then reality shows up: relay discovery, outbox routing, subscription repair, dedup, replaceable events, deletions, expiry, retries. And the awkward question nobody answers honestly — did the network actually give me everything, or am I just guessing? Most apps rebuild all of that, and most get it subtly wrong.
+
+NMP is the bet that you shouldn't have to. An embeddable Nostr client engine — a Rust core, with Swift and Kotlin SDKs on top through UniFFI. A library you call, not a framework you move into: your app keeps its own architecture, screens, and identity. NMP owns the network machinery underneath.
+
+It comes down to two nouns. A live query: you describe what you want, NMP keeps a local view fresh and re-routes relays as inputs change, observed through your platform's own reactive primitive. A write intent: you describe something to publish and how durable it must be, NMP carries it through acceptance, signing, routing, retries, and per-relay outcomes — and reports what it actually saw on the wire, not a cheerful success-equals-true.
+
+What it can do today: self-bootstrapping outbox routing (hand it two indexers, it discovers each author's write relays); a remote-signer bunker that survives reconnect across a store close and reopen; a durable outbox with bounded retry that reports outcome-unknown instead of blindly resending; and negentropy set reconciliation with a passing live test where the engine finds an event it never asked for.
+
+How solid: the Rust core is genuinely proven — 100+ test modules, differential falsifiers, live relay tests. Busiest-room query 5.15ms to about 0.26ms; a resolver over ~60,000 rows from almost four seconds to under a millisecond. Bounded memory and streaming, not first-N truncation.
+
+Honest gaps: pre-1.0. Swift qualified on the macOS host, iOS-simulator target pending; Kotlin desktop-JVM only, no Android package; content-relay AUTH doesn't answer the challenge yet; NIP-51 lists are read-only; reactions and media aren't built.
+
+Where it's heading: freeze the v2 surface, encode lifecycle rules as types, close the platform gap, ship secure-storage signer providers. The known-gaps doc names every open item. Own the hard machinery, and don't lie about what's proven. That's NMP.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0003.mp3" type="audio/mpeg" length="3609644"/>
+<itunes:title>NMP — The Audio Tour: What It Is &amp; How Solid It Is</itunes:title>
+<itunes:duration>226</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Briefing — 2026-07-15 11:30 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0002.mp3</link>
