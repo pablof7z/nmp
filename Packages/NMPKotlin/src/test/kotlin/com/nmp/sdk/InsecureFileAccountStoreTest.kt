@@ -70,6 +70,10 @@ class InsecureFileAccountStoreTest {
         NMPEngine(config, store).use { first ->
             val pubkey = first.addAccount(secretOne)
             first.setActiveAccount(pubkey)
+            assertThrows(NMPError.StoreStillOpen::class.java) {
+                NMPEngine.resetPersistentStore(database.toString())
+            }
+            assertTrue(Files.exists(database), "typed live-store refusal must leave the file intact")
         }
 
         NMPEngine.resetPersistentStore(database.toString())

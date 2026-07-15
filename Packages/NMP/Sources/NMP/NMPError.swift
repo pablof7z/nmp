@@ -35,6 +35,7 @@ public enum NMPError: Error, Sendable, Equatable {
     case receiptCorrelationIdExhausted
     case storeOpenFailed(String)
     case storeResetFailed(String)
+    case storeStillOpen(String)
     case threadUnavailable(component: String, reason: String)
     case executorSaturated(component: String, capacity: UInt64)
     case invalidSignature(String)
@@ -79,6 +80,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .ReceiptCorrelationIdExhausted: self = .receiptCorrelationIdExhausted
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .StoreResetFailed(let reason): self = .storeResetFailed(reason)
+        case .StoreStillOpen(let path): self = .storeStillOpen(path)
         case .ThreadUnavailable(let component, let reason):
             self = .threadUnavailable(component: component, reason: reason)
         case .ExecutorSaturated(let component, let capacity):

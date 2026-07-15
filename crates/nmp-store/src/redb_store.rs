@@ -41,6 +41,9 @@ use crate::coverage::{
     coverage_key as compute_coverage_key, merge_interval, shape_matches, shrink_after_eviction,
     window_erase, ShapeRecord,
 };
+use crate::persistent_store_lifetime::{
+    open_and_register, reset_store, OpenStoreRegistration, RegisteredOpen,
+};
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
     ClaimSet, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
@@ -3141,6 +3144,9 @@ enum RedbCrashPoint {
 
 pub struct RedbStore {
     db: Database,
+    // Field order is load-bearing: Rust drops `db` before this registration,
+    // so reset cannot proceed until the database handle is fully closed.
+    _open_registration: OpenStoreRegistration,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -3203,7 +3209,8 @@ impl RedbStore {
     /// schema marker proves every table exists, and one exact metadata count
     /// tells us whether crash-abandoned ephemeral receipts need recovery.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
-        let db = Database::create(path)?;
+        let registered = open_and_register(path.as_ref(), |path| Database::create(path))?;
+        let db = &registered.value;
         // Schema v6 deliberately carries no event-row migration. Refuse any
         // older NMP event epoch before creating a single v6 table: otherwise
         // canonical events would appear empty while unversioned durable
@@ -3347,8 +3354,13 @@ impl RedbStore {
             write_txn.commit()?;
             _open_write_transactions += 1;
         }
+        let RegisteredOpen {
+            value: db,
+            registration,
+        } = registered;
         Ok(Self {
             db,
+            _open_registration: registration,
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]
@@ -3364,6 +3376,18 @@ impl RedbStore {
             #[cfg(test)]
             route_revision_range_rows: AtomicU64::new(0),
         })
+    }
+
+    /// Destructively remove one closed persistent store target. The same
+    /// process-global mutex serializes this operation with every
+    /// [`RedbStore::open`] path, including stores later moved through raw
+    /// engine construction. Existing and dangling final symlink aliases
+    /// resolve to the actual store target; the alias inode is not removed.
+    /// A live target is a typed refusal. This is deliberately process-local:
+    /// arbitrary external retargeting and cross-process reset require a
+    /// separate advisory-lock contract.
+    pub fn reset(path: impl AsRef<Path>) -> Result<(), crate::RedbStoreResetError> {
+        reset_store(path.as_ref())
     }
 
     #[cfg(test)]
