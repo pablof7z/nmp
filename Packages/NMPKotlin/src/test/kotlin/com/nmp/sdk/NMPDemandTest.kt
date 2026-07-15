@@ -12,7 +12,7 @@ class NMPDemandTest {
         val demand = NMPDemand(selection = NMPFilter(kinds = listOf(1u)), source = NMPSourceAuthority.AuthorOutboxes)
         val ffi = demand.toFfi()
         assertEquals(uniffi.nmp_ffi.FfiSourceAuthority.AuthorOutboxes, ffi.source)
-        assertEquals(uniffi.nmp_ffi.FfiAccessContext.PUBLIC, ffi.access)
+        assertEquals(uniffi.nmp_ffi.FfiAccessContext.Public, ffi.access)
         assertEquals(uniffi.nmp_ffi.FfiCacheMode.AGNOSTIC, ffi.cache)
         assertEquals(demand, NMPDemand.from(ffi))
     }

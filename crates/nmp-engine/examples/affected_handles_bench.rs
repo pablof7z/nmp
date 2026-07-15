@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nmp_engine::core::{EngineCore, EngineMsg, RowDelta, RowSink};
-use nmp_grammar::{Binding, Filter, IndexedTagName};
+use nmp_grammar::{Binding, Filter, IndexedTagName, RelaySessionKey};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_store::{EventStore, RedbStore, RelayObserved};
@@ -102,7 +102,8 @@ fn run_case(label: &str, events: &[Event], rooms: &[String], max_created_at: u64
         slot: 0,
         generation: 1,
     };
-    black_box(core.handle(EngineMsg::RelayConnected(relay_handle, relay.clone())));
+    let session = RelaySessionKey::public(relay.clone());
+    black_box(core.handle(EngineMsg::RelayConnected(relay_handle, session.clone())));
     for room in rooms.iter().take(handles) {
         black_box(core.handle(EngineMsg::Subscribe(room_query(room), Box::new(NullSink))));
     }
@@ -122,7 +123,7 @@ fn run_case(label: &str, events: &[Event], rooms: &[String], max_created_at: u64
             event,
         ));
         let started = Instant::now();
-        let effects = core.handle(EngineMsg::RelayFrame(relay_handle, frame));
+        let effects = core.handle(EngineMsg::RelayFrame(relay_handle, session.clone(), frame));
         samples.push(started.elapsed());
         black_box(effects);
     }

@@ -94,6 +94,11 @@ sealed class SourceStatus {
  * dropped (offline cached rows remain usable). */
 data class SourceEvidence(
     val relay: String,
+    /** The frozen access identity of the physical session that produced this
+     * per-source fact (#8): the same relay URL under [NMPAccessContext.Public]
+     * versus a [NMPAccessContext.Nip42] identity is a distinct, non-aliasing
+     * source. */
+    val access: NMPAccessContext,
     val reconciledThrough: ULong?,
     val status: SourceStatus,
 ) {
@@ -101,6 +106,7 @@ data class SourceEvidence(
         fun from(ffi: FfiSourceEvidence): SourceEvidence =
             SourceEvidence(
                 relay = ffi.relay,
+                access = NMPAccessContext.from(ffi.access),
                 reconciledThrough = ffi.reconciledThrough,
                 status = SourceStatus.from(ffi.status),
             )

@@ -21,13 +21,13 @@
 //!
 //! No mutation, no attribution bookkeeping — that lives in `attribution.rs`;
 //! this module only READS what has already been recorded (`plan` for each
-//! atom's current covering relay set, `store` for each `(atom, relay)`'s
+//! atom's current covering session set, `store` for each `(atom, relay)`'s
 //! proven interval, and the engine's own connection bookkeeping for each
-//! relay's current link status).
+//! session's current link status).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{ConcreteFilter, ContextualAtom};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey};
 use nmp_router::RelayPlan;
 use nmp_store::{coverage_key, EventStore};
 use nostr::{RelayUrl, Timestamp};
@@ -41,9 +41,10 @@ use nostr::{RelayUrl, Timestamp};
 /// policy; NMP never does that rollup for it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcquisitionEvidence {
-    /// One entry per relay that currently covers at least one atom in the
-    /// query's subtree (interior `Derived` atoms included — #12). Sorted by
-    /// relay URL for deterministic equality: `refresh_handle`'s
+    /// One entry per SESSION (relay URL + frozen access context) that
+    /// currently covers at least one atom in the query's subtree (interior
+    /// `Derived` atoms included — #12). Sorted by session key (relay URL,
+    /// then access) for deterministic equality: `refresh_handle`'s
     /// change-detection compare must never spuriously fire on a mere
     /// re-ordering with no actual state change.
     pub sources: Vec<SourceEvidence>,
@@ -69,6 +70,8 @@ pub struct AcquisitionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEvidence {
     pub relay: RelayUrl,
+    /// Frozen access identity of the physical session producing this fact.
+    pub access: AccessContext,
     /// Durable per-(shape, relay) watermark evidence, min'd over the
     /// subtree atoms THIS source covers in THIS query, IFF every one of
     /// them has a coverage row whose `from` is at or before the query's own
@@ -82,9 +85,11 @@ pub struct SourceEvidence {
 
 /// The closed, honest per-source link-status vocabulary. This frame
 /// populates `Requesting`/`Connecting`/`Disconnected` (folded from the same
-/// connection bookkeeping `EngineCore` already keeps for reconnect/replay);
-/// `AwaitingAuth`/`AuthDenied` are RESERVED for #8's AUTH wire half, and
-/// `Error` is reserved until a transport-level error fold lands (#51) —
+/// connection bookkeeping `EngineCore` already keeps for reconnect/replay)
+/// and — since #8's session-identity half — `AwaitingAuth` (a protected
+/// session that is connected but whose exact current generation has not yet
+/// completed AUTH); `AuthDenied` remains RESERVED for #8's AUTH wire half,
+/// and `Error` is reserved until a transport-level error fold lands (#51) —
 /// every ratified variant is either populated here or documented reserved
 /// with a named landing issue, never vocabulary nothing can ever emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +107,9 @@ pub enum SourceStatus {
     /// fact: rows already acquired through this source remain usable; this
     /// status alone never invalidates them.
     Disconnected,
-    /// Reserved for #8 (AUTH evidence half) — NOT populated by this frame.
+    /// #8: a PROTECTED (`AccessContext::Nip42`) session is connected, but
+    /// its exact current connection generation has not yet completed AUTH —
+    /// its planned REQs are parked, so it is honestly not `Requesting` yet.
     AwaitingAuth { phase: AuthPhase },
     /// Reserved for #8 — terminal, NOT populated by this frame.
     AuthDenied,
@@ -147,12 +154,12 @@ pub enum ShortfallFact {
 }
 
 /// Compute `subtree_atoms`' [`AcquisitionEvidence`] against `plan` (each
-/// atom's current covering relay set — the relays whose compiled `WireReq`
-/// absorbs that atom's key), `store` (each `(atom, relay)`'s proven
-/// interval), and the engine's own `connected`/`ever_connected` relay sets
-/// (for `status`). Replaces `query_coverage`'s min-over-everything collapse:
-/// this never returns a single verdict, only per-source facts plus explicit
-/// shortfall.
+/// atom's current covering SESSION set — the sessions whose compiled
+/// `WireReq` absorbs that atom's key), `store` (each `(atom, relay)`'s
+/// proven interval), and the engine's own `connected`/`auth_ready`/
+/// `ever_connected` session sets (for `status`). Replaces `query_coverage`'s
+/// min-over-everything collapse: this never returns a single verdict, only
+/// per-source facts plus explicit shortfall.
 ///
 /// - `subtree_atoms` must include every atom in the query's FULL subtree
 ///   (`nmp_resolver::Engine::subtree_atoms`), not just its root atoms (#12)
@@ -166,19 +173,22 @@ pub enum ShortfallFact {
 ///   (never a silently-empty `sources`/`shortfall` pair).
 /// - A subtree atom with an EMPTY covering set contributes
 ///   `ShortfallFact::NoPlannedSource` and contributes to no source.
-/// - For each relay that covers at least one subtree atom:
+/// - For each session that covers at least one subtree atom:
 ///   `reconciled_through = Some(min over covered atoms' proven `through`)`
 ///   IFF every atom it covers has a proven row (`from <= window floor`),
-///   else `None`. `status` is `Requesting` if the relay is currently
-///   connected, `Disconnected` if it has connected before but is not
-///   connected now, else `Connecting` (planned but never yet connected).
-/// - Sources are returned sorted by relay URL for deterministic equality.
+///   else `None`. `status` is `Requesting` if the session is currently
+///   connected AND (Public, or its exact current generation has completed
+///   AUTH); `AwaitingAuth` if connected but protected and not yet ready;
+///   `Disconnected` if it has connected before but is not connected now;
+///   else `Connecting` (planned but never yet connected).
+/// - Sources are returned sorted by session key for deterministic equality.
 pub(crate) fn acquisition_evidence<S: EventStore>(
     subtree_atoms: &BTreeSet<ContextualAtom>,
     plan: &RelayPlan,
     store: &S,
-    connected: &BTreeSet<RelayUrl>,
-    ever_connected: &BTreeSet<RelayUrl>,
+    connected: &BTreeSet<RelaySessionKey>,
+    auth_ready: &BTreeSet<RelaySessionKey>,
+    ever_connected: &BTreeSet<RelaySessionKey>,
 ) -> AcquisitionEvidence {
     if subtree_atoms.is_empty() {
         return AcquisitionEvidence {
@@ -187,20 +197,20 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         };
     }
 
-    // relay -> (every covered atom proven so far?, min proven `through`).
-    let mut per_relay: BTreeMap<RelayUrl, (bool, Option<Timestamp>)> = BTreeMap::new();
+    // session -> (every covered atom proven so far?, min proven `through`).
+    let mut per_session: BTreeMap<RelaySessionKey, (bool, Option<Timestamp>)> = BTreeMap::new();
     let mut shortfall = Vec::new();
 
     for atom in subtree_atoms {
         let key = coverage_key(atom);
         let locally_limited = plan.limited.contains(&key);
-        let covering: Vec<&RelayUrl> = plan
+        let covering: Vec<&RelaySessionKey> = plan
             .reqs
             .iter()
-            .filter_map(|(relay, reqs)| {
+            .filter_map(|(session, reqs)| {
                 reqs.iter()
                     .any(|r| r.absorbed.contains(&key))
-                    .then_some(relay)
+                    .then_some(session)
             })
             .collect();
 
@@ -220,9 +230,13 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         }
 
         let window_start = Timestamp::from(atom.filter.since.unwrap_or(0));
-        for relay in covering {
-            let entry = per_relay.entry(relay.clone()).or_insert((true, None));
-            match store.get_coverage(key, relay) {
+        for session in covering {
+            let entry = per_session.entry(session.clone()).or_insert((true, None));
+            // Coverage rows stay keyed (context-hashed key, relay URL): the
+            // access distinction already lives inside `key` itself
+            // (`CoverageKey` is a context-inclusive hash), so the store read
+            // needs only the session's relay.
+            match store.get_coverage(key, &session.relay) {
                 Some(interval) if interval.from <= window_start => {
                     entry.1 = Some(match entry.1 {
                         None => interval.through,
@@ -234,18 +248,28 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         }
     }
 
-    let sources = per_relay
+    let sources = per_session
         .into_iter()
-        .map(|(relay, (all_proven, through))| {
-            let status = if connected.contains(&relay) {
-                SourceStatus::Requesting
-            } else if ever_connected.contains(&relay) {
+        .map(|(session, (all_proven, through))| {
+            let status = if connected.contains(&session) {
+                if session.access == AccessContext::Public || auth_ready.contains(&session) {
+                    SourceStatus::Requesting
+                } else {
+                    // Connected but protected and its exact current
+                    // generation has not completed AUTH: its planned REQs
+                    // are parked, so `Requesting` would be a lie.
+                    SourceStatus::AwaitingAuth {
+                        phase: AuthPhase::AwaitingPolicy,
+                    }
+                }
+            } else if ever_connected.contains(&session) {
                 SourceStatus::Disconnected
             } else {
                 SourceStatus::Connecting
             };
             SourceEvidence {
-                relay,
+                relay: session.relay,
+                access: session.access,
                 reconciled_through: if all_proven { through } else { None },
                 status,
             }
@@ -287,15 +311,18 @@ mod tests {
             absorbed: BTreeSet::from([key]),
         };
         let plan = RelayPlan {
-            reqs: BTreeMap::from([(relay.clone(), vec![req])]),
+            reqs: BTreeMap::from([(RelaySessionKey::public(relay.clone()), vec![req])]),
             limited: BTreeSet::from([key]),
-            refused_relays: BTreeSet::from([RelayUrl::parse("wss://refused.example").unwrap()]),
+            refused_sessions: BTreeSet::from([RelaySessionKey::public(
+                RelayUrl::parse("wss://refused.example").unwrap(),
+            )]),
         };
 
         let evidence = acquisition_evidence(
             &BTreeSet::from([atom.clone()]),
             &plan,
             &MemoryStore::new(),
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeSet::new(),
         );
@@ -314,7 +341,9 @@ mod tests {
         let key = coverage_key(&atom);
         let plan = RelayPlan {
             limited: BTreeSet::from([key]),
-            refused_relays: BTreeSet::from([RelayUrl::parse("wss://refused.example").unwrap()]),
+            refused_sessions: BTreeSet::from([RelaySessionKey::public(
+                RelayUrl::parse("wss://refused.example").unwrap(),
+            )]),
             ..RelayPlan::default()
         };
 
@@ -322,6 +351,7 @@ mod tests {
             &BTreeSet::from([atom.clone()]),
             &plan,
             &MemoryStore::new(),
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeSet::new(),
         );

@@ -54,6 +54,11 @@ data class FilterCoverage(val filter: String, val coverage: CoverageInterval?) {
  * a REAL number read off the running engine -- never fabricated/estimated. */
 data class RelayDiagnostics(
     val relay: String,
+    /** The frozen access identity of the physical session these diagnostics
+     * describe (#8): the same relay under [NMPAccessContext.Public] versus a
+     * [NMPAccessContext.Nip42] identity is a distinct session with its own
+     * row. */
+    val access: NMPAccessContext,
     val wireSubCount: UInt,
     val authorsServed: UInt,
     val byLane: List<LaneCount>,
@@ -72,6 +77,7 @@ data class RelayDiagnostics(
         fun from(ffi: FfiRelayDiagnostics): RelayDiagnostics =
             RelayDiagnostics(
                 relay = ffi.relay,
+                access = NMPAccessContext.from(ffi.access),
                 wireSubCount = ffi.wireSubCount,
                 authorsServed = ffi.authorsServed,
                 byLane = ffi.byLane.map { LaneCount.from(it) },

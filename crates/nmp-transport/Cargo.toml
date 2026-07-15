@@ -6,9 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# `RelayUrl` lives directly on `nostr` (re-exported by `nmp-router::facts`);
-# this crate does not need `nmp-grammar`.
 nostr.workspace = true
+nmp-grammar.workspace = true
 # HARVEST target (M3 plan §4 "Transport pool"): the old repo's `mio`-driven
 # worker-thread pool, kept as the interior async edge so the app never sees
 # an imposed runtime (§2). Versions mirror the old repo's pinned stack.

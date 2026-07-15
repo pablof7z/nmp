@@ -100,6 +100,7 @@ private func source(from ffi: FfiSourceAuthority) -> NMPSourceAuthority {
 private func access(from ffi: FfiAccessContext) -> NMPAccessContext {
     switch ffi {
     case .public: return .public
+    case let .nip42(publicKey): return .nip42(publicKey: publicKey)
     }
 }
 

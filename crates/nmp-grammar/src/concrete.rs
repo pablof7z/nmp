@@ -280,12 +280,16 @@ pub fn fold_context(
             DescriptorHash(*blake3::hash(&bytes).as_bytes())
         }
     };
-    fold_byte(
-        tagged,
-        match access {
-            AccessContext::Public => 0,
-        },
-    )
+    match access {
+        AccessContext::Public => fold_byte(tagged, 0),
+        AccessContext::Nip42(public_key) => {
+            let mut bytes = Vec::with_capacity(65);
+            bytes.extend_from_slice(tagged.as_bytes());
+            bytes.push(1);
+            bytes.extend_from_slice(&public_key.to_bytes());
+            DescriptorHash(*blake3::hash(&bytes).as_bytes())
+        }
+    }
 }
 
 /// Fold one arbitrary tag byte onto an existing hash, producing a NEW,

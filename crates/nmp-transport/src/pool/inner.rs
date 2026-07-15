@@ -33,7 +33,7 @@ use super::worker::{
 };
 use super::{
     DisconnectReason, PoolBuildError, PoolConfig, PoolEvent, PoolEventSink, RelayOpenError,
-    ThreadRole, ThreadSpawnError,
+    RelaySessionKey, ThreadRole, ThreadSpawnError,
 };
 
 struct RetireRequest {
@@ -66,7 +66,7 @@ impl ShutdownHandles {
 }
 
 struct SlotState {
-    url: RelayUrl,
+    session: RelaySessionKey,
     /// `None` once explicitly closed (via `Pool::close`) or after
     /// `Pool::shutdown` — a slot in this state accepts no further worker
     /// events (see [`apply_worker_event`]) and is only revivable by a fresh
@@ -79,10 +79,10 @@ struct SlotState {
 pub(super) struct PoolInner {
     /// Indexed by dense `RelayHandle.slot`. `worker: None` marks a closed
     /// slot; the entry itself stays so the slot id is only ever reused by a
-    /// reopen of the SAME url (matching `url_to_slot`).
+    /// reopen of the SAME session (matching `session_to_slot`).
     slots: Vec<SlotState>,
-    url_to_slot: HashMap<RelayUrl, u32>,
-    /// Bumped on every fresh worker spawn (new url or reopen-after-close).
+    session_to_slot: HashMap<RelaySessionKey, u32>,
+    /// Bumped on every fresh worker spawn (new session or reopen-after-close).
     /// Globally unique across the pool's whole lifetime — see
     /// `worker::pack_generation`.
     next_worker_id: u32,
@@ -152,7 +152,7 @@ impl PoolInner {
         let translator_config = config.clone();
         let inner = Arc::new(Mutex::new(Self {
             slots: Vec::new(),
-            url_to_slot: HashMap::new(),
+            session_to_slot: HashMap::new(),
             next_worker_id: 0,
             sink,
             worker_event_tx: Some(worker_event_tx),
@@ -201,22 +201,30 @@ impl PoolInner {
 
     #[cfg(test)]
     pub(super) fn ensure_open(&mut self, url: &RelayUrl) -> RelayHandle {
-        self.try_ensure_open(url)
+        self.try_ensure_session(&RelaySessionKey::public(url.clone()))
             .expect("test relay worker spawn/admission must succeed")
     }
 
+    #[cfg(test)]
     pub(super) fn try_ensure_open(
         &mut self,
         url: &RelayUrl,
+    ) -> Result<RelayHandle, RelayOpenError> {
+        self.try_ensure_session(&RelaySessionKey::public(url.clone()))
+    }
+
+    pub(super) fn try_ensure_session(
+        &mut self,
+        session: &RelaySessionKey,
     ) -> Result<RelayHandle, RelayOpenError> {
         self.reap_orphaned_workers();
         if self.shutdown {
             return Err(RelayOpenError::ShuttingDown);
         }
-        if let Some(&slot_id) = self.url_to_slot.get(url) {
+        if let Some(&slot_id) = self.session_to_slot.get(session) {
             let state = &self.slots[slot_id as usize];
             if state.worker.is_some() {
-                // Idempotent: a live slot for this URL already exists — never
+                // Idempotent: a live slot for this session already exists — never
                 // counted against the cap (it is already one of the live
                 // relays the cap bounds).
                 return Ok(RelayHandle {
@@ -235,7 +243,7 @@ impl PoolInner {
                     max_relays: self.config.max_relays,
                 });
             }
-            return self.reopen(slot_id, url.clone());
+            return self.reopen(slot_id, session.clone());
         }
         if self.live_worker_count() >= self.config.max_relays
             || self.total_relay_thread_count() >= self.max_relay_threads
@@ -245,11 +253,11 @@ impl PoolInner {
                 max_relays: self.config.max_relays,
             });
         }
-        self.open_new(url.clone())
+        self.open_new(session.clone())
     }
 
-    pub(super) fn live_handle(&self, url: &RelayUrl) -> Option<RelayHandle> {
-        let slot = *self.url_to_slot.get(url)?;
+    pub(super) fn live_session_handle(&self, session: &RelaySessionKey) -> Option<RelayHandle> {
+        let slot = *self.session_to_slot.get(session)?;
         let state = self.slots.get(slot as usize)?;
         state.worker.as_ref()?;
         Some(RelayHandle {
@@ -312,7 +320,7 @@ impl PoolInner {
         self.relays_rejected_over_cap
     }
 
-    fn open_new(&mut self, url: RelayUrl) -> Result<RelayHandle, RelayOpenError> {
+    fn open_new(&mut self, session: RelaySessionKey) -> Result<RelayHandle, RelayOpenError> {
         let slot_id = u32::try_from(self.slots.len()).map_err(|_| RelayOpenError::Unavailable)?;
         let worker_id = self.next_worker_id;
         self.next_worker_id = self
@@ -320,9 +328,9 @@ impl PoolInner {
             .checked_add(1)
             .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &url)?;
+        let worker = self.spawn_worker(slot_id, worker_id, &session.relay)?;
         self.slots.push(SlotState {
-            url: url.clone(),
+            session: session.clone(),
             worker: Some(worker),
             generation,
             health: RelayHealth {
@@ -330,23 +338,27 @@ impl PoolInner {
                 ..RelayHealth::default()
             },
         });
-        self.url_to_slot.insert(url, slot_id);
+        self.session_to_slot.insert(session, slot_id);
         Ok(RelayHandle {
             slot: slot_id,
             generation,
         })
     }
 
-    fn reopen(&mut self, slot_id: u32, url: RelayUrl) -> Result<RelayHandle, RelayOpenError> {
+    fn reopen(
+        &mut self,
+        slot_id: u32,
+        session: RelaySessionKey,
+    ) -> Result<RelayHandle, RelayOpenError> {
         let worker_id = self.next_worker_id;
         self.next_worker_id = self
             .next_worker_id
             .checked_add(1)
             .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &url)?;
+        let worker = self.spawn_worker(slot_id, worker_id, &session.relay)?;
         self.slots[slot_id as usize] = SlotState {
-            url,
+            session,
             worker: Some(worker),
             generation,
             health: RelayHealth {
@@ -435,10 +447,12 @@ impl PoolInner {
         }
         let worker = state.worker.take()?;
         let generation = state.generation;
+        let session = state.session.clone();
         state.health.state = ConnState::Disconnected;
         self.retire_worker(h.slot, generation, worker);
         Some(PoolEvent::Disconnected {
             handle: h,
+            session,
             reason: DisconnectReason::Closed,
         })
     }
@@ -447,12 +461,15 @@ impl PoolInner {
     /// set. Handles are snapshotted first so [`Self::close`] remains the one
     /// generation-safe mutation door and produces the ordinary synchronous
     /// disconnect fact for every released worker.
-    pub(super) fn close_unrequired(&mut self, required: &BTreeSet<RelayUrl>) -> Vec<PoolEvent> {
+    pub(super) fn close_unrequired_sessions(
+        &mut self,
+        required: &BTreeSet<RelaySessionKey>,
+    ) -> Vec<PoolEvent> {
         let obsolete: Vec<RelayHandle> = self
             .slots
             .iter()
             .enumerate()
-            .filter(|(_, state)| state.worker.is_some() && !required.contains(&state.url))
+            .filter(|(_, state)| state.worker.is_some() && !required.contains(&state.session))
             .map(|(slot, state)| RelayHandle {
                 slot: u32::try_from(slot).expect("pool slot id already fit u32 at allocation"),
                 generation: state.generation,
@@ -889,7 +906,7 @@ fn apply_worker_event_with_verdict(
                     slot: event.slot,
                     generation: event.generation,
                 },
-                url: state.url.clone(),
+                session: state.session.clone(),
             })
         }
         WorkerEventKind::Failed {
@@ -934,6 +951,7 @@ fn apply_worker_event_with_verdict(
                 // worker left behind for the caller to keep observing.
                 let taken = state.worker.take();
                 let generation = state.generation;
+                let session = state.session.clone();
                 // `state`'s mutable borrow of `inner.slots` ends here (its
                 // last use); `retire_worker` below takes `&mut inner` for
                 // the whole `PoolInner`, which NLL only allows once `state`
@@ -943,17 +961,20 @@ fn apply_worker_event_with_verdict(
                 }
                 return Some(PoolEvent::Disconnected {
                     handle,
+                    session,
                     reason: DisconnectReason::PermanentlyFailed,
                 });
             }
             if was_connected {
                 Some(PoolEvent::Disconnected {
                     handle,
+                    session: state.session.clone(),
                     reason: DisconnectReason::Error,
                 })
             } else {
                 Some(PoolEvent::Health {
                     handle,
+                    session: state.session.clone(),
                     health: state.health.clone(),
                 })
             }
@@ -975,6 +996,7 @@ fn apply_worker_event_with_verdict(
                         slot: event.slot,
                         generation: event.generation,
                     },
+                    session: state.session.clone(),
                     frame,
                 }),
                 FrameVerdict::RejectMisbehavior => {
@@ -984,6 +1006,7 @@ fn apply_worker_event_with_verdict(
                             slot: event.slot,
                             generation: event.generation,
                         },
+                        session: state.session.clone(),
                         health: state.health.clone(),
                     })
                 }
@@ -994,6 +1017,7 @@ fn apply_worker_event_with_verdict(
                             slot: event.slot,
                             generation: event.generation,
                         },
+                        session: state.session.clone(),
                         health: state.health.clone(),
                     })
                 }
@@ -1249,7 +1273,9 @@ mod tests {
             "the retired worker must reject any further send"
         );
         assert!(
-            guard.live_handle(&url).is_none(),
+            guard
+                .live_session_handle(&RelaySessionKey::public(url.clone()))
+                .is_none(),
             "the pool must never auto-redial a permanently-failed relay itself"
         );
 

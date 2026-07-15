@@ -50,12 +50,15 @@
 //! ## Reconnect-preamble bookkeeping
 //!
 //! `nmp_transport::Pool::set_reconnect_preamble` replaces the ENTIRE preamble
-//! for a relay on every call ("last call wins" — see that method's doc).
-//! `EngineCore`'s `Effect::Wire`/`Effect::Replay` are deltas/snapshots of the
-//! CURRENT demand, not the preamble text itself, so this module keeps its
-//! own per-relay `SubId -> wire REQ text` map (`Preambles`) and re-derives
-//! the full preamble string list on every touch — see `apply_wire_delta`/
-//! `apply_replay`.
+//! for a relay worker on every call ("last call wins" — see that method's
+//! doc). `EngineCore`'s `Effect::Wire`/`Effect::Replay` are deltas/snapshots
+//! of the CURRENT demand, not the preamble text itself, so this module keeps
+//! its own per-SESSION `SubId -> wire REQ text` map (`Preambles`) and
+//! re-derives the full preamble string list on every touch — see
+//! `apply_wire_delta`/`apply_replay`. PROTECTED (`AccessContext::Nip42`)
+//! sessions are the exception (#8): they never store a preamble at all — a
+//! reconnected protected socket is unauthenticated until its own AUTH
+//! completes, so nothing may auto-replay on it.
 
 mod diagnostics_channel;
 
@@ -81,7 +84,9 @@ use nostr::{
     Timestamp, UnsignedEvent,
 };
 
-use nmp_transport::{DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
+use nmp_transport::{
+    DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, RelaySessionKey, WireFrame,
+};
 
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
@@ -621,7 +626,11 @@ enum Cmd {
     /// waits for this acknowledgement before draining another frame batch,
     /// propagating store/engine pressure back into the bounded pool queues.
     RelayBatch {
-        frames: Vec<(nmp_transport::RelayHandle, nmp_transport::RelayFrame)>,
+        frames: Vec<(
+            nmp_transport::RelayHandle,
+            RelaySessionKey,
+            nmp_transport::RelayFrame,
+        )>,
         applied: cb::Sender<()>,
     },
     /// A closed relay OS thread has been joined and the finite retirement
@@ -1206,14 +1215,23 @@ fn pool_bridge_loop(
                 Err(_) => break,
             },
         };
-        if let PoolEvent::Frame { handle, frame } = event {
-            let mut frames = vec![(handle, frame)];
+        if let PoolEvent::Frame {
+            handle,
+            session,
+            frame,
+        } = event
+        {
+            let mut frames = vec![(handle, session, frame)];
             let trailing = loop {
                 if frames.len() == max_engine_batch {
                     break None;
                 }
                 match pool_evt_rx.try_recv() {
-                    Ok(PoolEvent::Frame { handle, frame }) => frames.push((handle, frame)),
+                    Ok(PoolEvent::Frame {
+                        handle,
+                        session,
+                        frame,
+                    }) => frames.push((handle, session, frame)),
                     Ok(other) => break Some(other),
                     Err(cb::TryRecvError::Empty | cb::TryRecvError::Disconnected) => break None,
                 }
@@ -1266,6 +1284,10 @@ mod pool_bridge_tests {
         RelayFrame::from_message(RelayMessage::notice(text))
     }
 
+    fn test_session() -> RelaySessionKey {
+        RelaySessionKey::public(RelayUrl::parse("wss://relay.example.com").unwrap())
+    }
+
     #[test]
     fn bridge_waits_for_applied_ack_before_enqueuing_another_relay_batch() {
         let (pool_tx, pool_rx) = cb::bounded(8);
@@ -1280,6 +1302,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
+                session: test_session(),
                 frame: notice_frame("first"),
             })
             .unwrap();
@@ -1294,6 +1317,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
+                session: test_session(),
                 frame: notice_frame("second"),
             })
             .unwrap();
@@ -1329,6 +1353,7 @@ mod pool_bridge_tests {
             pool_tx
                 .send(PoolEvent::Frame {
                     handle,
+                    session: test_session(),
                     frame: notice_frame(text),
                 })
                 .unwrap();
@@ -1339,11 +1364,11 @@ mod pool_bridge_tests {
             Cmd::RelayBatch { frames, applied } => {
                 assert_eq!(frames.len(), 2);
                 assert_eq!(
-                    frames[0].1.clone().into_message(),
+                    frames[0].2.clone().into_message(),
                     RelayMessage::notice("one")
                 );
                 assert_eq!(
-                    frames[1].1.clone().into_message(),
+                    frames[1].2.clone().into_message(),
                     RelayMessage::notice("two")
                 );
                 applied
@@ -1355,7 +1380,7 @@ mod pool_bridge_tests {
             Cmd::RelayBatch { frames, applied } => {
                 assert_eq!(frames.len(), 1);
                 assert_eq!(
-                    frames[0].1.clone().into_message(),
+                    frames[0].2.clone().into_message(),
                     RelayMessage::notice("three")
                 );
                 applied
@@ -1380,6 +1405,7 @@ mod pool_bridge_tests {
                     slot: 1,
                     generation: 2,
                 },
+                session: test_session(),
                 frame: notice_frame("pending"),
             })
             .unwrap();
@@ -1403,6 +1429,7 @@ mod pool_bridge_tests {
                 slot: 1,
                 generation: 1,
             },
+            session: test_session(),
             reason: nmp_transport::DisconnectReason::Error,
         });
         let blocked = thread::spawn(move || {
@@ -1411,6 +1438,7 @@ mod pool_bridge_tests {
                     slot: 2,
                     generation: 1,
                 },
+                session: test_session(),
                 reason: nmp_transport::DisconnectReason::Error,
             });
         });
@@ -1585,6 +1613,11 @@ mod relay_worker_reconciliation_tests {
     fn durable_write_lane_retains_worker_without_read_demand() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://write-only.example").unwrap();
+        // #8 U1: the write plane rides the relay's PUBLIC session (no AUTH
+        // reducer yet), so the worker this durable lane owns is the public
+        // session for the URL. Authenticated per-identity write sessions
+        // arrive with the AUTH wave.
+        let write_session = RelaySessionKey::public(relay.clone());
         let directory =
             FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
@@ -1650,7 +1683,7 @@ mod relay_worker_reconciliation_tests {
             &registry,
             dispatch_runtime,
         );
-        assert!(pool.live_handle(&relay).is_some());
+        assert!(pool.live_session_handle(&write_session).is_some());
 
         dispatch_core_effects(
             &core,
@@ -1664,7 +1697,7 @@ mod relay_worker_reconciliation_tests {
             dispatch_runtime,
         );
         assert!(
-            pool.live_handle(&relay).is_some(),
+            pool.live_session_handle(&write_session).is_some(),
             "a nonterminal durable lane remains a worker owner"
         );
 
@@ -1685,7 +1718,9 @@ mod relay_worker_reconciliation_tests {
 ///
 fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     match event {
-        PoolEvent::Connected { handle, url } => Some(EngineMsg::RelayConnected(handle, url)),
+        PoolEvent::Connected { handle, session } => {
+            Some(EngineMsg::RelayConnected(handle, session))
+        }
         // The `reason` is no longer discarded here (issue #506's CRITICAL
         // fix): `EngineCore::on_relay_disconnected` needs to tell a
         // permanent failure (401/403 -- the relay worker has already
@@ -1693,11 +1728,21 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
         // PermanentlyFailed`'s doc) apart from an ordinary transient one, so
         // it never re-issues `Effect::EnsureRelay` into a busy 401 redial
         // loop.
-        PoolEvent::Disconnected { handle, reason } => {
-            Some(EngineMsg::RelayDisconnected(handle, reason))
-        }
-        PoolEvent::Frame { handle, frame } => Some(EngineMsg::RelayFrame(handle, frame)),
-        PoolEvent::Health { handle, health } => Some(EngineMsg::RelayHealth(handle, health)),
+        PoolEvent::Disconnected {
+            handle,
+            session,
+            reason,
+        } => Some(EngineMsg::RelayDisconnected(handle, session, reason)),
+        PoolEvent::Frame {
+            handle,
+            session,
+            frame,
+        } => Some(EngineMsg::RelayFrame(handle, session, frame)),
+        PoolEvent::Health {
+            handle,
+            session,
+            health,
+        } => Some(EngineMsg::RelayHealth(handle, session, health)),
         PoolEvent::EventHandoff {
             correlation,
             result,
@@ -1706,12 +1751,15 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     }
 }
 
-/// Per-relay reconnect-preamble bookkeeping: the full set of currently-live
+/// Per-SESSION reconnect-preamble bookkeeping: the full set of currently-live
 /// REQ wire texts, keyed by `SubId` so `WireOp::Req`/`Close` can update it
 /// incrementally (module doc: `Pool::set_reconnect_preamble` replaces the
 /// WHOLE preamble on every call, so this module must always hand it the
-/// complete current set, not a delta).
-type Preambles = HashMap<RelayUrl, HashMap<SubId, String>>;
+/// complete current set, not a delta). PROTECTED sessions never own an entry
+/// here (#8): their REQs must never auto-replay on reconnect — a fresh
+/// generation is unauthenticated until its own AUTH completes, and the
+/// engine re-issues `Effect::Replay` itself on `RelayAuthReady`.
+type Preambles = HashMap<RelaySessionKey, HashMap<SubId, String>>;
 
 #[derive(Clone, Copy)]
 struct DispatchRuntime<'a> {
@@ -2128,8 +2176,8 @@ fn engine_loop<S, D>(
                 // the relay-cap rejection count too, not only the ones fanned
                 // out later.
                 let mut snapshot = core.diagnostics_snapshot();
-                snapshot.relays_rejected_over_cap = snapshot
-                    .relays_rejected_over_cap
+                snapshot.sessions_rejected_over_cap = snapshot
+                    .sessions_rejected_over_cap
                     .saturating_add(pool.admission_rejections());
                 tx.send(snapshot);
                 if reply.send((id, rx)).is_err() {
@@ -2555,12 +2603,12 @@ fn dispatch_core_effects<S: EventStore>(
     runtime: DispatchRuntime<'_>,
 ) {
     if let Some(required) = core.required_relay_workers() {
-        for event in pool.close_unrequired(&required) {
+        for event in pool.close_unrequired_sessions(&required) {
             if let Some(msg) = translate_pool_event(event) {
                 let _ = runtime.self_inbox.send(Cmd::Engine(msg));
             }
         }
-        preambles.retain(|relay, _| required.contains(relay));
+        preambles.retain(|session, _| required.contains(session));
     }
 
     dispatch_effects(
@@ -2583,8 +2631,8 @@ fn dispatch_core_effects<S: EventStore>(
 fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), EngineThreadError> {
     preflight_query_relay_workers_with(
         effects,
-        |relay| pool.live_handle(relay).is_some(),
-        |relay| match pool.ensure_open(relay) {
+        |session| pool.live_session_handle(session).is_some(),
+        |session| match pool.ensure_session(session) {
             Ok(handle) => Ok(Some(handle)),
             Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) => {
                 Err(EngineThreadError::ThreadUnavailable {
@@ -2604,31 +2652,31 @@ fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), 
 
 fn preflight_query_relay_workers_with(
     effects: &[Effect],
-    mut is_live: impl FnMut(&RelayUrl) -> bool,
-    mut ensure_open: impl FnMut(
-        &RelayUrl,
+    mut is_live: impl FnMut(&RelaySessionKey) -> bool,
+    mut ensure_session: impl FnMut(
+        &RelaySessionKey,
     ) -> Result<Option<nmp_transport::RelayHandle>, EngineThreadError>,
     mut close: impl FnMut(nmp_transport::RelayHandle),
 ) -> Result<(), EngineThreadError> {
-    let mut relays = BTreeSet::new();
+    let mut sessions = BTreeSet::new();
     for effect in effects {
         match effect {
             Effect::Wire(delta) => {
-                for (relay, ops) in &delta.ops {
+                for (session, ops) in &delta.ops {
                     if ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
-                        relays.insert(relay.clone());
+                        sessions.insert(session.clone());
                     }
                 }
             }
-            Effect::PreflightHistoryRelays(planned) => relays.extend(planned.iter().cloned()),
+            Effect::PreflightHistoryRelays(planned) => sessions.extend(planned.iter().cloned()),
             _ => {}
         }
     }
 
     let mut opened = Vec::new();
-    for relay in relays {
-        let was_live = is_live(&relay);
-        match ensure_open(&relay) {
+    for session in sessions {
+        let was_live = is_live(&session);
+        match ensure_session(&session) {
             Ok(Some(handle)) if !was_live => opened.push(handle),
             Ok(_) => {}
             Err(error) => {
@@ -2659,7 +2707,7 @@ mod history_preflight_tests {
         let delta = WireDelta {
             ops: vec![
                 (
-                    first.clone(),
+                    RelaySessionKey::public(first.clone()),
                     vec![WireOp::Req(
                         SubId::for_wire(
                             first.clone(),
@@ -2671,7 +2719,7 @@ mod history_preflight_tests {
                     )],
                 ),
                 (
-                    second.clone(),
+                    RelaySessionKey::public(second.clone()),
                     vec![WireOp::Req(
                         SubId::for_wire(
                             second.clone(),
@@ -2689,8 +2737,8 @@ mod history_preflight_tests {
         let result = preflight_query_relay_workers_with(
             &effects,
             |_| false,
-            |relay| {
-                if relay == &first {
+            |session| {
+                if session.relay == first {
                     Ok(Some(RelayHandle {
                         slot: 7,
                         generation: 1,
@@ -2719,10 +2767,13 @@ mod history_preflight_tests {
     }
 }
 
-/// Retry the exact currently-owned relay set once after an actual worker
-/// join releases retirement capacity. Read relays replay the full preamble
-/// retained even when their first spawn was refused; write-only relays need
-/// only be opened, after which the ordinary Connected path advances them.
+/// Retry the exact currently-owned relay-session set once after an actual
+/// worker join releases retirement capacity. Public read sessions replay the
+/// full preamble retained even when their first spawn was refused;
+/// write-only and PROTECTED sessions need only be opened, after which the
+/// ordinary Connected (and, for protected, `RelayAuthReady`) path advances
+/// them — a protected session's reconnect must never auto-send REQs (#8),
+/// so its fresh worker gets an explicitly EMPTY reconnect preamble.
 fn retry_required_relay_workers<S: EventStore>(
     core: &EngineCore<S>,
     pool: &Pool,
@@ -2731,14 +2782,18 @@ fn retry_required_relay_workers<S: EventStore>(
     let Some(required) = core.required_relay_workers() else {
         return;
     };
-    for relay in required {
-        if pool.live_handle(&relay).is_some() {
+    for session in required {
+        if pool.live_session_handle(&session).is_some() {
             continue;
         }
-        let Ok(handle) = pool.ensure_open(&relay) else {
+        let Ok(handle) = pool.ensure_session(&session) else {
             continue;
         };
-        let Some(entry) = preambles.get(&relay) else {
+        if session.access != nmp_grammar::AccessContext::Public {
+            pool.set_reconnect_preamble(handle, Vec::new());
+            continue;
+        }
+        let Some(entry) = preambles.get(&session) else {
             continue;
         };
         let frames: Vec<_> = entry.values().cloned().collect();
@@ -2793,7 +2848,7 @@ fn dispatch_effect(
     match effect {
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::PreflightHistoryRelays(_) => {}
-        Effect::Replay(url, reqs) => apply_replay(&url, reqs, pool, preambles),
+        Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
         Effect::FetchRelayInformation(url) => {
             let generation = runtime
                 .nip11_decisions
@@ -2822,8 +2877,8 @@ fn dispatch_effect(
                     .send(Cmd::Engine(EngineMsg::RelayInformationResolved(url, None)));
             }
         }
-        Effect::PublishEvent(url, event, correlation) => {
-            let Ok(handle) = pool.ensure_open(&url) else {
+        Effect::PublishEvent(session, event, correlation) => {
+            let Ok(handle) = pool.ensure_session(&session) else {
                 let _ = runtime.self_inbox.send(Cmd::Engine(EngineMsg::EventHandoff(
                     correlation,
                     HandoffResult::NotHandedOff,
@@ -2839,12 +2894,12 @@ fn dispatch_effect(
                     .send(Cmd::Engine(EngineMsg::EventHandoff(correlation, result)));
             }
         }
-        Effect::EnsureRelay(url) => {
+        Effect::EnsureRelay(session) => {
             // The durable lane is already persisted as WaitingConnection.
             // A typed cap refusal remains observable in pool diagnostics and
             // must not be converted back into an invalid handle or a busy
             // retry loop here.
-            let _refusal = pool.ensure_open(&url).err();
+            let _refusal = pool.ensure_session(&session).err();
         }
         // The signer frozen into this exact accepted template is looked up
         // by pubkey on every request. A later active-account switch cannot
@@ -2942,8 +2997,8 @@ fn dispatch_effect(
             // both the core-built snapshot AND the `Pool`, so it stitches the
             // count in here before fan-out. Idempotent per snapshot (a fresh
             // read each time), monotonic across snapshots.
-            snapshot.relays_rejected_over_cap = snapshot
-                .relays_rejected_over_cap
+            snapshot.sessions_rejected_over_cap = snapshot
+                .sessions_rejected_over_cap
                 .saturating_add(pool.admission_rejections());
             // Fan out to every currently-registered observer (M5 plan §1.2
             // step 4) -- each observer's own `LatestSender` overwrites its
@@ -3034,24 +3089,48 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
     .as_json()
 }
 
-/// `Effect::Wire`'s per-relay ops -> wire frames + reconnect-preamble
-/// upkeep. `ensure_open` is idempotent for an already-live slot (ships the
-/// frame onto whichever generation is current, queuing it if the socket is
-/// still dialing) and transparently reopens a previously-closed one, so
-/// there is no separate "is this relay already open" bookkeeping to keep
+/// `Effect::Wire`'s per-session ops -> wire frames + reconnect-preamble
+/// upkeep. `ensure_session` is idempotent for an already-live slot (ships
+/// the frame onto whichever generation is current, queuing it if the socket
+/// is still dialing) and transparently reopens a previously-closed one, so
+/// there is no separate "is this session already open" bookkeeping to keep
 /// here.
+///
+/// PROTECTED sessions take a stricter path (#8): their frames are sent
+/// directly (the reducer only ever emits protected ops AFTER the exact
+/// current generation reported `RelayAuthReady`), but NO reconnect preamble
+/// is ever stored for them — a fresh generation is unauthenticated until
+/// its own AUTH completes, so the pool must never auto-replay a protected
+/// REQ, and this module keeps no `preambles` entry that
+/// `retry_required_relay_workers` could accidentally resend.
 fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
-    for (relay, ops) in &delta.ops {
+    for (session, ops) in &delta.ops {
         let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
         let handle = if has_req {
-            pool.ensure_open(relay).ok()
+            pool.ensure_session(session).ok()
         } else {
             // A close-only delta must never reopen a worker already released
-            // by exact relay-demand reconciliation. Socket teardown already
+            // by exact session-demand reconciliation. Socket teardown already
             // withdrew every subscription on that connection.
-            pool.live_handle(relay)
+            pool.live_session_handle(session)
         };
-        let entry = preambles.entry(relay.clone()).or_default();
+        if session.access != nmp_grammar::AccessContext::Public {
+            for op in ops {
+                let text = match op {
+                    WireOp::Req(sub_id, filter) => req_frame_text(sub_id, filter),
+                    WireOp::Close(sub_id) => close_frame_text(sub_id),
+                };
+                if let Some(handle) = handle {
+                    let _ = pool.send(handle, WireFrame::Text(text));
+                }
+            }
+            if let Some(handle) = handle {
+                pool.set_reconnect_preamble(handle, Vec::new());
+            }
+            preambles.remove(session);
+            continue;
+        }
+        let entry = preambles.entry(session.clone()).or_default();
         for op in ops {
             match op {
                 WireOp::Req(sub_id, filter) => {
@@ -3076,27 +3155,43 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
             pool.set_reconnect_preamble(handle, frames);
         }
         if empty {
-            preambles.remove(relay);
+            preambles.remove(session);
         }
     }
 }
 
 /// `Effect::Replay`: `reqs` is `EngineCore`'s full CURRENT req list for
-/// `url` at the moment it observed `RelayConnected` (`core/mod.rs`'s
-/// `on_relay_connected`) -- an authoritative snapshot, not a delta, so the
-/// preamble entry for this relay is rebuilt from scratch rather than
+/// `session` at the moment it observed `RelayConnected` (`core/mod.rs`'s
+/// `on_relay_connected`) or — for a protected session — `RelayAuthReady`
+/// (`on_relay_auth_ready`) -- an authoritative snapshot, not a delta, so the
+/// preamble entry for this session is rebuilt from scratch rather than
 /// patched. Resending these as fresh REQ frames on the just-connected handle
 /// is what makes reconnection replay observable even on the very first
-/// `Connected` for a relay (before any preamble could have existed yet); on
-/// a later automatic reconnect the pool's own preamble mechanism will
+/// `Connected` for a session (before any preamble could have existed yet);
+/// on a later automatic reconnect the pool's own preamble mechanism will
 /// typically have already replayed them, and resending here is a harmless,
 /// idempotent overwrite (NIP-01: a REQ with an existing sub-id replaces that
-/// sub).
-fn apply_replay(url: &RelayUrl, reqs: Vec<WireReq>, pool: &Pool, preambles: &mut Preambles) {
-    let Ok(handle) = pool.ensure_open(url) else {
+/// sub). A PROTECTED session's replay sends directly and stores NO preamble
+/// (#8) — the same never-auto-replay rule as `apply_wire_delta`.
+fn apply_replay(
+    session: &RelaySessionKey,
+    reqs: Vec<WireReq>,
+    pool: &Pool,
+    preambles: &mut Preambles,
+) {
+    let Ok(handle) = pool.ensure_session(session) else {
         return;
     };
-    let entry = preambles.entry(url.clone()).or_default();
+    if session.access != nmp_grammar::AccessContext::Public {
+        for req in &reqs {
+            let text = req_frame_text(&req.sub_id, &req.filter);
+            let _ = pool.send(handle, WireFrame::Text(text));
+        }
+        pool.set_reconnect_preamble(handle, Vec::new());
+        preambles.remove(session);
+        return;
+    }
+    let entry = preambles.entry(session.clone()).or_default();
     entry.clear();
     for req in &reqs {
         let text = req_frame_text(&req.sub_id, &req.filter);

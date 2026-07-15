@@ -99,21 +99,23 @@ final class EvidenceMappingTests: XCTestCase {
     func testEveryAcquisitionEvidenceVariantMapsWithoutARollup() {
         let raw = FfiAcquisitionEvidence(
             sources: [
-                .init(relay: "wss://requesting.example", reconciledThrough: 10, status: .requesting),
-                .init(relay: "wss://connecting.example", reconciledThrough: nil, status: .connecting),
-                .init(relay: "wss://disconnected.example", reconciledThrough: 20, status: .disconnected),
+                .init(relay: "wss://requesting.example", access: .public, reconciledThrough: 10, status: .requesting),
+                .init(relay: "wss://connecting.example", access: .public, reconciledThrough: nil, status: .connecting),
+                .init(relay: "wss://disconnected.example", access: .public, reconciledThrough: 20, status: .disconnected),
                 .init(
                     relay: "wss://policy.example",
+                    access: .public,
                     reconciledThrough: nil,
                     status: .awaitingAuth(phase: .awaitingPolicy)
                 ),
                 .init(
                     relay: "wss://signature.example",
+                    access: .public,
                     reconciledThrough: nil,
                     status: .awaitingAuth(phase: .awaitingSignature)
                 ),
-                .init(relay: "wss://denied.example", reconciledThrough: nil, status: .authDenied),
-                .init(relay: "wss://error.example", reconciledThrough: nil, status: .error),
+                .init(relay: "wss://denied.example", access: .public, reconciledThrough: nil, status: .authDenied),
+                .init(relay: "wss://error.example", access: .public, reconciledThrough: nil, status: .error),
             ],
             shortfall: [
                 .noPlannedSource(atom: "no-source-filter"),
@@ -207,6 +209,7 @@ final class EvidenceMappingTests: XCTestCase {
                 sources: [
                     .init(
                         relay: "wss://source.example",
+                        access: .public,
                         reconciledThrough: 9,
                         status: .disconnected
                     )

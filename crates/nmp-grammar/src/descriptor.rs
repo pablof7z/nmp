@@ -46,14 +46,39 @@ pub enum SourceAuthority {
     Pinned(BTreeSet<nostr::RelayUrl>),
 }
 
-/// The access/AUTH context a [`Demand`] carries — a reserved slot for #8
-/// (NIP-42 AUTH). Only `Public` is populated today; this exists so the axis
-/// is part of `Demand` identity from day one, not retrofitted once AUTH
-/// lands (which would silently re-alias every existing coverage/evidence
-/// row keyed before the axis existed).
+/// The connection-scoped access/AUTH context a [`Demand`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AccessContext {
+    /// An unauthenticated relay connection. It never shares a physical
+    /// session or acquisition evidence with an authenticated context.
     Public,
+    /// Authenticate the exact relay session with this explicit identity.
+    /// The value is fixed in the demand; changing the engine's active account
+    /// cannot redirect it.
+    Nip42(nostr::PublicKey),
+}
+
+/// The complete identity of one physical relay session.
+///
+/// NIP-42 visibility is connection-scoped, so a URL without its frozen
+/// access context is never a sufficient key for planning, transport,
+/// attribution, replay, or coverage.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RelaySessionKey {
+    pub relay: nostr::RelayUrl,
+    pub access: AccessContext,
+}
+
+impl RelaySessionKey {
+    #[must_use]
+    pub const fn new(relay: nostr::RelayUrl, access: AccessContext) -> Self {
+        Self { relay, access }
+    }
+
+    #[must_use]
+    pub const fn public(relay: nostr::RelayUrl) -> Self {
+        Self::new(relay, AccessContext::Public)
+    }
 }
 
 /// The cache-provenance mode a [`Demand`] carries -- meaningful ONLY under

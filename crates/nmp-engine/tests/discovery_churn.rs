@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
-use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, RelaySessionKey, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::{LiveDirectory, WireOp};
 use nmp_store::MemoryStore;
@@ -34,7 +34,7 @@ fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec
             slot,
             generation: 1,
         },
-        url.clone(),
+        RelaySessionKey::public(url.clone()),
     ))
 }
 
@@ -183,6 +183,7 @@ fn resolving_39_authors_one_at_a_time_does_not_churn_the_discovery_sub() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind3(&me, &follows, 100)),
     )));
 
@@ -199,6 +200,7 @@ fn resolving_39_authors_one_at_a_time_does_not_churn_the_discovery_sub() {
                 slot: 0,
                 generation: 1,
             },
+            RelaySessionKey::public(indexer.clone()),
             event_frame("s", relay_list),
         )));
     }
@@ -289,6 +291,7 @@ fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind3(&me, &follows, 100)),
     ));
 
@@ -311,6 +314,7 @@ fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind10002_declaring_no_write_relays(&a, 200)),
     ));
     assert!(
@@ -326,6 +330,7 @@ fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind10002(&b, &write_relay, 201)),
     ));
 
@@ -341,6 +346,7 @@ fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
             slot: 0,
             generation: 1,
         },
+        RelaySessionKey::public(indexer.clone()),
         event_frame("s", kind10002_declaring_no_write_relays(&me, 202)),
     ));
 

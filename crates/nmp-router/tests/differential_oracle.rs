@@ -112,7 +112,7 @@ fn differential_oracle_identical_delivery() {
         .map(|a| (a.clone(), BTreeSet::new()))
         .collect();
     for (relay, reqs) in &router_a.plan().reqs {
-        let store = &relay_store[relay];
+        let store = &relay_store[&relay.relay];
         for req in reqs {
             for prov in &req.provenance {
                 for author in &prov.covers_authors {
@@ -141,7 +141,7 @@ fn differential_oracle_identical_delivery() {
         .map(|a| (a.clone(), BTreeSet::new()))
         .collect();
     for (relay, reqs) in &router_b.plan().reqs {
-        let store = &relay_store[relay];
+        let store = &relay_store[&relay.relay];
         for req in reqs {
             let wire_events: Vec<Event> = store
                 .iter()

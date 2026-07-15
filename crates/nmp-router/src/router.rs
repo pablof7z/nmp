@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, RoutingEvidence, SourceAuthority,
+    AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, RoutingEvidence,
+    SourceAuthority,
 };
 use nmp_store::{coverage_key, CoverageKey};
 
@@ -24,13 +25,12 @@ use crate::solver::{self, CoverageInput, Shortfall, ShortfallReason};
 /// atoms only ever share wire work if their FULL context matches. Bagged
 /// and coalesced entirely inside `Router::compile` -- `coalesce.rs` itself
 /// stays PURE selection-only and never learns this type exists.
-type ContextKey = (SourceAuthority, AccessContext);
-
 /// One relay's not-yet-coalesced bag entry, PER context partition: a
 /// materialized (filter, single-lane provenance, absorbed coverage-key)
 /// triple -- selection-only, exactly what `coalesce.rs::coalesce_with`
 /// (unchanged, context-free) has always taken.
 type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+type SessionBag = BTreeMap<RelaySessionKey, BTreeMap<SourceAuthority, Vec<BagEntry>>>;
 
 /// Apply the ONE whole-demand relay ceiling after every routing lane has
 /// materialized. The previous implementation handed the full `cap` to each
@@ -47,35 +47,35 @@ type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
 /// reports that local limit instead of pretending the smaller plan was the
 /// complete requested acquisition.
 fn apply_global_relay_cap(
-    bag: &mut BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>>,
+    bag: &mut SessionBag,
     cap: usize,
     uncovered_authors: &mut BTreeMap<PubkeyHex, Shortfall>,
-) -> (BTreeSet<CoverageKey>, BTreeSet<RelayUrl>) {
+) -> (BTreeSet<CoverageKey>, BTreeSet<RelaySessionKey>) {
     if bag.len() <= cap {
         return (BTreeSet::new(), BTreeSet::new());
     }
 
-    let mut ranked: Vec<(RelayUrl, usize)> = bag
+    let mut ranked: Vec<(RelaySessionKey, usize)> = bag
         .iter()
-        .map(|(relay, by_context)| {
-            let route_facts = by_context
+        .map(|(session, by_source)| {
+            let route_facts = by_source
                 .values()
                 .flatten()
                 .map(|(_, provenance, absorbed)| provenance.len().max(absorbed.len()).max(1))
                 .sum();
-            (relay.clone(), route_facts)
+            (session.clone(), route_facts)
         })
         .collect();
     ranked.sort_by(|(a_url, a_score), (b_url, b_score)| {
         b_score.cmp(a_score).then_with(|| a_url.cmp(b_url))
     });
 
-    let selected: BTreeSet<RelayUrl> = ranked
+    let selected: BTreeSet<RelaySessionKey> = ranked
         .iter()
         .take(cap)
-        .map(|(relay, _)| relay.clone())
+        .map(|(session, _)| session.clone())
         .collect();
-    let refused: BTreeSet<RelayUrl> = bag
+    let refused: BTreeSet<RelaySessionKey> = bag
         .keys()
         .filter(|relay| !selected.contains(*relay))
         .cloned()
@@ -83,9 +83,9 @@ fn apply_global_relay_cap(
 
     let mut limited = BTreeSet::new();
     let mut cap_limited_authors = BTreeSet::new();
-    for relay in &refused {
-        if let Some(by_context) = bag.get(relay) {
-            for (_, provenance, absorbed) in by_context.values().flatten() {
+    for session in &refused {
+        if let Some(by_source) = bag.get(session) {
+            for (_, provenance, absorbed) in by_source.values().flatten() {
                 limited.extend(absorbed.iter().copied());
                 for route in provenance {
                     if route.route_kind == RouteKind::OutboxSolved {
@@ -106,9 +106,9 @@ fn apply_global_relay_cap(
         }
         let achieved: BTreeSet<RelayUrl> = selected
             .iter()
-            .filter(|relay| {
-                bag.get(*relay).is_some_and(|by_context| {
-                    by_context.values().flatten().any(|(_, provenance, _)| {
+            .filter(|session| {
+                bag.get(*session).is_some_and(|by_source| {
+                    by_source.values().flatten().any(|(_, provenance, _)| {
                         provenance.iter().any(|route| {
                             route.route_kind == RouteKind::OutboxSolved
                                 && route.covers_authors.contains(&author)
@@ -116,7 +116,7 @@ fn apply_global_relay_cap(
                     })
                 })
             })
-            .cloned()
+            .map(|session| session.relay.clone())
             .collect();
         uncovered_authors.insert(
             author,
@@ -128,7 +128,7 @@ fn apply_global_relay_cap(
         );
     }
 
-    bag.retain(|relay, _| selected.contains(relay));
+    bag.retain(|session, _| selected.contains(session));
     (limited, refused)
 }
 
@@ -138,7 +138,7 @@ fn apply_global_relay_cap(
 /// `routes` is empty (no configured relays for that lane, or the lane's
 /// gate didn't fire).
 fn push_routes(
-    bag: &mut BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>>,
+    bag: &mut SessionBag,
     filter: &ConcreteFilter,
     source: &SourceAuthority,
     access: AccessContext,
@@ -154,9 +154,9 @@ fn push_routes(
         routing_evidence: BTreeSet::new(),
     });
     for (relay, prov) in routes {
-        bag.entry(relay)
+        bag.entry(RelaySessionKey::new(relay, access))
             .or_default()
-            .entry((source.clone(), access))
+            .entry(source.clone())
             .or_default()
             .push((filter.clone(), vec![prov], BTreeSet::from([key])));
     }
@@ -200,7 +200,8 @@ impl Router {
             (Skeleton, AccessContext),
             BTreeMap<PubkeyHex, BTreeSet<RoutingEvidence>>,
         > = BTreeMap::new();
-        let mut pinned_atoms: BTreeMap<ConcreteFilter, BTreeSet<RoutingEvidence>> = BTreeMap::new();
+        let mut pinned_atoms: BTreeMap<(ConcreteFilter, AccessContext), BTreeSet<RoutingEvidence>> =
+            BTreeMap::new();
         // #107: query-declared `SourceAuthority::Pinned(relays)` atoms — kept
         // in their OWN collection, never merged into `pinned_atoms` (the
         // directory-fact `Public`-sourced kind), since these must skip every
@@ -220,7 +221,7 @@ impl Router {
                 }
                 AtomClass::Pinned => {
                     pinned_atoms
-                        .entry(atom.filter.clone())
+                        .entry((atom.filter.clone(), atom.access))
                         .or_default()
                         .extend(atom.routing_evidence.iter().cloned());
                 }
@@ -242,7 +243,7 @@ impl Router {
         // contributes exactly one key, later unioned by `coalesce_with`
         // alongside provenance as same-skeleton, SAME-CONTEXT atoms merge
         // (Fable D: equal-context-only).
-        let mut bag: BTreeMap<RelayUrl, BTreeMap<ContextKey, Vec<BagEntry>>> = BTreeMap::new();
+        let mut bag: SessionBag = BTreeMap::new();
         let mut uncovered_authors: BTreeMap<PubkeyHex, Shortfall> = BTreeMap::new();
 
         for ((skeleton, access), evidence_by_author) in &outbox_groups {
@@ -300,9 +301,9 @@ impl Router {
                         .cloned()
                         .unwrap_or_default(),
                 });
-                bag.entry(relay)
+                bag.entry(RelaySessionKey::new(relay, access))
                     .or_default()
-                    .entry((source.clone(), access))
+                    .entry(source.clone())
                     .or_default()
                     .push((filter, vec![prov], BTreeSet::from([key])));
             }
@@ -335,15 +336,9 @@ impl Router {
             );
         }
 
-        for (atom, routing_evidence) in &pinned_atoms {
-            // #106's closed vocabulary has only one directory-fact non-outbox
-            // source (`Public`) and one `AccessContext` (`Public`), so a
-            // fixed context here is exact today, not a placeholder — #107's
-            // `SourceAuthority::Pinned(relays)` is query-declared, not a
-            // directory fact, and is routed entirely separately below
-            // (`explicit_pinned_atoms`), never through this loop.
+        for ((atom, access), routing_evidence) in &pinned_atoms {
             let source = SourceAuthority::Public;
-            let access = AccessContext::Public;
+            let access = *access;
             let key = coverage_key(&ContextualAtom {
                 filter: atom.clone(),
                 source: source.clone(),
@@ -353,9 +348,9 @@ impl Router {
             let mut routes = route::provenance_for_pinned(atom, dir);
             routes.extend(route::provenance_for_projected(routing_evidence));
             for (relay, prov) in routes {
-                bag.entry(relay)
+                bag.entry(RelaySessionKey::new(relay, access))
                     .or_default()
-                    .entry((source.clone(), access))
+                    .entry(source.clone())
                     .or_default()
                     .push((atom.clone(), vec![prov], BTreeSet::from([key])));
             }
@@ -380,9 +375,9 @@ impl Router {
                 routing_evidence: BTreeSet::new(),
             });
             for (relay, prov) in route::provenance_for_explicit_pinned(relays) {
-                bag.entry(relay)
+                bag.entry(RelaySessionKey::new(relay, *access))
                     .or_default()
-                    .entry((source.clone(), *access))
+                    .entry(source.clone())
                     .or_default()
                     .push((filter.clone(), vec![prov], BTreeSet::from([key])));
             }
@@ -392,7 +387,7 @@ impl Router {
         // materialized bag. Nothing removed here can reach coalescing, the
         // plan, or the wire; its contextual coverage keys remain as exact
         // local-limit evidence.
-        let (limited, refused_relays) =
+        let (limited, refused_sessions) =
             apply_global_relay_cap(&mut bag, cap, &mut uncovered_authors);
 
         // Step 5 + 6: per relay, PER CONTEXT PARTITION, dedup + widen-only
@@ -402,12 +397,14 @@ impl Router {
         // engine itself), then assign stable sub-ids (context-folded,
         // `SubId::for_wire` — atlas's 3rd proof floor / Fable D's wire
         // consequence).
-        let mut reqs: BTreeMap<RelayUrl, Vec<WireReq>> = BTreeMap::new();
-        for (relay, by_context) in bag {
-            let mut relay_reqs: Vec<WireReq> = Vec::new();
-            for ((source, access), entries) in by_context {
+        let mut reqs: BTreeMap<RelaySessionKey, Vec<WireReq>> = BTreeMap::new();
+        for (session, by_source) in bag {
+            let relay = session.relay.clone();
+            let access = session.access;
+            let session_reqs = reqs.entry(session).or_default();
+            for (source, entries) in by_source {
                 let merged = self.rules.coalesce_with(entries);
-                relay_reqs.extend(merged.into_iter().map(|(filter, provenance, absorbed)| {
+                session_reqs.extend(merged.into_iter().map(|(filter, provenance, absorbed)| {
                     let sub_id = SubId::for_wire(relay.clone(), &filter, &source, access);
                     WireReq {
                         sub_id,
@@ -417,14 +414,13 @@ impl Router {
                     }
                 }));
             }
-            relay_reqs.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
-            reqs.insert(relay, relay_reqs);
+            session_reqs.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
         }
 
         let next_plan = RelayPlan {
             reqs,
             limited,
-            refused_relays,
+            refused_sessions,
         };
 
         // Step 7: diff vs previous plan.
@@ -492,6 +488,10 @@ mod tests {
         as_atom(filter, SourceAuthority::Public)
     }
 
+    fn public_session(relay: RelayUrl) -> RelaySessionKey {
+        RelaySessionKey::public(relay)
+    }
+
     #[test]
     fn outbox_maps_authors_to_own_write_relays() {
         let dir = FixtureDirectory::new()
@@ -507,11 +507,11 @@ mod tests {
         ]);
         let _ = router.compile(&demand, &dir, 10);
         let plan = router.plan();
-        assert!(plan.reqs.contains_key(&test_relay(0)));
-        assert!(plan.reqs.contains_key(&test_relay(1)));
-        assert!(plan.reqs.contains_key(&test_relay(2)));
-        assert!(plan.reqs.contains_key(&test_relay(3)));
-        for req in &plan.reqs[&test_relay(0)] {
+        assert!(plan.reqs.contains_key(&public_session(test_relay(0))));
+        assert!(plan.reqs.contains_key(&public_session(test_relay(1))));
+        assert!(plan.reqs.contains_key(&public_session(test_relay(2))));
+        assert!(plan.reqs.contains_key(&public_session(test_relay(3))));
+        for req in &plan.reqs[&public_session(test_relay(0))] {
             assert!(req.provenance.iter().all(|p| p.lane == Lane::Nip65Write));
         }
     }
@@ -541,7 +541,7 @@ mod tests {
         ]);
         let delta = router.compile(&demand2, &dir, 10);
 
-        let touched: BTreeSet<RelayUrl> = delta.ops.iter().map(|(r, _)| r.clone()).collect();
+        let touched: BTreeSet<RelayUrl> = delta.ops.iter().map(|(r, _)| r.relay.clone()).collect();
         assert!(touched.contains(&test_relay(2)));
         assert!(touched.contains(&test_relay(3)));
         assert!(!touched.contains(&test_relay(0)));
@@ -594,10 +594,10 @@ mod tests {
         let plan = router.plan();
 
         assert!(
-            plan.reqs.contains_key(&shared),
+            plan.reqs.contains_key(&public_session(shared.clone())),
             "the relay serving both roles must appear in the plan at all"
         );
-        let covered_kinds: BTreeSet<u16> = plan.reqs[&shared]
+        let covered_kinds: BTreeSet<u16> = plan.reqs[&public_session(shared.clone())]
             .iter()
             .flat_map(|req| req.filter.kinds.clone().unwrap_or_default())
             .collect();
@@ -620,7 +620,7 @@ mod tests {
         // what the kind-coverage assertions above already prove -- is that
         // BOTH roles' kinds still route to `shared` regardless of which
         // single lane the tie-break happens to label it with.
-        let lanes: BTreeSet<Lane> = plan.reqs[&shared]
+        let lanes: BTreeSet<Lane> = plan.reqs[&public_session(shared.clone())]
             .iter()
             .flat_map(|req| req.provenance.iter().map(|p| p.lane))
             .collect();
@@ -647,7 +647,7 @@ mod tests {
         let plan2 = router2.plan();
         let indexer_only_lanes: BTreeSet<Lane> = plan2
             .reqs
-            .get(&indexer_only)
+            .get(&public_session(indexer_only))
             .into_iter()
             .flatten()
             .flat_map(|req| req.provenance.iter().map(|p| p.lane))
@@ -697,7 +697,7 @@ mod tests {
         // The indexer still routes the discovery atom (additive lane) --
         // narrowing the solver's input doesn't remove the route, only its
         // contribution to `k`.
-        assert!(router.plan().reqs.contains_key(&indexer));
+        assert!(router.plan().reqs.contains_key(&public_session(indexer)));
     }
 
     /// The app lane routes EVERY atom -- author-bearing (all authors) and
@@ -730,7 +730,7 @@ mod tests {
         ]);
         let _ = router.compile(&demand, &dir, 10);
 
-        let app_reqs = &router.plan().reqs[&app_relay];
+        let app_reqs = &router.plan().reqs[&public_session(app_relay)];
         assert!(app_reqs.iter().any(|r| r.filter == authored));
         assert!(app_reqs.iter().any(|r| r.filter == authorless));
         assert!(app_reqs
@@ -770,10 +770,11 @@ mod tests {
         let _ = router.compile(&demand, &dir, 10);
         let plan = router.plan();
         assert!(
-            plan.reqs.contains_key(&fallback_relay),
+            plan.reqs
+                .contains_key(&public_session(fallback_relay.clone())),
             "fallback must fire for the under-min author when no appRelay is configured"
         );
-        assert!(plan.reqs[&fallback_relay]
+        assert!(plan.reqs[&public_session(fallback_relay.clone())]
             .iter()
             .flat_map(|r| r.provenance.iter())
             .all(|p| p.lane == Lane::Fallback));
@@ -796,10 +797,10 @@ mod tests {
         let _ = router2.compile(&demand, &dir2, 10);
         let plan2 = router2.plan();
         assert!(
-            !plan2.reqs.contains_key(&fallback_relay),
+            !plan2.reqs.contains_key(&public_session(fallback_relay)),
             "an appRelay must suppress the fallback lane entirely"
         );
-        assert!(plan2.reqs.contains_key(&app_relay));
+        assert!(plan2.reqs.contains_key(&public_session(app_relay)));
         assert_eq!(
             router2.diagnostics().uncovered_authors[&a].reason,
             ShortfallReason::FewerCandidatesThanK,
@@ -833,7 +834,7 @@ mod tests {
         let _ = router.compile(&demand, &dir, 10);
 
         let plan = router.plan();
-        let indexer_reqs = &plan.reqs[&indexer];
+        let indexer_reqs = &plan.reqs[&public_session(indexer)];
         assert!(indexer_reqs.iter().all(|r| r.filter == discovery_atom));
         assert!(indexer_reqs
             .iter()
@@ -878,7 +879,7 @@ mod tests {
         ]);
         let _ = router.compile(&demand, &dir, 10);
 
-        let reqs = &router.plan().reqs[&shared];
+        let reqs = &router.plan().reqs[&public_session(shared)];
         assert_eq!(
             reqs.len(),
             2,
@@ -931,12 +932,12 @@ mod tests {
         let plan = router.plan();
         assert_eq!(
             plan.reqs.keys().collect::<Vec<_>>(),
-            vec![&explicit_relay],
+            vec![&public_session(explicit_relay.clone())],
             "an ExplicitPinned atom must touch exactly its own declared relay set, \
              never own-write/group-host/app/fallback/indexer relays: {:?}",
             plan.reqs.keys().collect::<Vec<_>>()
         );
-        assert!(plan.reqs[&explicit_relay]
+        assert!(plan.reqs[&public_session(explicit_relay)]
             .iter()
             .flat_map(|r| r.provenance.iter())
             .all(|p| p.lane == Lane::ExplicitPinned));
@@ -969,7 +970,7 @@ mod tests {
         second.compile(&demand, &dir, 2);
 
         assert_eq!(first.plan().reqs.len(), 2);
-        assert_eq!(first.plan().refused_relays.len(), 2);
+        assert_eq!(first.plan().refused_sessions.len(), 2);
         assert!(!first.plan().limited.is_empty());
         assert_eq!(
             first_relays,
@@ -981,7 +982,7 @@ mod tests {
             second.plan().limited,
             "the explicit shortfall evidence must be deterministic too"
         );
-        assert_eq!(first.diagnostics().relays_refused_by_cap, 2);
+        assert_eq!(first.diagnostics().sessions_refused_by_cap, 2);
         assert!(first
             .diagnostics()
             .uncovered_authors
@@ -1016,9 +1017,9 @@ mod tests {
         router.compile(&demand, &dir, 2);
 
         assert_eq!(router.plan().reqs.len(), 2);
-        assert_eq!(router.plan().refused_relays.len(), 3);
+        assert_eq!(router.plan().refused_sessions.len(), 3);
         assert!(!router.plan().limited.is_empty());
-        assert_eq!(router.diagnostics().relays_refused_by_cap, 3);
+        assert_eq!(router.diagnostics().sessions_refused_by_cap, 3);
     }
 
     /// A zero budget is not an uncapped escape hatch at the router seam: it
@@ -1036,7 +1037,7 @@ mod tests {
         router.compile(&BTreeSet::from([outbox(1, &[a.as_str()])]), &dir, 0);
 
         assert!(router.plan().reqs.is_empty());
-        assert_eq!(router.plan().refused_relays.len(), 2);
+        assert_eq!(router.plan().refused_sessions.len(), 2);
         assert!(!router.plan().limited.is_empty());
         assert_eq!(
             router.diagnostics().uncovered_authors[&a].reason,
@@ -1066,7 +1067,7 @@ mod tests {
             usize::MAX,
         );
 
-        let req = &router.plan().reqs[&relay][0];
+        let req = &router.plan().reqs[&public_session(relay)][0];
         assert!(req.provenance.iter().any(|fact| fact.lane == Lane::Hint));
     }
 
@@ -1090,7 +1091,7 @@ mod tests {
 
         assert_eq!(
             router.plan().reqs.keys().cloned().collect::<BTreeSet<_>>(),
-            BTreeSet::from([directory_relay, hint_relay])
+            BTreeSet::from([public_session(directory_relay), public_session(hint_relay),])
         );
         assert!(router.diagnostics().uncovered_authors.is_empty());
     }

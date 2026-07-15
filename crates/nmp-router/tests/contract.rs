@@ -4,7 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{
+    AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, SourceAuthority,
+};
 use nmp_router::{
     test_relay, DiscoveryKinds, FixtureDirectory, Lane, RouteKind, Router, RuleRegistry,
     ShortfallReason,
@@ -53,6 +55,10 @@ fn new_router() -> Router {
     )
 }
 
+fn public_session(relay: nmp_router::RelayUrl) -> RelaySessionKey {
+    RelaySessionKey::public(relay)
+}
+
 /// Test 1: `outbox_maps_authors_to_write_relays`.
 #[test]
 fn outbox_maps_authors_to_write_relays() {
@@ -68,7 +74,7 @@ fn outbox_maps_authors_to_write_relays() {
 
     let plan = router.plan();
     for relay in [test_relay(0), test_relay(1)] {
-        let reqs = &plan.reqs[&relay];
+        let reqs = &plan.reqs[&public_session(relay)];
         assert!(!reqs.is_empty());
         for req in reqs {
             assert_eq!(req.filter.authors, Some(BTreeSet::from([a.clone()])));
@@ -79,7 +85,7 @@ fn outbox_maps_authors_to_write_relays() {
         }
     }
     for relay in [test_relay(2), test_relay(3)] {
-        let reqs = &plan.reqs[&relay];
+        let reqs = &plan.reqs[&public_session(relay)];
         for req in reqs {
             assert_eq!(req.filter.authors, Some(BTreeSet::from([b.clone()])));
         }
@@ -192,7 +198,10 @@ fn content_atom_uncovered_author_never_uses_indexer() {
         router.diagnostics().uncovered_authors[&a].reason,
         ShortfallReason::NoCandidates
     );
-    assert!(!router.plan().reqs.contains_key(&test_relay(99)));
+    assert!(!router
+        .plan()
+        .reqs
+        .contains_key(&public_session(test_relay(99))));
 }
 
 /// Test 7: `indexer_lane_only_for_discovery_kinds`.
@@ -207,7 +216,7 @@ fn indexer_lane_only_for_discovery_kinds() {
     let demand = BTreeSet::from([discovery_atom, content_atom]);
     router.compile(&demand, &dir, 10);
 
-    let indexer_reqs = &router.plan().reqs[&test_relay(99)];
+    let indexer_reqs = &router.plan().reqs[&public_session(test_relay(99))];
     assert!(indexer_reqs
         .iter()
         .all(|r| r.filter.kinds == Some(BTreeSet::from([3u16]))));
@@ -229,8 +238,8 @@ fn exact_canonical_dedup_one_req_per_relay() {
     let demand = BTreeSet::from([outbox(1, &[&a])]);
     router.compile(&demand, &dir, 10);
 
-    assert_eq!(router.plan().reqs[&test_relay(0)].len(), 1);
-    assert_eq!(router.plan().reqs[&test_relay(1)].len(), 1);
+    assert_eq!(router.plan().reqs[&public_session(test_relay(0))].len(), 1);
+    assert_eq!(router.plan().reqs[&public_session(test_relay(1))].len(), 1);
 }
 
 /// Test 9: `author_union_coalesces_shards_into_one_req`.
@@ -246,7 +255,7 @@ fn author_union_coalesces_shards_into_one_req() {
     let demand = BTreeSet::from([outbox(1, &[&a]), outbox(1, &[&b]), outbox(1, &[&d])]);
     router.compile(&demand, &dir, 10);
 
-    let reqs = &router.plan().reqs[&test_relay(0)];
+    let reqs = &router.plan().reqs[&public_session(test_relay(0))];
     assert_eq!(reqs.len(), 1, "expected exactly one coalesced WireReq");
     let authors = reqs[0].filter.authors.clone().unwrap();
     assert_eq!(authors, BTreeSet::from([a, b, d]));
@@ -269,7 +278,7 @@ fn per_relay_diff_is_surgical() {
     let demand2 = BTreeSet::from([outbox(1, &[&a]), outbox(1, &[&b]), outbox(1, &[&d])]);
     let delta = router.compile(&demand2, &dir, 10);
 
-    let touched: BTreeSet<_> = delta.ops.iter().map(|(r, _)| r.clone()).collect();
+    let touched: BTreeSet<_> = delta.ops.iter().map(|(r, _)| r.relay.clone()).collect();
     assert!(touched.contains(&test_relay(2)));
     assert!(touched.contains(&test_relay(3)));
     assert!(
@@ -312,7 +321,7 @@ fn diagnostics_reverse_coverage_and_lanes() {
     router.compile(&demand, &dir, 10);
 
     let diag = router.diagnostics();
-    let relay0 = &diag.per_relay[&test_relay(0)];
+    let relay0 = &diag.per_session[&public_session(test_relay(0))];
     assert_eq!(relay0.authors_served, 2);
     // Both A and B reached relay0 via Nip65Write; AuthorUnion folds their
     // filters into one WireReq, but `by_lane` counts each contributing
@@ -348,7 +357,7 @@ fn nip29_non_author_atom_routes_via_group_host() {
     let demand = BTreeSet::from([pinned(group_atom.clone())]);
     router.compile(&demand, &dir, 10);
 
-    let reqs = &router.plan().reqs[&host];
+    let reqs = &router.plan().reqs[&public_session(host)];
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].filter, group_atom);
     assert!(reqs[0]

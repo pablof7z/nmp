@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use nostr::{JsonUtil, RelayUrl};
 
+use nmp_grammar::{AccessContext, RelaySessionKey};
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
 use nmp_store::{CoverageInterval, CoverageKey};
 
@@ -39,12 +40,16 @@ pub struct FilterCoverageEntry {
     pub coverage: Option<CoverageInterval>,
 }
 
-/// One relay's full diagnostics: wire-sub count, lane breakdown, reverse
+/// One SESSION's full diagnostics: wire-sub count, lane breakdown, reverse
 /// coverage (authors served), the exact filters currently sent, events
-/// actually received per kind, and per-filter coverage state.
+/// actually received per kind, and per-filter coverage state. One relay URL
+/// planned under several access contexts yields several rows — physical
+/// sessions never share a diagnostics row (#8).
 #[derive(Debug, Clone)]
 pub struct RelayDiagnosticsSnapshot {
     pub relay: RelayUrl,
+    /// Frozen access identity of the physical session this row describes.
+    pub access: AccessContext,
     pub wire_sub_count: usize,
     /// Reverse coverage: distinct authors this relay covers.
     pub authors_served: usize,
@@ -103,7 +108,7 @@ pub struct DiagnosticsSnapshot {
     /// adds `nmp_transport::Pool::admission_rejections()` before delivery.
     /// A refused router candidate is absent from the executable plan and its
     /// affected query atom carries `ShortfallFact::LocalLimit`.
-    pub relays_rejected_over_cap: u64,
+    pub sessions_rejected_over_cap: u64,
     /// `Some(message)` once an ingest/read [`nmp_store::EventStore`] door has
     /// returned a [`nmp_store::PersistenceError`] (issue #122): the local
     /// cache has degraded to read-only and stopped accepting fresh
@@ -116,49 +121,50 @@ pub struct DiagnosticsSnapshot {
 }
 
 /// Combine `diag` (subs/filters/lanes/authors_served — `nmp-router`-owned)
-/// with `events_by_relay_kind` (this crate's own counter) and per-(relay,
+/// with `events_by_session_kind` (this crate's own counter) and per-(relay,
 /// filter) coverage (`get_coverage`, read from the store) into one
 /// [`DiagnosticsSnapshot`]. Pure — no mutation, no I/O; called by
 /// `EngineCore::diagnostics_snapshot`.
 pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
-    events_by_relay_kind: &HashMap<RelayUrl, BTreeMap<u16, u64>>,
+    events_by_session_kind: &HashMap<RelaySessionKey, BTreeMap<u16, u64>>,
     discovered_private_relays_rejected: u64,
     get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
 ) -> DiagnosticsSnapshot {
     let mut relays = Vec::new();
-    for (relay, rd) in &diag.per_relay {
+    for (session, rd) in &diag.per_session {
         let filters: Vec<String> = rd.filters.iter().map(|f| f.to_nostr().as_json()).collect();
 
         // `plan.reqs` (not `rd.filters`) is the source of the per-filter
         // coverage list: it carries the SAME filters (a `RelayDiagnostics`
         // is built straight off the same `RelayPlan`, `diag::build`'s own
-        // per-relay loop), but iterating the plan directly needs no second
+        // per-session loop), but iterating the plan directly needs no second
         // lookup to re-associate each filter with its `ConcreteFilter`
         // value for `get_coverage`.
         let coverage: Vec<FilterCoverageEntry> = plan
             .reqs
-            .get(relay)
+            .get(session)
             .into_iter()
             .flatten()
             .map(|req| {
                 let text = req.filter.to_nostr().as_json();
                 FilterCoverageEntry {
                     filter: text,
-                    coverage: request_coverage(relay, req, &get_coverage),
+                    coverage: request_coverage(&session.relay, req, &get_coverage),
                 }
             })
             .collect();
 
-        let events_by_kind: Vec<(u16, u64)> = events_by_relay_kind
-            .get(relay)
+        let events_by_kind: Vec<(u16, u64)> = events_by_session_kind
+            .get(session)
             .into_iter()
             .flat_map(|m| m.iter().map(|(&k, &v)| (k, v)))
             .collect();
 
         relays.push(RelayDiagnosticsSnapshot {
-            relay: relay.clone(),
+            relay: session.relay.clone(),
+            access: session.access,
             wire_sub_count: rd.wire_sub_count,
             authors_served: rd.authors_served,
             by_lane: rd.by_lane.iter().map(|(&l, &c)| (l, c)).collect(),
@@ -179,7 +185,7 @@ pub(crate) fn build(
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
         discovered_private_relays_rejected,
-        relays_rejected_over_cap: u64::try_from(diag.relays_refused_by_cap).unwrap_or(u64::MAX),
+        sessions_rejected_over_cap: u64::try_from(diag.sessions_refused_by_cap).unwrap_or(u64::MAX),
         // Filled in by `EngineCore::diagnostics_snapshot` (which owns the
         // degrade flag); `build` itself is a pure projection of router/store
         // facts and has no notion of persistence health.

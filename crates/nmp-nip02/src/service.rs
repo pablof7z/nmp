@@ -603,7 +603,7 @@ fn engine_failure(error: nmp::EngineError) -> FollowActionFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp::{EngineConfig, RelayUrl, SourceEvidence};
+    use nmp::{AccessContext, EngineConfig, RelayUrl, SourceEvidence};
     use nostr::Keys;
 
     #[test]
@@ -711,6 +711,7 @@ mod tests {
         let evidence = AcquisitionEvidence {
             sources: vec![SourceEvidence {
                 relay: RelayUrl::parse("wss://relay.example").unwrap(),
+                access: AccessContext::Public,
                 reconciled_through: Some(Timestamp::from_secs(10)),
                 status: SourceStatus::Requesting,
             }],
