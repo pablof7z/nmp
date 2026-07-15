@@ -238,6 +238,10 @@ impl Executor {
     /// Event-driven lifecycle barrier used by teardown/census proofs. It
     /// returns only after the reaper has joined every task admitted so far.
     pub fn wait_for_idle(&self) {
+        self.wait_for_idle_with(|| {});
+    }
+
+    fn wait_for_idle_with(&self, mut before_wait: impl FnMut()) {
         let mut state = self
             .core
             .shared
@@ -245,6 +249,7 @@ impl Executor {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         while state.admitted != 0 {
+            before_wait();
             state = self
                 .core
                 .shared
@@ -442,6 +447,10 @@ impl Reservation {
             .unwrap_or_else(|poison| poison.into_inner());
         if state.reservations.remove(&self.reservation_id) {
             state.admitted -= 1;
+            // A waiter may already have observed this reservation in the
+            // admitted count. SlotReleased wakes the reaper, not this
+            // condition variable, so signal the lifecycle barrier directly.
+            self.core.shared.changed.notify_all();
         }
         drop(state);
         let _ = self.core.reaper_tx.send(ReaperMsg::SlotReleased);
@@ -626,6 +635,39 @@ mod tests {
         drop(executor.reserve("reserved").unwrap());
         assert_eq!(executor.census().admitted, 0);
         executor.shutdown();
+    }
+
+    #[test]
+    fn dropping_a_reservation_wakes_an_already_waiting_idle_barrier() {
+        let executor = Executor::new(1).unwrap();
+        let reservation = executor.reserve("reserved").unwrap();
+        let waiter = executor.clone();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let mut waiting_tx = Some(waiting_tx);
+            waiter.wait_for_idle_with(|| {
+                if let Some(waiting_tx) = waiting_tx.take() {
+                    waiting_tx.send(()).unwrap();
+                }
+            });
+            done_tx.send(()).unwrap();
+        });
+
+        waiting_rx.recv().unwrap();
+        drop(reservation);
+        let woke_on_release = done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+
+        // Also makes the falsifier self-cleaning on the broken implementation:
+        // shutdown's terminal notification wakes the waiter before we assert.
+        executor.shutdown();
+        join.join().unwrap();
+        assert!(
+            woke_on_release,
+            "dropping the final reservation must wake an idle-barrier waiter"
+        );
     }
 
     #[test]
