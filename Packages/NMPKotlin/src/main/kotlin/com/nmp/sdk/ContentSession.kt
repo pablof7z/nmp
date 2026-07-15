@@ -249,6 +249,36 @@ class NostrContentSession internal constructor(
         sessionJob.cancel()
     }
 
+    /**
+     * Deterministically withdraw every content-derived demand now.
+     *
+     * Unlike [close], this leaves the session alive and reusable: [scope] and
+     * [sessionJob] keep running, so a later [claim] on a target re-arms
+     * observation for it.
+     */
+    fun stop() {
+        lock.withLock {
+            releaseJobs.values.forEach(Job::cancel)
+            releaseJobs.clear()
+            observationJobs.values.flatten().forEach(Job::cancel)
+            observationJobs.clear()
+            activeTargets.clear()
+            waitingTargets.clear()
+            for (key in states.keys.toList()) {
+                when (val state = states[key] ?: continue) {
+                    is NostrReferenceState.Loading, is NostrReferenceState.Shortfall,
+                    is NostrReferenceState.Stopped, is NostrReferenceState.Withdrawn ->
+                        states[key] = NostrReferenceState.Idle
+                    is NostrReferenceState.Refreshing ->
+                        states[key] = NostrReferenceState.Resolved(state.cached, state.evidence)
+                    is NostrReferenceState.Idle, is NostrReferenceState.Resolved,
+                    is NostrReferenceState.Collapsed -> Unit
+                }
+            }
+            publishLocked()
+        }
+    }
+
     private fun addOccurrenceLocked(occurrence: NostrReferenceOccurrence) {
         val plan = referenceDemandPlan(occurrence.target)
         targetForOccurrence[occurrence.id] = plan.targetKey
