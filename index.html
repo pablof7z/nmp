@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-15 21:56 UTC</p>
-    <p class="ep-sub">2026-07-15 &middot; relay ingest proven at 1M events &middot; ~3.5 min</p>
-    <audio controls preload="none" src="reports/pulse-0007.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0007.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-15 22:51 UTC</p>
+    <p class="ep-sub">2026-07-15 &middot; no new merge &middot; AUTH Wave 1 build-gate progress &middot; ~3.5 min</p>
+    <audio controls preload="none" src="reports/pulse-0008.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0008.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">A new end-to-end harness (#535) proves relay ingest at real scale — 1,000,000 signed events through the real websocket/transport/verifier/resolver/redb path, ~4,333 events/s, all frames exactly recovered on reopen, closing #530. The same proof honestly surfaced the next gap: peak RSS during that run (~630 MB) isn't bounded yet, tracked as new issue #534. Meanwhile NIP-42 content-relay AUTH's Wave 1 session-identity work passed an adversarial isolation review and is now in the build/CI gate — pre-merge, engine-internal, no app-facing AUTH API yet. <code>remove_account</code> (#529) stays held pending #8's account-handle shape.</p>
+    <p class="ep-blurb">No new merge this hour — master still sits at #535's relay-ingest scale proof. Behind it, NIP-42 content-relay AUTH Wave 1's session-identity work keeps moving through the full workspace build/CI gate: a direct/FFI write-status parity divergence is fixed (write plane reverted to Public, authenticated writes deferred), a Swift SDK test compile gap is fixed, and a transport regression — session-keyed admission not honoring the local-host allowlist, caught by #535's new ingest smoke test — is being fixed now. Still pre-merge, engine-internal, no app-facing AUTH API yet. <code>remove_account</code> (#529) stays held pending #8's account-handle shape.</p>
   </section>
 
   <details class="archive" id="archive">
