@@ -227,7 +227,7 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),
                 ..PoolConfig::default()
             },
-            RelayAdmissionPolicy::default(),
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
         )
         .expect("test engine thread construction");
 
@@ -269,7 +269,7 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_secs(3600)),
                 ..PoolConfig::default()
             },
-            RelayAdmissionPolicy::default(),
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
         )
         .expect("test engine thread construction");
 
@@ -383,7 +383,7 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     handle
@@ -487,7 +487,7 @@ async fn write_ack_per_relay_over_real_relays() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     handle
@@ -643,7 +643,7 @@ async fn follows_minus_mutes_resolves_over_a_real_relay() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
     )
     .expect("test engine thread construction");
     handle

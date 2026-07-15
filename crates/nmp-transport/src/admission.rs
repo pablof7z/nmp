@@ -27,7 +27,7 @@
 //! `path_is_never_consulted_public_host_at_a_path_is_public` falsifier pins
 //! that exact URL as `Public`.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use nostr::types::url::Host;
 use nostr::RelayUrl;
@@ -79,12 +79,50 @@ pub fn relay_host_key(url: &RelayUrl) -> Option<String> {
     }
 }
 
+/// Classify a raw resolved `IpAddr` by the SAME local-range rules
+/// [`classify_relay_host`] applies to a literal URL host (issue #519). This
+/// is the post-DNS half of admission: a hostname's literal spelling can look
+/// perfectly public while its A/AAAA answer still lands in a loopback,
+/// RFC-1918, link-local, or IPv4-mapped-private range (an ordinary DNS-based
+/// SSRF, or a rebind between resolution and connect). Callers that dial or
+/// fetch by resolved address MUST run every candidate through this function
+/// and refuse `Local` unless the ORIGINAL host was operator opted-in — see
+/// `pool::connect::connect_with_timeout` (WS dial) and
+/// `nmp-engine`'s `HickoryReqwestResolver::resolve` (NIP-11 fetch).
+#[must_use]
+pub fn classify_ip(ip: IpAddr) -> RelayHostClass {
+    match ip {
+        IpAddr::V4(ip) => classify_ipv4(ip),
+        IpAddr::V6(ip) => classify_ipv6(ip),
+    }
+}
+
+/// Normalize a bare HOST string (no scheme, no port, no path) to the same
+/// canonical key [`relay_host_key`] derives from a parsed [`RelayUrl`]. Used
+/// wherever a host needs to be checked against the operator's opt-in
+/// allowlist without a full `RelayUrl` in hand: the WS dial's already-
+/// resolved connect target (`pool::connect`), and the NIP-11 resolver's raw
+/// DNS query name (`nmp-engine::relay_information`). An IP-literal host
+/// keeps its canonical `Display` text (matching `Host::Ipv4`/`Host::Ipv6`'s
+/// `to_string()` branch of `relay_host_key`); anything else is trimmed of a
+/// trailing dot and lower-cased as an ordinary domain (matching
+/// `Host::Domain`'s branch).
+#[must_use]
+pub fn normalize_bare_host(host: &str) -> String {
+    let trimmed = host.trim_end_matches('.');
+    match trimmed.parse::<IpAddr>() {
+        Ok(ip) => ip.to_string(),
+        Err(_) => trimmed.to_ascii_lowercase(),
+    }
+}
+
 fn classify_ipv4(ip: Ipv4Addr) -> RelayHostClass {
     if ip.is_loopback()        // 127.0.0.0/8
         || ip.is_private()     // 10/8, 172.16/12, 192.168/16
         || ip.is_link_local()  // 169.254.0.0/16
-        || ip.is_unspecified()
-    // 0.0.0.0
+        || ip.is_unspecified() // 0.0.0.0
+        || ip.is_broadcast()
+    // 255.255.255.255
     {
         RelayHostClass::Local
     } else {
@@ -172,6 +210,22 @@ mod tests {
         assert_eq!(class("ws://192.168.1.1"), RelayHostClass::Local);
         assert_eq!(class("ws://169.254.1.1"), RelayHostClass::Local);
         assert_eq!(class("ws://0.0.0.0"), RelayHostClass::Local);
+        // The IPv4 limited-broadcast address: never a legitimate unicast
+        // relay target, and reachable only on-segment.
+        assert_eq!(class("ws://255.255.255.255"), RelayHostClass::Local);
+    }
+
+    /// A trailing-dot literal IPv4 host (`ws://127.0.0.1.`) must still
+    /// classify `Local` — issue #519 Fix 3's falsifier. The `url` crate
+    /// canonicalizes a dotted-quad host to `Host::Ipv4` regardless of a
+    /// trailing root-zone dot, so this exercises the SAME `classify_ipv4`
+    /// arm as the bare literal; pinned so a future parsing change that
+    /// stopped canonicalizing the trailing dot would be caught immediately
+    /// rather than silently reclassifying as an unremarkable `Domain`.
+    #[test]
+    fn trailing_dot_ipv4_literal_is_local() {
+        assert_eq!(class("ws://127.0.0.1.:80"), RelayHostClass::Local);
+        assert_eq!(class("ws://10.0.0.1."), RelayHostClass::Local);
     }
 
     /// Non-dotted IPv4 encodings (decimal `2130706433` and hex `0x7f000001`,
@@ -244,5 +298,67 @@ mod tests {
             relay_host_key(&RelayUrl::parse("wss://Relay.Example.COM").unwrap()),
             Some("relay.example.com".to_string())
         );
+    }
+
+    /// [`classify_ip`] is the post-DNS half of admission (issue #519): it
+    /// must agree exactly with [`classify_relay_host`]'s literal-IP verdict
+    /// for every range that classifier already pins, since a resolved
+    /// address in one of these ranges is exactly as dangerous as the same
+    /// address spelled out in the URL.
+    #[test]
+    fn classify_ip_agrees_with_literal_host_classification() {
+        use std::net::IpAddr;
+
+        let local: &[&str] = &[
+            "127.0.0.1",
+            "127.5.5.5",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1", // link-local, incl. the cloud metadata endpoint
+            "169.254.169.254",
+            "0.0.0.0",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
+            "::ffff:10.0.0.1",  // IPv4-mapped private
+        ];
+        for host in local {
+            let ip: IpAddr = host.parse().unwrap();
+            assert_eq!(
+                classify_ip(ip),
+                RelayHostClass::Local,
+                "resolved address {host} must classify Local"
+            );
+        }
+
+        let public: &[&str] = &["8.8.8.8", "1.1.1.1", "172.32.0.1", "2606:4700:4700::1111"];
+        for host in public {
+            let ip: IpAddr = host.parse().unwrap();
+            assert_eq!(
+                classify_ip(ip),
+                RelayHostClass::Public,
+                "resolved address {host} must classify Public"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_bare_host_matches_relay_host_key_conventions() {
+        // IP literals keep their canonical text (same as `relay_host_key`'s
+        // `Host::Ipv4`/`Host::Ipv6` branches — no case-folding applicable).
+        assert_eq!(normalize_bare_host("127.0.0.1"), "127.0.0.1");
+        // Domains lower-case and drop a trailing root-zone dot (same as
+        // `relay_host_key`'s `Host::Domain` branch).
+        assert_eq!(
+            normalize_bare_host("Relay.Example.COM"),
+            "relay.example.com"
+        );
+        assert_eq!(normalize_bare_host("relay.nmp.test."), "relay.nmp.test");
+        assert_eq!(normalize_bare_host("LOCALHOST"), "localhost");
     }
 }

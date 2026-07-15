@@ -1598,7 +1598,16 @@ mod tests {
             let _ = stream.read_to_end(&mut sink);
         });
 
-        let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
+        // Issue #519: the resolved-IP admission check now refuses a loopback
+        // dial by default, so this test's own `127.0.0.1` NIP-11 mock server
+        // needs the same operator opt-in a real local relay would use.
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+                ..EngineConfig::default()
+            })
+            .expect("engine must build"),
+        );
         let retained_engine = Arc::clone(&engine);
         let subscription = engine.observe(probe_query()).expect("engine is open");
         subscription
@@ -1673,7 +1682,13 @@ mod tests {
             .unwrap();
         });
 
-        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        // Issue #519: opt the mock server's loopback host in — see the
+        // identical note in `live_nip11_cannot_outlive_real_engine_shutdown_with_retained_owners`.
+        let engine = Engine::new(EngineConfig {
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
         let relay = format!("ws://{address}");
         let mut caller_owned = Vec::with_capacity(CALLS);
         caller_owned.push(
