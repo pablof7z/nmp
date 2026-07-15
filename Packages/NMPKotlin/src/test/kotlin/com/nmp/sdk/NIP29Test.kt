@@ -396,7 +396,7 @@ class NIP29Test {
     fun generatedNativeGroupMessageReachesRelayAckAndCanonicalReadBack() {
         LocalAckRelay().use { relay ->
             runBlocking {
-                NMPEngine(NMPConfig()).use { engine ->
+                NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("127.0.0.1"))).use { engine ->
                     val author = engine.addAccount("0".repeat(63) + "1")
                     engine.setActiveAccount(author)
                     val groupId = "group-acked"
@@ -442,7 +442,7 @@ class NIP29Test {
         LocalAckRelay().use { relayX ->
             LocalAckRelay().use { relayY ->
                 runBlocking {
-                    NMPEngine(NMPConfig()).use { engine ->
+                    NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("127.0.0.1"))).use { engine ->
                         val author = engine.addAccount("0".repeat(63) + "1")
                         engine.setActiveAccount(author)
                         val groupId = "same-id-on-two-hosts"
