@@ -330,8 +330,19 @@ fn run_worker(
 
     loop {
         // Retired between sockets (e.g. during a backoff wait that returned to
-        // reconnect): never dial again.
+        // reconnect): never dial again. Settle any durables still queued in the
+        // narrow window between `wait_before_reconnect` returning and this
+        // re-check before exiting (#506 Fix 2) — a `Queued` correlation must
+        // never be abandoned on retirement. `EventHandoff` delivery ignores the
+        // tag generation (`apply_worker_event` resolves it before any slot
+        // lookup), so this attempt's generation is a fine label.
         if shutdown_requested(shutdown) {
+            resolve_queued_durables_on_shutdown(
+                &command_rx,
+                &event_tx,
+                slot,
+                pack_generation(worker_id, attempt),
+            );
             return;
         }
         let generation = pack_generation(worker_id, attempt);
@@ -485,6 +496,11 @@ fn drain_permanently_disconnected(
 ) {
     loop {
         if shutdown_requested(shutdown) {
+            // Retired: settle any durables still queued before exiting (#506
+            // Fix 2). Without this the worst case — flag observed on the first
+            // check, zero commands drained — abandons the whole queued durable
+            // burst.
+            resolve_queued_durables_on_shutdown(command_rx, event_tx, slot, generation);
             return;
         }
         match command_rx.recv() {
@@ -522,6 +538,56 @@ fn resolve_correlation(
             result,
         },
     });
+}
+
+/// Drain whatever commands are still queued at a flag-observed exit and
+/// resolve every durable `EVENT` among them `NotHandedOff` (issue #506 Fix 2,
+/// upholding issue #93).
+///
+/// A retired worker exits via the out-of-band `shutdown` atomic, which is
+/// checked at the TOP of each drain/wait loop — so it can return with
+/// `SendDurable` commands STILL sitting in the bounded command channel (worst
+/// case: `drain_permanently_disconnected` sees the flag on its very first
+/// check and has drained zero). Each of those commands already returned
+/// [`super::DurableSendOutcome::Queued`] to the engine, whose contract
+/// (`Pool::send_durable`) is that the worker now OWNS the attempt and WILL
+/// emit exactly one [`super::PoolEvent::EventHandoff`]. If the worker returned
+/// without draining them, `command_rx` would drop and those correlations would
+/// be lost forever — silently violating #93's resolve-exactly-once invariant.
+/// [`resolve_generation_end`] only drains the worker-LOCAL `durable`/
+/// `write_accepted` state, never the channel, so this is the one place the
+/// channel remainder is settled.
+///
+/// Deadlock-safe (the whole point of #506 Fix 2): this runs only AFTER
+/// `retire` set the flag, and `retire` is non-blocking and has already taken
+/// `state.worker` out of the slot, so `command_tx_for` refuses every new
+/// producer — the channel can only drain here, never refill — and the
+/// resolving `event_tx.send`s complete because the translator is no longer
+/// blocked behind the (already-released) pool lock.
+fn resolve_queued_durables_on_shutdown(
+    command_rx: &Receiver<WorkerCommand>,
+    event_tx: &SyncSender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) {
+    loop {
+        match command_rx.try_recv() {
+            Ok(WorkerCommand::SendDurable { correlation, .. }) => resolve_correlation(
+                event_tx,
+                slot,
+                generation,
+                correlation,
+                HandoffResult::NotHandedOff,
+            ),
+            // Non-durable traffic (`Send`/`SetReconnectPreamble`) and the
+            // `Shutdown` nudge itself carry no correlation to resolve; simply
+            // discard them.
+            Ok(_) => {}
+            // `Empty` (fully drained) or `Disconnected` — nothing more to
+            // settle.
+            Err(_) => return,
+        }
+    }
 }
 
 /// Resolve every durable `EVENT` still tracked for this generation the
@@ -586,6 +652,9 @@ fn wait_before_reconnect(
         // before every blocking `recv_timeout` and after every command — is
         // what guarantees a prompt exit rather than sleeping out `remaining`.
         if shutdown_requested(shutdown) {
+            // Settle any durables still queued before exiting (#506 Fix 2), so
+            // a retirement never abandons a `Queued` correlation.
+            resolve_queued_durables_on_shutdown(command_rx, event_tx, slot, generation);
             return false;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -683,6 +752,12 @@ fn run_connected_inner(
         // check is what guarantees the loop exits even when the nudge was
         // dropped and `drain_commands` only saw ordinary data.
         if shutdown_requested(shutdown) {
+            // Settle any durables still in the CHANNEL before exiting (#506
+            // Fix 2). `resolve_generation_end` (called by `run_connected`
+            // right after this returns) only drains the worker-local `durable`
+            // VecDeque, never `command_rx`, so channel-resident `SendDurable`s
+            // would otherwise be lost on retirement.
+            resolve_queued_durables_on_shutdown(command_rx, event_tx, slot, generation);
             let _ = socket.close(None);
             return ConnectedOutcome::Shutdown;
         }
@@ -1273,6 +1348,68 @@ mod tests {
                 (first, HandoffResult::NotHandedOff),
                 (second, HandoffResult::NotHandedOff),
             ]
+        );
+    }
+
+    /// The #506 Fix 2 durable-resolution regression guard: retiring a worker
+    /// (out-of-band shutdown flag) with `SendDurable` commands STILL in the
+    /// bounded channel must resolve every one `NotHandedOff` — never silently
+    /// drop a correlation when `command_rx` drops on exit (issue #93's
+    /// resolve-exactly-once). This drives the WORST case: the flag is already
+    /// set, so `drain_permanently_disconnected` observes it on its very first
+    /// check having drained zero commands, and must still settle the whole
+    /// queued burst before returning. Before the fix, that path abandoned
+    /// every queued durable.
+    #[test]
+    fn shutdown_flag_exit_resolves_every_queued_durable_not_handed_off() {
+        let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(8);
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+
+        let first = AttemptCorrelation(41);
+        let second = AttemptCorrelation(42);
+        let third = AttemptCorrelation(43);
+        // A non-empty queue, durables interleaved with non-durable traffic.
+        command_tx
+            .send(WorkerCommand::SendDurable {
+                generation: 5,
+                correlation: first,
+                frame: "a".to_string(),
+            })
+            .unwrap();
+        command_tx.send(WorkerCommand::Send("req".into())).unwrap();
+        command_tx
+            .send(WorkerCommand::SendDurable {
+                generation: 5,
+                correlation: second,
+                frame: "b".to_string(),
+            })
+            .unwrap();
+        command_tx
+            .send(WorkerCommand::SetReconnectPreamble(vec![]))
+            .unwrap();
+        command_tx
+            .send(WorkerCommand::SendDurable {
+                generation: 5,
+                correlation: third,
+                frame: "c".to_string(),
+            })
+            .unwrap();
+
+        // Flag ALREADY set: the first loop check fires before any recv, so the
+        // exit path itself must drain + resolve the whole queue.
+        let shutdown = Arc::new(AtomicBool::new(true));
+        drain_permanently_disconnected(&command_rx, &event_tx, &shutdown, 1, 5);
+
+        let mut results = handoff_results(&event_rx);
+        results.sort_by_key(|(correlation, _)| correlation.0);
+        assert_eq!(
+            results,
+            vec![
+                (first, HandoffResult::NotHandedOff),
+                (second, HandoffResult::NotHandedOff),
+                (third, HandoffResult::NotHandedOff),
+            ],
+            "every queued durable must resolve exactly once on retirement, none dropped"
         );
     }
 
