@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom">
+<channel>
+<title>NMP Status Report</title>
+<link>https://pablof7z.github.io/nmp/</link>
+<atom:link href="https://pablof7z.github.io/nmp/feed.xml" rel="self" type="application/rss+xml"/>
+<description>Automated engineering status audio for the nmp (Nostr Mobile Primitives) project. Hourly "Pulse" episodes and a deeper "Briefing" every four hours -- candid, technical, for the human operator.</description>
+<language>en-us</language>
+<itunes:explicit>false</itunes:explicit>
+<itunes:author>nmp status reporter</itunes:author>
+<itunes:summary>Automated engineering status audio for the nmp project: hourly Pulse episodes plus a deeper Briefing every four hours.</itunes:summary>
+<itunes:owner>
+<itunes:name>nmp status reporter</itunes:name>
+<itunes:email>marinadiazc@gmail.com</itunes:email>
+</itunes:owner>
+<itunes:category text="Technology"/>
+<itunes:type>episodic</itunes:type>
+<lastBuildDate>Wed, 15 Jul 2026 11:03:30 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-15 11:00 UTC</title>
+<link>https://pablof7z.github.io/nmp/reports/pulse-0001.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0001</guid>
+<pubDate>Wed, 15 Jul 2026 11:03:30 GMT</pubDate>
+<description><![CDATA[
+Progressing -- architecture-hardening sweep clears five merges this hour on clean CI, including one data-corruption-class fix that had merged uncaught before.
+
+USER: NIP-02 follow/unfollow now behaves identically on iOS and Android -- apps built on nmp get consistent social-graph state cross-platform, today.
+
+DEVELOPER: nmp is still two nouns -- live queries and write intents; describe intent, the engine owns relays, subscriptions, canonical state. Newly adoptable: RelayIngestResult now embeds the canonical CommittedMutationResult instead of hand-copying its fields, so relay-ingest and local-accept share one invalidation path.
+
+THIS HOUR -- merged: #498 (arch-review guardrails + cross-SDK parity script), #499 (Kotlin NIP-02 parity), #500 (mutation-result unification), #501 (test-relay teardown state), #497 (live-store reset guard -- the corruption fix). In review: #502 (typed FFI error taxonomy), #503 (bool-lifecycle refactors) -- both green except swift-package still pending.
+
+VERIFIED: the #490 epic's review named this violation class after one instance merged uncaught elsewhere; all five merges ride green CI (fmt, clippy, workspace tests) plus #498's new cross-language surface governance; #501 swaps a locale-fragile string match for real closed-state truth.
+
+PERFORMANCE: build farm spiked to 14.78 one-minute load on 8 cores (likely this session's CI); 15-min average 4.79 is more typical. Public surface holds near 29.7k of the 30k-line ceiling.
+
+NEXT HOUR: #502's typed FFI errors and #503's bool-lifecycle types are expected to land -- unblocking the queued #491 signer/FFI cleanup burst behind them.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/reports/pulse-0001.mp3" type="audio/mpeg" length="1591724"/>
+<itunes:title>NMP Pulse — 2026-07-15 11:00 UTC</itunes:title>
+<itunes:duration>99</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
+</channel>
+</rss>

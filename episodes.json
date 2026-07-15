@@ -1,0 +1,10 @@
+[
+  {
+    "id": "pulse-0001",
+    "tier": "pulse",
+    "utc": "2026-07-15T11:03:30Z",
+    "title": "NMP Pulse — 2026-07-15 11:00 UTC",
+    "mp3": "reports/pulse-0001.mp3",
+    "text": "🟢 Progressing — architecture-hardening sweep clears five merges this hour on clean CI, including one data-corruption-class fix that had merged uncaught before.\n\nUSER: NIP-02 follow/unfollow now behaves identically on iOS and Android — apps built on nmp get consistent social-graph state cross-platform, today.\n\nDEVELOPER: nmp is still two nouns — live queries and write intents; describe intent, the engine owns relays, subscriptions, canonical state. Newly adoptable: RelayIngestResult now embeds the canonical CommittedMutationResult instead of hand-copying its fields, so relay-ingest and local-accept share one invalidation path.\n\nTHIS HOUR — merged: #498 (arch-review guardrails + cross-SDK parity script), #499 (Kotlin NIP-02 parity), #500 (mutation-result unification), #501 (test-relay teardown state), #497 (live-store reset guard — the corruption fix). In review: #502 (typed FFI error taxonomy), #503 (bool-lifecycle refactors) — both green except swift-package still pending.\n\nVERIFIED: the #490 epic's review named this violation class after one instance merged uncaught elsewhere; all five merges ride green CI (fmt, clippy, workspace tests) plus #498's new cross-language surface governance; #501 swaps a locale-fragile string match for real closed-state truth.\n\nPERFORMANCE: build farm spiked to 14.78 one-minute load on 8 cores (likely this session's CI); 15-min average 4.79 is more typical. Public surface holds near 29.7k of the 30k-line ceiling.\n\nNEXT HOUR: #502's typed FFI errors and #503's bool-lifecycle types are expected to land — unblocking the queued #491 signer/FFI cleanup burst behind them."
+  }
+]

@@ -1,21 +1,300 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Planning Pages</title>
-    <link rel="stylesheet" href="assets/style.css">
-  </head>
-  <body>
-    <main class="shell">
-      <section class="hero">
-        <div class="eyebrow">Planning pages</div>
-        <h1>Hosted architecture plans</h1>
-        <p class="summary">Generated planning pages for complex agent-assigned work.</p>
-      </section>
-      <section class="card links">
-          <a href="plans/durable-retry-policy-79/">Single-owner durable retry policy and deadline consumption</a>
-      </section>
-    </main>
-  </body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMP Status Report</title>
+<meta name="description" content="Automated engineering status audio for the nmp project -- hourly Pulse, deeper Briefing every four hours.">
+<link rel="alternate" type="application/rss+xml" title="NMP Status Report" href="feed.xml">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5;
+    --fg: #16181c;
+    --muted: #5b6270;
+    --card: #ffffff;
+    --border: #e3e5e8;
+    --accent: #1f7a3f;
+    --accent-bg: #e9f7ee;
+    --mono-bg: #eef0f2;
+    --link: #1a56db;
+    --shadow: rgba(20, 20, 30, 0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1013;
+      --fg: #e8eaed;
+      --muted: #9aa2b1;
+      --card: #171a1f;
+      --border: #2a2e35;
+      --accent: #3ddc73;
+      --accent-bg: #10241a;
+      --mono-bg: #1d2127;
+      --link: #7aa2f7;
+      --shadow: rgba(0, 0, 0, 0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1013; --fg: #e8eaed; --muted: #9aa2b1; --card: #171a1f;
+    --border: #2a2e35; --accent: #3ddc73; --accent-bg: #10241a;
+    --mono-bg: #1d2127; --link: #7aa2f7; --shadow: rgba(0,0,0,0.35);
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f7f5; --fg: #16181c; --muted: #5b6270; --card: #ffffff;
+    --border: #e3e5e8; --accent: #1f7a3f; --accent-bg: #e9f7ee;
+    --mono-bg: #eef0f2; --link: #1a56db; --shadow: rgba(20,20,30,0.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 4rem;
+  }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .masthead {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .masthead h1 {
+    font-size: 1.15rem;
+    margin: 0.15rem 0 0;
+  }
+  .rss-link {
+    font-size: 0.85rem;
+    color: var(--link);
+    text-decoration: none;
+    border: 1px solid var(--border);
+    padding: 0.35rem 0.7rem;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .rss-link:hover { border-color: var(--link); }
+
+  .headline-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 1.5rem;
+    box-shadow: 0 1px 3px var(--shadow);
+    margin-bottom: 1.25rem;
+  }
+  .status-line {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0 0 0.35rem;
+  }
+  .status-sub {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin: 0 0 1.1rem;
+  }
+  audio {
+    width: 100%;
+    margin: 0.25rem 0 1.1rem;
+    height: 40px;
+  }
+  .lens {
+    margin: 0 0 0.85rem;
+    font-size: 0.98rem;
+  }
+  .lens b {
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  .bullets {
+    margin: 1rem 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 0.55rem;
+  }
+  .bullets li {
+    font-size: 0.93rem;
+    padding: 0.55rem 0.75rem;
+    background: var(--mono-bg);
+    border-radius: 10px;
+  }
+  .bullets li b { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.2rem; }
+  .next-hour {
+    margin-top: 1.1rem;
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 0.9rem 1rem;
+  }
+  .next-hour .tag {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 0.3rem;
+  }
+  .meta-row {
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 0.78rem;
+    margin-top: 1rem;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
+
+  details.archive {
+    margin-top: 2rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--card);
+    padding: 0.9rem 1.1rem;
+  }
+  details.archive summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+  .archive-item {
+    border-top: 1px solid var(--border);
+    padding: 0.85rem 0;
+  }
+  .archive-item:first-of-type { border-top: none; padding-top: 0.9rem; }
+  .archive-item h3 {
+    font-size: 0.92rem;
+    margin: 0 0 0.3rem;
+  }
+  .archive-item pre {
+    white-space: pre-wrap;
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin: 0.4rem 0;
+  }
+  .archive-item audio { height: 34px; margin: 0.3rem 0; }
+  .tier-pill {
+    display: inline-block;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: var(--mono-bg);
+    color: var(--muted);
+    margin-left: 0.4rem;
+  }
+  footer {
+    margin-top: 2.5rem;
+    text-align: center;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <div class="masthead">
+    <div>
+      <div class="eyebrow">nmp status report</div>
+      <h1>Automated engineering pulse for pablof7z/nmp</h1>
+    </div>
+    <a class="rss-link" href="feed.xml">Subscribe (RSS)</a>
+  </div>
+
+  <section class="headline-card" id="latest">
+    <p class="status-line">🟢 Progressing</p>
+    <p class="status-sub">NMP Pulse &mdash; 2026-07-15 11:00 UTC &middot; architecture-hardening sweep, five merges, clean CI</p>
+
+    <audio controls preload="none" src="reports/pulse-0001.mp3">
+      Your browser does not support the audio element. <a href="reports/pulse-0001.mp3">Download the mp3</a>.
+    </audio>
+
+    <p class="lens"><b>USER &mdash;</b> NIP-02 follow/unfollow now behaves identically on iOS and Android; apps built on nmp get consistent social-graph state cross-platform, today.</p>
+    <p class="lens"><b>DEVELOPER &mdash;</b> nmp is still two nouns: live queries and write intents. Describe intent, the engine owns relays, subscriptions, canonical state. Newly adoptable: <code>RelayIngestResult</code> now embeds the canonical <code>CommittedMutationResult</code> instead of hand-copying its fields, so relay-ingest and local-accept share one invalidation path.</p>
+
+    <ul class="bullets">
+      <li><b>This hour</b>Merged: #498 (arch-review guardrails + cross-SDK parity script), #499 (Kotlin NIP-02 parity), #500 (mutation-result unification), #501 (test-relay teardown state), #497 (live-store reset guard &mdash; the corruption-class fix). In review: #502 (typed FFI error taxonomy), #503 (bool-lifecycle refactors) &mdash; both green except swift-package still pending.</li>
+      <li><b>Verified</b>The #490 epic's review named this violation class after one instance merged uncaught elsewhere. All five merges ride green CI (fmt, clippy, workspace tests) plus #498's new cross-language surface governance. #501 swaps a locale-fragile string match for real closed-state truth.</li>
+      <li><b>Performance</b>Build farm spiked to 14.78 one-minute load on 8 cores (likely this session's CI); 15-min average 4.79 is more typical. Public surface holds near 29.7k of the 30k-line ceiling.</li>
+    </ul>
+
+    <div class="next-hour">
+      <span class="tag">Next hour</span>
+      #502's typed FFI errors and #503's bool-lifecycle types are expected to land &mdash; unblocking the queued #491 signer/FFI cleanup burst behind them.
+    </div>
+
+    <div class="meta-row">
+      <span>Tier: Pulse (hourly) &middot; next tier: Briefing (~4h)</span>
+      <span>Generated 2026-07-15 11:03 UTC</span>
+    </div>
+  </section>
+
+  <details class="archive" id="archive">
+    <summary>Episode archive</summary>
+    <div id="archive-list">
+      <p class="mono" style="color: var(--muted); font-size: 0.85rem;">Loading episodes.json&hellip;</p>
+    </div>
+  </details>
+
+  <footer>
+    <p>Audience: human operator. Voice: crisp analyst. Candid by design &mdash; risks and unverified items are named, not smoothed over.</p>
+    <p><a href="plans/index.html">Planning pages archive</a></p>
+  </footer>
+</main>
+
+<script>
+(function () {
+  const root = document.documentElement;
+  try {
+    const saved = localStorage.getItem('nmp-theme');
+    if (saved) root.setAttribute('data-theme', saved);
+  } catch (e) {}
+
+  fetch('episodes.json', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (episodes) {
+      const list = document.getElementById('archive-list');
+      if (!Array.isArray(episodes) || episodes.length === 0) {
+        list.innerHTML = '<p>No episodes yet.</p>';
+        return;
+      }
+      // Newest first
+      const sorted = episodes.slice().sort(function (a, b) {
+        return new Date(b.utc) - new Date(a.utc);
+      });
+      list.innerHTML = sorted.map(function (ep) {
+        const safeTitle = (ep.title || ep.id || '').replace(/</g, '&lt;');
+        const safeText = (ep.text || '').replace(/</g, '&lt;');
+        const tier = (ep.tier || '').toUpperCase();
+        return '<div class="archive-item">' +
+          '<h3>' + safeTitle + '<span class="tier-pill">' + tier + '</span></h3>' +
+          '<audio controls preload="none" src="' + ep.mp3 + '"></audio>' +
+          '<pre>' + safeText + '</pre>' +
+          '</div>';
+      }).join('');
+    })
+    .catch(function (err) {
+      document.getElementById('archive-list').innerHTML =
+        '<p>Could not load episodes.json (' + err + ').</p>';
+    });
+})();
+</script>
+</body>
 </html>
