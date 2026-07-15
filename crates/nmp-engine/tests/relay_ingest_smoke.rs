@@ -15,6 +15,7 @@ fn websocket_runtime_to_redb_smoke_crosses_every_bounded_queue() {
         queue_capacity: 8,
         batch_size: 7,
         visible_limit: Some(64),
+        trim_allocator_during_ingest: false,
         frame_delay: Duration::ZERO,
         expect_rejection: false,
         timeout: Duration::from_secs(30),
@@ -25,6 +26,7 @@ fn websocket_runtime_to_redb_smoke_crosses_every_bounded_queue() {
     assert_eq!(result.expected_relay_frames, 1_028);
     assert_eq!(result.observed_relay_frames, 1_028);
     assert_eq!(result.final_visible_rows, 64);
+    assert_eq!(result.delivery_mode, "bounded-latest-window");
     assert!(result.database_bytes > 0);
     assert_eq!(result.server_send_ms.len(), 2);
     assert_eq!(result.server_bytes.len(), 2);
@@ -40,6 +42,7 @@ fn websocket_runtime_rejects_a_message_above_the_one_mib_ceiling() {
         queue_capacity: 8,
         batch_size: 7,
         visible_limit: Some(64),
+        trim_allocator_during_ingest: false,
         frame_delay: Duration::ZERO,
         expect_rejection: true,
         timeout: Duration::from_secs(30),

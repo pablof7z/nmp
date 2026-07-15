@@ -1,0 +1,37 @@
+{
+  "schema": "nmp-relay-ingest-allocator-matrix-v1",
+  "issue": 534,
+  "date_utc": "2026-07-15",
+  "probe_commit": "6aa80b43fa3e383c9c66facf90f0b97f15d11148",
+  "runs": [
+    {
+      "id": "bounded-window-500k",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 500000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 600",
+      "result": "window-500k.json"
+    },
+    {
+      "id": "bounded-window-trim-500k",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 500000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --trim-allocator-during-ingest --timeout-secs 600",
+      "result": "window-trim-500k.json"
+    },
+    {
+      "id": "bounded-window-1m",
+      "command": "cargo run --release -q -p nmp-engine --example relay_ingest_bench -- --events 1000000 --relays 1 --passes 1 --payload-bytes 256 --queue-capacity 1024 --batch-size 128 --visible-limit 200 --timeout-secs 900",
+      "result": "window-1m.json"
+    }
+  ],
+  "paired_500k": {
+    "control_peak_anonymous_bytes": 427249664,
+    "trim_peak_anonymous_bytes": 315666432,
+    "peak_reduction_bytes": 111583232,
+    "peak_reduction_percent": 26.11663423098678,
+    "control_frames_per_second": 4524.786233151189,
+    "trim_frames_per_second": 4440.325005623399,
+    "throughput_delta_percent": -1.866634646935981
+  },
+  "source_observation": {
+    "bounded_delivery": "HistoryReceiver uses the runtime single-slot latest-value channel; the smoke test asserts this path",
+    "linux_mapping_shape": "live /proc smaps inspection during the 500k control showed growth in unnamed writable glibc arena mappings, including multiple 64 MiB mappings; the redb file mapping was not the anonymous-RSS owner",
+    "production_disposition": "allocator trim remains probe-only because it is glibc-specific and does not establish the Apple-device envelope"
+  }
+}
