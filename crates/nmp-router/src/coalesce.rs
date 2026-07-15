@@ -14,6 +14,10 @@ use nmp_store::CoverageKey;
 
 use crate::route::RouteProvenance;
 
+/// One coalesce-in-progress entry: the filter plus the provenance/coverage
+/// bookkeeping threaded alongside it through `coalesce_with`'s merges.
+pub(crate) type Entry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+
 /// A widen-only, INTROSPECTABLE merge rule.
 pub trait MergeRule {
     fn name(&self) -> &'static str;
@@ -263,12 +267,8 @@ impl RuleRegistry {
     /// atoms' `absorbed` sets is still soundly contained in the merged
     /// filter's matches — the SAME real mechanism that already threads
     /// `provenance` through a merge.
-    pub(crate) fn coalesce_with(
-        &self,
-        entries: Vec<(ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>)>,
-    ) -> Vec<(ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>)> {
+    pub(crate) fn coalesce_with(&self, entries: Vec<Entry>) -> Vec<Entry> {
         // 1. Exact-canonical dedup by hash (the trivially-correct floor).
-        type Entry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
         let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
         for (f, prov, absorbed) in entries {
             let h = f.hash();
@@ -283,11 +283,167 @@ impl RuleRegistry {
         let mut current: Vec<Entry> = by_hash.into_values().collect();
 
         // 2. Fixed-point pairwise merge across every registered rule.
+        self.merge_fixed_point(&mut current);
+        current
+    }
+
+    /// Advance `current` to the AuthorUnion/KindUnion/IdUnion fixed point,
+    /// merging pairs in EXACTLY the order the original "nested loop, restart
+    /// the whole O(n^2) scan from i=0 after every merge" implementation
+    /// picked (#505): that loop always merges the FIRST pair `(i, j)`, in
+    /// row-major order over the CURRENT array, that any registered rule
+    /// accepts, then re-derives that first pair from scratch. Restarting
+    /// from `i=0` is what made it O(n^3) (n-1 merges, each paying a fresh
+    /// O(n^2) scan) -- but it is NOT simply replaceable by "only compare
+    /// the freshly-merged entry against the rest and otherwise carry on",
+    /// because a rule can unlock a match between an UNTOUCHED earlier
+    /// entry and the freshly-merged one that neither original operand
+    /// qualified for. Concretely: `AuthorUnion` merging `{authors:{a}}` and
+    /// `{authors:{b}}` produces `{authors:{a,b}}`; a third entry
+    /// `{kinds:{2}, authors:{a,b}}` cannot `KindUnion` with either input
+    /// alone (their `authors` are `{a}`/`{b}`, not `{a,b}`) but CAN
+    /// `KindUnion` with the merged entry. The original algorithm would
+    /// find this via its next full restart; skipping straight to "only
+    /// test the new entry against later entries" would miss it entirely.
+    ///
+    /// So every entry before the current merge point genuinely has to be
+    /// re-offered against each newly merged entry -- this function does
+    /// exactly that, and ONLY that (an O(n) check per merge, O(n) merges
+    /// => O(n^2) total), instead of re-running the full O(n^2) scan on
+    /// every merge (=> O(n^3) total).
+    ///
+    /// Invariant maintained throughout (`settled`): `current[0..settled]`
+    /// is pairwise merge-free AND merge-free against every entry in
+    /// `current[settled..]` -- exactly the invariant the original nested
+    /// loop already had (by the time its outer `i` reaches `settled`,
+    /// every `i' < settled` has been scanned against every `j' > i'`,
+    /// including `i`'s own row, with no merge ever found). We only ever
+    /// attempt a merge at `(settled, j)`, mirroring the original's `i`; a
+    /// freshly merged entry is always appended at the tail (mirroring the
+    /// original's rebuild), so `j` sweeping up to it is what naturally
+    /// re-tests row `settled` against it, and
+    /// `revalidate_prefix_against_tail` is what re-tests the settled
+    /// PREFIX against it (the one comparison the natural `j` sweep can
+    /// never reach, since rows `< settled` are never revisited by `j`).
+    fn merge_fixed_point(&self, current: &mut Vec<Entry>) {
+        let mut settled = 0usize;
+        let mut j = settled + 1;
+        while settled < current.len() {
+            if j >= current.len() {
+                // Row `settled` fully scanned against everything currently
+                // present, no merge found: it can never merge with anything
+                // that already exists (unchanged entries stay unchanged),
+                // and any FUTURE new entry is re-offered to it by
+                // `revalidate_prefix_against_tail`. Move to the next row.
+                settled += 1;
+                j = settled + 1;
+                continue;
+            }
+            if let Some(merged) = self.try_merge_pair(&current[settled], &current[j]) {
+                Self::apply_merge(current, settled, j, merged);
+                // The new tail entry has never been offered to the settled
+                // prefix (only to whatever it gets compared against as `j`
+                // sweeps row `settled` again below) -- do that first, since
+                // in row-major order any prefix match outranks continuing
+                // row `settled`.
+                self.revalidate_prefix_against_tail(current, &mut settled);
+                // Whatever now occupies position `settled` (post-removal
+                // shift, post-revalidation) has never been tested against
+                // the rest of its row -- restart the row's `j` sweep.
+                j = settled + 1;
+                continue;
+            }
+            j += 1;
+        }
+    }
+
+    /// Try every registered rule, in registration order (matching the
+    /// original's `for rule in &self.rules`), on `(a, b)`. The three
+    /// default rules' domains are mutually exclusive on any given pair
+    /// (each requires a DIFFERENT single field to be the one that
+    /// differs, with every other field -- including whether the pair
+    /// differs on that rule's field at all -- required equal), so at most
+    /// one can ever match; the order is kept anyway for exact parity with
+    /// the original loop.
+    fn try_merge_pair(&self, a: &Entry, b: &Entry) -> Option<Entry> {
+        for rule in &self.rules {
+            if let Some(merged) = rule.try_merge(&a.0, &b.0) {
+                let mut prov = a.1.clone();
+                prov.extend(b.1.clone());
+                let mut absorbed = a.2.clone();
+                absorbed.extend(b.2.clone());
+                return Some((merged, prov, absorbed));
+            }
+        }
+        None
+    }
+
+    /// Remove `current[i]` and `current[j]` (`i < j`) and push `merged`
+    /// onto the tail -- the same "remove both, append the merge result at
+    /// the end" shape the original rebuild (`next.push(entry)` for
+    /// `k != i && k != j`, then `next.push(merged)`) produced, so a
+    /// freshly merged entry always lands in the same relative position
+    /// (the very end) that the original algorithm would have put it in.
+    fn apply_merge(current: &mut Vec<Entry>, i: usize, j: usize, merged: Entry) {
+        debug_assert!(i < j);
+        current.remove(j);
+        current.remove(i);
+        current.push(merged);
+    }
+
+    /// After a merge produces a new tail entry, re-offer it against the
+    /// SETTLED prefix (`current[0..*settled]`), lowest index first, exactly
+    /// like a from-scratch row-major restart would re-discover it (the
+    /// settled prefix was cleared against everything that existed before
+    /// this merge, but never against this brand-new entry). A match here
+    /// consumes a prefix member and produces yet another new tail entry,
+    /// so this loops until the (shrinking) prefix is clear against the
+    /// (ever-changing) tail -- each iteration is a real merge, so this
+    /// terminates in at most `*settled` steps.
+    fn revalidate_prefix_against_tail(&self, current: &mut Vec<Entry>, settled: &mut usize) {
+        let mut k = 0;
+        while k < *settled {
+            let tail = current.len() - 1;
+            if let Some(merged) = self.try_merge_pair(&current[k], &current[tail]) {
+                Self::apply_merge(current, k, tail, merged);
+                *settled -= 1;
+                k = 0;
+            } else {
+                k += 1;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet as Set;
+
+    /// Reference oracle for the O(n^2) `merge_fixed_point` above: an exact
+    /// copy of the ORIGINAL (pre-#505) `coalesce_with` fixed-point loop,
+    /// which restarts the full O(n^2) all-pairs scan from `i=0` after every
+    /// successful merge (O(n^3) total). Kept ONLY as a differential-testing
+    /// oracle -- never call this outside `#[cfg(test)]`.
+    fn naive_coalesce_with(registry: &RuleRegistry, entries: Vec<Entry>) -> Vec<Entry> {
+        let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
+        for (f, prov, absorbed) in entries {
+            let h = f.hash();
+            by_hash
+                .entry(h)
+                .and_modify(|(_, p, a)| {
+                    p.extend(prov.clone());
+                    a.extend(absorbed.clone());
+                })
+                .or_insert((f, prov, absorbed));
+        }
+        let mut current: Vec<Entry> = by_hash.into_values().collect();
+
         loop {
             let mut merged_once = false;
             'search: for i in 0..current.len() {
                 for j in (i + 1)..current.len() {
-                    for rule in &self.rules {
+                    for rule in &registry.rules {
                         if let Some(merged) = rule.try_merge(&current[i].0, &current[j].0) {
                             let mut prov = current[i].1.clone();
                             prov.extend(current[j].1.clone());
@@ -313,12 +469,102 @@ impl RuleRegistry {
         }
         current
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeSet as Set;
+    fn entries_of(filters: Vec<ConcreteFilter>) -> Vec<Entry> {
+        filters
+            .into_iter()
+            .map(|f| (f, Vec::new(), Set::new()))
+            .collect()
+    }
+
+    /// The falsifier the #505 fix has to survive: a rule can unlock a match
+    /// between an UNTOUCHED earlier entry and a freshly merged one that
+    /// neither original operand qualified for. `AuthorUnion(a, b)` produces
+    /// `authors: {a, b}` -- a set that exists nowhere in the input until
+    /// that merge happens. `c` carries exactly that author set already (but
+    /// a different `kinds`), so it cannot `KindUnion` with `a` or `b` alone
+    /// (their `authors` are `{a}`/`{b}`, not `{a,b}`), only with their
+    /// merge. An "only compare the new entry against later entries"
+    /// shortcut would miss this; `merge_fixed_point`'s prefix revalidation
+    /// must not.
+    #[test]
+    fn incremental_merge_matches_naive_restart_on_cross_rule_unlock() {
+        let a = cf(&[1], &["a"]);
+        let b = cf(&[1], &["b"]);
+        let c = ConcreteFilter {
+            kinds: Some(Set::from([2u16])),
+            authors: Some(Set::from(["a".to_string(), "b".to_string()])),
+            ..ConcreteFilter::default()
+        };
+        let entries = entries_of(vec![a, b, c]);
+
+        let registry = RuleRegistry::default_widen_only();
+        let naive = naive_coalesce_with(&registry, entries.clone());
+        let fast = registry.coalesce_with(entries);
+
+        assert_eq!(fast, naive);
+        // Sanity: the cross-rule unlock actually fires -- everything
+        // collapses into ONE filter (kinds {1,2}, authors {a,b}).
+        assert_eq!(fast.len(), 1);
+        assert_eq!(
+            fast[0].0.authors,
+            Some(Set::from(["a".to_string(), "b".to_string()]))
+        );
+        assert_eq!(fast[0].0.kinds, Some(Set::from([1u16, 2u16])));
+    }
+
+    /// A bigger fixture exercising all three rules together, including an
+    /// `IdUnion` shard large enough that the `MAX_IDS_PER_FILTER` cap forces
+    /// it to split into multiple wire filters -- the one place merge ORDER
+    /// can change which ids land in which final filter (bin-packing). The
+    /// O(n^2) incremental merge must reproduce the O(n^3) naive restart's
+    /// bucketing byte-for-byte, not just its aggregate shape.
+    #[test]
+    fn incremental_merge_matches_naive_restart_on_large_fixture() {
+        let mut filters: Vec<ConcreteFilter> = Vec::new();
+
+        // 4 disjoint AuthorUnion shards (10 authors each, distinct `kinds`).
+        for shard in 0..4u16 {
+            for author in 0..10 {
+                filters.push(ConcreteFilter {
+                    kinds: Some(Set::from([100 + shard])),
+                    authors: Some(Set::from([format!("author-{shard}-{author}")])),
+                    ..ConcreteFilter::default()
+                });
+            }
+        }
+
+        // A KindUnion shard: one author, 6 distinct singleton kinds.
+        for kind in 0..6u16 {
+            filters.push(ConcreteFilter {
+                kinds: Some(Set::from([200 + kind])),
+                authors: Some(Set::from(["kind-shard-author".to_string()])),
+                ..ConcreteFilter::default()
+            });
+        }
+
+        // An IdUnion shard big enough to force the cap to split it.
+        for i in 0..(MAX_IDS_PER_FILTER * 2 + 17) {
+            filters.push(ConcreteFilter {
+                kinds: Some(Set::from([1u16])),
+                ids: Some(Set::from([format!("{i:064x}")])),
+                ..ConcreteFilter::default()
+            });
+        }
+
+        let entries = entries_of(filters);
+
+        let registry = RuleRegistry::default_widen_only();
+        let naive = naive_coalesce_with(&registry, entries.clone());
+        let fast = registry.coalesce_with(entries);
+
+        assert_eq!(
+            fast, naive,
+            "the O(n^2) incremental merge must produce a byte-identical \
+             coalesced set (including IdUnion's cap-driven bucketing) to \
+             the original O(n^3) restart-from-scratch algorithm"
+        );
+    }
 
     fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
         ConcreteFilter {
