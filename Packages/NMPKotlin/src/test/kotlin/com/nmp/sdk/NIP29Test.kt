@@ -38,6 +38,7 @@ private class LocalAckRelay : AutoCloseable {
     private val accepted = Collections.synchronizedList(mutableListOf<Socket>())
     private val connectionWorkers = Collections.synchronizedList(mutableListOf<Thread>())
     private val closed = AtomicBoolean(false)
+    private val clientClosed = AtomicBoolean(false)
     private val failure = AtomicReference<Throwable?>()
     private val events = LinkedBlockingQueue<String>()
     private val storedEvents = CopyOnWriteArrayList<String>()
@@ -92,17 +93,19 @@ private class LocalAckRelay : AutoCloseable {
                             }
                         }
                     }
-                    0x8 -> break
+                    0x8 -> {
+                        clientClosed.set(true)
+                        break
+                    }
                     0x9 -> writeFrame(output, 0xA, frame.payload)
                 }
             }
         } catch (error: SocketException) {
-            val message = error.message.orEmpty().lowercase()
-            val expectedTeardown =
-                message.contains("connection reset") ||
-                    message.contains("broken pipe") ||
-                    message.contains("socket closed")
-            if (!closed.get() && !expectedTeardown) failure.compareAndSet(null, error)
+            // Fixture-initiated teardown (close()) or a client-initiated close
+            // frame (opcode 0x8) already observed means a subsequent
+            // SocketException on this connection is expected teardown noise,
+            // not a real relay failure.
+            if (!closed.get() && !clientClosed.get()) failure.compareAndSet(null, error)
         } catch (error: Throwable) {
             if (!closed.get()) failure.compareAndSet(null, error)
         }
