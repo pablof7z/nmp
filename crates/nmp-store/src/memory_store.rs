@@ -15,7 +15,7 @@ use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, 
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins, AddressKey};
 use crate::coverage::{
-    coverage_key, merge_interval, shape_matches, shrink_after_eviction, window_erase,
+    coverage_key, merge_interval, shrink_after_eviction, window_erase, GcVictimIndex,
 };
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
@@ -1403,33 +1403,36 @@ impl EventStore for MemoryStore {
             victims.push(se.event);
         }
 
-        // Pass 2: shrink/delete every coverage row an evicted victim falls
-        // inside AND whose retained shape matches it (gc's O(victims ×
-        // rows) coverage-shrink batching is issue #507's SECOND fix, in a
-        // follow-up commit — this commit is scoped to the secondary query
-        // indexes above and keeping GC's `by_id` departures consistent
-        // with them).
-        for event in &victims {
-            let evicted_at = event.created_at;
-            let mut to_delete = Vec::new();
-            for (row_key, row) in self.coverage.iter_mut() {
-                if row.interval.from <= evicted_at
-                    && evicted_at <= row.interval.through
-                    && shape_matches(&row.shape, event)
-                {
-                    match shrink_after_eviction(row.interval, evicted_at) {
-                        Some(shrunk) => {
-                            row.interval = shrunk;
-                            report.coverage_rows_shrunk += 1;
-                        }
-                        None => to_delete.push(row_key.clone()),
+        // Pass 2 (issue #507): a SINGLE pass over coverage rows, using
+        // `GcVictimIndex` to find each row's maximum matching victim
+        // timestamp directly rather than re-walking the full victim list
+        // per row — see that type's doc comment for the proof that the
+        // maximum alone determines a row's final state, regardless of
+        // how many victims match or in what order they'd be applied.
+        // `coverage_rows_shrunk`/`coverage_rows_deleted` now count per
+        // ROW (one increment per row actually touched at all), matching
+        // `RedbStore::gc`'s always-per-row counting — `MemoryStore`
+        // previously incremented once per (victim, row) pair that
+        // individually triggered a shrink, which could over-count
+        // relative to `RedbStore` whenever more than one victim fell
+        // inside the same row; this unifies the two backends on per-row
+        // counting.
+        let victim_index = GcVictimIndex::new(&victims);
+        let mut to_delete = Vec::new();
+        for (row_key, row) in self.coverage.iter_mut() {
+            if let Some(m) = victim_index.max_matching_within(&row.shape, row.interval) {
+                match shrink_after_eviction(row.interval, m) {
+                    Some(shrunk) => {
+                        row.interval = shrunk;
+                        report.coverage_rows_shrunk += 1;
                     }
+                    None => to_delete.push(row_key.clone()),
                 }
             }
-            for row_key in to_delete {
-                self.coverage.remove(&row_key);
-                report.coverage_rows_deleted += 1;
-            }
+        }
+        for row_key in to_delete {
+            self.coverage.remove(&row_key);
+            report.coverage_rows_deleted += 1;
         }
 
         Ok(report)
@@ -2962,7 +2965,8 @@ mod query_index_tests {
         let target_keys = Keys::generate();
         let target = note_at(&target_keys, 1);
         let target_id = target.id;
-        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+        store
+            .insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
             .unwrap();
         for i in 0..200u64 {
             let noise_keys = Keys::generate();
@@ -2991,7 +2995,8 @@ mod query_index_tests {
         let target_keys = Keys::generate();
         let target = note_at(&target_keys, 1);
         let target_id = target.id;
-        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+        store
+            .insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
             .unwrap();
         for i in 0..200u64 {
             let noise_keys = Keys::generate();
@@ -3022,7 +3027,8 @@ mod query_index_tests {
         let keys = Keys::generate();
         let target = kind_at(&keys, 1, 1);
         let target_id = target.id;
-        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+        store
+            .insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
             .unwrap();
         for i in 0..200u64 {
             store
@@ -3051,7 +3057,8 @@ mod query_index_tests {
         let other_keys = Keys::generate();
         let target = kind_at(&target_keys, 1, 1);
         let target_id = target.id;
-        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+        store
+            .insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
             .unwrap();
         // Same author, different kind -- must not be picked up by the
         // author+kind narrowing.
@@ -3096,7 +3103,8 @@ mod query_index_tests {
         let keys = Keys::generate();
         let target = tagged_at(&keys, 1, "target");
         let target_id = target.id;
-        store.insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
+        store
+            .insert(target, RelayObserved::new(relay(), Timestamp::from(1u64)))
             .unwrap();
         for i in 0..200u64 {
             store

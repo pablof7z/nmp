@@ -728,6 +728,124 @@ fn gc_evicts_unclaimed_event_even_when_unrelated_claims_exist() {
 }
 
 // ---------------------------------------------------------------------
+// gc coverage-shrink batching (issue #507): a coverage row is shrunk (or
+// deleted) at most ONCE per `gc` call, using only the MAXIMUM matching
+// victim's `created_at` -- never once per (victim, row) pair -- and both
+// backends must agree byte-for-byte on the resulting `GcReport` and
+// coverage row for the identical scenario (`for_each_backend` runs every
+// assertion below against both, so parity is checked by construction).
+// ---------------------------------------------------------------------
+
+#[test]
+fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row() {
+    for_each_backend(|store| {
+        let k = keys();
+        let smaller = regular_event_at(&k, "older", 50);
+        let larger = regular_event_at(&k, "newer", 100);
+        store.insert(smaller, observed("wss://r1", 1)).unwrap();
+        store.insert(larger, observed("wss://r1", 1)).unwrap();
+
+        let s = shape(&[1], Some(&k));
+        let r = relay("wss://r1");
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
+            )
+            .unwrap();
+
+        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        assert_eq!(report.events_evicted, 2);
+        // Both victims fall inside the SAME row's interval and both match
+        // its shape -- if the row were (incorrectly) shrunk once per
+        // victim, `coverage_rows_shrunk` would read 2. Batching must
+        // shrink it exactly ONCE, using only the greater `created_at`
+        // (100), so the new floor is 101 -- NOT 51 (the smaller victim's
+        // own floor).
+        assert_eq!(report.coverage_rows_shrunk, 1);
+        assert_eq!(report.coverage_rows_deleted, 0);
+
+        let key = coverage_key(&atom(&s));
+        let interval = store.get_coverage(key, &r).expect("row survives, shrunk");
+        assert_eq!(interval.from, Timestamp::from(101u64));
+        assert_eq!(interval.through, Timestamp::from(300u64));
+    });
+}
+
+#[test]
+fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
+    for_each_backend(|store| {
+        let k = keys();
+        // A row whose interval the smaller victim (50) alone would only
+        // SHRINK ([51, 100]) -- but the larger victim (100) alone would
+        // EMPTY it (new_from 101 > through 100). Evicting both together
+        // must behave exactly like evicting only the max: deleted.
+        let smaller = regular_event_at(&k, "older", 50);
+        let larger = regular_event_at(&k, "newer", 100);
+        store.insert(smaller, observed("wss://r1", 1)).unwrap();
+        store.insert(larger, observed("wss://r1", 1)).unwrap();
+
+        let s = shape(&[1], Some(&k));
+        let r = relay("wss://r1");
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(50u64), Timestamp::from(100u64)),
+            )
+            .unwrap();
+
+        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        assert_eq!(report.events_evicted, 2);
+        assert_eq!(report.coverage_rows_deleted, 1);
+        assert_eq!(report.coverage_rows_shrunk, 0);
+
+        let key = coverage_key(&atom(&s));
+        assert!(store.get_coverage(key, &r).is_none());
+    });
+}
+
+#[test]
+fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
+    for_each_backend(|store| {
+        let k = keys();
+        // A kind:9 event sitting squarely inside a kind:1-shaped row's
+        // interval must never shrink it -- shape-fingerprint pruning
+        // means the row's own shape (kind 1) never even considers a
+        // kind-9 victim, regardless of where its timestamp falls.
+        let other_kind = EventBuilder::new(Kind::from(9u16), "noise")
+            .custom_created_at(Timestamp::from(50u64))
+            .sign_with_keys(&k)
+            .unwrap();
+        store.insert(other_kind, observed("wss://r1", 1)).unwrap();
+
+        let s = shape(&[1], Some(&k));
+        let r = relay("wss://r1");
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+            )
+            .unwrap();
+
+        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        assert_eq!(
+            report.events_evicted, 1,
+            "the kind:9 event is still an unclaimed victim"
+        );
+        assert_eq!(report.coverage_rows_shrunk, 0);
+        assert_eq!(report.coverage_rows_deleted, 0);
+
+        let key = coverage_key(&atom(&s));
+        let interval = store.get_coverage(key, &r).expect("row untouched");
+        assert_eq!(interval.from, Timestamp::from(0u64));
+        assert_eq!(interval.through, Timestamp::from(100u64));
+    });
+}
+
+// ---------------------------------------------------------------------
 // Retraction: the store door goes symmetric (issue #25 / #23 §1.1) —
 // `Superseded` hands back the full row, `remove` clears both indexes, and an
 // already-expired event is `Refused` before it ever touches storage.
