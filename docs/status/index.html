@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-15 19:00 UTC</p>
-    <p class="ep-sub">2026-07-15 &middot; hardening batch &middot; ~2.5 min</p>
-    <audio controls preload="none" src="reports/pulse-0004.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0004.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-15 19:53 UTC</p>
+    <p class="ep-sub">2026-07-15 &middot; caught-and-fixed CI break &middot; ~3.5 min</p>
+    <audio controls preload="none" src="reports/pulse-0005.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0005.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">A DNS-rebinding SSRF hole in relay admission closed (#524), a permanently-failed relay's wedge-and-leak fixed (#511), a router pass taken from cubic to quadratic (#510), two unbounded bookkeeping structures pruned (#512, #514), Kotlin/Swift content-session and NMPConfig parity (#523, #513), an unsafe NIP-29 tag omitted (#516), and the in-progress plan to fold History* pagination into a windowed observe() (#485).</p>
+    <p class="ep-blurb">A DNS-rebinding relay-admission fix (#524) merged with the Kotlin package CI lane red, caught and hotfixed (#528). Three more hardening PRs landed right behind it: wake-relay lane indexing (#525), MemoryStore secondary indexes + batched GC (#526), and real kind-ownership enforcement (#527, closing a documented-but-unenforced gap). One more is in CI now: remove_account across all four surfaces (#529). Plus the in-progress observe(query, window) redesign folding History* pagination into the read noun (#474, #485).</p>
   </section>
 
   <details class="archive" id="archive">
