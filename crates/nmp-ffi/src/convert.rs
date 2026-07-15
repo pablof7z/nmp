@@ -94,6 +94,11 @@ pub enum FfiError {
     StoreResetFailed {
         reason: String,
     },
+    /// Destructive reset was refused because a live engine in this process
+    /// owns the same canonical persistent-store path.
+    StoreStillOpen {
+        path: String,
+    },
     /// One named engine/native thread could not be created. The component
     /// and safe OS reason survive Swift/Kotlin error translation unchanged.
     ThreadUnavailable {
@@ -165,6 +170,7 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::StoreResetFailed { reason } => Self::StoreResetFailed { reason },
+            nmp::EngineError::StoreStillOpen { path } => Self::StoreStillOpen { path },
             nmp::EngineError::ThreadUnavailable { component, reason } => {
                 Self::ThreadUnavailable { component, reason }
             }
@@ -206,6 +212,9 @@ impl std::fmt::Display for FfiError {
             }
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
+            Self::StoreStillOpen { path } => {
+                write!(f, "persistent store is still open: {path}")
+            }
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
@@ -367,6 +376,23 @@ mod engine_error_tests {
         assert_eq!(
             error.to_string(),
             "receipt correlation id namespace exhausted"
+        );
+    }
+
+    #[test]
+    fn live_store_reset_refusal_remains_a_typed_ffi_error() {
+        let error = FfiError::from(nmp::EngineError::StoreStillOpen {
+            path: "/canonical/nmp.redb".to_string(),
+        });
+        assert_eq!(
+            error,
+            FfiError::StoreStillOpen {
+                path: "/canonical/nmp.redb".to_string(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "persistent store is still open: /canonical/nmp.redb"
         );
     }
 }

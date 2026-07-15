@@ -58,6 +58,14 @@ class EvidenceMappingTest {
     }
 
     @Test
+    fun liveStoreResetRefusalRemainsTypedAtTheNativeBoundary() {
+        assertEquals(
+            NMPError.StoreStillOpen("/canonical/nmp.redb"),
+            NMPError.from(FfiException.StoreStillOpen("/canonical/nmp.redb")),
+        )
+    }
+
+    @Test
     fun everyReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
         val attached = mapReceiptReattachment(FfiReceiptReattachment.ATTACHED, 42uL, emptyFlow())
         assertEquals(42uL, (attached as ReceiptReattachment.Attached).receipt.id)

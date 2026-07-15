@@ -43,6 +43,7 @@ sealed class NMPError(message: String) : Exception(message) {
         NMPError("receipt correlation id namespace exhausted")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class StoreResetFailed(val reason: String) : NMPError("store reset failed: $reason")
+    data class StoreStillOpen(val path: String) : NMPError("persistent store is still open: $path")
     data class ThreadUnavailable(val component: String, val reason: String) :
         NMPError("$component thread unavailable: $reason")
     data class ExecutorSaturated(val component: String, val capacity: ULong) :
@@ -98,6 +99,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
+                is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
                 is FfiException.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
                 is FfiException.ExecutorSaturated -> ExecutorSaturated(ffi.component, ffi.capacity)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
