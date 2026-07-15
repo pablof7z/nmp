@@ -1342,9 +1342,13 @@ mod tests {
     #[test]
     fn retire_is_non_blocking_when_the_command_queue_is_full_and_undrained() {
         let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
-        command_tx.send(WorkerCommand::Send("only-slot".into())).unwrap();
+        command_tx
+            .send(WorkerCommand::Send("only-slot".into()))
+            .unwrap();
         assert!(
-            command_tx.try_send(WorkerCommand::Send("overflow".into())).is_err(),
+            command_tx
+                .try_send(WorkerCommand::Send("overflow".into()))
+                .is_err(),
             "the command queue must be observably full for this falsifier to mean anything"
         );
 
