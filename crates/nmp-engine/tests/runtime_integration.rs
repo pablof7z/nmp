@@ -34,7 +34,7 @@ use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
 use nmp_store::{
     sentinel_signature, AcceptWrite, EventStore, IntentSigState, MemoryStore, RedbStore,
-    RelayObserved, WriteDurability,
+    RedbStoreResetError, RelayObserved, WriteDurability,
 };
 use nmp_test_support::ConnectionOwner;
 use nmp_transport::PoolConfig;
@@ -93,6 +93,39 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()
     })
+}
+
+/// #489: store-layer ownership must survive the lowest supported raw runtime
+/// path. Moving `RedbStore` directly into `EngineThread` cannot bypass live
+/// reset refusal, and joining the thread releases the final registration.
+#[test]
+fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
+    let fixture = tempfile::tempdir().unwrap();
+    let path = fixture.path().join("raw-engine-thread.redb");
+    let store = RedbStore::open(&path).unwrap();
+    let (engine_thread, handle) = EngineThread::spawn(
+        store,
+        FixtureDirectory::new(),
+        10,
+        PoolConfig::default(),
+        RelayAdmissionPolicy::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        RedbStore::reset(&path),
+        Err(RedbStoreResetError::StoreStillOpen {
+            path: path.canonicalize().unwrap(),
+        })
+    );
+    assert!(
+        path.exists(),
+        "typed refusal must leave raw-engine bytes intact"
+    );
+
+    handle.shutdown();
+    engine_thread.join();
+    RedbStore::reset(&path).expect("joined raw engine must release store ownership");
 }
 
 /// Block (on the calling OS thread -- this crate's `Receiver`s are plain

@@ -61,8 +61,12 @@ public final class NMPEngine: Sendable {
     let ffi: NmpEngineProtocol
     private let localAccountStore: NMPInsecureFileAccountStore?
 
-    /// Destructively remove one closed persistent NMP store. The configured
-    /// local-account checkpoint is a separate file and is not touched.
+    /// Destructively remove one closed persistent NMP store. A live engine in
+    /// this process using the same canonical path throws
+    /// `NMPError.storeStillOpen` without touching the file; call `shutdown()`
+    /// or release that engine first. This guard is process-local. The
+    /// configured local-account checkpoint is a separate file and is not
+    /// touched.
     public static func resetPersistentStore(at storePath: String) throws {
         try nmpRethrowing {
             try NMPFFI.resetPersistentStore(storePath: storePath)

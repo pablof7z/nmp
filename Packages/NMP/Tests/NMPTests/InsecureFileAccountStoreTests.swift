@@ -62,6 +62,15 @@ final class InsecureFileAccountStoreTests: XCTestCase {
         let first = try NMPEngine(config: config, localAccountStore: fixture.store)
         let pubkey = try await first.addAccount(secretKey: secretOne)
         try first.setActiveAccount(pubkey)
+        XCTAssertThrowsError(try NMPEngine.resetPersistentStore(at: database.path)) { error in
+            guard case .storeStillOpen = error as? NMPError else {
+                return XCTFail("live store reset must remain a typed refusal: \(error)")
+            }
+        }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: database.path),
+            "typed live-store refusal must leave the database file intact"
+        )
         first.shutdown()
 
         try NMPEngine.resetPersistentStore(at: database.path)

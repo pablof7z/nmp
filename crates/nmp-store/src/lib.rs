@@ -61,10 +61,12 @@ mod address_key;
 mod binary_event;
 mod coverage;
 mod memory_store;
+mod persistent_store_lifetime;
 mod redb_store;
 
 pub use coverage::{coverage_key, ClaimSet, CoverageInterval, CoverageKey, GcReport};
 pub use memory_store::MemoryStore;
+pub use persistent_store_lifetime::RedbStoreResetError;
 pub use redb_store::RedbStore;
 
 use std::collections::{BTreeMap, BTreeSet};

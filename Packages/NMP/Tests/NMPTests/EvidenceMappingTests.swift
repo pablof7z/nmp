@@ -10,6 +10,13 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
+    func testLiveStoreResetRefusalRemainsTypedAtTheNativeBoundary() {
+        XCTAssertEqual(
+            NMPError(.StoreStillOpen(path: "/canonical/nmp.redb")),
+            .storeStillOpen("/canonical/nmp.redb")
+        )
+    }
+
     func testEveryReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
         let stream = AsyncStream<WriteStatus> { $0.finish() }
 

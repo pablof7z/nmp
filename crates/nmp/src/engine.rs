@@ -33,7 +33,7 @@ use nmp_engine::runtime::{
 };
 use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
-use nmp_store::{MemoryStore, RedbStore};
+use nmp_store::{MemoryStore, RedbStore, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
 use nostr::{Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -114,15 +114,19 @@ impl Engine {
     /// This clears NMP's canonical events, pending writes, receipts,
     /// coverage/evidence, and all other state held in that store. It does not
     /// touch any separately configured platform signer-provider checkpoint.
-    /// The caller must shut down and drop every engine using `path` before
-    /// invoking this operation. A missing path is already reset and succeeds.
+    /// A live in-process engine using the same canonical path is refused with
+    /// [`EngineError::StoreStillOpen`] without touching the file. Call
+    /// [`Engine::shutdown`] (or drop the engine) first. A missing path is
+    /// already reset and succeeds. Cross-process exclusion is not provided.
     pub fn reset_persistent_store(path: impl AsRef<std::path::Path>) -> Result<(), EngineError> {
-        match std::fs::remove_file(path.as_ref()) {
+        match RedbStore::reset(path) {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(EngineError::StoreResetFailed {
-                reason: error.to_string(),
+            Err(RedbStoreResetError::StoreStillOpen { path }) => Err(EngineError::StoreStillOpen {
+                path: path.to_string_lossy().into_owned(),
             }),
+            Err(RedbStoreResetError::ResetFailed { reason }) => {
+                Err(EngineError::StoreResetFailed { reason })
+            }
         }
     }
 
@@ -153,6 +157,7 @@ impl Engine {
                     admission,
                     config.max_native_tasks,
                 )
+                .map_err(EngineError::from_thread_error)?
             }
             None => {
                 let store = MemoryStore::new();
@@ -164,9 +169,9 @@ impl Engine {
                     admission,
                     config.max_native_tasks,
                 )
+                .map_err(EngineError::from_thread_error)?
             }
-        }
-        .map_err(EngineError::from_thread_error)?;
+        };
 
         let native_tasks = engine_thread.native_tasks();
         Ok(Self {
@@ -593,11 +598,31 @@ mod tests {
         };
 
         let engine = Engine::new(config.clone()).expect("persistent engine must build");
-        engine.shutdown();
         assert!(
             path.exists(),
             "opening the persistent engine creates its store"
         );
+        let before = std::fs::read(&path).expect("live store bytes must be readable");
+        let alias = fixture.path().join(".").join("nmp.redb");
+        let refusal = Engine::reset_persistent_store(&alias)
+            .expect_err("a canonical alias of a live store must refuse reset");
+        assert_eq!(
+            refusal,
+            EngineError::StoreStillOpen {
+                path: path
+                    .canonicalize()
+                    .expect("live store path must canonicalize")
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("refused reset must leave the store readable"),
+            before,
+            "refused reset must not touch the live store file"
+        );
+
+        engine.shutdown();
 
         Engine::reset_persistent_store(&path).expect("a closed store must reset");
         assert!(
@@ -607,7 +632,67 @@ mod tests {
         Engine::reset_persistent_store(&path).expect("a missing store is already reset");
 
         let reopened = Engine::new(config).expect("reset path must open as a fresh store");
-        reopened.shutdown();
+        drop(reopened);
+        Engine::reset_persistent_store(&path)
+            .expect("dropping an engine must release its store registration");
+    }
+
+    #[test]
+    fn failed_persistent_store_open_releases_reset_guard() {
+        let fixture = tempfile::tempdir().expect("temporary directory");
+        let path = fixture.path().join("corrupt.redb");
+        std::fs::write(&path, b"not a redb database").expect("corrupt fixture must write");
+        let error = Engine::new(EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .err()
+        .expect("corrupt store must fail construction");
+        assert!(matches!(error, EngineError::StoreOpenFailed { .. }));
+
+        Engine::reset_persistent_store(&path)
+            .expect("failed construction must release its path registration");
+        assert!(!path.exists(), "reset must remove the failed-open store");
+    }
+
+    #[cfg(feature = "unstable-mechanism")]
+    #[test]
+    fn from_parts_cannot_bypass_guard_and_spawn_failure_releases_store() {
+        let fixture = tempfile::tempdir().expect("temporary directory");
+        let path = fixture.path().join("from-parts.redb");
+        let store = RedbStore::open(&path).expect("store must open");
+        let engine = Engine::from_parts(
+            store,
+            nmp_router::FixtureDirectory::new(),
+            10,
+            PoolConfig::default(),
+            nmp_engine::core::RelayAdmissionPolicy::default(),
+        )
+        .expect("from_parts engine must build");
+        assert!(matches!(
+            Engine::reset_persistent_store(&path),
+            Err(EngineError::StoreStillOpen { .. })
+        ));
+        engine.shutdown();
+        Engine::reset_persistent_store(&path)
+            .expect("from_parts shutdown must release store ownership");
+
+        let store = RedbStore::open(&path).expect("store must reopen");
+        let failure = Engine::from_parts(
+            store,
+            nmp_router::FixtureDirectory::new(),
+            usize::MAX,
+            PoolConfig {
+                max_relays: usize::MAX,
+                ..PoolConfig::default()
+            },
+            nmp_engine::core::RelayAdmissionPolicy::default(),
+        )
+        .err()
+        .expect("unrepresentable relay envelope must refuse construction");
+        assert!(matches!(failure, EngineError::ThreadUnavailable { .. }));
+        Engine::reset_persistent_store(&path)
+            .expect("post-open spawn failure must release RedbStore ownership");
     }
 
     #[test]

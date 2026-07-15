@@ -186,13 +186,24 @@ about current code:
   facade falsifier proves dropping them leaves exactly the one cached engine
   payload rather than a hidden waiter/result shadow cache.
 - **~~Destructive trust-domain reset is missing as a defined contract~~ CLOSED
-  (#232).** `Engine::reset_persistent_store`, the UniFFI operation, and the
-  Swift/Kotlin `NMPEngine.resetPersistentStore` projections idempotently remove
-  one closed canonical store. The caller must first close every engine using
-  that path; doing so drops live capabilities, then reset clears cached events,
-  pending writes, receipts, coverage/evidence, and related persisted state.
-  Separately configured platform account checkpoints are intentionally outside
-  the store path and remain untouched.
+  (#232); in-process live-store deletion is structurally refused (#489).**
+  `Engine::reset_persistent_store`, the UniFFI operation, and the Swift/Kotlin
+  `NMPEngine.resetPersistentStore` projections idempotently remove one closed
+  canonical store. `RedbStore::open` owns the guard at the lowest governed
+  store layer: one mutex spans pre-open target resolution, create/open,
+  post-open canonical target resolution, and registration, and the RAII
+  registration moves with the store through facade, `from_parts`, or raw
+  `EngineThread` ownership. Reset holds the same mutex through target
+  resolution, live check, and deletion and returns typed
+  `StoreStillOpen { path }` without touching a live in-process store. Existing
+  and dangling final symlink paths resolve to the store target; reset never
+  unlinks the alias inode. Reset clears cached events, pending writes, receipts,
+  coverage/evidence, and related persisted state. Separately configured
+  platform account checkpoints remain outside the store path and untouched.
+  **Cross-process exclusion remains a gap:** no advisory/sidecar lock yet
+  prevents another process from resetting a store that is live elsewhere, and
+  arbitrary external symlink retargeting is not an in-process guarantee, so
+  callers must coordinate that deployment boundary explicitly.
 - **Public syntax remains provisional; its promotion protocol is now enforced.**
   Pinned snapshots cover the canonical `nmp` Rust facade and the
   language-independent UniFFI proc-macro component metadata. CI requires exact

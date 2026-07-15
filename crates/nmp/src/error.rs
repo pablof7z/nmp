@@ -27,6 +27,9 @@ pub enum EngineError {
     /// [`Engine::reset_persistent_store`](crate::Engine::reset_persistent_store)
     /// could not remove the requested closed persistent store.
     StoreResetFailed { reason: String },
+    /// Destructive reset was refused because an engine in this process still
+    /// owns the same canonical persistent-store path.
+    StoreStillOpen { path: String },
     /// The OS refused one engine-owned transport/runtime thread, or the
     /// configured relay budget could not be represented safely. No partial
     /// engine escapes construction.
@@ -55,6 +58,9 @@ impl std::fmt::Display for EngineError {
             Self::InvalidRelayUrl { url } => write!(f, "invalid relay url: {url:?}"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
+            Self::StoreStillOpen { path } => {
+                write!(f, "persistent store is still open: {path}")
+            }
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
