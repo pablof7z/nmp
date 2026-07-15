@@ -48,7 +48,10 @@ class NMPEngine(
     private val localAccountStore: NMPInsecureFileAccountStore? = null,
 ) : AutoCloseable {
     companion object {
-        /** Destructively remove one closed persistent NMP store. A separate
+        /** Destructively remove one closed persistent NMP store. A live engine
+         * in this process using the same canonical path throws
+         * [NMPError.StoreStillOpen] without touching the file; call
+         * [shutdown] or [close] first. This guard is process-local. A separate
          * local-account checkpoint is not touched. */
         fun resetPersistentStore(storePath: String) =
             nmpRethrowing { ffiResetPersistentStore(storePath) }

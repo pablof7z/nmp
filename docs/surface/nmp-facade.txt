@@ -80,6 +80,8 @@ pub nmp::EngineError::StoreOpenFailed
 pub nmp::EngineError::StoreOpenFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreResetFailed
 pub nmp::EngineError::StoreResetFailed::reason: alloc::string::String
+pub nmp::EngineError::StoreStillOpen
+pub nmp::EngineError::StoreStillOpen::path: alloc::string::String
 pub nmp::EngineError::ThreadUnavailable
 pub nmp::EngineError::ThreadUnavailable::component: alloc::string::String
 pub nmp::EngineError::ThreadUnavailable::reason: alloc::string::String
