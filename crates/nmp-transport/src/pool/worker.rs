@@ -26,7 +26,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::TcpStream;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -140,17 +140,23 @@ pub(super) fn worker_id_of(generation: u64) -> u32 {
 /// `RelayPoller` for a freshly opened socket; cleared while the worker is in
 /// its backoff wait between sockets, where it just blocks on `recv_timeout`).
 pub(super) struct WorkerHandle {
-    command_tx: Sender<WorkerCommand>,
+    command_tx: SyncSender<WorkerCommand>,
     waker: Arc<Mutex<Option<Waker>>>,
     join: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
     /// Enqueue `command` and wake the worker if it is currently parked in
-    /// `mio::Poll::poll`. Returns `false` only if the worker thread is
-    /// already gone (channel disconnected).
+    /// `mio::Poll::poll`. Returns `false` if the worker thread is already
+    /// gone (channel disconnected) OR — issue #506's HIGH finding — if the
+    /// bounded outbound queue is currently full: a stalled-but-connected
+    /// relay (TCP send window full, so the worker's `flush_writes` keeps
+    /// returning `Blocked`) must surface backpressure to the caller instead
+    /// of growing this queue without bound. `Pool::send`/`send_durable`
+    /// already have a typed "not handed off" outcome for exactly this case;
+    /// this is the seam that makes it reachable.
     pub(super) fn push(&self, command: WorkerCommand) -> bool {
-        if self.command_tx.send(command).is_err() {
+        if self.command_tx.try_send(command).is_err() {
             return false;
         }
         if let Ok(guard) = self.waker.lock() {
@@ -161,8 +167,30 @@ impl WorkerHandle {
         true
     }
 
+    /// Request shutdown and return the worker's join handle.
+    ///
+    /// Deliberately NOT [`Self::push`]: `Shutdown` must never be rejected by
+    /// a saturated data queue, so this uses a plain (potentially blocking)
+    /// `send` on the SAME bounded channel rather than `try_send`. This is
+    /// safe from deadlock/stall by construction, not by luck: every caller
+    /// of `retire` (`PoolInner::close`/`shutdown`, and the permanent-`Failed`
+    /// arm of `apply_worker_event_with_verdict`) has ALREADY taken
+    /// `state.worker` out of the slot table under the pool's own lock before
+    /// calling this, so `PoolInner::command_tx_for` refuses every future
+    /// `Pool::send`/`send_durable` against this exact handle from that
+    /// instant on — the channel can only ever drain from here, never refill.
+    /// The worker's own receive loop drains commands at CPU speed with no
+    /// socket I/O in the way (`drain_commands`/`wait_before_reconnect`), so
+    /// a blocking `send` resolves in bounded time (at most whatever backlog
+    /// was already queued) rather than silently losing the shutdown request
+    /// the way a `try_send` could under a full queue.
     pub(super) fn retire(mut self) -> JoinHandle<()> {
-        let _ = self.push(WorkerCommand::Shutdown);
+        let _ = self.command_tx.send(WorkerCommand::Shutdown);
+        if let Ok(guard) = self.waker.lock() {
+            if let Some(waker) = guard.as_ref() {
+                let _ = waker.wake();
+            }
+        }
         self.join
             .take()
             .expect("a live relay worker owns exactly one join handle")
@@ -180,9 +208,15 @@ pub(super) fn spawn(
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
+    command_queue_capacity: usize,
     spawner: &dyn ThreadSpawner,
 ) -> Result<WorkerHandle, ThreadSpawnError> {
-    let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
+    // Bounded (issue #506's HIGH finding): this was the one unbounded queue
+    // in the whole pool. `command_queue_capacity` is `PoolConfig::
+    // command_queue_capacity`, already normalized to at least 1 by the
+    // caller (`PoolInner::spawn_worker`) the same way every other queue
+    // knob is.
+    let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(command_queue_capacity);
     let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
     let waker_for_thread = Arc::clone(&waker_slot);
     let join = spawner
@@ -1142,5 +1176,94 @@ mod tests {
                 (second, HandoffResult::NotHandedOff),
             ]
         );
+    }
+
+    fn test_worker_handle(
+        command_tx: SyncSender<WorkerCommand>,
+    ) -> (WorkerHandle, Arc<Mutex<Option<Waker>>>) {
+        let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let handle = WorkerHandle {
+            command_tx,
+            waker: Arc::clone(&waker_slot),
+            // No real worker thread backs this handle in these tests --
+            // `retire`/`push` never touch `join` (`retire` only takes it out
+            // and hands it back), so a trivially-finished thread is a
+            // faithful enough stand-in.
+            join: Some(thread::spawn(|| {})),
+        };
+        (handle, waker_slot)
+    }
+
+    /// The HIGH falsifier (issue #506): a stalled-but-connected relay must
+    /// no longer be able to grow its outbound queue without bound.
+    /// `WorkerHandle::push` now uses `try_send` against the bounded channel
+    /// (`PoolConfig::command_queue_capacity`), so a saturated queue reports
+    /// `false` -- the EXACT signal `Pool::send`/`send_durable` already turn
+    /// into "not handed off" backpressure -- instead of silently succeeding
+    /// forever.
+    #[test]
+    fn push_reports_backpressure_once_the_bounded_queue_is_full() {
+        let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(2);
+        let (handle, _waker_slot) = test_worker_handle(command_tx);
+
+        assert!(handle.push(WorkerCommand::Send("a".into())));
+        assert!(handle.push(WorkerCommand::Send("b".into())));
+        assert!(
+            !handle.push(WorkerCommand::Send("c".into())),
+            "a full bounded queue must report backpressure (false), \
+             never grow past its configured capacity"
+        );
+
+        // Draining one slot must free exactly one more `push`.
+        assert!(matches!(command_rx.recv(), Ok(WorkerCommand::Send(text)) if text == "a"));
+        assert!(handle.push(WorkerCommand::Send("d".into())));
+        assert!(
+            !handle.push(WorkerCommand::Send("e".into())),
+            "capacity is bounded, not one-shot -- it stays saturated at N \
+             in-flight commands"
+        );
+
+        drop(command_rx);
+        handle.join.expect("join handle retained").join().unwrap();
+    }
+
+    /// The other half of the HIGH falsifier: `Shutdown`/retire must never
+    /// be rejected by the same saturated queue that legitimately backpressures
+    /// ordinary `Send`/`SendDurable` traffic. This drives `WorkerHandle::
+    /// retire` (not a raw channel `send`) against a queue that starts FULL,
+    /// with a background thread standing in for the real worker's own
+    /// receive loop -- draining the pre-existing backlog before `Shutdown`
+    /// can land, exactly the bounded-wait `retire`'s doc describes.
+    #[test]
+    fn retire_shutdown_lands_even_when_the_data_queue_is_saturated() {
+        let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
+        command_tx
+            .send(WorkerCommand::Send("queued".into()))
+            .unwrap();
+        assert!(
+            command_tx
+                .try_send(WorkerCommand::Send("overflow".into()))
+                .is_err(),
+            "the queue must be observably full before this falsifier means anything"
+        );
+
+        // Stand-in for the real worker's own receive loop: drains whatever
+        // was already queued (the ordinary backlog `retire`'s doc allows
+        // for), THEN observes the `Shutdown` `retire` is about to send.
+        let backlog_drained = std::thread::spawn(move || {
+            assert!(matches!(command_rx.recv(), Ok(WorkerCommand::Send(text)) if text == "queued"));
+            assert!(matches!(command_rx.recv(), Ok(WorkerCommand::Shutdown)));
+        });
+
+        let (handle, _waker_slot) = test_worker_handle(command_tx);
+        // Must not be silently dropped by the initially-full queue: `retire`
+        // blocks (briefly -- the "worker" above is already draining) rather
+        // than using the same `try_send` a saturated-queue `push` now
+        // legitimately fails.
+        let join = handle.retire();
+        join.join().unwrap();
+        backlog_drained
+            .join()
+            .expect("retire's Shutdown must reach the receive loop");
     }
 }

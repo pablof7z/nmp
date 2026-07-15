@@ -272,11 +272,24 @@ impl From<RelayMessage<'static>> for RelayFrame {
 pub enum DisconnectReason {
     /// `Pool::close` was called for this handle.
     Closed,
-    /// A transient or permanent transport error (dial failure, socket
-    /// error, peer-initiated close, keepalive timeout) tore down a
-    /// previously-`Connected` session. [`Pool::health`] carries the message
-    /// and, for a transient error, the next retry delay.
+    /// A TRANSIENT transport error (dial failure, socket error, peer-
+    /// initiated close, keepalive timeout) tore down a previously-`Connected`
+    /// session. The pool itself keeps redialing on its own backoff schedule
+    /// -- this variant never accompanies a worker retirement. [`Pool::health`]
+    /// carries the message and the next retry delay.
     Error,
+    /// The relay's own failure was PERMANENT (`backoff::is_permanent_error`
+    /// -- HTTP 401/403/Forbidden, i.e. NIP-42-auth-required, IP-banned, or an
+    /// expired-paid relay): the worker will never redial on its own. The
+    /// pool retires the worker thread and frees its `max_relays` cap slot the
+    /// instant this is emitted (both when the slot was previously `Connected`
+    /// and when it never got that far) -- there is no lingering zombie
+    /// `state.worker` for a caller to get idempotently handed back. Recovery
+    /// requires an explicit fresh [`Pool::ensure_open`] after the caller has
+    /// addressed the denial (e.g. NIP-42 AUTH); the pool never self-reopens
+    /// this slot, which would otherwise busy-loop against a relay that keeps
+    /// saying no.
+    PermanentlyFailed,
     /// `Pool::shutdown` tore down every worker in the pool.
     ShuttingDown,
 }
@@ -360,6 +373,18 @@ pub struct PoolConfig {
     /// Maximum worker events waiting for the translator. A full queue blocks
     /// the socket worker, propagating pressure back to TCP reads.
     pub ingest_queue_capacity: usize,
+    /// Maximum outbound commands (`Send`/`SendDurable`/reconnect-preamble
+    /// updates) queued per relay worker (issue #506's HIGH finding). This is
+    /// the one pool queue that was historically unbounded: a stalled-but-
+    /// connected socket (TCP send window full, so `flush_writes` keeps
+    /// returning `Blocked`) could accumulate an unbounded backlog while
+    /// `Pool::send`/`send_durable` kept reporting success. `pool::worker::
+    /// WorkerHandle::push` now uses `try_send` against this bound, so a
+    /// saturated queue surfaces as the EXISTING "not handed off" backpressure
+    /// signal instead of unbounded memory growth. `Shutdown`/retire is exempt
+    /// from this cap by construction (see that type's `retire` doc), so a
+    /// full data queue can never block a worker from being torn down.
+    pub command_queue_capacity: usize,
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
     /// Persistent native verification workers. Zero selects the small fixed
@@ -405,6 +430,7 @@ impl Default for PoolConfig {
         Self {
             max_relays: DEFAULT_MAX_RELAYS,
             ingest_queue_capacity: 1_024,
+            command_queue_capacity: 1_024,
             event_sink_queue_capacity: 1_024,
             verifier_workers: 0,
             verifier_queue_capacity: 64,
