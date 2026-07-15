@@ -15,7 +15,34 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Wed, 15 Jul 2026 11:54:00 GMT</lastBuildDate>
+<lastBuildDate>Wed, 15 Jul 2026 19:04:30 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-15 19:00 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0004.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0004</guid>
+<pubDate>Wed, 15 Jul 2026 19:04:30 GMT</pubDate>
+<description><![CDATA[
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin SDKs on top, built so your app doesn't have to reinvent relay handling, event storage, and durable publishing from scratch. Since the last update, the team landed a solid batch of hardening work, and one fix is worth pausing on.
+
+Start with the serious one: a DNS rebinding style SSRF hole in relay admission (#524). The engine checked a hostname's resolved IP against its local-and-private blocklist, then reconnected later and resolved that same hostname again -- and DNS can answer differently the second time. That gap is closed. Admission now pins the resolved IP it already approved and connects to that exact address, so a relay can't pass the safety check once and then quietly point somewhere internal on the next connection.
+
+Alongside it, a critical transport bug (#511): a relay that permanently fails -- say, it demands auth and never accepts it -- used to wedge forever and leak a connection slot. That's fixed, and the send queue behind it is now bounded instead of growing without limit.
+
+There's bounded-memory work too. The router's coalescing pass (#510) used to scale roughly cubically with plan size; it's now quadratic, same output plan, just faster at scale. Two bookkeeping structures -- one tracking attribution shapes on every recompile (#512), one tracking negentropy backfill state and per-relay event counts (#514) -- used to grow unboundedly under long-running connections; both are now pruned as they go.
+
+On cross-platform parity: Kotlin's content session can now be paused non-terminally with a proper stop() call (#523), matching what Swift already had. And Swift and Kotlin's NMPConfig now actually expose the max-relays ceiling and the allowed-local-relay-hosts list (#513), instead of silently dropping them.
+
+One more: NIP-29 groups no longer emit an unsafe previous-tag reference that could point at stale state (#516); it's omitted rather than shipped wrong.
+
+Bigger picture: there's an open architecture decision (#485) to stop adding a parallel "History" set of types for paginated queries, and instead make windowing a policy on the one existing observe call -- an optional window parameter rather than a whole second vocabulary. Not shipped yet, but that's the direction the read side of the API is heading.
+
+So: a real SSRF fix, a wedge-prone relay bug closed, three unbounded-growth points pruned, tighter Swift-Kotlin parity, and a cleaner read-API on the way.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0004.mp3" type="audio/mpeg" length="2378540"/>
+<itunes:title>NMP Pulse — 2026-07-15 19:00 UTC</itunes:title>
+<itunes:duration>149</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP — The Audio Tour: What It Is &amp; How Solid It Is</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0003.mp3</link>
