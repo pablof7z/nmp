@@ -101,6 +101,13 @@ const LEGACY_EVENT_TABLES: [&str; 9] = [
 const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
 const SCHEMA_VERSION_KEY: &str = "version";
 const SCHEMA_VERSION: u64 = 6;
+/// Bound redb's process-private page cache for mobile/desktop clients.
+///
+/// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
+/// fills most of that default even when NMP's transport queues and live query
+/// projections remain bounded, so the database alone can consume more memory
+/// than the rest of the process by an order of magnitude.
+const REDB_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index_v6");
 const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
 /// Permanent kind:5 tombstones for individual event ids
@@ -3276,7 +3283,11 @@ impl RedbStore {
     /// schema marker proves every table exists, and one exact metadata count
     /// tells us whether crash-abandoned ephemeral receipts need recovery.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
-        let registered = open_and_register(path.as_ref(), |path| Database::create(path))?;
+        let registered = open_and_register(path.as_ref(), |path| {
+            Database::builder()
+                .set_cache_size(REDB_CACHE_BYTES)
+                .create(path)
+        })?;
         let db = &registered.value;
         // Schema v6 deliberately carries no event-row migration. Refuse any
         // older NMP event epoch before creating a single v6 table: otherwise
