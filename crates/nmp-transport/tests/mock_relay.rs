@@ -84,7 +84,7 @@ fn loopback(port: u16) -> SocketAddr {
 fn test_pool_config() -> PoolConfig {
     PoolConfig {
         allowed_local_hosts: std::sync::Arc::new(std::collections::BTreeSet::from([
-            "127.0.0.1".to_string(),
+            "127.0.0.1".to_string()
         ])),
         ..PoolConfig::default()
     }

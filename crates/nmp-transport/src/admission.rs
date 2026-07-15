@@ -315,7 +315,7 @@ mod tests {
             "10.0.0.1",
             "172.16.0.1",
             "192.168.1.1",
-            "169.254.1.1",  // link-local, incl. the cloud metadata endpoint
+            "169.254.1.1", // link-local, incl. the cloud metadata endpoint
             "169.254.169.254",
             "0.0.0.0",
             "255.255.255.255",
@@ -354,7 +354,10 @@ mod tests {
         assert_eq!(normalize_bare_host("127.0.0.1"), "127.0.0.1");
         // Domains lower-case and drop a trailing root-zone dot (same as
         // `relay_host_key`'s `Host::Domain` branch).
-        assert_eq!(normalize_bare_host("Relay.Example.COM"), "relay.example.com");
+        assert_eq!(
+            normalize_bare_host("Relay.Example.COM"),
+            "relay.example.com"
+        );
         assert_eq!(normalize_bare_host("relay.nmp.test."), "relay.nmp.test");
         assert_eq!(normalize_bare_host("LOCALHOST"), "localhost");
     }
