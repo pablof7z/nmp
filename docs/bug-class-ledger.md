@@ -32,3 +32,8 @@ Every status must remain honest. A design document, issue, or passing adjacent
 test is not proof. Promoting `TARGET`/`PARTIAL` to `BUILT` requires a falsifier
 against the supported public facade and, where applicable, restart and platform
 projection tests.
+
+PR review applies this same rule prospectively, before a new bug class ever
+needs a row here: see `docs/design/architecture-review-gates.md` for the six
+review gates (Noun, Reachability, Bool-Lifecycle, Destructive-API, Cross-SDK
+Parity, Falsifier-honesty) this ledger's rule expands into at review time.
