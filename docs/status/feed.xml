@@ -15,7 +15,36 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 08:58:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 09:51:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 09:51 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0018.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0018</guid>
+<pubDate>Thu, 16 Jul 2026 09:51:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Last cycle left one honest loose end. Blossom, the media and blob-storage module, had every verb working on the Rust side, but the projection out to Swift and Kotlin was sitting in a pull request with a real compile failure -- a raw byte array where the generated wrapper expected Apple's Data type.
+
+That's fixed now, and it's fixed for real, not just re-flaked. The pull request landed clean: Rust tests, cross-software-development-kit parity, the falsifier-honesty check, and both the Swift and Kotlin package builds are all green. Blob upload, mirror, delete, and list -- the whole BUD-eleven verb set -- is now callable from Swift and from Kotlin, not only from Rust.
+
+Here's what that actually unlocks. Before this, if you were embedding NMP in a native app and wanted a user to attach a photo to a post, there was nothing to call from the app layer -- the machinery existed, but only in Rust. Now an iOS app or an Android app can build an upload authorization, hand a file to the client, and get back a verified, content-addressed blob reference, with the same typed error handling on every platform. That's a real app-facing capability today, not a future promise.
+
+Now, the honest part, because that's the point of these reports. Uploading a blob today is a standalone asynchronous call. It is not yet a durable, engine-owned obligation the way a Nostr write intent is. If your app crashes mid-upload, or the network drops, retrying that upload is on you, the app, not on the engine. The team actually made a deliberate call here: rather than hold this feature back until uploads get full crash-durable retry, they scoped that as a separate, additive upgrade for later, filed as its own tracked issue, and shipped the useful, callable version now. So: posting a photo is crash-durable on the Nostr-publish half today, but not yet on the upload half. That gap is named and open, not hidden.
+
+What's still ahead for this epic: wiring picture-event metadata, so an uploaded blob gets properly described as a NIP-sixty-eight picture post, and a composition layer that ties upload and publish together into one clean flow. Both are scoped and queued, not started yet.
+
+So: Blossom media just crossed the platform line. Rust, Swift, and Kotlin can all call it today. The durability upgrade is a known, named, deliberately deferred next step, not a corner quietly cut.
+
+That's the pulse.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0018.mp3" type="audio/mpeg" length="2917292"/>
+<itunes:title>NMP Pulse — 2026-07-16 09:51 UTC</itunes:title>
+<itunes:duration>182</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-16 08:58 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0017.mp3</link>
