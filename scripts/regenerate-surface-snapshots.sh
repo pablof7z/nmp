@@ -53,7 +53,11 @@ cd "$ROOT"
 # The supported facade has dozens of explicit roots, not arbitrary dependency
 # method inventories. These generous ceilings catch accidental recursive impl
 # expansion while leaving substantial room for intentional surface growth.
-RUST_FACADE_MAX_LINES=30000
+# 2026-07-16 (#8 Wave 2, PR #PRNUM): raised 30000 -> 31000 for the NIP-42
+# auth-diagnostics facade surface (AuthDiagnosticsSnapshot / AuthDiagnosticsPhase
+# / AuthPhase variants / DiagnosticsSnapshot.auth_sessions), which is
+# adversarially-reviewed intended growth (+~399 lines, no over-exposure).
+RUST_FACADE_MAX_LINES=31000
 RUST_FACADE_MAX_BYTES=8000000
 RUST_FACADE_LINES=$(wc -l < "$TMP/nmp-facade.txt")
 RUST_FACADE_BYTES=$(wc -c < "$TMP/nmp-facade.txt")
