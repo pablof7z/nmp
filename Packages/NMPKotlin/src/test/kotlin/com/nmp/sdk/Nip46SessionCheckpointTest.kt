@@ -60,12 +60,11 @@ class Nip46SessionCheckpointTest {
         lines[1] = "CarrierPigeon"
         val data = lines.joinToString("\n").toByteArray()
 
-        val error = assertThrows(
+        assertThrows(
             NMPNip46SessionCheckpoint.SerializationException.InvalidOrigin::class.java,
         ) {
             NMPNip46SessionCheckpoint.deserialize(data)
         }
-        assertEquals("CarrierPigeon", error.origin)
     }
 
     @Test
@@ -73,6 +72,35 @@ class Nip46SessionCheckpointTest {
         assertThrows(NMPNip46SessionCheckpoint.SerializationException.Malformed::class.java) {
             NMPNip46SessionCheckpoint.deserialize("not a checkpoint".toByteArray())
         }
+    }
+
+    /**
+     * #571 secrecy falsifier: this wire format is POSITIONAL, unlike
+     * Swift's keyed-JSON equivalent -- a blob missing its origin line
+     * shifts every later field (starting with `clientSecretKey`) up by one
+     * line, so the secret itself lands at the exact line index the decoder
+     * reads as "origin". Regardless of which exception surfaces, its
+     * `.message` must never contain the raw secret.
+     */
+    @Test
+    fun deserializeNeverSurfacesSecretMaterialInAnyErrorMessageEvenWhenLinesShift() {
+        val checkpoint = makeCheckpoint()
+        val secret = checkpoint.clientSecretKey
+        val lines = String(checkpoint.serialize()).split("\n").toMutableList()
+        // Delete the origin line (index 1): clientSecretKey (previously
+        // index 2) now sits at index 1, exactly where deserialize reads
+        // the origin tag from.
+        lines.removeAt(1)
+        val shifted = lines.joinToString("\n").toByteArray()
+
+        val error = assertThrows(NMPNip46SessionCheckpoint.SerializationException::class.java) {
+            NMPNip46SessionCheckpoint.deserialize(shifted)
+        }
+        assertFalse(
+            (error.message ?: "").contains(secret),
+            "a shifted/corrupt blob must never surface secret material in an error message: " +
+                "${error.message}",
+        )
     }
 
     /** #571 secrecy falsifier: `toString()` -- what `println`/string

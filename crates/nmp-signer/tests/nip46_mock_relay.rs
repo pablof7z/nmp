@@ -445,6 +445,174 @@ fn from_parts_fails_closed_on_user_public_key_mismatch() {
     );
 }
 
+/// #571 falsifier -- the issue's HEADLINE path: a real `nostrconnect://`
+/// client-initiated pairing (not `bunker://`), checkpointed and restored
+/// through `from_parts` over a SECOND connection with NO re-pairing
+/// handshake. Proves `Nip46Invitation::connect`'s generated `client_keys`
+/// (the exact identity `checkpoint()` reads out) survives the full round
+/// trip, reaches the identical user pubkey, and can still sign.
+#[test]
+fn client_initiated_checkpoint_then_from_parts_reconnects_without_repairing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let invitation = Nip46Invitation::new(
+        vec![nostr::RelayUrl::parse(&relay).unwrap()],
+        None,
+        Nip46ClientMetadata::default(),
+    )
+    .unwrap();
+    let uri = url::Url::parse(&invitation.uri()).unwrap();
+    let client = PublicKey::from_hex(uri.host_str().unwrap()).unwrap();
+    let secret = uri
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let remote_thread = remote.clone();
+    let user_thread = user.clone();
+
+    // A two-phase mock over the SAME listener: session 1 completes the
+    // `nostrconnect://` pairing handshake (an unsolicited valid `connect`
+    // response keyed to the invitation secret, matching
+    // `client_invitation_ignores_forged_secret_then_accepts_valid_signer`'s
+    // precedent) then answers `get_public_key`/`switch_relays`; session 2
+    // (the restore) never receives a `connect` response at all -- it only
+    // answers `get_public_key`/`switch_relays`/`sign_event`.
+    thread::spawn(move || {
+        let remote = remote_thread;
+        let user = user_thread;
+        let mut paired = false;
+        while let Ok((stream, _)) = listener.accept() {
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let mut subscription_id = None;
+            while let Ok(message) = socket.read() {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let Ok(frame) = serde_json::from_str::<Value>(text.as_ref()) else {
+                    continue;
+                };
+                let Some(parts) = frame.as_array() else {
+                    continue;
+                };
+                match parts.first().and_then(Value::as_str) {
+                    Some("REQ") => {
+                        subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                        if !paired {
+                            let valid = response_event(
+                                &remote,
+                                client,
+                                "connect-valid",
+                                Some(secret.clone()),
+                                None,
+                            );
+                            socket
+                                .send(Message::Text(
+                                    event_frame(subscription_id.as_deref().unwrap(), valid).into(),
+                                ))
+                                .unwrap();
+                        }
+                    }
+                    Some("EVENT") => {
+                        let event = Event::from_json(parts[1].to_string()).unwrap();
+                        let plaintext = nip44::decrypt(
+                            remote.secret_key(),
+                            &event.pubkey,
+                            event.content.as_bytes(),
+                        )
+                        .unwrap();
+                        let request: Value = serde_json::from_str(&plaintext).unwrap();
+                        let id = request["id"].as_str().unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let params = request["params"].as_array().unwrap();
+                        let result = match method {
+                            "get_public_key" => user.public_key().to_hex(),
+                            "switch_relays" => "null".to_string(),
+                            "sign_event" => {
+                                let body: SignBody =
+                                    serde_json::from_str(params[0].as_str().unwrap()).unwrap();
+                                let tags = body
+                                    .tags
+                                    .iter()
+                                    .map(Tag::parse)
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .unwrap();
+                                UnsignedEvent::new(
+                                    user.public_key(),
+                                    Timestamp::from(body.created_at),
+                                    Kind::from_u16(body.kind),
+                                    tags,
+                                    body.content,
+                                )
+                                .sign_with_keys(&user)
+                                .unwrap()
+                                .as_json()
+                            }
+                            other => panic!("unexpected method {other}"),
+                        };
+                        let response =
+                            response_event(&remote, event.pubkey, id, Some(result), None);
+                        socket
+                            .send(Message::Text(
+                                event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                            ))
+                            .unwrap();
+                        // `connect()` only synchronously waits on
+                        // `get_public_key` -- `switch_relays` is a
+                        // best-effort background request fired afterward
+                        // (never awaited by the caller), so ending session 1
+                        // here (rather than waiting for a `switch_relays`
+                        // that may race with the test's own
+                        // checkpoint+drop) matches the real dependency
+                        // order and avoids a flaky teardown race.
+                        if !paired && method == "get_public_key" {
+                            paired = true;
+                            break;
+                        }
+                        if paired && method == "sign_event" {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let paired_signer = invitation.connect(Duration::from_secs(5)).unwrap();
+    assert_eq!(paired_signer.user_public_key(), user.public_key());
+    assert_eq!(
+        paired_signer.remote_signer_public_key(),
+        remote.public_key()
+    );
+
+    let checkpoint = paired_signer.checkpoint();
+    assert_eq!(checkpoint.origin, Nip46Origin::ClientInitiated);
+    assert_eq!(checkpoint.user_public_key, user.public_key());
+    assert_eq!(checkpoint.remote_signer_public_key, remote.public_key());
+    drop(paired_signer);
+
+    let restored = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap();
+    assert_eq!(restored.user_public_key(), user.public_key());
+    assert_eq!(restored.remote_signer_public_key(), remote.public_key());
+
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_070),
+        Kind::TextNote,
+        Vec::new(),
+        "resumed after client-initiated restore",
+    );
+    let signed = restored
+        .sign(unsigned.clone())
+        .wait(Duration::from_secs(5))
+        .unwrap();
+    signed.verify().unwrap();
+    assert_eq!(signed.pubkey, user.public_key());
+}
+
 #[test]
 fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
     let (relay, remote, user, seen) = spawn_mock_remote_signer(false);

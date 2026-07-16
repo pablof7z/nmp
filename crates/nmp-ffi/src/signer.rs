@@ -1063,6 +1063,30 @@ mod tests {
         engine.shutdown();
     }
 
+    /// #571: a real `Nip46Connection` that has never attached a signer
+    /// (never reached ready) refuses `checkpoint()` with a typed error --
+    /// distinct from the Swift/Kotlin wrapper's own nil-underlying-
+    /// connection guard, this exercises the actual FFI-level
+    /// `attachment.registration.is_none()` refusal this method's doc
+    /// documents.
+    #[test]
+    fn checkpoint_before_ready_is_refused_at_the_ffi_boundary() {
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let closed = Arc::new(AtomicUsize::new(0));
+        let connection = Nip46Connection::new(
+            Arc::clone(&engine),
+            Arc::new(CloseCountingObserver { closed }),
+        );
+
+        assert!(matches!(
+            connection.checkpoint(),
+            Err(FfiError::InvalidSigner { .. })
+        ));
+
+        connection.disconnect();
+        engine.shutdown();
+    }
+
     #[test]
     fn observer_delivery_is_reentrant_and_closed_is_terminal() {
         let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
