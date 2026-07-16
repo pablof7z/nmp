@@ -304,7 +304,7 @@ sealed class BlossomUploadError(message: String) : Exception(message) {
                 is FfiBlossomUploadException.AuthRejected -> AuthRejected(ffi.status, ffi.reason)
                 is FfiBlossomUploadException.ServerRejected ->
                     ServerRejected(ffi.status, ffi.reason)
-                is FfiBlossomUploadException.ServerError -> ServerError(ffi.status, ffi.reason)
+                is FfiBlossomUploadException.ServerException -> ServerError(ffi.status, ffi.reason)
                 is FfiBlossomUploadException.ResponseTooLarge -> ResponseTooLarge(ffi.limitBytes)
                 is FfiBlossomUploadException.DescriptorInvalid ->
                     DescriptorInvalid(BlossomDescriptorError.from(ffi.error))
@@ -406,7 +406,7 @@ sealed class BlossomMirrorError(message: String) : Exception(message) {
                 is FfiBlossomMirrorException.OriginFetchFailed -> OriginFetchFailed(ffi.reason)
                 is FfiBlossomMirrorException.ServerRejected ->
                     ServerRejected(ffi.status, ffi.reason)
-                is FfiBlossomMirrorException.ServerError -> ServerError(ffi.status, ffi.reason)
+                is FfiBlossomMirrorException.ServerException -> ServerError(ffi.status, ffi.reason)
                 is FfiBlossomMirrorException.ResponseTooLarge -> ResponseTooLarge(ffi.limitBytes)
                 is FfiBlossomMirrorException.DescriptorInvalid ->
                     DescriptorInvalid(BlossomDescriptorError.from(ffi.error))
@@ -484,7 +484,7 @@ sealed class BlossomDeleteError(message: String) : Exception(message) {
                 is FfiBlossomDeleteException.NotFound -> NotFound(ffi.reason)
                 is FfiBlossomDeleteException.ServerRejected ->
                     ServerRejected(ffi.status, ffi.reason)
-                is FfiBlossomDeleteException.ServerError -> ServerError(ffi.status, ffi.reason)
+                is FfiBlossomDeleteException.ServerException -> ServerError(ffi.status, ffi.reason)
             }
     }
 }
@@ -556,7 +556,7 @@ sealed class BlossomListError(message: String) : Exception(message) {
                 is FfiBlossomListException.AuthRejected -> AuthRejected(ffi.status, ffi.reason)
                 is FfiBlossomListException.ServerRejected ->
                     ServerRejected(ffi.status, ffi.reason)
-                is FfiBlossomListException.ServerError -> ServerError(ffi.status, ffi.reason)
+                is FfiBlossomListException.ServerException -> ServerError(ffi.status, ffi.reason)
                 is FfiBlossomListException.ResponseTooLarge -> ResponseTooLarge(ffi.limitBytes)
                 is FfiBlossomListException.BodyNotAnArray -> BodyNotAnArray(ffi.reason)
                 is FfiBlossomListException.InvalidDescriptor ->
@@ -783,7 +783,7 @@ class BlossomClient(config: BlossomClientConfig = BlossomClientConfig()) {
                 BlobDescriptor.from(
                     ffi.upload(
                         serverUrl,
-                        blob.map { it.toUByte() },
+                        blob,
                         contentType,
                         authorization.ffi,
                     ),
