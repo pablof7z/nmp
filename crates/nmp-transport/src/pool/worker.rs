@@ -48,6 +48,11 @@ use super::{ThreadRole, ThreadSpawnError};
 
 const SOCKET: Token = Token(0);
 const CONTROL: Token = Token(1);
+/// Per-protected-generation transport-owned first-frame observation contract.
+/// Unlike an engine deadline, the relay worker remains the sole producer
+/// throughout this interval, so any frame it observes is enqueued before
+/// completion. Public generations do not pay this interval.
+const INITIAL_READ_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
 
 /// Command the pool pushes to one relay worker.
 pub(super) enum WorkerCommand {
@@ -58,6 +63,11 @@ pub(super) enum WorkerCommand {
     /// engine after observing `Connected` so the current live subscriptions
     /// survive a reconnect without the engine racing the socket.
     SetReconnectPreamble(Vec<String>),
+    /// Open the ordinary outbound gate for one exact connected generation
+    /// after the consumer has applied its ordered initial-read edge.
+    ReleaseInitialRead {
+        generation: u64,
+    },
     /// A durable `EVENT` handoff (issue #93), scoped to the generation the
     /// caller observed when it submitted this. Tracked in a queue entirely
     /// separate from the plain `Send` deque above: it never survives a
@@ -135,6 +145,11 @@ pub(super) enum WorkerEventKind {
         worker_id: u32,
     },
     Connected,
+    /// This protected generation completed its initial socket observation and
+    /// final nonblocking read-drain. Any observed frame was emitted before
+    /// this edge on the same FIFO worker event stream. Public generations skip
+    /// the handshake and never emit this marker.
+    InitialReadCompleted,
     /// `permanent` mirrors [`backoff::is_permanent_error`] (HTTP 401/403):
     /// the pool must not keep auto-reconnecting on its own. `retry_in` is
     /// the (pre-jitter) delay before the next reconnect attempt, `None` for
@@ -296,6 +311,7 @@ pub(super) fn spawn(
     slot: u32,
     worker_id: u32,
     url: String,
+    initial_gate_required: bool,
     event_tx: SyncSender<WorkerEvent>,
     keepalive_idle: Duration,
     keepalive_pong_timeout: Duration,
@@ -327,6 +343,7 @@ pub(super) fn spawn(
                     slot,
                     worker_id,
                     url,
+                    initial_gate_required,
                     event_tx,
                     command_rx,
                     waker_for_thread,
@@ -372,6 +389,7 @@ fn run_worker(
     slot: u32,
     worker_id: u32,
     url: String,
+    initial_gate_required: bool,
     event_tx: SyncSender<WorkerEvent>,
     command_rx: Receiver<WorkerCommand>,
     waker_slot: Arc<Mutex<Option<Waker>>>,
@@ -453,6 +471,7 @@ fn run_worker(
                     &mut write_accepted,
                     &mut ephemeral,
                     &mut ephemeral_write_accepted,
+                    initial_gate_required,
                 );
                 match outcome {
                     ConnectedOutcome::Shutdown => return,
@@ -587,7 +606,11 @@ fn drain_permanently_disconnected(
             Ok(WorkerCommand::SendEphemeral { completion, .. }) => {
                 completion.resolve(EphemeralSendOutcome::Unavailable);
             }
-            Ok(WorkerCommand::Send(_) | WorkerCommand::SetReconnectPreamble(_)) => {}
+            Ok(
+                WorkerCommand::Send(_)
+                | WorkerCommand::SetReconnectPreamble(_)
+                | WorkerCommand::ReleaseInitialRead { .. },
+            ) => {}
             Ok(WorkerCommand::Shutdown) | Err(_) => return,
         }
     }
@@ -761,6 +784,7 @@ fn wait_before_reconnect(
         match command_rx.recv_timeout(remaining) {
             Ok(WorkerCommand::Send(text)) => pending.push_back(text),
             Ok(WorkerCommand::SetReconnectPreamble(frames)) => *preamble = frames,
+            Ok(WorkerCommand::ReleaseInitialRead { .. }) => {}
             Ok(WorkerCommand::SendDurable { correlation, .. }) => {
                 resolve_correlation(
                     event_tx,
@@ -802,7 +826,9 @@ fn run_connected(
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
     ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    initial_gate_required: bool,
 ) -> ConnectedOutcome {
+    let mut outbound_released = !initial_gate_required;
     let outcome = run_connected_inner(
         slot,
         generation,
@@ -818,6 +844,8 @@ fn run_connected(
         write_accepted,
         ephemeral,
         ephemeral_write_accepted,
+        &mut outbound_released,
+        initial_gate_required,
     );
     resolve_generation_end(
         event_tx,
@@ -847,6 +875,8 @@ fn run_connected_inner(
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
     ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    outbound_released: &mut bool,
+    initial_gate_required: bool,
 ) -> ConnectedOutcome {
     let mut poller = match RelayPoller::new(socket, waker_slot) {
         Ok(poller) => poller,
@@ -857,6 +887,73 @@ fn run_connected_inner(
             }
         }
     };
+
+    if initial_gate_required {
+        // Arbitrate a protected generation's first inbound frame before
+        // accepting any ordinary outbound command. Control wakeups only
+        // buffer commands during this worker-owned interval; they cannot
+        // terminate it or flush ordinary wire. Public sessions skip this
+        // entire handshake and enter the established read/write loop below.
+        let initial_read_deadline = Instant::now() + INITIAL_READ_OBSERVATION_WINDOW;
+        loop {
+            // Authoritative terminal check (issue #506 Fix 2), mirrored from
+            // the established loop below: a retirement during this bounded
+            // observation window may have had its best-effort `Shutdown`
+            // nudge dropped by a full command queue, so the atomic — not the
+            // 250 ms deadline — is what guarantees a prompt exit.
+            if shutdown_requested(shutdown) {
+                resolve_queued_durables_on_shutdown(command_rx, event_tx, slot, generation);
+                let _ = socket.close(None);
+                return ConnectedOutcome::Shutdown;
+            }
+            match drain_commands(
+                command_rx,
+                pending,
+                preamble,
+                durable,
+                ephemeral,
+                outbound_released,
+                event_tx,
+                slot,
+                generation,
+            ) {
+                Drain::Continue => {}
+                Drain::Shutdown | Drain::Disconnected => {
+                    let _ = socket.close(None);
+                    return ConnectedOutcome::Shutdown;
+                }
+            }
+            let remaining = initial_read_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match poller.wait(remaining) {
+                Ok(true) => {
+                    if let Some(outcome) =
+                        complete_initial_read(slot, generation, event_tx, socket, keepalive)
+                    {
+                        return outcome;
+                    }
+                    break;
+                }
+                Ok(false) => {
+                    if Instant::now() >= initial_read_deadline {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    return ConnectedOutcome::Reconnect {
+                        message: format!("initial readiness wait failed: {error}"),
+                        permanent: false,
+                    }
+                }
+            }
+        }
+        if let Some(outcome) = complete_initial_read(slot, generation, event_tx, socket, keepalive)
+        {
+            return outcome;
+        }
+    }
 
     loop {
         // Authoritative terminal check (issue #506 Fix 2): `retire` wakes the
@@ -876,7 +973,15 @@ fn run_connected_inner(
             return ConnectedOutcome::Shutdown;
         }
         match drain_commands(
-            command_rx, pending, preamble, durable, ephemeral, event_tx, slot, generation,
+            command_rx,
+            pending,
+            preamble,
+            durable,
+            ephemeral,
+            outbound_released,
+            event_tx,
+            slot,
+            generation,
         ) {
             Drain::Continue => {}
             Drain::Shutdown | Drain::Disconnected => {
@@ -885,7 +990,8 @@ fn run_connected_inner(
             }
         }
 
-        let mut wants_write = match flush_writes(
+        let flush = flush_generation_writes(
+            *outbound_released,
             pending,
             durable,
             write_accepted,
@@ -895,7 +1001,8 @@ fn run_connected_inner(
             event_tx,
             slot,
             generation,
-        ) {
+        );
+        let mut wants_write = match flush {
             FlushResult::Flushed => false,
             FlushResult::Blocked => true,
             FlushResult::Broken(message) => {
@@ -966,6 +1073,26 @@ fn run_connected_inner(
     }
 }
 
+fn complete_initial_read(
+    slot: u32,
+    generation: u64,
+    event_tx: &SyncSender<WorkerEvent>,
+    socket: &mut RelaySocket,
+    keepalive: &mut KeepaliveState,
+) -> Option<ConnectedOutcome> {
+    if let Some(outcome) = drain_reads(slot, generation, event_tx, socket, keepalive) {
+        return Some(outcome);
+    }
+    event_tx
+        .send(WorkerEvent {
+            slot,
+            generation,
+            kind: WorkerEventKind::InitialReadCompleted,
+        })
+        .err()
+        .map(|_| ConnectedOutcome::Shutdown)
+}
+
 enum Drain {
     Continue,
     Shutdown,
@@ -985,6 +1112,7 @@ fn drain_commands(
     preamble: &mut Vec<String>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
+    outbound_released: &mut bool,
     event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
@@ -994,6 +1122,13 @@ fn drain_commands(
             Ok(WorkerCommand::Send(text)) => pending.push_back(text),
             Ok(WorkerCommand::Shutdown) => return Drain::Shutdown,
             Ok(WorkerCommand::SetReconnectPreamble(frames)) => *preamble = frames,
+            Ok(WorkerCommand::ReleaseInitialRead {
+                generation: release_generation,
+            }) => {
+                if release_generation == generation {
+                    *outbound_released = true;
+                }
+            }
             Ok(WorkerCommand::SendDurable {
                 generation: cmd_generation,
                 correlation,
@@ -1032,6 +1167,44 @@ enum FlushResult {
     Flushed,
     Blocked,
     Broken(String),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_generation_writes(
+    outbound_released: bool,
+    pending: &mut VecDeque<String>,
+    durable: &mut VecDeque<(AttemptCorrelation, String)>,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+    ephemeral: &mut VecDeque<EphemeralFrame>,
+    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    socket: &mut RelaySocket,
+    event_tx: &SyncSender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) -> FlushResult {
+    if outbound_released {
+        flush_writes(
+            pending,
+            durable,
+            write_accepted,
+            ephemeral,
+            ephemeral_write_accepted,
+            socket,
+            event_tx,
+            slot,
+            generation,
+        )
+    } else {
+        flush_ephemeral_writes(
+            ephemeral,
+            write_accepted,
+            ephemeral_write_accepted,
+            socket,
+            event_tx,
+            slot,
+            generation,
+        )
+    }
 }
 
 /// Write every pending REQ frame, then every queued durable EVENT frame,
@@ -1084,6 +1257,27 @@ fn flush_writes(
             }
         }
     }
+    flush_ephemeral_writes(
+        ephemeral,
+        write_accepted,
+        ephemeral_write_accepted,
+        socket,
+        event_tx,
+        slot,
+        generation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_ephemeral_writes(
+    ephemeral: &mut VecDeque<EphemeralFrame>,
+    write_accepted: &mut Vec<AttemptCorrelation>,
+    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    socket: &mut RelaySocket,
+    event_tx: &SyncSender<WorkerEvent>,
+    slot: u32,
+    generation: u64,
+) -> FlushResult {
     while let Some(pending) = ephemeral.pop_front() {
         match socket.write(Message::Text(pending.frame.clone().into())) {
             Ok(()) => ephemeral_write_accepted.push(pending.completion),
@@ -1181,6 +1375,12 @@ fn drain_reads(
         match socket.read() {
             Ok(message) => {
                 keepalive.on_inbound(Instant::now());
+                if matches!(message, Message::Close(_)) {
+                    return Some(ConnectedOutcome::Reconnect {
+                        message: "peer closed websocket".to_string(),
+                        permanent: false,
+                    });
+                }
                 if let Some(frame) = classify_message(&message) {
                     if event_tx
                         .send(WorkerEvent {
@@ -1194,13 +1394,35 @@ fn drain_reads(
                     }
                 }
             }
-            Err(error) if is_nonblocking_io(&error) => return None,
+            Err(error) if read_error_disposition(&error) == ReadErrorDisposition::Retry => continue,
+            Err(error) if read_error_disposition(&error) == ReadErrorDisposition::Drained => {
+                return None;
+            }
             Err(error) => {
                 let message = error.to_string();
                 let permanent = backoff::is_permanent_error(&message);
                 return Some(ConnectedOutcome::Reconnect { message, permanent });
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadErrorDisposition {
+    Retry,
+    Drained,
+    Fatal,
+}
+
+fn read_error_disposition(error: &tungstenite::Error) -> ReadErrorDisposition {
+    match error {
+        tungstenite::Error::Io(error) if error.kind() == io::ErrorKind::Interrupted => {
+            ReadErrorDisposition::Retry
+        }
+        tungstenite::Error::Io(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            ReadErrorDisposition::Drained
+        }
+        _ => ReadErrorDisposition::Fatal,
     }
 }
 
@@ -1254,9 +1476,12 @@ impl<'a> RelayPoller<'a> {
     /// elapses. The caller doesn't need to know WHICH woke it — every
     /// wakeup unconditionally re-drains commands, writes, and reads (see
     /// the call site's comment on why that's both correct and cheap).
-    fn wait(&mut self, timeout: Duration) -> io::Result<()> {
+    fn wait(&mut self, timeout: Duration) -> io::Result<bool> {
         self.poll.poll(&mut self.events, Some(timeout))?;
-        Ok(())
+        Ok(self
+            .events
+            .iter()
+            .any(|event| event.token() == SOCKET && event.is_readable()))
     }
 }
 
@@ -1305,6 +1530,7 @@ fn socket_tcp(socket: &mut RelaySocket) -> io::Result<&mut TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::RelayMessage;
     use std::io::Read;
     use std::net::TcpListener;
     use tungstenite::protocol::{Role, WebSocketConfig};
@@ -1326,6 +1552,28 @@ mod tests {
             Some(config),
         );
         (socket, peer)
+    }
+
+    fn real_websocket_pair() -> (
+        RelaySocket,
+        tungstenite::WebSocket<MaybeTlsStream<TcpStream>>,
+    ) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let client = tungstenite::WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(client),
+            Role::Client,
+            None,
+        );
+        let server = tungstenite::WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(peer),
+            Role::Server,
+            None,
+        );
+        (client, server)
     }
 
     fn begin_real_unconfirmed_write(
@@ -1405,6 +1653,235 @@ mod tests {
             worker_id_of(pack_generation(1, 0)),
             worker_id_of(pack_generation(2, 0))
         );
+    }
+
+    #[test]
+    fn initial_read_orders_buffered_auth_before_completion_and_completes_empty_once() {
+        let (mut socket, mut peer) = real_websocket_pair();
+        peer.send(Message::Text(
+            "[\"AUTH\",\"worker-ordered\"]".to_string().into(),
+        ))
+        .unwrap();
+        peer.flush().unwrap();
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let mut keepalive = KeepaliveState::new(
+            Instant::now(),
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+        );
+        let waker_slot = Arc::new(Mutex::new(None));
+        let mut poller = RelayPoller::new(&mut socket, &waker_slot).unwrap();
+        assert!(poller.wait(Duration::from_secs(1)).unwrap());
+        drop(poller);
+
+        assert!(complete_initial_read(3, 9, &event_tx, &mut socket, &mut keepalive).is_none());
+        let events = event_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0].kind,
+            WorkerEventKind::Frame(RelayFrame::Message(message))
+                if matches!(message.as_ref(), RelayMessage::Auth { challenge } if challenge == "worker-ordered")
+        ));
+        assert!(matches!(
+            events[1].kind,
+            WorkerEventKind::InitialReadCompleted
+        ));
+
+        let (mut empty_socket, _empty_peer) = real_websocket_pair();
+        let (empty_tx, empty_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let mut empty_keepalive = KeepaliveState::new(
+            Instant::now(),
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+        );
+        assert!(
+            complete_initial_read(4, 10, &empty_tx, &mut empty_socket, &mut empty_keepalive,)
+                .is_none()
+        );
+        let empty_events = empty_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(empty_events.len(), 1);
+        assert!(matches!(
+            empty_events[0].kind,
+            WorkerEventKind::InitialReadCompleted
+        ));
+
+        assert_eq!(
+            read_error_disposition(&tungstenite::Error::Io(io::Error::from(
+                io::ErrorKind::Interrupted,
+            ))),
+            ReadErrorDisposition::Retry,
+            "Interrupted must retry the read instead of completing the drain"
+        );
+        assert_eq!(
+            read_error_disposition(&tungstenite::Error::Io(io::Error::from(
+                io::ErrorKind::WouldBlock,
+            ))),
+            ReadErrorDisposition::Drained
+        );
+
+        let (mut closing_socket, mut closing_peer) = real_websocket_pair();
+        closing_peer.close(None).unwrap();
+        closing_peer.flush().unwrap();
+        let (closing_tx, closing_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let closing_waker = Arc::new(Mutex::new(None));
+        let mut closing_poller = RelayPoller::new(&mut closing_socket, &closing_waker).unwrap();
+        assert!(
+            closing_poller.wait(Duration::from_secs(1)).unwrap(),
+            "close frame must be socket-readable before exercising initial drain"
+        );
+        let mut closing_keepalive = KeepaliveState::new(
+            Instant::now(),
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+        );
+        assert!(matches!(
+            complete_initial_read(
+                5,
+                11,
+                &closing_tx,
+                &mut closing_socket,
+                &mut closing_keepalive,
+            ),
+            Some(ConnectedOutcome::Reconnect { .. })
+        ));
+        assert!(
+            closing_rx
+                .try_iter()
+                .all(|event| !matches!(event.kind, WorkerEventKind::InitialReadCompleted)),
+            "a websocket close is fatal and cannot emit completion"
+        );
+    }
+
+    #[test]
+    fn public_connected_loop_flushes_queued_wire_without_initial_marker() {
+        let (mut socket, mut peer) = real_websocket_pair();
+        let (command_tx, command_rx) = mpsc::channel();
+        command_tx
+            .send(WorkerCommand::Send("public-immediate".to_string()))
+            .unwrap();
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let waker = Arc::new(Mutex::new(None));
+        let worker_waker = Arc::clone(&waker);
+        let worker = std::thread::spawn(move || {
+            let mut pending = VecDeque::new();
+            let mut keepalive = KeepaliveState::new(
+                Instant::now(),
+                Duration::from_secs(60),
+                Duration::from_secs(10),
+            );
+            let mut preamble = Vec::new();
+            let mut durable = VecDeque::new();
+            let mut write_accepted = Vec::new();
+            let mut ephemeral = VecDeque::new();
+            let mut ephemeral_write_accepted = Vec::new();
+            let mut outbound_released = true;
+            let shutdown = AtomicBool::new(false);
+            run_connected_inner(
+                3,
+                12,
+                &event_tx,
+                &command_rx,
+                &worker_waker,
+                &shutdown,
+                &mut pending,
+                &mut socket,
+                &mut keepalive,
+                &mut preamble,
+                &mut durable,
+                &mut write_accepted,
+                &mut ephemeral,
+                &mut ephemeral_write_accepted,
+                &mut outbound_released,
+                false,
+            )
+        });
+
+        assert!(matches!(
+            peer.read().unwrap(),
+            Message::Text(text) if text == "public-immediate"
+        ));
+        assert!(
+            event_rx
+                .try_iter()
+                .all(|event| !matches!(event.kind, WorkerEventKind::InitialReadCompleted)),
+            "a public session must never enter the protected marker handshake"
+        );
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        if let Some(waker) = waker.lock().unwrap().as_ref() {
+            waker.wake().unwrap();
+        }
+        assert!(matches!(worker.join().unwrap(), ConnectedOutcome::Shutdown));
+    }
+
+    #[test]
+    fn ordinary_outbound_is_held_until_exact_generation_release() {
+        let (mut socket, mut peer) = real_websocket_pair();
+        let (event_tx, _event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let mut pending = VecDeque::from(["held".to_string()]);
+        let mut durable = VecDeque::new();
+        let mut write_accepted = Vec::new();
+        let mut ephemeral = VecDeque::new();
+        let mut ephemeral_write_accepted = Vec::new();
+
+        assert!(matches!(
+            flush_generation_writes(
+                false,
+                &mut pending,
+                &mut durable,
+                &mut write_accepted,
+                &mut ephemeral,
+                &mut ephemeral_write_accepted,
+                &mut socket,
+                &event_tx,
+                1,
+                7,
+            ),
+            FlushResult::Flushed
+        ));
+        assert_eq!(pending, ["held"], "closed gate cannot consume queued wire");
+
+        assert!(matches!(
+            flush_generation_writes(
+                true,
+                &mut pending,
+                &mut durable,
+                &mut write_accepted,
+                &mut ephemeral,
+                &mut ephemeral_write_accepted,
+                &mut socket,
+                &event_tx,
+                1,
+                7,
+            ),
+            FlushResult::Flushed
+        ));
+        assert!(pending.is_empty());
+        assert!(matches!(
+            peer.read().unwrap(),
+            Message::Text(text) if text == "held"
+        ));
+
+        let (command_tx, command_rx) = mpsc::channel();
+        command_tx
+            .send(WorkerCommand::ReleaseInitialRead { generation: 6 })
+            .unwrap();
+        let mut preamble = Vec::new();
+        let mut released = false;
+        assert!(matches!(
+            drain_commands(
+                &command_rx,
+                &mut pending,
+                &mut preamble,
+                &mut durable,
+                &mut ephemeral,
+                &mut released,
+                &event_tx,
+                1,
+                7,
+            ),
+            Drain::Continue
+        ));
+        assert!(!released, "stale generation release must be inert");
     }
 
     #[test]
@@ -1769,6 +2246,7 @@ mod tests {
         let mut preamble = Vec::new();
         let mut durable = VecDeque::new();
         let mut ephemeral = VecDeque::new();
+        let mut outbound_released = false;
         assert!(matches!(
             drain_commands(
                 &command_rx,
@@ -1776,6 +2254,7 @@ mod tests {
                 &mut preamble,
                 &mut durable,
                 &mut ephemeral,
+                &mut outbound_released,
                 &event_tx,
                 4,
                 8,
@@ -1811,6 +2290,7 @@ mod tests {
         let mut preamble = vec!["req-preamble".to_string()];
         let mut durable = VecDeque::new();
         let mut ephemeral = VecDeque::new();
+        let mut outbound_released = false;
         assert!(matches!(
             drain_commands(
                 &command_rx,
@@ -1818,6 +2298,7 @@ mod tests {
                 &mut preamble,
                 &mut durable,
                 &mut ephemeral,
+                &mut outbound_released,
                 &event_tx,
                 2,
                 9,

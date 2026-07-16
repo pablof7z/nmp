@@ -130,10 +130,12 @@ pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 // field type `DiagnosticsSnapshot` names must be reachable from here too,
 // or an app cannot even print what it read. (The public per-session
 // AUTH-diagnostics projection -- `AuthDiagnosticsSnapshot`/
-// `AuthDiagnosticsPhase` -- is intentionally NOT part of #8 Wave 2:
-// `DiagnosticsSnapshot` carries no `auth_sessions` field this wave, so those
-// types are not reachable here. The whole auth-diagnostics read-out lands in
-// Wave 3 with its FFI projection and the policy API.)
+// `AuthDiagnosticsPhase` -- is intentionally NOT part of the supported
+// facade surface yet: #8 U4 gives `DiagnosticsSnapshot` an engine-owned
+// `auth_sessions` read-out for its own falsifiers/capstone, but the field is
+// `#[doc(hidden)]` and its types are not re-exported here. The documented
+// facade/FFI auth-diagnostics read-out lands with the app-facing policy
+// API's wave.)
 //
 // Two distinct coverage surfaces live here, deliberately not conflated
 // (`docs/design/scoped-evidence-49-12-plan.md` §4): `AcquisitionEvidence`

@@ -889,7 +889,14 @@ fn collect_direct_receipts_until_awaiting_auth(
     loop {
         let status = recv_before(rx, deadline, "direct auth-parked receipt");
         let normalized = normalize_direct_status(status, relay);
-        let parked = matches!(normalized, NormStatus::AwaitingAuth(_));
+        // #8 U4: the first `AwaitingAuth` beat is the bounded AUTH-discovery
+        // park on the cold protected session (before `Sent`); the park under
+        // test is the one the relay's `auth-required:` refusal causes AFTER
+        // the send.
+        let sent = statuses
+            .iter()
+            .any(|status| matches!(status, NormStatus::Sent(_)));
+        let parked = sent && matches!(normalized, NormStatus::AwaitingAuth(_));
         statuses.push(normalized);
         if parked {
             return statuses;
@@ -906,7 +913,10 @@ fn collect_ffi_receipts_until_awaiting_auth(
     loop {
         let status = recv_before(rx, deadline, "FFI auth-parked receipt");
         let normalized = normalize_ffi_status(status, relay);
-        let parked = matches!(normalized, NormStatus::AwaitingAuth(_));
+        let sent = statuses
+            .iter()
+            .any(|status| matches!(status, NormStatus::Sent(_)));
+        let parked = sent && matches!(normalized, NormStatus::AwaitingAuth(_));
         statuses.push(normalized);
         if parked {
             return statuses;
@@ -921,6 +931,11 @@ fn collect_ffi_receipts_until_awaiting_auth(
 /// schedules the eligible lane in the same turn that dials the session,
 /// before that dial can possibly complete) — for EVERY durable write, since
 /// worker reconciliation closes the write session once a write terminates.
+/// #8 U4 adds the second deterministic beat: once the cold protected
+/// session connects, its bounded initial AUTH-discovery window parks the
+/// lane as `AwaitingAuth` until the transport's ordered first-read
+/// completion releases it (a relay that never challenges releases within
+/// the window; one that does parks it for real).
 fn expected_send_preamble(keys: &Keys) -> Vec<NormStatus> {
     let event = UnsignedEvent::new(
         keys.public_key(),
@@ -937,6 +952,7 @@ fn expected_send_preamble(keys: &Keys) -> Vec<NormStatus> {
         NormStatus::Signed(event.id.to_hex()),
         NormStatus::Routed(vec![relay.clone()]),
         NormStatus::AwaitingRelay(relay.clone()),
+        NormStatus::AwaitingAuth(relay.clone()),
         NormStatus::Sent(relay),
     ]
 }
@@ -2527,6 +2543,7 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
             NormFollowActionStatus::Receipt("signed"),
             NormFollowActionStatus::Receipt("routed"),
             NormFollowActionStatus::Receipt("awaiting_relay"),
+            NormFollowActionStatus::Receipt("awaiting_auth"),
             NormFollowActionStatus::Receipt("sent"),
             NormFollowActionStatus::Receipt("acked")
         ]
@@ -2539,6 +2556,7 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
             NormFollowActionStatus::Receipt("signed"),
             NormFollowActionStatus::Receipt("routed"),
             NormFollowActionStatus::Receipt("awaiting_relay"),
+            NormFollowActionStatus::Receipt("awaiting_auth"),
             NormFollowActionStatus::Receipt("sent"),
             NormFollowActionStatus::Receipt("acked")
         ]

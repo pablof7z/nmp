@@ -1,4 +1,4 @@
-//! The async edge (plan §2 position 2). `EngineThread` spawns TWO dedicated
+//! The async edge (plan §2 position 2). `EngineThread` spawns THREE dedicated
 //! OS threads:
 //!
 //! - the **engine thread**, which owns `core::EngineCore` and runs a
@@ -16,7 +16,10 @@
 //! - the **pool-bridge thread**, a tiny translator that blocking-`recv`s
 //!   `nmp_transport::PoolEvent`s (the pool's OWN `mio` worker threads push
 //!   these) and forwards each as a `core::EngineMsg` onto the engine
-//!   thread's inbox.
+//!   thread's inbox;
+//! - the **AUTH-release bridge**, which forwards only destructor-free
+//!   executor `ReleaseId`s. Rich session/terminal state remains in the
+//!   engine-thread registry and is never owned or dropped by the reaper.
 //!
 //! `Handle` is the cheap, `Clone + Send` value the app holds: it sends
 //! command `EngineMsg`s in (wrapped in the runtime-private [`Cmd`] envelope)
@@ -63,11 +66,17 @@
 mod auth;
 mod diagnostics_channel;
 
+pub use auth::{
+    AddAuthPolicyError, AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp,
+    AuthPolicyPendingSender, AuthPolicyRegistration, AuthPolicyRequest, AuthPolicyResolveError,
+    PendingAuthPolicyOp,
+};
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -81,12 +90,13 @@ use nmp_signer::{
 };
 use nmp_store::EventStore;
 use nostr::{
-    ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, SubscriptionId,
-    Timestamp, UnsignedEvent,
+    ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayMessage, RelayUrl,
+    SubscriptionId, Timestamp, UnsignedEvent,
 };
 
 use nmp_transport::{
-    DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, RelaySessionKey, WireFrame,
+    DurableSendOutcome, HandoffResult, Pool, PoolConfig, PoolEvent, RelayFrame, RelaySessionKey,
+    WireFrame,
 };
 
 use crate::core::{
@@ -121,6 +131,8 @@ struct EnginePoolRuntime {
     stop: cb::Sender<()>,
     native_tasks: nmp_executor::Executor,
     relay_information: RelayInformationService,
+    auth_release_sender: Sender<nmp_executor::ReleaseId>,
+    max_auth_capabilities: usize,
 }
 
 impl nmp_transport::PoolEventSink for EnginePoolSink {
@@ -673,6 +685,17 @@ enum Cmd {
         registration: SignerRegistration,
         reply: Sender<bool>,
     },
+    AddAuthPolicy {
+        expected_pubkey: PublicKey,
+        policy: Box<dyn AuthPolicy>,
+        reply: Sender<Result<AuthPolicyRegistration, AddAuthPolicyError>>,
+    },
+    RemoveAuthPolicy {
+        registration: AuthPolicyRegistration,
+        reply: Sender<bool>,
+    },
+    AuthTaskCompleted(auth::AuthTaskCompletion),
+    AuthTaskReleased(nmp_executor::ReleaseId),
     /// Sign one exact event through the active account's registered
     /// capability without entering the write/store/outbox reducer.
     SignEvent {
@@ -683,6 +706,7 @@ enum Cmd {
     },
     CancelSignEvent(u64),
     SignEventFinished(u64),
+    ExemptSignEventDrain(nmp_executor::TaskId),
     /// Register a new diagnostics observer (M5 plan §1.2 step 4). The reply
     /// carries the id (used only by `Cmd::UnobserveDiagnostics` to withdraw
     /// later) and a mailbox already primed with the CURRENT snapshot — an
@@ -787,6 +811,22 @@ struct SignEventRegistration {
     terminal: Arc<SignEventTerminal>,
 }
 
+struct ActiveSignEvent {
+    terminal: Arc<SignEventTerminal>,
+    task_id: nmp_executor::TaskId,
+}
+
+struct SignEventFinishedGuard {
+    inbox: Sender<Cmd>,
+    operation_id: u64,
+}
+
+impl Drop for SignEventFinishedGuard {
+    fn drop(&mut self) {
+        let _ = self.inbox.send(Cmd::SignEventFinished(self.operation_id));
+    }
+}
+
 impl std::fmt::Display for SignEventError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -868,110 +908,138 @@ fn validate_signer_output(
 
 struct RegisteredSigner {
     identity: Arc<()>,
-    signer: Box<dyn SigningCapability + Send>,
+    instance: core::AuthCapabilityInstance,
+    signer: SharedSigner,
 }
 
+type SharedSigner = Arc<Mutex<Box<dyn SigningCapability + Send>>>;
+
 impl SignerRegistry {
-    fn auth_instance(identity: &Arc<()>) -> crate::core::AuthCapabilityInstance {
-        // A stale `SignerRegistration` retains this allocation, so its
-        // address cannot be reused while a stale removal can still arrive.
-        crate::core::AuthCapabilityInstance(Arc::as_ptr(identity) as usize as u64)
+    fn contains(&self, pk: PublicKey) -> bool {
+        self.signers.contains_key(&pk)
+    }
+
+    fn len(&self) -> usize {
+        self.signers.len()
     }
 
     /// Register `signer` under its own `public_key()`, replacing any prior
     /// capability already registered for that key.
     fn add(
         &mut self,
+        pk: PublicKey,
+        instance: core::AuthCapabilityInstance,
         signer: Box<dyn SigningCapability + Send>,
-    ) -> Result<SignerRegistration, AddSignerError> {
-        let pk = signer
-            .public_key()
-            .ok_or(AddSignerError::MissingPublicKey)?;
+    ) -> (SignerRegistration, Option<core::AuthCapabilityInstance>) {
         let identity = Arc::new(());
-        self.signers.insert(
-            pk,
-            RegisteredSigner {
-                identity: Arc::clone(&identity),
-                signer,
+        let replaced = self
+            .signers
+            .insert(
+                pk,
+                RegisteredSigner {
+                    identity: Arc::clone(&identity),
+                    instance,
+                    signer: Arc::new(Mutex::new(signer)),
+                },
+            )
+            .map(|old| old.instance);
+        (
+            SignerRegistration {
+                public_key: pk,
+                identity,
+                instance,
             },
-        );
-        Ok(SignerRegistration {
-            public_key: pk,
-            identity,
-        })
+            replaced,
+        )
     }
 
     /// Remove only the capability installed by this exact registration.
     /// A stale remote session can therefore never detach a newer replacement
     /// for the same account.
-    fn remove(&mut self, registration: &SignerRegistration) -> bool {
+    fn remove(
+        &mut self,
+        registration: &SignerRegistration,
+    ) -> Option<core::AuthCapabilityInstance> {
         let is_current = self
             .signers
             .get(&registration.public_key)
-            .is_some_and(|current| Arc::ptr_eq(&current.identity, &registration.identity));
-        if is_current {
-            self.signers.remove(&registration.public_key);
+            .is_some_and(|current| {
+                current.instance == registration.instance
+                    && Arc::ptr_eq(&current.identity, &registration.identity)
+            });
+        if !is_current {
+            return None;
         }
-        is_current
+        self.signers
+            .remove(&registration.public_key)
+            .map(|entry| entry.instance)
     }
 
     /// Resolve the signer frozen into this exact accepted template. An
     /// account switch cannot redirect already-accepted work.
-    fn signer_for(&self, pk: PublicKey) -> Option<&(dyn SigningCapability + Send)> {
-        self.signers.get(&pk).map(|entry| entry.signer.as_ref())
+    fn sign(&self, unsigned: UnsignedEvent) -> Option<SignerOp<SignedEvent>> {
+        self.signers.get(&unsigned.pubkey).map(|entry| {
+            entry
+                .signer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .sign(unsigned)
+        })
     }
 
-    fn auth_signer_for(
-        &self,
-        pk: PublicKey,
-    ) -> Option<(
-        crate::core::AuthCapabilityInstance,
-        &(dyn SigningCapability + Send),
-    )> {
+    fn auth_snapshot(&self, pk: PublicKey) -> Option<(core::AuthCapabilityInstance, SharedSigner)> {
         self.signers
             .get(&pk)
-            .map(|entry| (Self::auth_instance(&entry.identity), entry.signer.as_ref()))
+            .map(|entry| (entry.instance, Arc::clone(&entry.signer)))
     }
 
-    fn auth_instance_for(&self, pk: PublicKey) -> Option<crate::core::AuthCapabilityInstance> {
-        self.signers
-            .get(&pk)
-            .map(|entry| Self::auth_instance(&entry.identity))
+    fn is_available(&self, pk: PublicKey) -> bool {
+        self.signers.get(&pk).is_some_and(|entry| {
+            entry
+                .signer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .is_available()
+        })
     }
 }
 
-/// One dedicated engine OS thread (§2 position 2) plus the pool-bridge
-/// thread that feeds it. Returned alongside the [`Handle`] the app actually
-/// uses; kept around only so a caller (chiefly tests) can deterministically
-/// `join` both threads after triggering [`Handle::shutdown`].
+/// One dedicated engine OS thread (§2 position 2) plus the pool and AUTH
+/// release bridge threads that feed it. Returned alongside the [`Handle`]
+/// the app actually uses; kept around only so a caller (chiefly tests) can
+/// deterministically `join` every thread after triggering
+/// [`Handle::shutdown`].
 pub struct EngineThread {
     engine_join: Option<JoinHandle<()>>,
     bridge_join: Option<JoinHandle<()>>,
+    auth_release_bridge_join: Option<JoinHandle<()>>,
+    drain_inbox: Sender<Cmd>,
     native_tasks: nmp_executor::Executor,
+    #[cfg(test)]
+    runtime_threads: Arc<std::sync::atomic::AtomicUsize>,
 }
-
-#[cfg(test)]
-static ACTIVE_RUNTIME_THREADS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
 static RUNTIME_LIFECYCLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
-struct RuntimeThreadCountGuard;
+struct RuntimeThreadCountGuard {
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+}
 
 #[cfg(test)]
 impl RuntimeThreadCountGuard {
-    fn enter() -> Self {
-        ACTIVE_RUNTIME_THREADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Self
+    fn enter(counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self { counter }
     }
 }
 
 #[cfg(test)]
 impl Drop for RuntimeThreadCountGuard {
     fn drop(&mut self) {
-        ACTIVE_RUNTIME_THREADS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -980,6 +1048,7 @@ impl Drop for RuntimeThreadCountGuard {
 pub enum EngineThreadError {
     ThreadUnavailable { component: String, reason: String },
     RelayBudgetOverflow { relay_limit: usize },
+    EngineShuttingDown,
 }
 
 impl std::fmt::Display for EngineThreadError {
@@ -992,6 +1061,7 @@ impl std::fmt::Display for EngineThreadError {
                 f,
                 "relay worker budget {relay_limit} cannot represent its retirement envelope"
             ),
+            Self::EngineShuttingDown => f.write_str("engine is shutting down"),
         }
     }
 }
@@ -1014,8 +1084,28 @@ fn pool_build_error(error: nmp_transport::PoolBuildError) -> EngineThreadError {
     }
 }
 
+pub const DEFAULT_MAX_AUTH_CAPABILITIES: usize = 64;
+
+/// Finite admission limits for engine-owned native work and live AUTH
+/// policy/signer registrations. Unlike legacy zero-valued relay/task
+/// settings, zero AUTH capabilities intentionally admits none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    pub max_native_tasks: usize,
+    pub max_auth_capabilities: usize,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_native_tasks: nmp_executor::DEFAULT_MAX_TASKS,
+            max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
+        }
+    }
+}
+
 impl EngineThread {
-    /// Spawn the engine thread + the pool-bridge thread. `store`/`directory`
+    /// Spawn the engine thread and its two bridge threads. `store`/`directory`
     /// are constructed by the CALLER but moved whole into the engine
     /// thread's closure and built into `EngineCore` there — they never cross
     /// back out, which is what lets `EngineCore` itself stay `!Send`-friendly
@@ -1035,13 +1125,13 @@ impl EngineThread {
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
-        Self::spawn_with_native_task_limit(
+        Self::spawn_with_runtime_config(
             store,
             directory,
             cap,
             pool_config,
             admission,
-            nmp_executor::DEFAULT_MAX_TASKS,
+            RuntimeConfig::default(),
         )
     }
 
@@ -1049,7 +1139,7 @@ impl EngineThread {
         store: S,
         directory: D,
         cap: usize,
-        mut pool_config: PoolConfig,
+        pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
         max_native_tasks: usize,
     ) -> Result<(Self, Handle), EngineThreadError>
@@ -1057,12 +1147,38 @@ impl EngineThread {
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
-        let native_tasks = nmp_executor::Executor::new(max_native_tasks).map_err(|error| {
-            EngineThreadError::ThreadUnavailable {
-                component: "native task executor".to_string(),
-                reason: error.to_string(),
-            }
-        })?;
+        Self::spawn_with_runtime_config(
+            store,
+            directory,
+            cap,
+            pool_config,
+            admission,
+            RuntimeConfig {
+                max_native_tasks,
+                ..RuntimeConfig::default()
+            },
+        )
+    }
+
+    pub fn spawn_with_runtime_config<S, D>(
+        store: S,
+        directory: D,
+        cap: usize,
+        mut pool_config: PoolConfig,
+        admission: RelayAdmissionPolicy,
+        runtime_config: RuntimeConfig,
+    ) -> Result<(Self, Handle), EngineThreadError>
+    where
+        S: EventStore + Send + 'static,
+        D: RelayDirectory + Send + 'static,
+    {
+        let native_tasks =
+            nmp_executor::Executor::new(runtime_config.max_native_tasks).map_err(|error| {
+                EngineThreadError::ThreadUnavailable {
+                    component: "native task executor".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
         // One limit owns both compilation and connection admission. Legacy
         // zero values select the finite default; conflicting mechanism-test
         // inputs fail closed to the smaller non-zero ceiling.
@@ -1085,10 +1201,13 @@ impl EngineThread {
         pool_config.allowed_local_hosts = Arc::clone(&allowed_local_hosts);
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let (auth_release_tx, auth_release_rx) = mpsc::channel::<nmp_executor::ReleaseId>();
         let relay_information = RelayInformationService::new_with_admission(
             native_tasks.clone(),
             Arc::clone(&allowed_local_hosts),
         );
+        #[cfg(test)]
+        let runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let (pool_evt_tx, pool_evt_rx) =
             cb::bounded::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
@@ -1111,11 +1230,13 @@ impl EngineThread {
         };
 
         let bridge_inbox = cmd_tx.clone();
+        #[cfg(test)]
+        let bridge_runtime_threads = Arc::clone(&runtime_threads);
         let bridge_join = match thread::Builder::new()
             .name("nmp-engine-pool-bridge".to_string())
             .spawn(move || {
                 #[cfg(test)]
-                let _thread_count = RuntimeThreadCountGuard::enter();
+                let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
                 pool_bridge_loop(&pool_evt_rx, &pool_stop_rx, &bridge_inbox, max_engine_batch)
             }) {
             Ok(join) => join,
@@ -1129,17 +1250,49 @@ impl EngineThread {
             }
         };
 
+        let auth_release_inbox = cmd_tx.clone();
+        #[cfg(test)]
+        let auth_release_runtime_threads = Arc::clone(&runtime_threads);
+        let auth_release_bridge_join = match thread::Builder::new()
+            .name("nmp-engine-auth-release-bridge".to_string())
+            .spawn(move || {
+                #[cfg(test)]
+                let _thread_count = RuntimeThreadCountGuard::enter(auth_release_runtime_threads);
+                while let Ok(release_id) = auth_release_rx.recv() {
+                    if auth_release_inbox
+                        .send(Cmd::AuthTaskReleased(release_id))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }) {
+            Ok(join) => join,
+            Err(error) => {
+                drop(pool_stop_tx);
+                pool.shutdown();
+                let _ = bridge_join.join();
+                native_tasks.shutdown();
+                return Err(EngineThreadError::ThreadUnavailable {
+                    component: "engine AUTH release bridge".to_string(),
+                    reason: error.to_string(),
+                });
+            }
+        };
+
         let self_inbox = cmd_tx.clone();
         let engine_pool = pool.clone();
         let engine_stop = pool_stop_tx.clone();
         let engine_native_tasks = native_tasks.clone();
         let engine_relay_information = relay_information.clone();
+        #[cfg(test)]
+        let engine_runtime_threads = Arc::clone(&runtime_threads);
         let engine_join =
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
                 .spawn(move || {
                     #[cfg(test)]
-                    let _thread_count = RuntimeThreadCountGuard::enter();
+                    let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
                     engine_loop(
                         store,
                         directory,
@@ -1150,6 +1303,8 @@ impl EngineThread {
                             stop: engine_stop,
                             native_tasks: engine_native_tasks,
                             relay_information: engine_relay_information,
+                            auth_release_sender: auth_release_tx,
+                            max_auth_capabilities: runtime_config.max_auth_capabilities,
                         },
                         &cmd_rx,
                         &self_inbox,
@@ -1160,6 +1315,7 @@ impl EngineThread {
                     drop(pool_stop_tx);
                     pool.shutdown();
                     let _ = bridge_join.join();
+                    let _ = auth_release_bridge_join.join();
                     native_tasks.shutdown();
                     return Err(EngineThreadError::ThreadUnavailable {
                         component: "engine runtime".to_string(),
@@ -1174,7 +1330,11 @@ impl EngineThread {
             Self {
                 engine_join: Some(engine_join),
                 bridge_join: Some(bridge_join),
+                auth_release_bridge_join: Some(auth_release_bridge_join),
+                drain_inbox: cmd_tx.clone(),
                 native_tasks,
+                #[cfg(test)]
+                runtime_threads,
             },
             Handle {
                 inbox: cmd_tx,
@@ -1184,15 +1344,25 @@ impl EngineThread {
         ))
     }
 
-    /// Block until both the engine thread and the pool-bridge thread have
-    /// exited. Only returns once a [`Handle::shutdown`] has actually been
-    /// observed by the engine thread (which then tears down its `Pool`
-    /// clone, which is what lets the bridge thread's `recv` finally see a
-    /// disconnected channel and exit in turn) — callers that never shut down
-    /// any `Handle` will block here forever, matching `Pool::shutdown`'s own
-    /// join discipline.
+    /// Block until the engine and both bridge threads have exited. Only
+    /// returns once a [`Handle::shutdown`] has actually been observed by the
+    /// engine thread (which then tears down its `Pool` clone, allowing the
+    /// pool bridge to disconnect) — callers that never shut down any `Handle`
+    /// block here forever, matching `Pool::shutdown`'s own join discipline.
+    ///
+    /// When called from a completion running on this engine's own native-task
+    /// executor, the runtime exempts only that exact callback from its drain.
+    /// The joins above remain synchronous; the final executor shutdown is the
+    /// existing two-phase self-shutdown, whose reaper joins the callback and
+    /// releases its slot immediately after this call lets it return.
     pub fn join(mut self) {
+        if let Some(task_id) = self.native_tasks.current_task_id() {
+            let _ = self.drain_inbox.send(Cmd::ExemptSignEventDrain(task_id));
+        }
         if let Some(h) = self.engine_join.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.auth_release_bridge_join.take() {
             let _ = h.join();
         }
         if let Some(h) = self.bridge_join.take() {
@@ -1203,6 +1373,235 @@ impl EngineThread {
 
     pub fn native_tasks(&self) -> nmp_executor::Executor {
         self.native_tasks.clone()
+    }
+}
+
+#[cfg(test)]
+mod reentrant_shutdown_tests {
+    use super::*;
+    use nmp_router::FixtureDirectory;
+    use nmp_signer::LocalKeySigner;
+    use nmp_store::MemoryStore;
+    use nostr::{Keys, Kind};
+
+    fn runtime() -> (EngineThread, Handle) {
+        EngineThread::spawn_with_native_task_limit(
+            MemoryStore::new(),
+            FixtureDirectory::new(),
+            1,
+            PoolConfig::default(),
+            RelayAdmissionPolicy::default(),
+            2,
+        )
+        .expect("engine construction")
+    }
+
+    fn unsigned(keys: &Keys, content: &str) -> UnsignedEvent {
+        UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(1),
+            Kind::TextNote,
+            Vec::new(),
+            content.to_string(),
+        )
+    }
+
+    #[test]
+    fn external_shutdown_first_then_callback_owned_join_exempts_exact_origin() {
+        let (engine, handle) = runtime();
+        let executor = engine.native_tasks();
+        let keys = Keys::generate();
+        handle
+            .add_signer(LocalKeySigner::new(keys.clone()))
+            .expect("signer registration");
+        handle.set_active_account(Some(keys.public_key()));
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (join_tx, join_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        handle
+            .sign_event_with_completion(unsigned(&keys, "reentrant shutdown"), move |result| {
+                assert!(result.is_ok(), "local signer must complete: {result:?}");
+                let _ = entered_tx.send(());
+                let _ = join_rx.recv();
+                engine.join();
+                let _ = returned_tx.send(());
+            })
+            .expect("sign-event admission");
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("completion callback must start");
+        handle.shutdown();
+        assert_eq!(
+            handle.add_signer(LocalKeySigner::new(Keys::generate())),
+            Err(AddSignerError::EngineShuttingDown),
+            "the external shutdown must enter its drain before callback-owned join"
+        );
+        join_tx.send(()).expect("allow callback-owned join");
+
+        returned_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("callback-owned join must exempt itself after shutdown already began");
+        executor.shutdown();
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+    }
+
+    #[test]
+    fn callback_handle_shutdown_does_not_weaken_external_join_drain() {
+        let (engine, handle) = runtime();
+        let executor = engine.native_tasks();
+        let keys = Keys::generate();
+        handle
+            .add_signer(LocalKeySigner::new(keys.clone()))
+            .expect("signer registration");
+        handle.set_active_account(Some(keys.public_key()));
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let callback_handle = handle.clone();
+        handle
+            .sign_event_with_completion(unsigned(&keys, "external shutdown"), move |result| {
+                assert!(result.is_ok(), "local signer must complete: {result:?}");
+                callback_handle.shutdown();
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            })
+            .expect("sign-event admission");
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("completion callback must start");
+        assert_eq!(
+            handle.add_signer(LocalKeySigner::new(Keys::generate())),
+            Err(AddSignerError::EngineShuttingDown),
+            "callback shutdown must enter its drain before external join"
+        );
+
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let shutdown = thread::spawn(move || {
+            engine.join();
+            let _ = returned_tx.send(());
+        });
+        assert!(
+            returned_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "a callback Handle::shutdown cannot exempt an externally-owned join"
+        );
+        release_tx.send(()).expect("release callback");
+        returned_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("external shutdown must return after callback completion");
+        shutdown.join().expect("shutdown thread");
+        executor.shutdown();
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+    }
+
+    #[test]
+    fn panicking_callback_still_finishes_external_shutdown_drain() {
+        let (engine, handle) = runtime();
+        let executor = engine.native_tasks();
+        let keys = Keys::generate();
+        handle
+            .add_signer(LocalKeySigner::new(keys.clone()))
+            .expect("signer registration");
+        handle.set_active_account(Some(keys.public_key()));
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        handle
+            .sign_event_with_completion(unsigned(&keys, "panicking callback"), move |result| {
+                assert!(result.is_ok(), "local signer must complete: {result:?}");
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+                panic!("injected completion panic");
+            })
+            .expect("sign-event admission");
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("completion callback must start");
+
+        handle.shutdown();
+        assert_eq!(
+            handle.add_signer(LocalKeySigner::new(Keys::generate())),
+            Err(AddSignerError::EngineShuttingDown),
+            "external shutdown must enter its drain before the callback panics"
+        );
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let shutdown = thread::spawn(move || {
+            engine.join();
+            let _ = returned_tx.send(());
+        });
+        assert!(
+            returned_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "external join must retain the callback until its panic unwinds"
+        );
+        release_tx.send(()).expect("release callback to panic");
+        returned_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("panic-safe Finished guard must release the shutdown drain");
+        shutdown.join().expect("shutdown thread");
+        executor.shutdown();
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+    }
+
+    #[test]
+    fn callback_owned_join_exempts_only_itself_and_drains_another_callback() {
+        let (engine, handle) = runtime();
+        let executor = engine.native_tasks();
+        let keys = Keys::generate();
+        handle
+            .add_signer(LocalKeySigner::new(keys.clone()))
+            .expect("signer registration");
+        handle.set_active_account(Some(keys.public_key()));
+
+        let (other_entered_tx, other_entered_rx) = mpsc::channel();
+        let (release_other_tx, release_other_rx) = mpsc::channel();
+        handle
+            .sign_event_with_completion(unsigned(&keys, "other callback"), move |result| {
+                assert!(result.is_ok(), "local signer must complete: {result:?}");
+                let _ = other_entered_tx.send(());
+                let _ = release_other_rx.recv();
+            })
+            .expect("other sign-event admission");
+        other_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("other callback must start");
+
+        let callback_handle = handle.clone();
+        let (joining_entered_tx, joining_entered_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        handle
+            .sign_event_with_completion(unsigned(&keys, "joining callback"), move |result| {
+                assert!(result.is_ok(), "local signer must complete: {result:?}");
+                callback_handle.shutdown();
+                let _ = joining_entered_tx.send(());
+                engine.join();
+                let _ = returned_tx.send(());
+            })
+            .expect("joining sign-event admission");
+
+        joining_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("joining callback must start");
+        assert!(
+            returned_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "exact-origin exemption must retain every other callback in the drain"
+        );
+        release_other_tx.send(()).expect("release other callback");
+        returned_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("callback-owned join must return after the other callback completes");
+        executor.shutdown();
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
     }
 }
 
@@ -1311,6 +1710,75 @@ mod pool_bridge_tests {
 
     fn test_session() -> RelaySessionKey {
         RelaySessionKey::public(RelayUrl::parse("wss://relay.example.com").unwrap())
+    }
+
+    fn protected_session() -> RelaySessionKey {
+        RelaySessionKey::new(
+            RelayUrl::parse("wss://relay.example.com").unwrap(),
+            nmp_grammar::AccessContext::Nip42(nostr::Keys::generate().public_key()),
+        )
+    }
+
+    #[test]
+    fn buffered_auth_batch_is_applied_before_initial_read_release() {
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        let session = protected_session();
+        pool_tx
+            .send(PoolEvent::Connected {
+                handle,
+                session: session.clone(),
+            })
+            .unwrap();
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: session.clone(),
+                frame: RelayFrame::from_message(RelayMessage::Auth {
+                    challenge: "bridge-ordered".into(),
+                }),
+            })
+            .unwrap();
+        pool_tx
+            .send(PoolEvent::InitialReadCompleted {
+                handle,
+                session: session.clone(),
+            })
+            .unwrap();
+        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128));
+
+        assert!(matches!(
+            cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Cmd::Engine(EngineMsg::RelayConnected(current, ref current_session))
+                if current == handle && *current_session == session
+        ));
+        let applied = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert!(relay_frame_is_auth(&frames[0].2));
+                applied
+            }
+            _ => panic!("AUTH must enter the reducer as a relay batch"),
+        };
+        assert!(
+            matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "the completion edge cannot overtake the stalled AUTH reduction"
+        );
+        applied.send(()).unwrap();
+        assert!(matches!(
+            cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Cmd::Engine(EngineMsg::AuthProbeReleased(current, ref current_session))
+                if current == handle && *current_session == session
+        ));
+
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
     }
 
     #[test]
@@ -1483,7 +1951,10 @@ mod relay_worker_reconciliation_tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
+    use nmp_grammar::{
+        AccessContext, Binding, Demand, Durability, Filter, SourceAuthority, WriteIntent,
+        WritePayload, WriteRouting,
+    };
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind, UnsignedEvent};
@@ -1502,10 +1973,411 @@ mod relay_worker_reconciliation_tests {
         })
     }
 
+    fn protected_query(relay: &RelayUrl, signer: PublicKey, kind: u16) -> LiveQuery {
+        LiveQuery(
+            Demand::new(
+                Filter {
+                    kinds: Some(BTreeSet::from([kind])),
+                    ..Filter::default()
+                },
+                SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                AccessContext::Nip42(signer),
+            )
+            .expect("protected pinned query"),
+        )
+    }
+
+    #[test]
+    fn fresh_protected_read_opens_one_worker_without_a_req_preamble_and_releases_on_withdrawal() {
+        let signer = Keys::generate().public_key();
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 1);
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let mut config = PoolConfig::default();
+        config.max_relays = 1;
+        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let mut rows = HashMap::new();
+        let mut histories = HashMap::new();
+        let mut diagnostics = HashMap::new();
+        let mut preambles = Preambles::new();
+        let registry = SignerRegistry::default();
+        let (self_inbox, _inbox_rx) = mpsc::channel();
+        let native_tasks = nmp_executor::Executor::new(1).unwrap();
+        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
+        let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
+        let dispatch_runtime = DispatchRuntime {
+            self_inbox: &self_inbox,
+            relay_information: &relay_information,
+            native_tasks: &native_tasks,
+            nip11_decisions: &nip11_decisions,
+            auth_policies: &auth_policies,
+            auth_tasks: &auth_tasks,
+        };
+
+        let first = core.handle(EngineMsg::Subscribe(
+            protected_query(&relay, signer, 1),
+            Box::new(NullRowSink),
+        ));
+        let first_id = first
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, ..) => Some(*id),
+                _ => None,
+            })
+            .expect("first subscription handle");
+        assert_eq!(
+            first
+                .iter()
+                .filter(|effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session))
+                .count(),
+            1
+        );
+        assert!(!first.iter().any(|effect| matches!(
+            effect,
+            Effect::Wire(delta)
+                if delta.ops.iter().any(|(candidate, ops)| candidate == &session
+                    && ops.iter().any(|op| matches!(op, WireOp::Req(..))))
+        )));
+        preflight_query_relay_workers(&first, &pool)
+            .expect("protected worker is acquired before the subscribe reply");
+        let first_transport = pool
+            .live_session_handle(&session)
+            .expect("preflight opens the protected worker");
+        dispatch_core_effects(
+            &mut core,
+            first,
+            &pool,
+            &mut rows,
+            &mut histories,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            dispatch_runtime,
+        );
+        assert_eq!(pool.live_session_handle(&session), Some(first_transport));
+        assert!(!preambles.contains_key(&session));
+
+        let second = core.handle(EngineMsg::Subscribe(
+            protected_query(&relay, signer, 2),
+            Box::new(NullRowSink),
+        ));
+        let second_id = second
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, ..) => Some(*id),
+                _ => None,
+            })
+            .expect("second subscription handle");
+        dispatch_core_effects(
+            &mut core,
+            second,
+            &pool,
+            &mut rows,
+            &mut histories,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            dispatch_runtime,
+        );
+        assert_eq!(pool.live_session_handle(&session), Some(first_transport));
+        assert_eq!(pool.admission_rejections(), 0);
+        assert!(!preambles.contains_key(&session));
+
+        let newest_only = core.handle(EngineMsg::Unsubscribe(first_id));
+        dispatch_core_effects(
+            &mut core,
+            newest_only,
+            &pool,
+            &mut rows,
+            &mut histories,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            dispatch_runtime,
+        );
+        assert_eq!(pool.live_session_handle(&session), Some(first_transport));
+
+        let removed = core.handle(EngineMsg::Unsubscribe(second_id));
+        dispatch_core_effects(
+            &mut core,
+            removed,
+            &pool,
+            &mut rows,
+            &mut histories,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            dispatch_runtime,
+        );
+        assert!(pool.live_session_handle(&session).is_none());
+
+        pool.shutdown();
+        native_tasks.shutdown();
+    }
+
+    #[test]
+    fn protected_initial_subscribe_spawn_refusal_rolls_back_every_owned_layer() {
+        let signer = Keys::generate().public_key();
+        let first_relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let refused_relay = RelayUrl::parse("ws://127.0.0.1:10").unwrap();
+        let access = AccessContext::Nip42(signer);
+        let first_session = RelaySessionKey::new(first_relay.clone(), access);
+        let refused_session = RelaySessionKey::new(refused_relay.clone(), access);
+        let query = LiveQuery(
+            Demand::new(
+                Filter {
+                    kinds: Some(BTreeSet::from([1])),
+                    ..Filter::default()
+                },
+                SourceAuthority::Pinned(BTreeSet::from([
+                    first_relay.clone(),
+                    refused_relay.clone(),
+                ])),
+                access,
+            )
+            .unwrap(),
+        );
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 2);
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let mut config = PoolConfig::default();
+        config.max_relays = 2;
+        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let mut rows = HashMap::new();
+        let mut histories = HashMap::new();
+        let mut diagnostics = HashMap::new();
+        let mut preambles = Preambles::new();
+        let registry = SignerRegistry::default();
+        let (self_inbox, _inbox_rx) = mpsc::channel();
+        let native_tasks = nmp_executor::Executor::new(1).unwrap();
+        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
+        let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
+        let dispatch_runtime = DispatchRuntime {
+            self_inbox: &self_inbox,
+            relay_information: &relay_information,
+            native_tasks: &native_tasks,
+            nip11_decisions: &nip11_decisions,
+            auth_policies: &auth_policies,
+            auth_tasks: &auth_tasks,
+        };
+
+        let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
+        let id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, ..) => Some(*id),
+                _ => None,
+            })
+            .expect("initial protected target exists until preflight resolves");
+        let (rows_tx, _rows_rx) = mpsc::channel();
+        rows.insert(id, rows_tx);
+
+        let mut opened = None;
+        let mut attempts = 0usize;
+        let refusal = preflight_query_relay_workers_with(
+            &effects,
+            |session| pool.live_session_handle(session).is_some(),
+            |session| {
+                attempts += 1;
+                if opened.is_none() {
+                    let handle = pool.ensure_session(session).unwrap();
+                    opened = Some((session.clone(), handle));
+                    Ok(Some(handle))
+                } else {
+                    Err(EngineThreadError::ThreadUnavailable {
+                        component: "relay worker".to_string(),
+                        reason: "injected protected subscribe refusal".to_string(),
+                    })
+                }
+            },
+            |handle| {
+                let _ = pool.close(handle);
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 2, "both deduplicated sessions were preflighted");
+        assert!(matches!(
+            refusal,
+            EngineThreadError::ThreadUnavailable { component, reason }
+                if component == "relay worker"
+                    && reason == "injected protected subscribe refusal"
+        ));
+        // The landed preflight rolls back every worker it just opened when a
+        // later session's spawn is refused (same discipline as the history
+        // preflight): the refused subscribe leaves no live protected worker
+        // behind.
+        assert!(pool
+            .live_session_handle(&opened.as_ref().unwrap().0)
+            .is_none());
+
+        rows.remove(&id);
+        let withdraw = core.handle(EngineMsg::Unsubscribe(id));
+        dispatch_core_effects(
+            &mut core,
+            withdraw,
+            &pool,
+            &mut rows,
+            &mut histories,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            dispatch_runtime,
+        );
+
+        assert!(!rows.contains_key(&id));
+        assert_eq!(core.required_relay_workers(), Some(BTreeSet::new()));
+        assert!(pool.live_session_handle(&first_session).is_none());
+        assert!(pool.live_session_handle(&refused_session).is_none());
+        assert!(preambles.is_empty());
+        let snapshot = core.diagnostics_snapshot();
+        assert!(snapshot.relays.is_empty());
+        assert!(snapshot.auth_sessions.is_empty());
+
+        let late = core.handle(EngineMsg::RelayOpenFailed(
+            refused_session.clone(),
+            "late unowned failure".to_string(),
+        ));
+        assert!(late.is_empty());
+        assert!(core.diagnostics_snapshot().transport_degraded.is_none());
+
+        assert!(
+            preflight_query_relay_workers_with(&effects, |_| false, |_| Ok(None), |_| {}).is_ok(),
+            "capacity refusal remains ordinary local shortfall"
+        );
+        let duplicate_edges = [
+            Effect::EnsureRelay(first_session.clone()),
+            Effect::EnsureRelay(first_session.clone()),
+        ];
+        let mut duplicate_attempts = 0usize;
+        preflight_query_relay_workers_with(
+            &duplicate_edges,
+            |_| false,
+            |_| {
+                duplicate_attempts += 1;
+                Ok(None)
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(duplicate_attempts, 1, "EnsureRelay edges are deduplicated");
+
+        pool.shutdown();
+        native_tasks.shutdown();
+    }
+
+    #[test]
+    fn relay_open_failure_clears_after_retry_connect_and_after_withdrawal() {
+        let signer = Keys::generate().public_key();
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 1);
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let mut config = PoolConfig::default();
+        config.max_relays = 1;
+        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let mut rows = HashMap::new();
+        let mut histories = HashMap::new();
+        let mut diagnostics = HashMap::new();
+        let mut preambles = Preambles::new();
+        let registry = SignerRegistry::default();
+        let (self_inbox, inbox_rx) = mpsc::channel();
+        let native_tasks = nmp_executor::Executor::new(1).unwrap();
+        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
+        let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
+        let dispatch_runtime = DispatchRuntime {
+            self_inbox: &self_inbox,
+            relay_information: &relay_information,
+            native_tasks: &native_tasks,
+            nip11_decisions: &nip11_decisions,
+            auth_policies: &auth_policies,
+            auth_tasks: &auth_tasks,
+        };
+
+        let effects = core.handle(EngineMsg::Subscribe(
+            protected_query(&relay, signer, 1),
+            Box::new(NullRowSink),
+        ));
+        let id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, ..) => Some(*id),
+                _ => None,
+            })
+            .expect("protected subscription handle");
+
+        dispatch_relay_open_failure(
+            &mut core,
+            session.clone(),
+            nmp_transport::RelayOpenError::ThreadUnavailable(nmp_transport::ThreadSpawnError {
+                role: nmp_transport::ThreadRole::RelayWorker,
+                reason: "injected retryable open failure".to_string(),
+            }),
+            &pool,
+            &mut rows,
+            &mut histories,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            dispatch_runtime,
+        );
+        assert!(core
+            .diagnostics_snapshot()
+            .transport_degraded
+            .as_deref()
+            .is_some_and(|failure| failure.contains("injected retryable open failure")));
+        assert!(matches!(
+            inbox_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(Cmd::RelayWorkerRetired)
+        ));
+        assert!(
+            inbox_rx.try_recv().is_err(),
+            "one refusal creates exactly one retry edge"
+        );
+
+        retry_required_relay_workers(&core, &pool, &mut preambles);
+        let handle = pool
+            .live_session_handle(&session)
+            .expect("bounded retry opens the still-owned session");
+        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        assert!(core.diagnostics_snapshot().transport_degraded.is_none());
+
+        core.handle(EngineMsg::RelayOpenFailed(
+            session.clone(),
+            "withdraw-owned".to_string(),
+        ));
+        assert!(core
+            .diagnostics_snapshot()
+            .transport_degraded
+            .as_deref()
+            .is_some_and(|failure| failure.contains("withdraw-owned")));
+        let withdraw = core.handle(EngineMsg::Unsubscribe(id));
+        assert!(core.diagnostics_snapshot().transport_degraded.is_none());
+        assert_eq!(core.required_relay_workers(), Some(BTreeSet::new()));
+        dispatch_core_effects(
+            &mut core,
+            withdraw,
+            &pool,
+            &mut rows,
+            &mut histories,
+            &mut diagnostics,
+            &mut preambles,
+            &registry,
+            dispatch_runtime,
+        );
+
+        pool.shutdown();
+        native_tasks.shutdown();
+    }
+
     #[test]
     fn repeated_engine_shutdown_returns_runtime_threads_to_exact_baseline() {
         let _serial = RUNTIME_LIFECYCLE_TEST_LOCK.lock().unwrap();
-        let baseline = ACTIVE_RUNTIME_THREADS.load(std::sync::atomic::Ordering::SeqCst);
         for _ in 0..16 {
             let (engine, handle) = EngineThread::spawn(
                 MemoryStore::new(),
@@ -1515,11 +2387,23 @@ mod relay_worker_reconciliation_tests {
                 RelayAdmissionPolicy::default(),
             )
             .expect("engine construction");
+            let runtime_threads = Arc::clone(&engine.runtime_threads);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while runtime_threads.load(std::sync::atomic::Ordering::SeqCst) != 3
+                && Instant::now() < deadline
+            {
+                thread::yield_now();
+            }
+            assert_eq!(
+                runtime_threads.load(std::sync::atomic::Ordering::SeqCst),
+                3,
+                "one engine must own exactly its engine and two bridge threads"
+            );
             handle.shutdown();
             engine.join();
             assert_eq!(
-                ACTIVE_RUNTIME_THREADS.load(std::sync::atomic::Ordering::SeqCst),
-                baseline,
+                runtime_threads.load(std::sync::atomic::Ordering::SeqCst),
+                0,
                 "join must be an exact engine/bridge teardown barrier"
             );
         }
@@ -1553,11 +2437,15 @@ mod relay_worker_reconciliation_tests {
         let native_tasks = nmp_executor::Executor::new(1).unwrap();
         let relay_information = RelayInformationService::new(native_tasks.clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
+        let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
             native_tasks: &native_tasks,
             nip11_decisions: &nip11_decisions,
+            auth_policies: &auth_policies,
+            auth_tasks: &auth_tasks,
         };
 
         let first = core.handle(EngineMsg::Subscribe(
@@ -1572,7 +2460,7 @@ mod relay_worker_reconciliation_tests {
             })
             .expect("subscription emits its initial rows");
         dispatch_core_effects(
-            &core,
+            &mut core,
             first,
             &pool,
             &mut rows,
@@ -1586,7 +2474,7 @@ mod relay_worker_reconciliation_tests {
 
         let withdrawn = core.handle(EngineMsg::Unsubscribe(first_id));
         dispatch_core_effects(
-            &core,
+            &mut core,
             withdrawn,
             &pool,
             &mut rows,
@@ -1606,7 +2494,7 @@ mod relay_worker_reconciliation_tests {
             Box::new(NullRowSink),
         ));
         dispatch_core_effects(
-            &core,
+            &mut core,
             replacement,
             &pool,
             &mut rows,
@@ -1692,15 +2580,19 @@ mod relay_worker_reconciliation_tests {
         let native_tasks = nmp_executor::Executor::new(1).unwrap();
         let relay_information = RelayInformationService::new(native_tasks.clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
+        let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
             native_tasks: &native_tasks,
             nip11_decisions: &nip11_decisions,
+            auth_policies: &auth_policies,
+            auth_tasks: &auth_tasks,
         };
 
         dispatch_core_effects(
-            &core,
+            &mut core,
             ready,
             &pool,
             &mut rows,
@@ -1713,7 +2605,7 @@ mod relay_worker_reconciliation_tests {
         assert!(pool.live_session_handle(&write_session).is_some());
 
         dispatch_core_effects(
-            &core,
+            &mut core,
             Vec::new(),
             &pool,
             &mut rows,
@@ -1733,6 +2625,330 @@ mod relay_worker_reconciliation_tests {
     }
 }
 
+#[cfg(test)]
+mod auth_registry_admission_tests {
+    use super::*;
+    use nmp_router::FixtureDirectory;
+    use nmp_signer::LocalKeySigner;
+    use nmp_store::MemoryStore;
+    use nmp_transport::RelayFrame;
+    use nostr::{Keys, RelayMessage};
+    use std::borrow::Cow;
+    use std::sync::Mutex;
+
+    struct AllowPolicy;
+
+    impl AuthPolicy for AllowPolicy {
+        fn evaluate(&self, _request: AuthPolicyRequest) -> AuthPolicyOp {
+            AuthPolicyOp::allow()
+        }
+    }
+
+    struct OnePolicy {
+        invoked: Sender<()>,
+        operation: Mutex<Option<AuthPolicyOp>>,
+    }
+
+    impl AuthPolicy for OnePolicy {
+        fn evaluate(&self, _request: AuthPolicyRequest) -> AuthPolicyOp {
+            let _ = self.invoked.send(());
+            self.operation
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+                .expect("one policy operation")
+        }
+    }
+
+    struct OneSigner {
+        public_key: PublicKey,
+        invoked: Sender<()>,
+        operation: Mutex<Option<SignerOp<SignedEvent>>>,
+    }
+
+    struct TimestampSigner {
+        keys: Keys,
+        observed: Sender<Timestamp>,
+    }
+
+    impl SigningCapability for TimestampSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.keys.public_key())
+        }
+
+        fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<SignedEvent> {
+            let _ = self.observed.send(unsigned.created_at);
+            SignerOp::Ready(Err(nmp_signer::SignerError::Unavailable))
+        }
+    }
+
+    impl SigningCapability for OneSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.public_key)
+        }
+
+        fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<SignedEvent> {
+            let _ = self.invoked.send(());
+            self.operation
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+                .expect("one signer operation")
+        }
+    }
+
+    fn runtime(limit: usize) -> (EngineThread, Handle) {
+        EngineThread::spawn_with_runtime_config(
+            MemoryStore::new(),
+            FixtureDirectory::new(),
+            1,
+            PoolConfig::default(),
+            RelayAdmissionPolicy::default(),
+            RuntimeConfig {
+                max_native_tasks: 1,
+                max_auth_capabilities: limit,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unique_key_flood_is_finite_but_replacement_and_removal_reuse_capacity() {
+        let (engine, handle) = runtime(1);
+        let first = Keys::generate().public_key();
+        let second = Keys::generate().public_key();
+        let stale = handle.add_auth_policy(first, AllowPolicy).unwrap();
+        assert!(!format!("{stale:?}").contains("instance"));
+        let replacement = handle
+            .add_auth_policy(first, AllowPolicy)
+            .expect("same-key replacement consumes no additional capacity");
+        assert_eq!(
+            handle.add_auth_policy(second, AllowPolicy),
+            Err(AddAuthPolicyError::RegistryFull { limit: 1 })
+        );
+        assert!(!handle.remove_auth_policy(stale));
+        assert!(handle.remove_auth_policy(replacement));
+        handle
+            .add_auth_policy(second, AllowPolicy)
+            .expect("exact removal releases capacity");
+        handle.shutdown();
+        engine.join();
+    }
+
+    #[test]
+    fn first_read_only_auth_frame_advances_the_frozen_template_clock() {
+        let (engine, handle) = runtime(2);
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let session =
+            RelaySessionKey::new(relay, nmp_grammar::AccessContext::Nip42(keys.public_key()));
+        let transport = nmp_transport::RelayHandle {
+            slot: 23,
+            generation: 1,
+        };
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let signer = handle
+            .add_signer(TimestampSigner {
+                keys: keys.clone(),
+                observed: observed_tx,
+            })
+            .unwrap();
+        assert!(!format!("{signer:?}").contains("instance"));
+        let policy = handle
+            .add_auth_policy(keys.public_key(), AllowPolicy)
+            .unwrap();
+        handle
+            .inbox
+            .send(Cmd::Engine(EngineMsg::RelayConnected(
+                transport,
+                session.clone(),
+            )))
+            .unwrap();
+        let before = Timestamp::now();
+        handle
+            .inbox
+            .send(Cmd::Engine(EngineMsg::RelayFrame(
+                transport,
+                session,
+                RelayFrame::from_message(RelayMessage::Auth {
+                    challenge: Cow::Borrowed("first-frame-clock"),
+                }),
+            )))
+            .unwrap();
+        let created_at = observed_rx.recv().unwrap();
+        assert!(created_at.as_secs() > 0);
+        assert!(created_at >= before);
+        assert!(handle.remove_signer(signer));
+        assert!(handle.remove_auth_policy(policy));
+        handle.shutdown();
+        engine.join();
+    }
+
+    #[test]
+    fn shutdown_drain_rejects_cancel_hook_handle_reentry_and_releases_executor() {
+        let (engine, handle) = runtime(2);
+        let executor = engine.native_tasks();
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let session =
+            RelaySessionKey::new(relay, nmp_grammar::AccessContext::Nip42(keys.public_key()));
+        let transport = nmp_transport::RelayHandle {
+            slot: 29,
+            generation: 1,
+        };
+        let hook_handle = handle.clone();
+        let hook_key = Keys::generate().public_key();
+        let (hook_result_tx, hook_result_rx) = mpsc::channel();
+        let (_pending_sender, operation) = AuthPolicyOp::pending_channel_with_cancel(move || {
+            let result = hook_handle
+                .add_auth_policy(hook_key, AllowPolicy)
+                .map(|_| ());
+            let _ = hook_result_tx.send(result);
+        });
+        let (invoked_tx, invoked_rx) = mpsc::channel();
+        handle
+            .add_auth_policy(
+                keys.public_key(),
+                OnePolicy {
+                    invoked: invoked_tx,
+                    operation: Mutex::new(Some(operation)),
+                },
+            )
+            .unwrap();
+        handle
+            .inbox
+            .send(Cmd::Engine(EngineMsg::RelayConnected(
+                transport,
+                session.clone(),
+            )))
+            .unwrap();
+        handle
+            .inbox
+            .send(Cmd::Engine(EngineMsg::RelayFrame(
+                transport,
+                session,
+                RelayFrame::from_message(RelayMessage::Auth {
+                    challenge: Cow::Borrowed("shutdown-reentry"),
+                }),
+            )))
+            .unwrap();
+        invoked_rx.recv().unwrap();
+        handle.shutdown();
+        engine.join();
+        assert_eq!(
+            hook_result_rx.recv().unwrap(),
+            Err(AddAuthPolicyError::EngineShuttingDown)
+        );
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+    }
+
+    #[test]
+    fn zero_auth_capacity_admits_none() {
+        let (engine, handle) = runtime(0);
+        let key = Keys::generate().public_key();
+        assert_eq!(
+            handle.add_auth_policy(key, AllowPolicy),
+            Err(AddAuthPolicyError::RegistryFull { limit: 0 })
+        );
+        handle.shutdown();
+        engine.join();
+    }
+
+    #[test]
+    fn bound_policy_and_signer_removal_are_synchronous_before_callbacks() {
+        let (engine, handle) = runtime(2);
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let session =
+            RelaySessionKey::new(relay, nmp_grammar::AccessContext::Nip42(keys.public_key()));
+        let transport = nmp_transport::RelayHandle {
+            slot: 19,
+            generation: 1,
+        };
+        let (policy_invoked_tx, policy_invoked_rx) = mpsc::channel();
+        let (_policy_sender, policy_op) = AuthPolicyOp::pending_channel();
+        let policy = handle
+            .add_auth_policy(
+                keys.public_key(),
+                OnePolicy {
+                    invoked: policy_invoked_tx,
+                    operation: Mutex::new(Some(policy_op)),
+                },
+            )
+            .unwrap();
+        handle
+            .inbox
+            .send(Cmd::Engine(EngineMsg::RelayConnected(
+                transport,
+                session.clone(),
+            )))
+            .unwrap();
+        handle
+            .inbox
+            .send(Cmd::Engine(EngineMsg::RelayFrame(
+                transport,
+                session.clone(),
+                RelayFrame::from_message(RelayMessage::Auth {
+                    challenge: Cow::Borrowed("policy-race"),
+                }),
+            )))
+            .unwrap();
+        policy_invoked_rx.recv().unwrap();
+        assert!(handle.remove_auth_policy(policy));
+        let (diagnostics, snapshots) = handle.observe_diagnostics();
+        let snapshot = snapshots.recv().unwrap();
+        let auth = snapshot
+            .auth_sessions
+            .iter()
+            .find(|auth| auth.relay == session.relay)
+            .unwrap();
+        assert!(auth.policy_bound);
+        assert_eq!(auth.phase, crate::core::AuthDiagnosticsPhase::Error);
+        drop(diagnostics);
+
+        let signer = LocalKeySigner::new(keys.clone());
+        let signer_registration = handle.add_signer(signer).unwrap();
+        let policy_registration = handle
+            .add_auth_policy(keys.public_key(), AllowPolicy)
+            .unwrap();
+        let (signer_invoked_tx, signer_invoked_rx) = mpsc::channel();
+        let (_signer_sender, signer_op) = SignerOp::pending_channel();
+        assert!(handle.remove_signer(signer_registration));
+        let signer_registration = handle
+            .add_signer(OneSigner {
+                public_key: keys.public_key(),
+                invoked: signer_invoked_tx,
+                operation: Mutex::new(Some(signer_op)),
+            })
+            .unwrap();
+        handle
+            .inbox
+            .send(Cmd::Engine(EngineMsg::RelayFrame(
+                transport,
+                session.clone(),
+                RelayFrame::from_message(RelayMessage::Auth {
+                    challenge: Cow::Borrowed("signer-race"),
+                }),
+            )))
+            .unwrap();
+        signer_invoked_rx.recv().unwrap();
+        assert!(handle.remove_signer(signer_registration));
+        let (_diagnostics, snapshots) = handle.observe_diagnostics();
+        let snapshot = snapshots.recv().unwrap();
+        let auth = snapshot
+            .auth_sessions
+            .iter()
+            .find(|auth| auth.relay == session.relay)
+            .unwrap();
+        assert!(auth.signer_bound);
+        assert_eq!(auth.phase, crate::core::AuthDiagnosticsPhase::Error);
+        assert!(handle.remove_auth_policy(policy_registration));
+        handle.shutdown();
+        engine.join();
+    }
+}
+
 /// `PoolEvent` -> `EngineMsg` (plan §2/§3.4). Generation safety is already
 /// enforced BEFORE this point: `nmp_transport::Pool`'s own translator drops
 /// any frame/connect event tagged with a superseded generation before it
@@ -1747,6 +2963,9 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     match event {
         PoolEvent::Connected { handle, session } => {
             Some(EngineMsg::RelayConnected(handle, session))
+        }
+        PoolEvent::InitialReadCompleted { handle, session } => {
+            Some(EngineMsg::AuthProbeReleased(handle, session))
         }
         // The `reason` is no longer discarded here (issue #506's CRITICAL
         // fix): `EngineCore::on_relay_disconnected` needs to tell a
@@ -1778,6 +2997,14 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     }
 }
 
+fn relay_frame_is_auth(frame: &RelayFrame) -> bool {
+    matches!(
+        frame,
+        RelayFrame::Message(message)
+            if matches!(message.as_ref(), RelayMessage::Auth { .. })
+    )
+}
+
 /// Per-SESSION reconnect-preamble bookkeeping: the full set of currently-live
 /// REQ wire texts, keyed by `SubId` so `WireOp::Req`/`Close` can update it
 /// incrementally (module doc: `Pool::set_reconnect_preamble` replaces the
@@ -1795,6 +3022,8 @@ struct DispatchRuntime<'a> {
     relay_information: &'a RelayInformationService,
     native_tasks: &'a nmp_executor::Executor,
     nip11_decisions: &'a RefCell<Nip11DecisionState>,
+    auth_policies: &'a RefCell<auth::AuthPolicyRegistry>,
+    auth_tasks: &'a RefCell<auth::AuthTaskRegistry>,
 }
 
 #[derive(Default)]
@@ -1897,23 +3126,12 @@ mod nip11_decision_tests {
 /// it is ever built — it never leaves this stack frame), then block on
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
 ///
-/// The deadline-armed driver (§3.3, #39): every iteration re-reads
-/// `core.next_deadline()` fresh, so a command that just introduced an
-/// earlier deadline (e.g. ingesting an event that expires sooner than
-/// whatever this loop was previously armed for) re-arms naturally on the
-/// very next `recv`/`recv_timeout` call — the command itself is the wakeup,
-/// with no separate "interrupt the sleep" machinery. `None` (no deadline
-/// pending anywhere) blocks on plain `recv()`: a light embedder with no
-/// expiring content and no open negentropy session pays nothing beyond the
-/// ordinary command loop. `Some(deadline)` arms `recv_timeout` for exactly
-/// the remaining wall-clock distance to it (zero if already past, e.g. a
-/// persisted deadline that elapsed while the process was down — the very
-/// first iteration catches that up through the identical `Tick` path). A
-/// timeout dispatches `EngineMsg::Tick(wall_now())`, which runs the
-/// mechanism `core::EngineCore::tick` already implements (NIP-40 expiry +
-/// neg-liveness sweep -- unchanged by this driver), then `continue`s
-/// straight back to the top so the timeout is recomputed from the deadline
-/// set `tick` just changed, rather than re-arming from a stale value.
+/// The deadline-armed driver (§3.3, #39): every iteration re-reads the core
+/// and NIP-11 decision deadlines, then waits for their exact minimum. A
+/// command that introduces an earlier deadline re-arms naturally on the next
+/// iteration; there is no polling or sleeper. `None` blocks on plain
+/// `recv()`. A timeout fires only the due owners: reducer `Tick` for
+/// persisted deadlines and/or NIP-11 fallback, then recomputes the minimum.
 fn engine_loop<S, D>(
     store: S,
     directory: D,
@@ -1931,6 +3149,8 @@ fn engine_loop<S, D>(
         stop: pool_stop_tx,
         native_tasks,
         relay_information,
+        auth_release_sender,
+        max_auth_capabilities,
     } = pool_runtime;
     let native_tasks = &native_tasks;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
@@ -1940,15 +3160,22 @@ fn engine_loop<S, D>(
     let mut next_diag_id: u64 = 0;
     let mut preambles: Preambles = Preambles::new();
     let mut registry = SignerRegistry::default();
+    let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
+    let auth_tasks = RefCell::new(auth::AuthTaskRegistry::with_release_sender(
+        auth_release_sender,
+    ));
+    let mut auth_instances = auth::AuthCapabilityInstances::default();
     let mut active_pubkey = None;
     let mut next_sign_event_id = 1u64;
-    let mut sign_event_cancellations: HashMap<u64, Arc<SignEventTerminal>> = HashMap::new();
+    let mut sign_event_cancellations: HashMap<u64, ActiveSignEvent> = HashMap::new();
     let nip11_decisions = RefCell::new(Nip11DecisionState::default());
     let dispatch_runtime = DispatchRuntime {
         self_inbox,
         relay_information: &relay_information,
         native_tasks,
         nip11_decisions: &nip11_decisions,
+        auth_policies: &auth_policies,
+        auth_tasks: &auth_tasks,
     };
 
     // Recovery happens before the first externally-issued command. Pending
@@ -1956,7 +3183,7 @@ fn engine_loop<S, D>(
     // replay exact durable attempt bytes whose Started fact was committed.
     let recovery_effects = core.recover_on_boot();
     dispatch_core_effects(
-        &core,
+        &mut core,
         recovery_effects,
         &pool,
         &mut row_channels,
@@ -1967,6 +3194,7 @@ fn engine_loop<S, D>(
         dispatch_runtime,
     );
 
+    let mut shutting_down = false;
     loop {
         let core_wait = core
             .next_deadline()
@@ -1975,10 +3203,10 @@ fn engine_loop<S, D>(
             .borrow()
             .next_deadline()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let wait = match (core_wait, nip11_wait) {
-            (Some(core), Some(nip11)) => Some(core.min(nip11)),
-            (Some(wait), None) | (None, Some(wait)) => Some(wait),
-            (None, None) => None,
+        let wait = if shutting_down {
+            None
+        } else {
+            [core_wait, nip11_wait].into_iter().flatten().min()
         };
         let cmd = match wait {
             None => match cmd_rx.recv() {
@@ -1988,16 +3216,16 @@ fn engine_loop<S, D>(
             Some(wait) => match cmd_rx.recv_timeout(wait) {
                 Ok(cmd) => cmd,
                 Err(RecvTimeoutError::Timeout) => {
-                    // The engine's wall-clock deadlines and NIP-11's
-                    // sub-second behavioral grace share this one event-driven
-                    // wait. Fire only the sources actually due, then re-arm.
+                    // Core deadlines and NIP-11 fallback share this one
+                    // event-driven wait. Fire only the owners actually due,
+                    // then re-arm the exact minimum.
                     for url in nip11_decisions
                         .borrow_mut()
                         .take_due_fallbacks(Instant::now())
                     {
                         let effects = core.handle(EngineMsg::RelayInformationResolved(url, None));
                         dispatch_core_effects(
-                            &core,
+                            &mut core,
                             effects,
                             &pool,
                             &mut row_channels,
@@ -2015,7 +3243,7 @@ fn engine_loop<S, D>(
                     {
                         let effects = core.handle(EngineMsg::Tick(wall_now));
                         dispatch_core_effects(
-                            &core,
+                            &mut core,
                             effects,
                             &pool,
                             &mut row_channels,
@@ -2031,8 +3259,100 @@ fn engine_loop<S, D>(
                 Err(RecvTimeoutError::Disconnected) => break,
             },
         };
+        if shutting_down {
+            match cmd {
+                Cmd::AuthTaskReleased(release) => {
+                    let _ = auth_tasks.borrow_mut().released(release);
+                }
+                Cmd::AuthTaskCompleted(completion) => {
+                    let _ = auth_tasks.borrow_mut().finish(completion);
+                }
+                Cmd::AddAuthPolicy { reply, .. } => {
+                    let _ = reply.send(Err(AddAuthPolicyError::EngineShuttingDown));
+                }
+                Cmd::AddSigner { reply, .. } => {
+                    let _ = reply.send(Err(AddSignerError::EngineShuttingDown));
+                }
+                Cmd::Subscribe { reply, .. } => {
+                    let _ = reply.send(Err(EngineThreadError::EngineShuttingDown));
+                }
+                Cmd::SubscribeHistory { reply, .. } => {
+                    let _ = reply.send(Err(EngineThreadError::EngineShuttingDown));
+                }
+                Cmd::RequestRows { reply, .. } => {
+                    let _ = reply.send(Err(HistoryAdvanceError::TransportUnavailable {
+                        reason: "engine is shutting down".to_string(),
+                    }));
+                }
+                Cmd::PublishTracked { reply, .. } => {
+                    let _ = reply.send(Err(PublishError::EngineShuttingDown));
+                }
+                Cmd::SignEvent { reply, .. } => {
+                    let _ = reply.send(Err(SignEventError::EngineClosed));
+                }
+                Cmd::RemoveAuthPolicy {
+                    registration,
+                    reply,
+                } => {
+                    let removed = auth_policies.borrow_mut().remove(&registration).is_some();
+                    let _ = reply.send(removed);
+                }
+                Cmd::RemoveSigner {
+                    registration,
+                    reply,
+                } => {
+                    let removed = registry.remove(&registration).is_some();
+                    let _ = reply.send(removed);
+                }
+                Cmd::ReattachReceipt { id, sink, reply } => {
+                    let _ = reply.send(core.reattach_receipt(id, sink));
+                }
+                Cmd::ObserveDiagnostics { reply } => {
+                    let id = next_diag_id;
+                    next_diag_id = next_diag_id.saturating_add(1);
+                    let (tx, rx) = latest_channel();
+                    tx.send(core.diagnostics_snapshot());
+                    if reply.send((id, rx)).is_ok() {
+                        diag_channels.insert(id, tx);
+                    }
+                }
+                Cmd::RelayBatch { applied, .. } => {
+                    let _ = applied.send(());
+                }
+                Cmd::CancelSignEvent(id) | Cmd::SignEventFinished(id) => {
+                    if let Some(active) = sign_event_cancellations.remove(&id) {
+                        active.terminal.cancel();
+                    }
+                }
+                Cmd::ExemptSignEventDrain(task_id) => {
+                    sign_event_cancellations.retain(|_, active| active.task_id != task_id);
+                }
+                Cmd::Engine(_)
+                | Cmd::RelayInformationFetched { .. }
+                | Cmd::RelayWorkerRetired
+                | Cmd::UnobserveDiagnostics(_)
+                | Cmd::UnsubscribeHistory(_)
+                | Cmd::Shutdown => {}
+            }
+            if auth_tasks.borrow().is_empty() && sign_event_cancellations.is_empty() {
+                break;
+            }
+            continue;
+        }
         match cmd {
-            Cmd::Shutdown => break,
+            Cmd::Shutdown => {
+                shutting_down = true;
+                auth_tasks.borrow_mut().shutdown();
+                for active in sign_event_cancellations.values() {
+                    active.terminal.cancel();
+                }
+                if auth_tasks.borrow().is_empty() && sign_event_cancellations.is_empty() {
+                    break;
+                }
+            }
+            Cmd::ExemptSignEventDrain(task_id) => {
+                sign_event_cancellations.retain(|_, active| active.task_id != task_id);
+            }
             Cmd::RelayInformationFetched {
                 url,
                 generation,
@@ -2046,7 +3366,7 @@ fn engine_loop<S, D>(
                     .map(|snapshot| snapshot.capability_evidence());
                 let effects = core.handle(EngineMsg::RelayInformationResolved(url, information));
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2058,9 +3378,26 @@ fn engine_loop<S, D>(
                 );
             }
             Cmd::RelayBatch { frames, applied } => {
+                if frames.iter().any(|(handle, session, frame)| {
+                    relay_frame_is_auth(frame)
+                        && core.is_current_transport_session(*handle, session)
+                }) {
+                    let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                    dispatch_core_effects(
+                        &mut core,
+                        tick_effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
                 let effects = core.handle(EngineMsg::RelayFrames(frames));
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2073,26 +3410,75 @@ fn engine_loop<S, D>(
                 let _ = applied.send(());
             }
             Cmd::AddSigner { signer, reply } => {
-                let replaced = signer.public_key().and_then(|pubkey| {
-                    registry
-                        .auth_instance_for(pubkey)
-                        .map(|instance| (pubkey, instance))
-                });
-                let result = registry.add(signer);
-                let _ = reply.send(result.clone());
-                if let Ok(registration) = result {
-                    let mut effects = Vec::new();
-                    if let Some((pubkey, instance)) = replaced {
-                        effects.extend(core.handle(EngineMsg::AuthCapabilityInvalidated(
-                            pubkey,
-                            crate::core::AuthCapability::Signer,
-                            instance,
-                        )));
+                let result = signer
+                    .public_key()
+                    .ok_or(AddSignerError::MissingPublicKey)
+                    .and_then(|pubkey| {
+                        let live = registry.len().saturating_add(auth_policies.borrow().len());
+                        if !registry.contains(pubkey) && live >= max_auth_capabilities {
+                            return Err(AddSignerError::RegistryFull {
+                                limit: max_auth_capabilities,
+                            });
+                        }
+                        let instance = auth_instances
+                            .mint()
+                            .ok_or(AddSignerError::CapabilityInstanceExhausted)?;
+                        Ok(registry.add(pubkey, instance, signer))
+                    });
+                match result {
+                    Ok((registration, replaced)) => {
+                        let mut effects = Vec::new();
+                        if let Some(instance) = replaced {
+                            auth_tasks.borrow_mut().cancel_capability(
+                                registration.public_key(),
+                                core::AuthCapability::Signer,
+                                instance,
+                            );
+                            effects.extend(core.handle(EngineMsg::AuthCapabilityInvalidated(
+                                registration.public_key(),
+                                core::AuthCapability::Signer,
+                                instance,
+                            )));
+                        }
+                        effects.extend(
+                            core.handle(EngineMsg::SignerAttached(registration.public_key())),
+                        );
+                        dispatch_core_effects(
+                            &mut core,
+                            effects,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &mut preambles,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        let _ = reply.send(Ok(registration));
                     }
-                    effects
-                        .extend(core.handle(EngineMsg::SignerAttached(registration.public_key())));
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            Cmd::RemoveSigner {
+                registration,
+                reply,
+            } => {
+                let removed = registry.remove(&registration);
+                if let Some(instance) = removed {
+                    auth_tasks.borrow_mut().cancel_capability(
+                        registration.public_key(),
+                        core::AuthCapability::Signer,
+                        instance,
+                    );
+                    let effects = core.handle(EngineMsg::AuthCapabilityInvalidated(
+                        registration.public_key(),
+                        core::AuthCapability::Signer,
+                        instance,
+                    ));
                     dispatch_core_effects(
-                        &core,
+                        &mut core,
                         effects,
                         &pool,
                         &mut row_channels,
@@ -2103,22 +3489,43 @@ fn engine_loop<S, D>(
                         dispatch_runtime,
                     );
                 }
+                let _ = reply.send(removed.is_some());
             }
-            Cmd::RemoveSigner {
-                registration,
+            Cmd::AddAuthPolicy {
+                expected_pubkey,
+                policy,
                 reply,
             } => {
-                let instance = SignerRegistry::auth_instance(&registration.identity);
-                let removed = registry.remove(&registration);
-                let _ = reply.send(removed);
-                if removed {
+                let live = registry.len().saturating_add(auth_policies.borrow().len());
+                if !auth_policies.borrow().contains(expected_pubkey)
+                    && live >= max_auth_capabilities
+                {
+                    let _ = reply.send(Err(AddAuthPolicyError::RegistryFull {
+                        limit: max_auth_capabilities,
+                    }));
+                    continue;
+                }
+                let Some(instance) = auth_instances.mint() else {
+                    let _ = reply.send(Err(AddAuthPolicyError::CapabilityInstanceExhausted));
+                    continue;
+                };
+                let (registration, replaced) =
+                    auth_policies
+                        .borrow_mut()
+                        .add(expected_pubkey, instance, policy);
+                if let Some(old_instance) = replaced {
+                    auth_tasks.borrow_mut().cancel_capability(
+                        expected_pubkey,
+                        core::AuthCapability::Policy,
+                        old_instance,
+                    );
                     let effects = core.handle(EngineMsg::AuthCapabilityInvalidated(
-                        registration.public_key(),
-                        crate::core::AuthCapability::Signer,
-                        instance,
+                        expected_pubkey,
+                        core::AuthCapability::Policy,
+                        old_instance,
                     ));
                     dispatch_core_effects(
-                        &core,
+                        &mut core,
                         effects,
                         &pool,
                         &mut row_channels,
@@ -2127,6 +3534,65 @@ fn engine_loop<S, D>(
                         &mut preambles,
                         &registry,
                         dispatch_runtime,
+                    );
+                }
+                let _ = reply.send(Ok(registration));
+            }
+            Cmd::RemoveAuthPolicy {
+                registration,
+                reply,
+            } => {
+                let removed = auth_policies.borrow_mut().remove(&registration);
+                if let Some(instance) = removed {
+                    auth_tasks.borrow_mut().cancel_capability(
+                        registration.expected_pubkey(),
+                        core::AuthCapability::Policy,
+                        instance,
+                    );
+                    let effects = core.handle(EngineMsg::AuthCapabilityInvalidated(
+                        registration.expected_pubkey(),
+                        core::AuthCapability::Policy,
+                        instance,
+                    ));
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                let _ = reply.send(removed.is_some());
+            }
+            Cmd::AuthTaskCompleted(completion) => {
+                let Some(msg) = auth_tasks.borrow_mut().finish(completion) else {
+                    continue;
+                };
+                let effects = core.handle(msg);
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
+            Cmd::AuthTaskReleased(release) => {
+                let pending = auth_tasks.borrow_mut().released(release);
+                if let Some(task) = pending {
+                    auth::launch_auth_task(
+                        task,
+                        &mut auth_tasks.borrow_mut(),
+                        native_tasks,
+                        self_inbox,
                     );
                 }
             }
@@ -2153,13 +3619,14 @@ fn engine_loop<S, D>(
                         continue;
                     }
                 };
-                let Some(signer) = registry.signer_for(author) else {
+                let Some(signer_op) = registry.sign(unsigned.clone()) else {
                     let _ = reply.send(Err(SignEventError::NoActiveSigner));
                     continue;
                 };
 
                 let (terminal, cancelled) = SignEventTerminal::new();
                 let shutdown_terminal = Arc::clone(&terminal);
+                let task_id = reservation.task_id();
                 let starter = match reservation.start_with_cancel(move || {
                     shutdown_terminal.cancel();
                 }) {
@@ -2183,12 +3650,18 @@ fn engine_loop<S, D>(
 
                 let operation_id = next_sign_event_id;
                 next_sign_event_id = next_sign_event_id.wrapping_add(1).max(1);
-                let signer_result = match signer.sign(unsigned.clone()) {
+                let signer_result = match signer_op {
                     SignerOp::Ready(result) => SignEventSignerResult::Ready(Box::new(result)),
                     SignerOp::Pending(pending) => SignEventSignerResult::Pending(pending),
                 };
 
-                sign_event_cancellations.insert(operation_id, Arc::clone(&terminal));
+                sign_event_cancellations.insert(
+                    operation_id,
+                    ActiveSignEvent {
+                        terminal: Arc::clone(&terminal),
+                        task_id,
+                    },
+                );
                 if reply
                     .send(Ok(SignEventRegistration {
                         id: operation_id,
@@ -2203,6 +3676,10 @@ fn engine_loop<S, D>(
 
                 let inbox = self_inbox.clone();
                 starter.run(move || {
+                    let _finished = SignEventFinishedGuard {
+                        inbox,
+                        operation_id,
+                    };
                     let signer_result = match signer_result {
                         SignEventSignerResult::Ready(result) => Some(*result),
                         SignEventSignerResult::Pending(pending) => {
@@ -2217,13 +3694,12 @@ fn engine_loop<S, D>(
                         }
                         Some(_) | None => Err(SignEventError::Cancelled),
                     };
-                    let _ = inbox.send(Cmd::SignEventFinished(operation_id));
                     completion(result);
                 });
             }
             Cmd::CancelSignEvent(id) => {
-                if let Some(terminal) = sign_event_cancellations.remove(&id) {
-                    terminal.cancel();
+                if let Some(active) = sign_event_cancellations.remove(&id) {
+                    active.terminal.cancel();
                 }
             }
             Cmd::SignEventFinished(id) => {
@@ -2266,7 +3742,7 @@ fn engine_loop<S, D>(
                 let _ = reply.send(result);
                 effects.extend(publish_effects);
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2296,7 +3772,7 @@ fn engine_loop<S, D>(
                     row_channels.remove(&id);
                     let withdraw = core.handle(EngineMsg::Unsubscribe(id));
                     dispatch_core_effects(
-                        &core,
+                        &mut core,
                         withdraw,
                         &pool,
                         &mut row_channels,
@@ -2316,7 +3792,7 @@ fn engine_loop<S, D>(
                     row_channels.remove(&id);
                     let withdraw = core.handle(EngineMsg::Unsubscribe(id));
                     dispatch_core_effects(
-                        &core,
+                        &mut core,
                         withdraw,
                         &pool,
                         &mut row_channels,
@@ -2329,7 +3805,7 @@ fn engine_loop<S, D>(
                     continue;
                 }
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2355,7 +3831,7 @@ fn engine_loop<S, D>(
                             .to_string(),
                     }));
                     dispatch_core_effects(
-                        &core,
+                        &mut core,
                         effects,
                         &pool,
                         &mut row_channels,
@@ -2373,7 +3849,7 @@ fn engine_loop<S, D>(
                     history_channels.remove(&id);
                     let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
                     dispatch_core_effects(
-                        &core,
+                        &mut core,
                         withdraw,
                         &pool,
                         &mut row_channels,
@@ -2393,7 +3869,7 @@ fn engine_loop<S, D>(
                     history_channels.remove(&id);
                     let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
                     dispatch_core_effects(
-                        &core,
+                        &mut core,
                         withdraw,
                         &pool,
                         &mut row_channels,
@@ -2406,7 +3882,7 @@ fn engine_loop<S, D>(
                     continue;
                 }
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2435,7 +3911,7 @@ fn engine_loop<S, D>(
                     if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
                         let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
                         dispatch_core_effects(
-                            &core,
+                            &mut core,
                             rollback,
                             &pool,
                             &mut row_channels,
@@ -2453,7 +3929,7 @@ fn engine_loop<S, D>(
                     if reply.send(Ok(())).is_err() {
                         let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
                         dispatch_core_effects(
-                            &core,
+                            &mut core,
                             rollback,
                             &pool,
                             &mut row_channels,
@@ -2484,7 +3960,7 @@ fn engine_loop<S, D>(
                             // the staged continuation back and stop growing.
                             let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
                             dispatch_core_effects(
-                                &core,
+                                &mut core,
                                 committed,
                                 &pool,
                                 &mut row_channels,
@@ -2495,7 +3971,7 @@ fn engine_loop<S, D>(
                                 dispatch_runtime,
                             );
                             dispatch_core_effects(
-                                &core,
+                                &mut core,
                                 rollback,
                                 &pool,
                                 &mut row_channels,
@@ -2508,7 +3984,7 @@ fn engine_loop<S, D>(
                             break;
                         }
                         dispatch_core_effects(
-                            &core,
+                            &mut core,
                             committed,
                             &pool,
                             &mut row_channels,
@@ -2529,7 +4005,7 @@ fn engine_loop<S, D>(
                         reply.send(result.unwrap_or(Err(HistoryAdvanceError::StoreUnavailable)));
                 }
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2544,7 +4020,7 @@ fn engine_loop<S, D>(
                 history_channels.remove(&id);
                 let effects = core.handle(EngineMsg::UnsubscribeHistory(id));
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2558,12 +4034,42 @@ fn engine_loop<S, D>(
             Cmd::RelayWorkerRetired => {
                 retry_required_relay_workers(&core, &pool, &mut preambles);
             }
+            Cmd::Engine(EngineMsg::RelayFrame(handle, session, frame)) => {
+                if relay_frame_is_auth(&frame)
+                    && core.is_current_transport_session(handle, &session)
+                {
+                    let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                    dispatch_core_effects(
+                        &mut core,
+                        tick_effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                let effects = core.handle(EngineMsg::RelayFrame(handle, session, frame));
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
             Cmd::Engine(EngineMsg::Unsubscribe(id)) => {
                 let effects = core.handle(EngineMsg::Unsubscribe(id));
                 // Drop the sender: the app's `Receiver` observes disconnect.
                 row_channels.remove(&id);
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2580,7 +4086,7 @@ fn engine_loop<S, D>(
                 let effects = core.handle(EngineMsg::SetActivePubkey(pk));
                 active_pubkey = pk;
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2599,7 +4105,7 @@ fn engine_loop<S, D>(
                 let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
                 effects.extend(core.handle(EngineMsg::Publish(intent, sink)));
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2613,7 +4119,7 @@ fn engine_loop<S, D>(
             Cmd::Engine(msg) => {
                 let effects = core.handle(msg);
                 dispatch_core_effects(
-                    &core,
+                    &mut core,
                     effects,
                     &pool,
                     &mut row_channels,
@@ -2627,8 +4133,9 @@ fn engine_loop<S, D>(
         }
     }
 
-    for (_, terminal) in sign_event_cancellations.drain() {
-        terminal.cancel();
+    auth_tasks.borrow_mut().shutdown();
+    for (_, active) in sign_event_cancellations.drain() {
+        active.terminal.cancel();
     }
 
     // Tear down this thread's OWN `Pool` clone. If no other `Pool` clone
@@ -2654,7 +4161,7 @@ fn engine_loop<S, D>(
 // adds only the reducer reference needed for exact ownership reconciliation.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_core_effects<S: EventStore>(
-    core: &EngineCore<S>,
+    core: &mut EngineCore<S>,
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
@@ -2674,6 +4181,7 @@ fn dispatch_core_effects<S: EventStore>(
     }
 
     dispatch_effects(
+        core,
         effects,
         pool,
         row_channels,
@@ -2730,6 +4238,15 @@ fn preflight_query_relay_workers_with(
                     }
                 }
             }
+            // A PROTECTED session's REQs stay parked until AUTH readiness,
+            // so its acquisition edge is `Effect::EnsureRelay`, never a
+            // `WireOp::Req` (#8 U4): the worker must exist before the relay
+            // can deliver the challenge that makes readiness possible, and a
+            // spawn refusal for it is the same typed construction failure as
+            // for an ordinary REQ session.
+            Effect::EnsureRelay(session) => {
+                sessions.insert(session.clone());
+            }
             Effect::PreflightHistoryRelays(planned) => sessions.extend(planned.iter().cloned()),
             _ => {}
         }
@@ -2750,6 +4267,87 @@ fn preflight_query_relay_workers_with(
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_relay_open_failure(
+    core: &mut EngineCore<impl EventStore>,
+    session: RelaySessionKey,
+    error: nmp_transport::RelayOpenError,
+    pool: &Pool,
+    row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
+    preambles: &mut Preambles,
+    registry: &SignerRegistry,
+    runtime: DispatchRuntime<'_>,
+) {
+    match error {
+        nmp_transport::RelayOpenError::AtCapacity { .. } => {
+            dispatch_effect(
+                core,
+                Effect::EmitDiagnostics(core.diagnostics_snapshot()),
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                preambles,
+                registry,
+                runtime,
+            );
+        }
+        nmp_transport::RelayOpenError::ThreadUnavailable(error) => {
+            let followups = core.handle(EngineMsg::RelayOpenFailed(
+                session,
+                format!("{}: {}", error.role, error.reason),
+            ));
+            dispatch_effects(
+                core,
+                followups,
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                preambles,
+                registry,
+                runtime,
+            );
+            // One event-driven retry after an OS refusal. A repeated refusal
+            // remains latched in diagnostics and the reducer's required set;
+            // it never turns into a command spin.
+            let _ = runtime.self_inbox.send(Cmd::RelayWorkerRetired);
+        }
+        nmp_transport::RelayOpenError::Unavailable => {
+            let followups = core.handle(EngineMsg::RelayOpenFailed(
+                session,
+                "relay pool state unavailable".to_string(),
+            ));
+            dispatch_effects(
+                core,
+                followups,
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                preambles,
+                registry,
+                runtime,
+            );
+        }
+        nmp_transport::RelayOpenError::ShuttingDown => {
+            if runtime
+                .self_inbox
+                .send(Cmd::Engine(EngineMsg::RelayOpenFailed(
+                    session,
+                    "relay pool is shutting down".to_string(),
+                )))
+                .is_err()
+            {
+                // The engine inbox is already gone; there is no observer or
+                // retry owner left to notify.
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2872,6 +4470,7 @@ fn retry_required_relay_workers<S: EventStore>(
 // cannot acquire hidden mutable state.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_effects(
+    core: &mut EngineCore<impl EventStore>,
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
@@ -2883,6 +4482,7 @@ fn dispatch_effects(
 ) {
     for effect in effects {
         dispatch_effect(
+            core,
             effect,
             pool,
             row_channels,
@@ -2899,6 +4499,7 @@ fn dispatch_effects(
 // at the one-effect boundary where its ownership is audited.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_effect(
+    core: &mut EngineCore<impl EventStore>,
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
@@ -2912,6 +4513,9 @@ fn dispatch_effect(
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
+        Effect::ReleaseInitialRead(handle) => {
+            let _ = pool.release_initial_read(handle);
+        }
         Effect::FetchRelayInformation(url) => {
             let generation = runtime
                 .nip11_decisions
@@ -2962,7 +4566,20 @@ fn dispatch_effect(
             // A typed cap refusal remains observable in pool diagnostics and
             // must not be converted back into an invalid handle or a busy
             // retry loop here.
-            let _refusal = pool.ensure_session(&session).err();
+            if let Err(error) = pool.ensure_session(&session) {
+                dispatch_relay_open_failure(
+                    core,
+                    session,
+                    error,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    preambles,
+                    registry,
+                    runtime,
+                );
+            }
         }
         // The signer frozen into this exact accepted template is looked up
         // by pubkey on every request. A later active-account switch cannot
@@ -2970,9 +4587,8 @@ fn dispatch_effect(
         // NOT a terminal signer failure. The accepted pending row and
         // obligation stay alive as `AwaitingCapability`; only an explicit
         // denial/error from an attached signer compensates the write.
-        Effect::RequestSign(id, generation, unsigned) => match registry.signer_for(unsigned.pubkey)
-        {
-            Some(signer) => match signer.sign(unsigned) {
+        Effect::RequestSign(id, generation, unsigned) => match registry.sign(unsigned) {
+            Some(operation) => match operation {
                 SignerOp::Ready(result) => {
                     let _ = runtime
                         .self_inbox
@@ -3017,13 +4633,30 @@ fn dispatch_effect(
             }
         },
         Effect::RelayAuth(effect) => {
-            auth::dispatch(effect, pool, registry, runtime.self_inbox);
+            let mut bind = |token, capability, instance| {
+                let effects = core.handle(EngineMsg::AuthCapabilityBound {
+                    token,
+                    capability,
+                    instance,
+                });
+                debug_assert!(
+                    effects.is_empty(),
+                    "binding an AUTH capability is a synchronous state-only transition"
+                );
+            };
+            auth::dispatch(
+                effect,
+                pool,
+                registry,
+                &runtime.auth_policies.borrow(),
+                &mut runtime.auth_tasks.borrow_mut(),
+                runtime.native_tasks,
+                runtime.self_inbox,
+                &mut bind,
+            );
         }
         Effect::RearmSignerIfAvailable(pubkey) => {
-            if registry
-                .signer_for(pubkey)
-                .is_some_and(SigningCapability::is_available)
-            {
+            if registry.is_available(pubkey) {
                 let _ = runtime
                     .self_inbox
                     .send(Cmd::Engine(EngineMsg::SignerAttached(pubkey)));
@@ -3394,6 +5027,7 @@ impl SignEventCancel {
 pub struct SignerRegistration {
     public_key: PublicKey,
     identity: Arc<()>,
+    instance: core::AuthCapabilityInstance,
 }
 
 impl SignerRegistration {
@@ -3413,7 +5047,9 @@ impl std::fmt::Debug for SignerRegistration {
 
 impl PartialEq for SignerRegistration {
     fn eq(&self, other: &Self) -> bool {
-        self.public_key == other.public_key && Arc::ptr_eq(&self.identity, &other.identity)
+        self.public_key == other.public_key
+            && self.instance == other.instance
+            && Arc::ptr_eq(&self.identity, &other.identity)
     }
 }
 
@@ -3422,12 +5058,22 @@ impl Eq for SignerRegistration {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddSignerError {
     MissingPublicKey,
+    CapabilityInstanceExhausted,
+    RegistryFull { limit: usize },
+    EngineShuttingDown,
 }
 
 impl std::fmt::Display for AddSignerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingPublicKey => f.write_str("signing capability has no public key"),
+            Self::CapabilityInstanceExhausted => {
+                f.write_str("AUTH capability instance space exhausted")
+            }
+            Self::RegistryFull { limit } => {
+                write!(f, "AUTH capability registry is full at {limit} entries")
+            }
+            Self::EngineShuttingDown => f.write_str("engine is shutting down"),
         }
     }
 }
@@ -3609,6 +5255,45 @@ impl Handle {
             .expect("nmp-engine: engine thread dropped the remove_signer reply")
     }
 
+    /// Install the authorization policy for one exact account identity.
+    /// Replacing a policy returns a new opaque registration and invalidates
+    /// any operation bound to the prior capability instance.
+    pub fn add_auth_policy<P>(
+        &self,
+        expected_pubkey: PublicKey,
+        policy: P,
+    ) -> Result<AuthPolicyRegistration, AddAuthPolicyError>
+    where
+        P: AuthPolicy + 'static,
+    {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::AddAuthPolicy {
+                expected_pubkey,
+                policy: Box::new(policy),
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: add_auth_policy() called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine thread dropped the add_auth_policy reply")
+    }
+
+    /// Remove only the policy installation proven by this registration.
+    /// A stale registration cannot remove a replacement.
+    pub fn remove_auth_policy(&self, registration: AuthPolicyRegistration) -> bool {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::RemoveAuthPolicy {
+                registration,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: remove_auth_policy() called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine thread dropped the remove_auth_policy reply")
+    }
+
     /// Ask the currently active registered signer to sign one exact event,
     /// without accepting a write or touching the canonical store/outbox.
     /// Admission reserves a finite native-task slot before the signer is
@@ -3757,8 +5442,8 @@ impl Handle {
         )
     }
 
-    /// Stop the engine thread (and, transitively, the pool-bridge thread —
-    /// see [`EngineThread::join`]). Idempotent: a `Handle` clone calling this
+    /// Stop the engine thread (and, transitively, its bridge threads — see
+    /// [`EngineThread::join`]). Idempotent: a `Handle` clone calling this
     /// after another already has just finds the inbox gone and no-ops.
     pub fn shutdown(&self) {
         let _ = self.inbox.send(Cmd::Shutdown);

@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::{
-    AcquisitionEvidence, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendOutcome,
-    AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta, RowSink, ShortfallFact,
-    SourceEvidence, SourceStatus,
+    AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
+    AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta,
+    RowSink, ShortfallFact, SourceEvidence, SourceStatus,
 };
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
@@ -683,6 +683,43 @@ fn signer_session(relay: &RelayUrl, signer: nostr::PublicKey) -> RelaySessionKey
     RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
 }
 
+fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16) -> LiveQuery {
+    LiveQuery(
+        nmp_grammar::Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([kind])),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            AccessContext::Nip42(signer),
+        )
+        .expect("protected pinned demand is valid"),
+    )
+}
+
+fn subscribed_handle(effects: &[Effect]) -> HandleId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(id, ..) => Some(*id),
+            _ => None,
+        })
+        .expect("subscribe emits its initial row snapshot")
+}
+
+fn assert_no_protected_req(effects: &[Effect], session: &RelaySessionKey) {
+    assert!(
+        !effects.iter().any(|effect| match effect {
+            Effect::Replay(candidate, reqs) => candidate == session && !reqs.is_empty(),
+            Effect::Wire(delta) => delta.ops.iter().any(|(candidate, ops)| {
+                candidate == session && ops.iter().any(|op| matches!(op, WireOp::Req(..)))
+            }),
+            _ => false,
+        }),
+        "protected REQs must remain parked before current AUTH readiness: {effects:?}"
+    );
+}
+
 fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
     let mut effects = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
@@ -713,6 +750,142 @@ fn connect_signer<S: EventStore>(
     ));
     effects.extend(core.handle(EngineMsg::RelayInformationResolved(url.clone(), None)));
     effects
+}
+
+fn release_author_probe<S: EventStore>(
+    core: &mut EngineCore<S>,
+    handle: RelayHandle,
+    url: &RelayUrl,
+    signer: nostr::PublicKey,
+) -> Vec<Effect> {
+    core.handle(EngineMsg::AuthProbeReleased(
+        handle,
+        signer_session(url, signer),
+    ))
+}
+
+/// Complete the canonical NIP-42 handshake for one exact signer session.
+///
+/// Protected-write tests call this explicitly after `connect_signer`; the
+/// returned effects are the matching AUTH `OK` wake, so callers can still
+/// assert any write scheduling caused by readiness.
+fn authenticate_signer<S: EventStore>(
+    core: &mut EngineCore<S>,
+    slot: u32,
+    url: &RelayUrl,
+    signer: &Keys,
+) -> Vec<Effect> {
+    authenticate_signer_generation(
+        core,
+        RelayHandle {
+            slot,
+            generation: 1,
+        },
+        url,
+        signer,
+    )
+}
+
+fn authenticate_signer_generation<S: EventStore>(
+    core: &mut EngineCore<S>,
+    handle: RelayHandle,
+    url: &RelayUrl,
+    signer: &Keys,
+) -> Vec<Effect> {
+    let session = signer_session(url, signer.public_key());
+    let challenge = core.handle(EngineMsg::RelayFrame(
+        handle,
+        session.clone(),
+        RelayFrame::from(RelayMessage::Auth {
+            challenge: Cow::Owned(format!(
+                "core-headless-{}-{}",
+                handle.slot, handle.generation
+            )),
+        }),
+    ));
+    let policy_token = challenge
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. }) => Some(token),
+            _ => None,
+        })
+        .expect("AUTH challenge requests policy for the exact session");
+    assert_eq!(policy_token.epoch.session, session);
+    assert_eq!(policy_token.epoch.handle, handle);
+
+    finish_authentication(core, handle, session, signer, policy_token)
+}
+
+fn finish_authentication<S: EventStore>(
+    core: &mut EngineCore<S>,
+    handle: RelayHandle,
+    session: RelaySessionKey,
+    signer: &Keys,
+    policy_token: nmp_engine::core::AuthOpToken,
+) -> Vec<Effect> {
+    let policy_instance = AuthCapabilityInstance(1);
+    core.handle(EngineMsg::AuthCapabilityBound {
+        token: policy_token.clone(),
+        capability: AuthCapability::Policy,
+        instance: policy_instance,
+    });
+    let signature = core.handle(EngineMsg::AuthPolicyCompleted(
+        policy_token,
+        Some(policy_instance),
+        AuthPolicyOutcome::Allow,
+    ));
+    let (sign_token, unsigned) = signature
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestSignature { token, unsigned }) => {
+                Some((token, unsigned))
+            }
+            _ => None,
+        })
+        .expect("allowed AUTH policy requests the frozen event signature");
+    assert_eq!(sign_token.epoch.session, session);
+    assert_eq!(sign_token.epoch.handle, handle);
+    assert_eq!(unsigned.kind, Kind::Authentication);
+    assert_eq!(unsigned.pubkey, signer.public_key());
+
+    let signed = unsigned
+        .sign_with_keys(signer)
+        .expect("sign deterministic AUTH fixture");
+    let signer_instance = AuthCapabilityInstance(2);
+    core.handle(EngineMsg::AuthCapabilityBound {
+        token: sign_token.clone(),
+        capability: AuthCapability::Signer,
+        instance: signer_instance,
+    });
+    let send = core.handle(EngineMsg::AuthSignerCompleted(
+        sign_token,
+        Some(signer_instance),
+        AuthSignerOutcome::Signed(signed),
+    ));
+    let (send_token, auth_event) = send
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::Send {
+                token,
+                epoch,
+                event,
+            }) => {
+                assert_eq!(epoch.session, session);
+                assert_eq!(epoch.handle, handle);
+                Some((token, event))
+            }
+            _ => None,
+        })
+        .expect("signed AUTH requests an exact-generation send");
+    core.handle(EngineMsg::AuthSendCompleted(
+        send_token,
+        AuthSendOutcome::Accepted,
+    ));
+    core.handle(EngineMsg::RelayFrame(
+        handle,
+        session,
+        RelayFrame::from(RelayMessage::ok(auth_event.id, true, "authenticated")),
+    ))
 }
 
 fn nip11_evidence(
@@ -749,7 +922,9 @@ fn mark_written<S: EventStore>(
             }
             _ => None,
         })
-        .expect("expected a persisted scheduled publish for connected relay");
+        .unwrap_or_else(|| {
+            panic!("expected a persisted scheduled publish for connected relay: {effects:?}")
+        });
     core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written))
 }
 
@@ -789,6 +964,122 @@ fn eose_frame(sub: &str) -> RelayFrame {
 }
 
 // ---- test 1 analog: subscribe -> Wire; ingest -> Wire + EmitRows --------
+
+#[test]
+fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after_auth() {
+    let signer = Keys::generate();
+    let relay = RelayUrl::parse("wss://fresh-protected-read.example").unwrap();
+    let session = signer_session(&relay, signer.public_key());
+    let mut core = new_core(FixtureDirectory::new());
+
+    let first = core.handle(EngineMsg::Subscribe(
+        protected_pinned_query(&relay, signer.public_key(), 1),
+        Box::new(CapturingSink::default()),
+    ));
+    let first_id = subscribed_handle(&first);
+    assert_eq!(
+        first
+            .iter()
+            .filter(
+                |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+            )
+            .count(),
+        1,
+        "fresh protected demand emits one deduplicated worker-acquisition edge"
+    );
+    assert_no_protected_req(&first, &session);
+
+    let generation_one = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let connected = core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
+    assert_no_protected_req(&connected, &session);
+
+    let second = core.handle(EngineMsg::Subscribe(
+        protected_pinned_query(&relay, signer.public_key(), 2),
+        Box::new(CapturingSink::default()),
+    ));
+    let second_id = subscribed_handle(&second);
+    assert_eq!(
+        second
+            .iter()
+            .filter(
+                |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+            )
+            .count(),
+        1,
+        "a demand recompile still names the existing protected worker once"
+    );
+    assert_no_protected_req(&second, &session);
+
+    let newest_only = core.handle(EngineMsg::Unsubscribe(first_id));
+    assert_eq!(
+        newest_only
+            .iter()
+            .filter(
+                |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+            )
+            .count(),
+        1,
+        "the parked plan retains the exact current protected session"
+    );
+    assert_no_protected_req(&newest_only, &session);
+
+    let ready = authenticate_signer(&mut core, 0, &relay, &signer);
+    let replay = ready
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(candidate, reqs) if candidate == &session => Some(reqs),
+            _ => None,
+        })
+        .expect("current AUTH readiness replays the parked current plan");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].filter.kinds, Some(BTreeSet::from([2])));
+
+    let disconnected = core.handle(EngineMsg::RelayDisconnected(
+        generation_one,
+        session.clone(),
+        nmp_transport::DisconnectReason::Error,
+    ));
+    assert!(disconnected
+        .iter()
+        .any(|effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)));
+
+    let generation_two = RelayHandle {
+        slot: 0,
+        generation: 2,
+    };
+    let reconnected = core.handle(EngineMsg::RelayConnected(generation_two, session.clone()));
+    assert_no_protected_req(&reconnected, &session);
+    let challenged = core.handle(EngineMsg::RelayFrame(
+        generation_two,
+        session.clone(),
+        RelayFrame::from(RelayMessage::Auth {
+            challenge: Cow::Borrowed("fresh-reconnect-challenge"),
+        }),
+    ));
+    assert!(challenged.iter().any(|effect| matches!(
+        effect,
+        Effect::RelayAuth(AuthEffect::RequestPolicy {
+            token,
+            challenge,
+            ..
+        })
+            if token.epoch.handle == generation_two
+                && token.epoch.session == session
+                && challenge == "fresh-reconnect-challenge"
+    )));
+    assert_no_protected_req(&challenged, &session);
+
+    let removed = core.handle(EngineMsg::Unsubscribe(second_id));
+    assert!(
+        !removed.iter().any(
+            |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+        ),
+        "the final demand withdrawal must not reopen the protected session"
+    );
+}
 
 #[test]
 fn subscribe_opens_wire_for_resolved_demand() {
@@ -2500,6 +2791,7 @@ fn enqueue_is_not_converged() {
     let mut core = new_core(dir);
     activate(&mut core, &a);
     connect_signer(&mut core, 0, &relay0, a.public_key());
+    authenticate_signer(&mut core, 0, &relay0, &a);
     let session = signer_session(&relay0, a.public_key());
 
     // -- Durable: first status is Accepted, never a bool/terminal. --
@@ -2605,6 +2897,222 @@ fn enqueue_is_not_converged() {
 }
 
 #[test]
+fn ordinary_author_relay_without_auth_challenge_publishes_and_acks() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://ordinary-no-auth.example").unwrap();
+    let handle = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let mut core = new_core(FixtureDirectory::new());
+    let sink = CapturingReceiptSink::default();
+    let (receipt, event, offline) =
+        publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    assert!(!offline
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    let parked = connect_signer(&mut core, 0, &relay, author.public_key());
+    assert!(!parked
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    let scheduled = release_author_probe(&mut core, handle, &relay, author.public_key());
+    assert!(scheduled.iter().any(|effect| matches!(
+        effect,
+        Effect::PublishEvent(session, candidate, _)
+            if session == &signer_session(&relay, author.public_key())
+                && candidate.id == event.id
+    )));
+    mark_written(&mut core, &scheduled, &relay);
+    let acked = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        signer_session(&relay, author.public_key()),
+        RelayFrame::from(RelayMessage::ok(event.id, true, "saved")),
+    ));
+    assert!(acked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteStatus::Acked(candidate))
+            if *id == receipt && candidate == &relay
+    )));
+    assert!(sink.0.lock().unwrap().contains(&WriteStatus::Acked(relay)));
+}
+
+#[test]
+fn challenged_author_relay_suppresses_event_until_exact_auth_ready() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://protected-pre-auth.example").unwrap();
+    let session = signer_session(&relay, author.public_key());
+    let handle = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let mut core = new_core(FixtureDirectory::new());
+    let owned = core.handle(EngineMsg::Subscribe(
+        protected_pinned_query(&relay, author.public_key(), 1),
+        Box::new(CapturingSink::default()),
+    ));
+    let subscription = subscribed_handle(&owned);
+    connect_signer(&mut core, 0, &relay, author.public_key());
+    let challenge = core.handle(EngineMsg::RelayFrame(
+        handle,
+        session.clone(),
+        RelayFrame::from(RelayMessage::Auth {
+            challenge: Cow::Borrowed("protect-before-event"),
+        }),
+    ));
+    let policy_token = challenge
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. })
+                if token.epoch.session == session =>
+            {
+                Some(token.clone())
+            }
+            _ => None,
+        })
+        .expect("proactive challenge requests exact-session policy");
+    let released = release_author_probe(&mut core, handle, &relay, author.public_key());
+    assert!(!released
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+
+    let sink = CapturingReceiptSink::default();
+    let (_, event, scheduled) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    assert!(!scheduled
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    assert!(sink
+        .0
+        .lock()
+        .unwrap()
+        .contains(&WriteStatus::AwaitingAuth { relay }));
+    let ready = finish_authentication(&mut core, handle, session.clone(), &author, policy_token);
+    assert_eq!(
+        ready
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::PublishEvent(candidate, published, _)
+                    if candidate == &session && published.id == event.id
+            ))
+            .count(),
+        1,
+        "the proactive challenge's exact AUTH OK releases the EVENT once"
+    );
+    core.handle(EngineMsg::Unsubscribe(subscription));
+}
+
+#[test]
+fn auth_required_session_reconnect_cannot_publish_before_fresh_generation_auth() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://protected-reconnect-write.example").unwrap();
+    let session = signer_session(&relay, author.public_key());
+    let generation_one = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let generation_two = RelayHandle {
+        slot: 0,
+        generation: 2,
+    };
+    let mut core = new_core(FixtureDirectory::new());
+    let subscribed = core.handle(EngineMsg::Subscribe(
+        protected_pinned_query(&relay, author.public_key(), 1),
+        Box::new(CapturingSink::default()),
+    ));
+    let subscription = subscribed_handle(&subscribed);
+    core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
+    authenticate_signer_generation(&mut core, generation_one, &relay, &author);
+    core.handle(EngineMsg::RelayDisconnected(
+        generation_one,
+        session.clone(),
+        nmp_transport::DisconnectReason::Error,
+    ));
+    core.handle(EngineMsg::RelayConnected(generation_two, session.clone()));
+    let released = release_author_probe(&mut core, generation_two, &relay, author.public_key());
+    assert!(!released
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+
+    let sink = CapturingReceiptSink::default();
+    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    assert!(!parked
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    assert!(sink.0.lock().unwrap().contains(&WriteStatus::AwaitingAuth {
+        relay: relay.clone(),
+    }));
+
+    let ready = authenticate_signer_generation(&mut core, generation_two, &relay, &author);
+    assert_eq!(
+        ready
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::PublishEvent(candidate, published, _)
+                    if candidate == &session && published.id == event.id
+            ))
+            .count(),
+        1,
+        "fresh exact-generation AUTH readiness releases the parked EVENT once"
+    );
+    core.handle(EngineMsg::Unsubscribe(subscription));
+}
+
+#[test]
+fn stale_auth_probe_release_after_reconnect_cannot_wake_current_generation() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://ordinary-probe-reconnect.example").unwrap();
+    let session = signer_session(&relay, author.public_key());
+    let generation_one = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let generation_two = RelayHandle {
+        slot: 0,
+        generation: 2,
+    };
+    let mut core = new_core(FixtureDirectory::new());
+    let subscribed = core.handle(EngineMsg::Subscribe(
+        protected_pinned_query(&relay, author.public_key(), 1),
+        Box::new(CapturingSink::default()),
+    ));
+    let subscription = subscribed_handle(&subscribed);
+    core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
+    core.handle(EngineMsg::RelayDisconnected(
+        generation_one,
+        session.clone(),
+        nmp_transport::DisconnectReason::Error,
+    ));
+    core.handle(EngineMsg::RelayConnected(generation_two, session.clone()));
+    let sink = CapturingReceiptSink::default();
+    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()], sink);
+    assert!(!parked
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+
+    let stale = release_author_probe(&mut core, generation_one, &relay, author.public_key());
+    assert!(!stale
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    let current = release_author_probe(&mut core, generation_two, &relay, author.public_key());
+    assert_eq!(
+        current
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::PublishEvent(candidate, published, _)
+                    if candidate == &session && published.id == event.id
+            ))
+            .count(),
+        1
+    );
+    core.handle(EngineMsg::Unsubscribe(subscription));
+}
+
+#[test]
 fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://auth-wait.example").unwrap();
@@ -2658,7 +3166,16 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .contains(&WriteStatus::AwaitingRelay {
                 relay: relay.clone(),
             }));
-        let first = connect_signer(&mut core, 0, &relay, event.pubkey);
+        connect_signer(&mut core, 0, &relay, event.pubkey);
+        let first = release_author_probe(
+            &mut core,
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            &relay,
+            event.pubkey,
+        );
         mark_written(&mut core, &first, &relay);
         let auth = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
@@ -2820,9 +3337,20 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
     let sink = CapturingReceiptSink::default();
     let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
 
-    // First generation: connect, hand off, and let the relay demand auth via
-    // an `OK false auth-required` on the durable EVENT. The lane parks.
-    let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+    // First generation: connect, release the bounded AUTH-discovery probe,
+    // hand off, and let the relay demand auth via an `OK false
+    // auth-required` on the durable EVENT. The lane parks and the relay is
+    // now KNOWN to require auth for this exact session.
+    connect_signer(&mut core, 0, &relay, author.public_key());
+    let connected = release_author_probe(
+        &mut core,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &relay,
+        author.public_key(),
+    );
     mark_written(&mut core, &connected, &relay);
     let parked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -2841,9 +3369,14 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
         Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay: waiting }) if waiting == &relay
     )));
 
-    // The socket drops mid-handshake (before any AUTH OK). The parked lane
-    // must fall back to `WaitingConnection`, surfacing `AwaitingRelay`.
-    let disconnected = core.handle(EngineMsg::RelayDisconnected(
+    // The socket drops mid-handshake (before any AUTH OK), and a fresh
+    // generation reconnects. The relay actually REQUIRED auth for this
+    // session (`auth_required_sessions` is sticky while the lane owns the
+    // worker), so the unauthenticated reconnect must NOT re-drive the
+    // publish: replaying the EVENT on a socket the relay already refused
+    // pre-auth would only be refused again (#8: a new generation needs a
+    // fresh challenge and matching AUTH OK before replay).
+    core.handle(EngineMsg::RelayDisconnected(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -2851,15 +3384,6 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
         session.clone(),
         DisconnectReason::Closed,
     ));
-    assert!(disconnected.iter().any(|effect| matches!(
-        effect,
-        Effect::EmitReceipt(_, WriteStatus::AwaitingRelay { relay: waiting }) if waiting == &relay
-    )));
-
-    // A fresh generation reconnects. The ordinary (non-auth) reconnect wake
-    // must re-drive the lane: a new `PublishEvent` is scheduled on the exact
-    // authenticated session, re-provoking the challenge. Without the fix the
-    // lane would remain `WaitingAuth` and no publish would ever be emitted.
     let mut reconnected = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
@@ -2869,10 +3393,32 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
     ));
     reconnected.extend(core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None)));
     assert!(
-        reconnected
+        !reconnected
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &session)),
-        "reconnect must re-drive the parked auth write, not leave it wedged in WaitingAuth"
+        "an unauthenticated reconnect must not replay a write the relay \
+         already refused pre-auth: {reconnected:?}"
+    );
+
+    // Only the fresh generation's own challenge + matching AUTH OK re-drives
+    // the parked lane — exactly once.
+    let ready = authenticate_signer_generation(
+        &mut core,
+        RelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        &relay,
+        &author,
+    );
+    assert_eq!(
+        ready
+            .iter()
+            .filter(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &session))
+            .count(),
+        1,
+        "the fresh generation's AUTH OK must re-drive the parked auth write \
+         exactly once, not leave it wedged: {ready:?}"
     );
 }
 
@@ -2901,7 +3447,16 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
             [relay.clone()],
             CapturingReceiptSink::default(),
         );
-        let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+        connect_signer(&mut core, 0, &relay, author.public_key());
+        let connected = release_author_probe(
+            &mut core,
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            &relay,
+            author.public_key(),
+        );
         mark_written(&mut core, &connected, &relay);
         let parked = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
@@ -2935,13 +3490,28 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
             .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)),
         "boot must redial the exact authenticated session for the recovered lane"
     );
-    let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+    // The fresh process has no in-memory auth-required fact for this relay,
+    // so the recovered lane rides the ordinary bounded AUTH-discovery path:
+    // connect parks it behind the probe, and the transport's ordered
+    // first-read completion re-drives it (a relay still requiring auth would
+    // instead deliver its challenge inside that window and park it as
+    // WaitingAuth until the fresh AUTH OK).
+    connect_signer(&mut core, 0, &relay, author.public_key());
+    let released = release_author_probe(
+        &mut core,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &relay,
+        author.public_key(),
+    );
     assert!(
-        connected.iter().any(
+        released.iter().any(
             |effect| matches!(effect, Effect::PublishEvent(r, current, _)
                 if r == &session && current.id == event.id)
         ),
-        "boot-recovered auth write must re-drive on the first connect, not stay wedged"
+        "boot-recovered auth write must re-drive on the first probe release, not stay wedged"
     );
 }
 
@@ -2964,6 +3534,9 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         connect_signer(&mut core, 0, &auth, author.public_key());
         connect_signer(&mut core, 1, &retry, author.public_key());
         connect_signer(&mut core, 2, &ambiguous, author.public_key());
+        authenticate_signer(&mut core, 0, &auth, &author);
+        authenticate_signer(&mut core, 1, &retry, &author);
+        authenticate_signer(&mut core, 2, &ambiguous, &author);
         let sink = CapturingReceiptSink::default();
         let (receipt, event, scheduled) = publish_private(
             &mut core,
@@ -3100,6 +3673,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     let relay = RelayUrl::parse("wss://transient-retry.example").unwrap();
     let mut core = new_core(FixtureDirectory::new());
     connect_signer(&mut core, 0, &relay, author.public_key());
+    authenticate_signer(&mut core, 0, &relay, &author);
     let sink = CapturingReceiptSink::default();
     let (receipt, event, first) =
         publish_private(&mut core, &author, [relay.clone()], sink.clone());
@@ -3178,6 +3752,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
     let mut core = new_core(FixtureDirectory::new());
     for (slot, relay) in relays.iter().enumerate() {
         connect_signer(&mut core, slot as u32, relay, author.public_key());
+        authenticate_signer(&mut core, slot as u32, relay, &author);
     }
     let (_, event, first_wave) = publish_private(
         &mut core,
@@ -3646,6 +4221,9 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     connect_signer(&mut core, 0, &ack, a.public_key());
     connect_signer(&mut core, 1, &nack, a.public_key());
     connect_signer(&mut core, 2, &drop_relay, a.public_key());
+    authenticate_signer(&mut core, 0, &ack, &a);
+    authenticate_signer(&mut core, 1, &nack, &a);
+    authenticate_signer(&mut core, 2, &drop_relay, &a);
     let template = unsigned(&a, 1, "same bytes, separate obligations");
     let sink_a = CapturingReceiptSink::default();
     let sink_b = CapturingReceiptSink::default();
@@ -3750,6 +4328,8 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     activate(&mut core, &a);
     connect_signer(&mut core, 0, &source, a.public_key());
     connect_signer(&mut core, 1, &out, a.public_key());
+    authenticate_signer(&mut core, 0, &source, &a);
+    authenticate_signer(&mut core, 1, &out, &a);
     let template = unsigned(&a, 1, "relay wins signing race");
     let sink_a = CapturingReceiptSink::default();
     let sink_b = CapturingReceiptSink::default();
@@ -4097,6 +4677,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect_signer(&mut core, 0, &relay0, a.public_key());
+    authenticate_signer(&mut core, 0, &relay0, &a);
 
     let genuine = unsigned(&a, 1, "genuine content")
         .sign_with_keys(&a)
@@ -4194,6 +4775,8 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
     connect_signer(&mut core, 0, &good, author.public_key());
     connect_signer(&mut core, 1, &blocked, author.public_key());
+    authenticate_signer(&mut core, 0, &good, &author);
+    authenticate_signer(&mut core, 1, &blocked, &author);
 
     let (id, _, effects) = publish_private(
         &mut core,
@@ -4240,6 +4823,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     let mut core = new_core(dir);
     let sink = CapturingReceiptSink::default();
     connect_signer(&mut core, 0, &relay, author.public_key());
+    authenticate_signer(&mut core, 0, &relay, &author);
 
     let (id, _signed, effects) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
 
@@ -4398,6 +4982,8 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
     let sink = CapturingReceiptSink::default();
     connect_signer(&mut core, 0, &relay_a, author.public_key());
     connect_signer(&mut core, 1, &relay_b, author.public_key());
+    authenticate_signer(&mut core, 0, &relay_a, &author);
+    authenticate_signer(&mut core, 1, &relay_b, &author);
 
     let (id, _signed, effects) = publish_private(
         &mut core,
@@ -4481,6 +5067,8 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     let sink = CapturingReceiptSink::default();
     connect_signer(&mut core, 0, &a, author.public_key());
     connect_signer(&mut core, 1, &b, author.public_key());
+    authenticate_signer(&mut core, 0, &a, &author);
+    authenticate_signer(&mut core, 1, &b, &author);
 
     let (id, _, effects) =
         publish_private(&mut core, &author, [a.clone(), b.clone()], sink.clone());
@@ -4519,6 +5107,8 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
         signer_session(&good, author.public_key()),
     ));
     connect_signer(&mut core, 1, &blocked, author.public_key());
+    authenticate_signer(&mut core, 0, &good, &author);
+    authenticate_signer(&mut core, 1, &blocked, &author);
     let (id, signed, scheduled) = publish_private(
         &mut core,
         &author,
@@ -4563,6 +5153,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
             10,
         );
         connect_signer(&mut first, 0, &relay, author.public_key());
+        authenticate_signer(&mut first, 0, &relay, &author);
         let (id, _, effects) = publish_private(
             &mut first,
             &author,
@@ -4586,6 +5177,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         .any(|effect| matches!(effect, Effect::EnsureRelay(r)
             if r == &signer_session(&relay, author.public_key()))));
     connect_signer(&mut still_blocked, 0, &relay, author.public_key());
+    authenticate_signer(&mut still_blocked, 0, &relay, &author);
     let replay = CapturingReceiptSink::default();
     assert!(still_blocked
         .reattach_receipt(receipt, Box::new(replay.clone()))
@@ -4607,7 +5199,16 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         .iter()
         .any(|effect| matches!(effect, Effect::EnsureRelay(r)
             if r == &signer_session(&relay, author.public_key()))));
-    let effects = connect_signer(&mut recovered, 0, &relay, author.public_key());
+    connect_signer(&mut recovered, 0, &relay, author.public_key());
+    let effects = release_author_probe(
+        &mut recovered,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &relay,
+        author.public_key(),
+    );
     assert_eq!(
         effects
             .iter()
@@ -4640,6 +5241,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
             10,
         );
         connect_signer(&mut core, 0, &relay, author.public_key());
+        authenticate_signer(&mut core, 0, &relay, &author);
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(
             WriteIntent {
@@ -4677,7 +5279,16 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         10,
     );
     recovered.recover_on_boot();
-    let effects = connect_signer(&mut recovered, 0, &relay, author.public_key());
+    connect_signer(&mut recovered, 0, &relay, author.public_key());
+    let effects = release_author_probe(
+        &mut recovered,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &relay,
+        author.public_key(),
+    );
     assert_eq!(
         effects
             .iter()
@@ -4738,7 +5349,16 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
             10,
         );
         core.recover_on_boot();
-        let effects = connect_signer(&mut core, 0, &old, author.public_key());
+        connect_signer(&mut core, 0, &old, author.public_key());
+        let effects = release_author_probe(
+            &mut core,
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            &old,
+            author.public_key(),
+        );
         let old_event = effects
             .iter()
             .find_map(|effect| match effect {
@@ -4800,7 +5420,16 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
     let changed = FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [new.clone()]);
     let mut core = EngineCore::new(RedbFailStartStore::open(&path, []), Box::new(changed), 10);
     core.recover_on_boot();
-    let effects = connect_signer(&mut core, 0, &new, author.public_key());
+    connect_signer(&mut core, 0, &new, author.public_key());
+    let effects = release_author_probe(
+        &mut core,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &new,
+        author.public_key(),
+    );
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(r, event, _)
@@ -4872,6 +5501,8 @@ fn write_ack_per_relay() {
     activate(&mut core, &a);
     connect_signer(&mut core, 0, &relay_ok, a.public_key());
     connect_signer(&mut core, 1, &relay_bad, a.public_key());
+    authenticate_signer(&mut core, 0, &relay_ok, &a);
+    authenticate_signer(&mut core, 1, &relay_bad, &a);
 
     let sink = CapturingReceiptSink::default();
     let effects = core.handle(EngineMsg::Publish(
@@ -4953,6 +5584,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
         },
         signer_session(&relay, a.public_key()),
     ));
+    authenticate_signer(&mut core, 0, &relay, &a);
     let effects = core.handle(EngineMsg::Publish(
         WriteIntent {
             payload: WritePayload::Unsigned(unsigned(&a, 2, "finish persistence")),
@@ -5743,6 +6375,7 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
     let mut core = new_core(dir);
     activate(&mut core, &author);
     connect_signer(&mut core, 0, &read_relay, author.public_key());
+    authenticate_signer(&mut core, 0, &read_relay, &author);
 
     let sink = CapturingReceiptSink::default();
     let effects = core.handle(EngineMsg::Publish(
@@ -6381,10 +7014,20 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     // Reset the counter right before the event under test -- everything
     // above (N acceptances, each running its own `schedule_ready`) already
     // produced its own, unrelated `recover_outbox_lanes` traffic.
-    calls.set(0);
-
     let woken = relays[0].clone();
-    let effects = core.handle(EngineMsg::RelayConnected(
+    core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        signer_session(&woken, author.public_key()),
+    ));
+    // The event under test is the bounded AUTH-discovery release (#8 U4):
+    // connect itself now only parks the lane behind the probe; the wake that
+    // actually publishes is `AuthProbeReleased`, with the same read
+    // composition the old connect-time wake had.
+    calls.set(0);
+    let effects = core.handle(EngineMsg::AuthProbeReleased(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -6482,8 +7125,17 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
          got {signed_effects2:?}"
     );
 
+    core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        signer_session(&relay, author.public_key()),
+    ));
+    // Same #8 U4 shift as `wake_relay_lanes_only_rereads_...`: the wake that
+    // publishes is the bounded AUTH-discovery release, not connect itself.
     calls.set(0);
-    let effects = core.handle(EngineMsg::RelayConnected(
+    let effects = core.handle(EngineMsg::AuthProbeReleased(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -6543,6 +7195,24 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
         );
         connect_signer(&mut core, 0, &relay_a, author_a.public_key());
         connect_signer(&mut core, 1, &relay_b, author_b.public_key());
+        release_author_probe(
+            &mut core,
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            &relay_a,
+            author_a.public_key(),
+        );
+        release_author_probe(
+            &mut core,
+            RelayHandle {
+                slot: 1,
+                generation: 1,
+            },
+            &relay_b,
+            author_b.public_key(),
+        );
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(10)));
         let sink_a = CapturingReceiptSink::default();
@@ -6617,6 +7287,24 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
     let mut core = new_core(FixtureDirectory::new());
     connect_signer(&mut core, 0, &relay1, author1.public_key());
     connect_signer(&mut core, 1, &relay2, author2.public_key());
+    release_author_probe(
+        &mut core,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &relay1,
+        author1.public_key(),
+    );
+    release_author_probe(
+        &mut core,
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        &relay2,
+        author2.public_key(),
+    );
 
     // Write #1: drive it all the way to a real, permanent `pending` removal
     // -- a successful ACK closes the intent once its one lane is terminal.

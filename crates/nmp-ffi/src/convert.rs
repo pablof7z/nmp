@@ -1663,6 +1663,9 @@ mod tests {
     fn diagnostics_keeps_exact_intervals_distinct_from_query_evidence() {
         let relay = RelayUrl::parse("wss://diagnostics.example.com").unwrap();
         let ffi = diagnostics_snapshot_to_ffi(DiagnosticsSnapshot {
+            // Engine-level AUTH session read-out (#8 U4). Not yet projected
+            // through FFI — that read-out is a later-wave surface.
+            auth_sessions: Vec::new(),
             relays: vec![RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
                 access: GAccessContext::Public,

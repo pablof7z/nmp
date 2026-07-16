@@ -331,6 +331,15 @@ pub enum PoolEvent {
         handle: RelayHandle,
         session: RelaySessionKey,
     },
+    /// The exact protected connection generation completed its initial
+    /// socket observation and final nonblocking read-drain. Any observed
+    /// frame precedes this edge in this generation's worker-produced event
+    /// subsequence (the retirement reaper is a separate producer). Public
+    /// sessions skip this handshake and never emit this marker.
+    InitialReadCompleted {
+        handle: RelayHandle,
+        session: RelaySessionKey,
+    },
     Disconnected {
         /// The exact connection generation that disconnected. A slot may
         /// already have reopened by the time this event is reduced, so a
@@ -720,6 +729,17 @@ impl Pool {
     pub fn set_reconnect_preamble(&self, h: RelayHandle, frames: Vec<String>) -> bool {
         match self.inner.lock() {
             Ok(guard) => guard.set_reconnect_preamble_for(h, frames),
+            Err(_) => false,
+        }
+    }
+
+    /// Open this exact connected generation's ordinary outbound gate after
+    /// the consumer has applied [`PoolEvent::InitialReadCompleted`] (or has
+    /// completed authentication ordered ahead of it). A stale generation is
+    /// a structural no-op.
+    pub fn release_initial_read(&self, h: RelayHandle) -> bool {
+        match self.inner.lock() {
+            Ok(guard) => guard.release_initial_read_for(h),
             Err(_) => false,
         }
     }

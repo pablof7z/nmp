@@ -90,6 +90,10 @@ const ACK_TIMEOUT_SECS: u64 = 30;
 /// receipt. We spend that future window as a checked per-live-session nonce
 /// when repeated identical challenges arrive inside one reducer second.
 const AUTH_MAX_FUTURE_SECS: u64 = 600;
+/// Never minted by `mint_auth_sequence`; owned exclusively by the
+/// counter-exhausted fallback `AuthEpoch` (phase `Error`) so sentinel and
+/// real epochs are distinct BY VALUE, not merely by phase.
+const AUTH_SEQUENCE_SENTINEL: u64 = u64::MAX;
 const MAX_GLOBAL_ATTEMPTS: usize = 32;
 const DEADLINE_READ_BATCH: usize = 1_024;
 
@@ -469,7 +473,10 @@ const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 pub use admission::RelayAdmissionPolicy;
 use attribution::AttributionState;
-pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
+pub use diagnostics::{
+    AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
+    RelayDiagnosticsSnapshot,
+};
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 // `runtime` (C) needs the EXACT same wire subscription-id string
@@ -492,6 +499,9 @@ pub enum PublishError {
     /// Every upper-half correlation id has already been issued. No id is
     /// reused, wrapped into the durable lower half, or fabricated.
     ReceiptCorrelationIdExhausted,
+    /// The runtime has begun its finite cancellation/drain phase and cannot
+    /// accept a new write before closing.
+    EngineShuttingDown,
 }
 
 impl std::fmt::Display for PublishError {
@@ -500,6 +510,7 @@ impl std::fmt::Display for PublishError {
             Self::ReceiptCorrelationIdExhausted => {
                 write!(f, "receipt correlation id namespace exhausted")
             }
+            Self::EngineShuttingDown => write!(f, "engine is shutting down"),
         }
     }
 }
@@ -722,6 +733,10 @@ pub enum EngineMsg {
     SetActivePubkey(Option<PublicKey>),
     Publish(WriteIntent, Box<dyn ReceiptSink>),
     RelayConnected(TransportRelayHandle, RelaySessionKey),
+    /// Transport completed this exact protected generation's initial socket
+    /// observation. Any observed frame was ordered before this edge on the
+    /// same worker event stream; public generations never emit it.
+    AuthProbeReleased(TransportRelayHandle, RelaySessionKey),
     /// Result of the engine-owned NIP-11 one-shot started for a connected
     /// relay. `Some` retains document revision/freshness/error provenance;
     /// `None` means no document fact was acquired before the decision grace.
@@ -740,6 +755,11 @@ pub enum EngineMsg {
     /// close must never resurrect the session).
     RelayDisconnected(TransportRelayHandle, RelaySessionKey, DisconnectReason),
     RelayHealth(TransportRelayHandle, RelaySessionKey, RelayHealth),
+    /// Runtime could not create a required relay worker. Observational only:
+    /// current demand remains the retry owner and diagnostics retain the
+    /// exact failure instead of silently presenting a merely connecting
+    /// session forever.
+    RelayOpenFailed(RelaySessionKey, String),
     RelayFrame(TransportRelayHandle, RelaySessionKey, RelayFrame),
     RelayFrames(Vec<(TransportRelayHandle, RelaySessionKey, RelayFrame)>),
     SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
@@ -805,6 +825,10 @@ pub enum Effect {
     Replay(RelaySessionKey, Vec<WireReq>),
     /// Acquire/revalidate NIP-11 without blocking the reducer thread.
     FetchRelayInformation(RelayUrl),
+    /// Open the exact protected transport generation's ordinary outbound gate
+    /// after its ordered initial-read edge is applied, or required AUTH
+    /// completes.
+    ReleaseInitialRead(TransportRelayHandle),
     /// Place a capability-probing `NEG-OPEN` on the wire (`negentropy::
     /// Prober::begin_probe`'s output, carried in full since the runtime has
     /// no negentropy-protocol knowledge of its own): the sub-id, the
@@ -1108,6 +1132,18 @@ pub struct EngineCore<S: EventStore> {
     /// "THIS socket, after THIS socket's AUTH handshake", never an earlier
     /// generation's leftover.
     auth_ready_sessions: HashMap<RelaySessionKey, TransportRelayHandle>,
+    /// Newly connected author sessions whose first inbound frame is still
+    /// being observed for a proactive AUTH challenge. Unlike sticky
+    /// `auth_required_sessions`, this exact-generation gate is released by a
+    /// transport's ordered first-read completion when an ordinary relay has
+    /// no already-available challenge.
+    auth_probe_sessions: HashMap<RelaySessionKey, TransportRelayHandle>,
+    /// Exact live sessions for which the relay has actually required AUTH:
+    /// an AUTH challenge, auth-required write response, or restricted close.
+    /// Merely using a frozen NIP-42 access identity does not populate this
+    /// set; ordinary relays are released only after the transport's ordered
+    /// first socket read-drain completes without an available challenge.
+    auth_required_sessions: BTreeSet<RelaySessionKey>,
     /// Current reducer-owned AUTH epoch for each exact protected session.
     /// Entries are removed on disconnect/reconnect teardown; the separate
     /// monotonic counters below deliberately survive that removal so stale
@@ -1275,6 +1311,13 @@ pub struct EngineCore<S: EventStore> {
     /// nothing). Enforcing degrade (short-circuiting further writes) would be
     /// the richer policy explicitly deferred here.
     store_degraded: Option<String>,
+    /// Runtime relay-worker open failures keyed by their exact current owner.
+    /// Entries are pruned whenever demand/write ownership changes and cleared
+    /// by a successful connection for that session.
+    relay_open_failures: BTreeMap<RelaySessionKey, String>,
+    /// Transport health/verifier degradation from a live worker. Kept
+    /// separate from open failures so clearing one recovered session cannot
+    /// erase an independent transport-health fact.
     transport_degraded: Option<String>,
     /// A failed durable-lane deadline transition is removed from the armed
     /// deadline set until another real engine message retries the reducer.
@@ -1330,6 +1373,8 @@ impl<S: EventStore> EngineCore<S> {
             connected_relays: BTreeSet::new(),
             ever_connected_relays: BTreeSet::new(),
             auth_ready_sessions: HashMap::new(),
+            auth_probe_sessions: HashMap::new(),
+            auth_required_sessions: BTreeSet::new(),
             auth_sessions: HashMap::new(),
             next_auth_epoch: Some(1),
             next_auth_operation: Some(1),
@@ -1356,6 +1401,7 @@ impl<S: EventStore> EngineCore<S> {
             discovered_private_relays_rejected: 0,
             rejected_projected_evidence: BTreeSet::new(),
             store_degraded: None,
+            relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
             retry_scheduler_blocked: false,
             #[cfg(test)]
@@ -1756,19 +1802,21 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 continue;
             }
-            // The AUTH gate: reducer-KNOWN auth truth for this exact session
-            // (a live challenge negotiation, denial, or error — any
-            // `auth_sessions` entry not yet `Ready`) parks the lane before an
-            // attempt ordinal is allocated. An unchallenged or Ready session
-            // proceeds: a relay that never challenges must not wedge every
-            // write, and one that only reveals auth-requirement via
-            // `OK false auth-required:` still parks through
-            // `handle_write_ack`'s `RelayAckClass::WaitingAuth` path.
-            if session.access != AccessContext::Public
-                && self
-                    .auth_sessions
-                    .get(&session)
-                    .is_some_and(|state| !matches!(state.phase, AuthSessionPhase::Ready { .. }))
+            // The AUTH gate: a lane parks before an attempt ordinal is
+            // allocated while (a) this exact generation's bounded initial
+            // AUTH-discovery observation is still pending, or (b) the relay
+            // has actually REQUIRED auth for this session (challenge,
+            // auth-required write ack, or restricted close — all of which
+            // insert `auth_required_sessions`) and the exact current
+            // generation has not completed AUTH. An unchallenged ordinary
+            // relay proceeds after its probe releases: a relay that never
+            // challenges must not wedge every write, and one that only
+            // reveals auth-requirement via `OK false auth-required:` still
+            // parks through `handle_write_ack`'s `RelayAckClass::WaitingAuth`
+            // path.
+            if self.auth_probe_sessions.contains_key(&session)
+                || (self.auth_required_sessions.contains(&session)
+                    && !self.auth_ready_sessions.contains_key(&session))
             {
                 if self
                     .resolver
@@ -2612,12 +2660,85 @@ impl<S: EventStore> EngineCore<S> {
         // door has failed — the one persistence-health fact `build` cannot
         // see on its own.
         snapshot.store_degraded = self.store_degraded.clone();
-        snapshot.transport_degraded = self.transport_degraded.clone();
-        // The public per-session AUTH-diagnostics projection is deferred to
-        // Wave 3 (see `diagnostics::DiagnosticsSnapshot`'s note): the reducer
-        // owns the phase truth in `self.auth_sessions` this wave, but the
-        // governed facade read-out lands together with its FFI projection and
-        // the policy API in Wave 3.
+        snapshot.transport_degraded = self
+            .relay_open_failures
+            .iter()
+            .next()
+            .map(|(session, reason)| format!("{}: {reason}", session.relay))
+            .or_else(|| self.transport_degraded.clone());
+        let mut auth_sessions = BTreeMap::new();
+        for (handle, session) in self.slot_to_relay.values() {
+            if session.access == AccessContext::Public || !self.connected_relays.contains(session) {
+                continue;
+            }
+            auth_sessions.insert(
+                session.clone(),
+                AuthDiagnosticsSnapshot {
+                    relay: session.relay.clone(),
+                    access: session.access,
+                    transport_slot: handle.slot,
+                    transport_generation: handle.generation,
+                    epoch_sequence: None,
+                    challenge_hash: None,
+                    phase: AuthDiagnosticsPhase::AwaitingChallenge,
+                    policy_bound: false,
+                    signer_bound: false,
+                    auth_event_id: None,
+                    send_handoff_accepted: false,
+                    relay_ok_accepted: false,
+                },
+            );
+        }
+        for (session, state) in &self.auth_sessions {
+            let (phase, auth_event_id, send_handoff_accepted, relay_ok_accepted) =
+                match &state.phase {
+                    AuthSessionPhase::AwaitingPolicy { .. } => {
+                        (AuthDiagnosticsPhase::AwaitingPolicy, None, false, false)
+                    }
+                    AuthSessionPhase::AwaitingSignature { .. } => {
+                        (AuthDiagnosticsPhase::AwaitingSignature, None, false, false)
+                    }
+                    AuthSessionPhase::AwaitingSend { event_id, .. } => (
+                        AuthDiagnosticsPhase::AwaitingSend,
+                        Some(*event_id),
+                        false,
+                        false,
+                    ),
+                    AuthSessionPhase::AwaitingOk { event_id } => (
+                        AuthDiagnosticsPhase::AwaitingRelayAck,
+                        Some(*event_id),
+                        true,
+                        false,
+                    ),
+                    AuthSessionPhase::Ready { event_id } => {
+                        (AuthDiagnosticsPhase::Ready, Some(*event_id), true, true)
+                    }
+                    AuthSessionPhase::Denied => (AuthDiagnosticsPhase::Denied, None, false, false),
+                    AuthSessionPhase::Error => (AuthDiagnosticsPhase::Error, None, false, false),
+                };
+            auth_sessions.insert(
+                session.clone(),
+                AuthDiagnosticsSnapshot {
+                    relay: session.relay.clone(),
+                    access: session.access,
+                    transport_slot: state.epoch.handle.slot,
+                    transport_generation: state.epoch.handle.generation,
+                    epoch_sequence: Some(state.epoch.sequence),
+                    challenge_hash: (!state.challenge.is_empty()).then(|| {
+                        blake3::hash(state.challenge.as_bytes())
+                            .to_hex()
+                            .to_string()
+                    }),
+                    phase,
+                    policy_bound: state.policy_instance.is_some(),
+                    signer_bound: state.signer_instance.is_some(),
+                    auth_event_id,
+                    send_handoff_accepted,
+                    relay_ok_accepted,
+                },
+            );
+        }
+        snapshot.auth_sessions = auth_sessions.into_values().collect();
         for relay in &mut snapshot.relays {
             // NIP-11 advertisement and the NIP-77 behavioral probe are both
             // PUBLIC-session evidence (#8): the one-shot HTTP document and
@@ -2770,7 +2891,7 @@ impl<S: EventStore> EngineCore<S> {
         // runtime immediately drives a fresh Tick instead of either spinning
         // on the failed transition or suppressing retry forever.
         self.retry_scheduler_blocked = false;
-        match msg {
+        let mut effects = match msg {
             EngineMsg::Subscribe(query, sink) => self.on_subscribe(query, sink),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
             EngineMsg::SubscribeHistory(query, sink) => self.on_subscribe_history(query, sink),
@@ -2781,6 +2902,9 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::SetActivePubkey(pk) => self.on_set_active_pubkey(pk),
             EngineMsg::Publish(intent, sink) => self.on_publish(intent, sink),
             EngineMsg::RelayConnected(handle, session) => self.on_relay_connected(handle, session),
+            EngineMsg::AuthProbeReleased(handle, session) => {
+                self.on_auth_probe_released(handle, session)
+            }
             EngineMsg::RelayInformationResolved(url, information) => {
                 self.on_relay_information_resolved(url, information)
             }
@@ -2789,6 +2913,17 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::RelayHealth(handle, session, health) => {
                 self.on_relay_health(handle, session, health)
+            }
+            EngineMsg::RelayOpenFailed(session, reason) => {
+                if self
+                    .required_relay_workers()
+                    .is_some_and(|required| required.contains(&session))
+                {
+                    self.relay_open_failures.insert(session, reason);
+                    vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
+                } else {
+                    Vec::new()
+                }
             }
             EngineMsg::RelayFrame(handle, session, frame) => {
                 self.on_relay_frame(handle, session, frame)
@@ -2827,7 +2962,30 @@ impl<S: EventStore> EngineCore<S> {
                 self.on_event_handoff(correlation, result)
             }
             EngineMsg::Tick(now) => self.tick(now),
+        };
+        if self.prune_unowned_relay_state() {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
         }
+        effects
+    }
+
+    fn prune_unowned_relay_state(&mut self) -> bool {
+        // `required_relay_workers()` reads outbox lanes from the store; with
+        // nothing to prune it must not tax every reducer message with that
+        // scan (the wake-falsifiers in `core_headless.rs` count exactly
+        // these reads).
+        if self.relay_open_failures.is_empty() && self.auth_required_sessions.is_empty() {
+            return false;
+        }
+        let Some(required) = self.required_relay_workers() else {
+            return false;
+        };
+        let before = self.relay_open_failures.len();
+        self.relay_open_failures
+            .retain(|session, _| required.contains(session));
+        self.auth_required_sessions
+            .retain(|session| required.contains(session));
+        self.relay_open_failures.len() != before
     }
 
     fn on_relay_health(
@@ -4390,6 +4548,8 @@ impl<S: EventStore> EngineCore<S> {
                     }
                 }
                 RelayAckClass::WaitingAuth => {
+                    self.auth_probe_sessions.remove(session);
+                    self.auth_required_sessions.insert(session.clone());
                     if self
                         .resolver
                         .store_mut()
@@ -4572,8 +4732,20 @@ impl<S: EventStore> EngineCore<S> {
 
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
 
+    /// `u64::MAX` is structurally reserved for [`AUTH_SEQUENCE_SENTINEL`]:
+    /// the counter treats it as already-exhausted and never issues it, so a
+    /// REAL epoch/operation sequence can never compare equal to the
+    /// counter-exhausted fallback epoch `on_auth_challenge`/
+    /// `on_auth_restricted` install. Sentinel distinctness therefore no
+    /// longer rests on the `Error`-phase guard alone (#8 U2's deferred
+    /// latent item): even a registry or correlation path that only compares
+    /// epochs is safe.
     fn mint_auth_sequence(next: &mut Option<u64>) -> Option<u64> {
         let issued = (*next)?;
+        if issued == AUTH_SEQUENCE_SENTINEL {
+            *next = None;
+            return None;
+        }
         *next = issued.checked_add(1);
         Some(issued)
     }
@@ -4607,6 +4779,19 @@ impl<S: EventStore> EngineCore<S> {
                 .auth_sessions
                 .get(&epoch.session)
                 .is_some_and(|state| state.epoch == *epoch)
+    }
+
+    pub(crate) fn is_current_transport_session(
+        &self,
+        handle: TransportRelayHandle,
+        session: &RelaySessionKey,
+    ) -> bool {
+        self.connected_relays.contains(session)
+            && matches!(
+                self.slot_to_relay.get(&handle.slot),
+                Some((current, current_session))
+                    if *current == handle && current_session == session
+            )
     }
 
     fn close_protected_reqs(&self, session: &RelaySessionKey) -> Option<Effect> {
@@ -4682,15 +4867,17 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(state) = previous.as_ref() {
             effects.push(Effect::RelayAuth(AuthEffect::Cancel(state.epoch.clone())));
         }
-        // Park only when there WAS reducer-known AUTH truth to invalidate
-        // (readiness or a live epoch). A session that was never challenged
-        // has nothing to invalidate, and its writes deliberately proceed on
-        // the ordinary connectivity path (`schedule_ready`'s gate mirrors
-        // this): parking such lanes as `WaitingAuth` would wedge every
-        // write to a relay that never challenges, because the ONLY wake for
+        // Park only when the relay actually REQUIRED auth for this session
+        // (`auth_required_sessions`: challenge, auth-required write ack, or
+        // restricted close — every path that creates reducer-known AUTH
+        // truth inserts it first). A session that was never required has
+        // nothing to invalidate, and its writes deliberately proceed on the
+        // ordinary connectivity path (`schedule_ready`'s gate mirrors this):
+        // parking such lanes as `WaitingAuth` would wedge every write to a
+        // relay that never challenges, because the ONLY wake for
         // `WaitingAuth` is `finish_auth_ok` — which for that relay never
         // fires.
-        if was_ready || previous.is_some() {
+        if self.auth_required_sessions.contains(session) {
             self.park_relay_lanes_for_auth(session, effects);
         }
         previous
@@ -4705,6 +4892,8 @@ impl<S: EventStore> EngineCore<S> {
         let AccessContext::Nip42(expected_pubkey) = session.access else {
             return Vec::new();
         };
+        self.auth_probe_sessions.remove(&session);
+        self.auth_required_sessions.insert(session.clone());
         let mut effects = Vec::new();
         let previous = self.invalidate_auth_epoch(&session, true, &mut effects);
         let last_created_at = previous.as_ref().and_then(|state| state.last_created_at);
@@ -4716,7 +4905,7 @@ impl<S: EventStore> EngineCore<S> {
                     epoch: fallback_epoch.unwrap_or(AuthEpoch {
                         handle,
                         session,
-                        sequence: u64::MAX,
+                        sequence: AUTH_SEQUENCE_SENTINEL,
                     }),
                     challenge,
                     last_created_at,
@@ -4788,6 +4977,8 @@ impl<S: EventStore> EngineCore<S> {
         if session.access == AccessContext::Public {
             return Vec::new();
         }
+        self.auth_probe_sessions.remove(&session);
+        self.auth_required_sessions.insert(session.clone());
         let mut effects = Vec::new();
         let previous = self.invalidate_auth_epoch(&session, true, &mut effects);
         let last_created_at = previous.as_ref().and_then(|state| state.last_created_at);
@@ -4798,7 +4989,7 @@ impl<S: EventStore> EngineCore<S> {
             .unwrap_or(AuthEpoch {
                 handle,
                 session: session.clone(),
-                sequence: u64::MAX,
+                sequence: AUTH_SEQUENCE_SENTINEL,
             });
         self.auth_sessions.insert(
             session,
@@ -5120,6 +5311,11 @@ impl<S: EventStore> EngineCore<S> {
             return Vec::new();
         }
         let mut effects = Vec::new();
+        let same_physical_session = matches!(
+            self.slot_to_relay.get(&handle.slot),
+            Some((current, current_session)) if *current == handle && *current_session == session
+        );
+        let open_failure_cleared = self.relay_open_failures.remove(&session).is_some();
         if let Some((_, displaced_session)) = self.slot_to_relay.get(&handle.slot).cloned() {
             if displaced_session != session {
                 // A pool slot has one physical owner. If a newer connection
@@ -5129,6 +5325,7 @@ impl<S: EventStore> EngineCore<S> {
                 // no transport handle can ever make them current again.
                 self.invalidate_auth_epoch(&displaced_session, false, &mut effects);
                 self.connected_relays.remove(&displaced_session);
+                self.auth_probe_sessions.remove(&displaced_session);
             }
         }
         // A fresh connection generation is NEVER pre-authorized (#8): any
@@ -5152,6 +5349,13 @@ impl<S: EventStore> EngineCore<S> {
         // then dropped" fact).
         self.connected_relays.insert(session.clone());
         self.ever_connected_relays.insert(session.clone());
+        if !same_physical_session && session.access != AccessContext::Public {
+            if self.auth_required_sessions.contains(&session) {
+                self.auth_probe_sessions.remove(&session);
+            } else {
+                self.auth_probe_sessions.insert(session.clone(), handle);
+            }
+        }
         // Reconnect (new generation): clear stale attribution, then replay
         // + re-snapshot every currently-planned REQ for this session (ruling
         // §2: "a replayed sub on the new generation gets fresh snapshots").
@@ -5193,6 +5397,35 @@ impl<S: EventStore> EngineCore<S> {
         self.refresh_all_handles(&mut effects);
         self.refresh_all_histories(&mut effects);
         effects.extend(self.wake_relay_lanes(&session, false));
+        if open_failure_cleared {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        }
+        effects
+    }
+
+    fn on_auth_probe_released(
+        &mut self,
+        handle: TransportRelayHandle,
+        session: RelaySessionKey,
+    ) -> Vec<Effect> {
+        if !self
+            .slot_to_relay
+            .get(&handle.slot)
+            .is_some_and(|(current, current_session)| {
+                *current == handle && *current_session == session
+            })
+        {
+            return Vec::new();
+        }
+        if self.auth_ready_sessions.get(&session) == Some(&handle) {
+            return vec![Effect::ReleaseInitialRead(handle)];
+        }
+        if self.auth_probe_sessions.get(&session) != Some(&handle) {
+            return Vec::new();
+        }
+        self.auth_probe_sessions.remove(&session);
+        let mut effects = vec![Effect::ReleaseInitialRead(handle)];
+        effects.extend(self.wake_relay_lanes(&session, true));
         effects
     }
 
@@ -5329,6 +5562,7 @@ impl<S: EventStore> EngineCore<S> {
             // usable" acceptance criterion -- watermark and link status are
             // deliberately orthogonal fields, never one enum).
             self.connected_relays.remove(&session);
+            self.auth_probe_sessions.remove(&session);
             match reason {
                 DisconnectReason::PermanentlyFailed => {
                     // #506: the pool already retired this worker for good --
@@ -5406,6 +5640,7 @@ impl<S: EventStore> EngineCore<S> {
         state.phase = AuthSessionPhase::Ready { event_id };
         self.auth_ready_sessions
             .insert(session.clone(), state.epoch.handle);
+        effects.push(Effect::ReleaseInitialRead(state.epoch.handle));
         if let Some(reqs) = self.router.plan().reqs.get(session).cloned() {
             for req in &reqs {
                 self.attribution.record_send(
@@ -5816,6 +6051,23 @@ impl<S: EventStore> EngineCore<S> {
         // "still-planned" key set as `nip11_information` just above.
         self.events_by_session_kind
             .retain(|session, _| planned.contains_key(session));
+        // Protected REQs stay parked until the exact current AUTH epoch is
+        // ready, but the relay worker must already exist so the server can
+        // deliver the challenge that makes readiness possible. Plan keys are
+        // unique, so this emits at most one idempotent acquisition edge per
+        // current protected session on each recompile. Exact runtime worker
+        // reconciliation still owns withdrawal and closes the worker as soon
+        // as the final read/write owner disappears.
+        effects.extend(
+            planned
+                .keys()
+                .filter(|session| {
+                    session.access != AccessContext::Public
+                        && !self.auth_ready_sessions.contains_key(*session)
+                })
+                .cloned()
+                .map(Effect::EnsureRelay),
+        );
         // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
         // for the full current demand, regardless of whether anything
         // actually changed on the wire (see `Router::compile`'s own body) —

@@ -2,9 +2,13 @@
 //! retry timers, or polling: restart is represented by dropping the whole
 //! reducer/store and opening the database again.
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
-use nmp_engine::core::{Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId};
+use nmp_engine::core::{
+    AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendOutcome,
+    AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
+};
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
     AccessContext, Durability, HostAuthority, RelaySessionKey, WriteIntent, WritePayload,
@@ -59,6 +63,94 @@ fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
     RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
 }
 
+/// Complete the canonical NIP-42 handshake for one exact connected session.
+/// The returned effects are the matching AUTH `OK` wake.
+fn authenticate(
+    core: &mut EngineCore<RedbStore>,
+    handle: RelayHandle,
+    session: &RelaySessionKey,
+    signer: &Keys,
+) -> Vec<Effect> {
+    let challenge = core.handle(EngineMsg::RelayFrame(
+        handle,
+        session.clone(),
+        RelayFrame::from(RelayMessage::Auth {
+            challenge: Cow::Owned(format!("durable-restart-{}", handle.slot)),
+        }),
+    ));
+    let policy_token = challenge
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. }) => Some(token),
+            _ => None,
+        })
+        .expect("AUTH challenge requests exact-session policy");
+    assert_eq!(policy_token.epoch.session, *session);
+    assert_eq!(policy_token.epoch.handle, handle);
+
+    let policy_instance = AuthCapabilityInstance(1);
+    core.handle(EngineMsg::AuthCapabilityBound {
+        token: policy_token.clone(),
+        capability: AuthCapability::Policy,
+        instance: policy_instance,
+    });
+    let signature = core.handle(EngineMsg::AuthPolicyCompleted(
+        policy_token,
+        Some(policy_instance),
+        AuthPolicyOutcome::Allow,
+    ));
+    let (sign_token, unsigned) = signature
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestSignature { token, unsigned }) => {
+                Some((token, unsigned))
+            }
+            _ => None,
+        })
+        .expect("allowed AUTH policy requests signature");
+    assert_eq!(sign_token.epoch.session, *session);
+    assert_eq!(sign_token.epoch.handle, handle);
+    assert_eq!(unsigned.kind, Kind::Authentication);
+    assert_eq!(unsigned.pubkey, signer.public_key());
+
+    let signed = unsigned.sign_with_keys(signer).unwrap();
+    let signer_instance = AuthCapabilityInstance(2);
+    core.handle(EngineMsg::AuthCapabilityBound {
+        token: sign_token.clone(),
+        capability: AuthCapability::Signer,
+        instance: signer_instance,
+    });
+    let send = core.handle(EngineMsg::AuthSignerCompleted(
+        sign_token,
+        Some(signer_instance),
+        AuthSignerOutcome::Signed(signed),
+    ));
+    let (send_token, auth_event) = send
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::Send {
+                token,
+                epoch,
+                event,
+            }) => {
+                assert_eq!(epoch.session, *session);
+                assert_eq!(epoch.handle, handle);
+                Some((token, event))
+            }
+            _ => None,
+        })
+        .expect("signed AUTH requests exact-generation send");
+    core.handle(EngineMsg::AuthSendCompleted(
+        send_token,
+        AuthSendOutcome::Accepted,
+    ));
+    core.handle(EngineMsg::RelayFrame(
+        handle,
+        session.clone(),
+        RelayFrame::from(RelayMessage::ok(auth_event.id, true, "authenticated")),
+    ))
+}
+
 fn strip_additive_lane_rows(path: &std::path::Path, intent: nmp_store::IntentId, relay: &RelayUrl) {
     let db = Database::open(path).unwrap();
     let write = db.begin_write().unwrap();
@@ -103,13 +195,12 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             Box::new(directory(keys.public_key(), relay.clone())),
             10,
         );
-        core.handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            relay_session.clone(),
-        ));
+        let handle = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(handle, relay_session.clone()));
+        authenticate(&mut core, handle, &relay_session, &keys);
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event.clone()),
@@ -179,23 +270,27 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)),
         "a recovered Started attempt predates transport Written and cannot replay as Sent"
     );
-    let relay_retry = core.handle(EngineMsg::RelayConnected(
-        RelayHandle {
-            slot: 0,
-            generation: 1,
-        },
+    let relay_handle = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(
+        relay_handle,
         relay_session.clone(),
     ));
+    let relay_retry = authenticate(&mut core, relay_handle, &relay_session, &keys);
     assert!(relay_retry.iter().any(|effect| matches!(effect,
         Effect::PublishEvent(r, e, _) if r == &relay_session && e == &event
     )));
-    let appended_first = core.handle(EngineMsg::RelayConnected(
-        RelayHandle {
-            slot: 1,
-            generation: 1,
-        },
+    let appended_handle = RelayHandle {
+        slot: 1,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(
+        appended_handle,
         appended_session.clone(),
     ));
+    let appended_first = authenticate(&mut core, appended_handle, &appended_session, &keys);
     assert!(appended_first.iter().any(|effect| matches!(effect,
         Effect::PublishEvent(r, e, _) if r == &appended_session && e == &event
     )));
@@ -266,13 +361,12 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
             Box::new(directory(keys.public_key(), relay.clone())),
             10,
         );
-        core.handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            session.clone(),
-        ));
+        let handle = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        authenticate(&mut core, handle, &session, &keys);
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event),
@@ -407,20 +501,18 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
             ),
             10,
         );
-        core.handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            s1.clone(),
-        ));
-        core.handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 1,
-                generation: 1,
-            },
-            s2.clone(),
-        ));
+        let h1 = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        let h2 = RelayHandle {
+            slot: 1,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(h1, s1.clone()));
+        core.handle(EngineMsg::RelayConnected(h2, s2.clone()));
+        authenticate(&mut core, h1, &s1, &keys);
+        authenticate(&mut core, h2, &s2, &keys);
         let publish = |core: &mut EngineCore<RedbStore>| {
             core.handle(EngineMsg::Publish(
                 WriteIntent {
@@ -455,27 +547,23 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         0,
         "recovery queues connection work without allocating offline attempts"
     );
-    let mut replays = core
-        .handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            s1.clone(),
-        ))
+    let h1 = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let h2 = RelayHandle {
+        slot: 1,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(h1, s1.clone()));
+    let mut replays = authenticate(&mut core, h1, &s1, &keys)
         .iter()
         .filter(
             |effect| matches!(effect, Effect::PublishEvent(_, replayed, _) if replayed == &event),
         )
         .count();
-    replays += core
-        .handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 1,
-                generation: 1,
-            },
-            s2.clone(),
-        ))
+    core.handle(EngineMsg::RelayConnected(h2, s2.clone()));
+    replays += authenticate(&mut core, h2, &s2, &keys)
         .iter()
         .filter(
             |effect| matches!(effect, Effect::PublishEvent(_, replayed, _) if replayed == &event),
@@ -672,13 +760,12 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             Box::new(directory(keys.public_key(), relay.clone())),
             10,
         );
-        core.handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            session.clone(),
-        ));
+        let handle = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        authenticate(&mut core, handle, &session, &keys);
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event),
@@ -870,13 +957,12 @@ fn pinned_host_routing_round_trips_across_a_restart() {
         // route to fall back on and this test would never see
         // `Effect::PublishEvent` at all.
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-        core.handle(EngineMsg::RelayConnected(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            session.clone(),
-        ));
+        let handle = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        authenticate(&mut core, handle, &session, &keys);
         let effects = core.handle(EngineMsg::Publish(
             WriteIntent {
                 payload: WritePayload::Signed(event.clone()),
@@ -898,13 +984,12 @@ fn pinned_host_routing_round_trips_across_a_restart() {
     assert!(recovery
         .iter()
         .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)));
-    let recovery = core.handle(EngineMsg::RelayConnected(
-        RelayHandle {
-            slot: 0,
-            generation: 1,
-        },
-        session.clone(),
-    ));
+    let handle = RelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+    let recovery = authenticate(&mut core, handle, &session, &keys);
     assert!(
         recovery.iter().any(|effect| matches!(effect,
             Effect::PublishEvent(r, e, _) if r == &session && e == &event

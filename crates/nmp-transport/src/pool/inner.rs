@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event, EventId, RelayUrl};
+#[cfg(test)]
+use nostr::RelayUrl;
+use nostr::{Event, EventId};
 
 use crate::handle::RelayHandle;
 use crate::health::{ConnState, RelayHealth};
@@ -328,7 +330,7 @@ impl PoolInner {
             .checked_add(1)
             .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &session.relay)?;
+        let worker = self.spawn_worker(slot_id, worker_id, &session)?;
         self.slots.push(SlotState {
             session: session.clone(),
             worker: Some(worker),
@@ -356,7 +358,7 @@ impl PoolInner {
             .checked_add(1)
             .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &session.relay)?;
+        let worker = self.spawn_worker(slot_id, worker_id, &session)?;
         self.slots[slot_id as usize] = SlotState {
             session,
             worker: Some(worker),
@@ -376,7 +378,7 @@ impl PoolInner {
         &self,
         slot_id: u32,
         worker_id: u32,
-        url: &RelayUrl,
+        session: &RelaySessionKey,
     ) -> Result<WorkerHandle, RelayOpenError> {
         let idle = self
             .config
@@ -398,7 +400,8 @@ impl PoolInner {
         super::worker::spawn(
             slot_id,
             worker_id,
-            url.as_str().to_string(),
+            session.relay.as_str().to_string(),
+            session.access != nmp_grammar::AccessContext::Public,
             self.worker_event_tx
                 .as_ref()
                 .expect("spawn_worker never called after shutdown (ensure_open guards it)")
@@ -445,6 +448,15 @@ impl PoolInner {
     pub(super) fn set_reconnect_preamble_for(&self, h: RelayHandle, frames: Vec<String>) -> bool {
         match self.command_tx_for(h) {
             Some(worker) => worker.push(WorkerCommand::SetReconnectPreamble(frames)),
+            None => false,
+        }
+    }
+
+    pub(super) fn release_initial_read_for(&self, h: RelayHandle) -> bool {
+        match self.command_tx_for(h) {
+            Some(worker) => worker.push(WorkerCommand::ReleaseInitialRead {
+                generation: h.generation,
+            }),
             None => false,
         }
     }
@@ -600,9 +612,11 @@ fn translator_loop(
         let mut events = vec![event];
         events.extend(worker_event_rx.try_iter().take(max_batch - 1));
         let Ok(guard) = inner.lock() else { break };
-        // Project generation changes in FIFO order without mutating the real
-        // slots. A reconnect worker emits Connected before its first Frame;
-        // planning both in one batch must therefore see the frame as current.
+        // Project generation changes in per-worker FIFO order without
+        // mutating the real slots (the retirement reaper is a separate
+        // producer). A reconnect worker emits Connected before its first
+        // Frame and InitialReadCompleted; planning all three in one batch
+        // must therefore see the latter two as current.
         let current = planned_currentness(&guard, &events);
         drop(guard);
 
@@ -833,7 +847,9 @@ fn planned_currentness(inner: &PoolInner, events: &[WorkerEvent]) -> Vec<bool> {
                     planned_generations.insert(event.slot, event.generation);
                     true
                 }
-                WorkerEventKind::Frame(_) => baseline == Some(event.generation),
+                WorkerEventKind::Frame(_) | WorkerEventKind::InitialReadCompleted => {
+                    baseline == Some(event.generation)
+                }
                 _ => true,
             }
         })
@@ -1043,6 +1059,18 @@ fn apply_worker_event_with_verdict(
                 }
             }
         }
+        WorkerEventKind::InitialReadCompleted => {
+            if !same_worker || event.generation != state.generation {
+                return None;
+            }
+            Some(PoolEvent::InitialReadCompleted {
+                handle: RelayHandle {
+                    slot: event.slot,
+                    generation: event.generation,
+                },
+                session: state.session.clone(),
+            })
+        }
         WorkerEventKind::EventHandoff { .. } => {
             unreachable!("EventHandoff already returned above, before any slot lookup")
         }
@@ -1112,6 +1140,19 @@ mod tests {
             },
         );
         assert!(stale.is_none(), "stale-worker frame must be dropped");
+
+        let stale_completion = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h1.slot,
+                generation: h1.generation,
+                kind: WorkerEventKind::InitialReadCompleted,
+            },
+        );
+        assert!(
+            stale_completion.is_none(),
+            "stale-worker initial-read completion must be dropped"
+        );
 
         // A frame from the NEW (h2) worker is accepted.
         let fresh = apply_worker_event(
@@ -1554,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn same_batch_connected_transition_makes_following_frame_current() {
+    fn same_batch_connected_transition_makes_following_frame_and_completion_current() {
         let (inner, _rx) = test_pool();
         let mut guard = inner.lock().unwrap();
         let url = RelayUrl::parse("wss://relay.example").unwrap();
@@ -1573,9 +1614,14 @@ mod tests {
                     nostr::RelayMessage::notice("after reconnect"),
                 )),
             },
+            WorkerEvent {
+                slot: handle.slot,
+                generation: connected_generation,
+                kind: WorkerEventKind::InitialReadCompleted,
+            },
         ];
 
-        assert_eq!(planned_currentness(&guard, &events), vec![true, true]);
+        assert_eq!(planned_currentness(&guard, &events), vec![true, true, true]);
         guard.shutdown();
     }
 

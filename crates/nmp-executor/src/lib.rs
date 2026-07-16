@@ -28,7 +28,7 @@ static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
-    static CURRENT_EXECUTOR: Cell<u64> = const { Cell::new(0) };
+    static CURRENT_TASK: Cell<Option<(u64, TaskId)>> = const { Cell::new(None) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,8 +117,42 @@ struct Shared {
     changed: Condvar,
 }
 
+/// Closed, destructor-free identity delivered after one exact native task
+/// has been joined and its finite admission slot released. Callers retain
+/// any rich release payload in their own registry keyed by this value; the
+/// executor reaper can never own or drop caller-defined data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReleaseId(u64);
+
+impl ReleaseId {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Opaque identity of one exact admitted task while that task is executing.
+///
+/// Unlike [`ReleaseId`], this value carries no release edge and has no
+/// lifecycle behavior. It is a destructor-free correlation token for an
+/// owner that must distinguish reentry from its own task from work running
+/// elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TaskId(u64);
+
+struct ReleaseEdge {
+    sender: Sender<ReleaseId>,
+    id: ReleaseId,
+}
+
+impl ReleaseEdge {
+    fn signal(self) {
+        let _ = self.sender.send(self.id);
+    }
+}
+
 enum ReaperMsg {
-    Completed(u64),
+    Completed(u64, Option<ReleaseEdge>),
     SlotReleased,
     Shutdown,
 }
@@ -234,6 +268,17 @@ impl Executor {
         }
     }
 
+    /// Return the exact task currently executing on this executor, if this
+    /// call itself is running inside one of its admitted tasks.
+    #[doc(hidden)]
+    pub fn current_task_id(&self) -> Option<TaskId> {
+        CURRENT_TASK.with(|current| {
+            current
+                .get()
+                .and_then(|(executor_id, task_id)| (executor_id == self.core.id).then_some(task_id))
+        })
+    }
+
     /// Event-driven lifecycle barrier used by teardown/census proofs. It
     /// returns only after the reaper has joined every task admitted so far.
     pub fn wait_for_idle(&self) {
@@ -289,7 +334,7 @@ impl Executor {
             cancel();
         }
         let _ = self.core.reaper_tx.send(ReaperMsg::Shutdown);
-        let on_own_task = CURRENT_EXECUTOR.with(|current| current.get() == self.core.id);
+        let on_own_task = self.current_task_id().is_some();
         if on_own_task {
             return;
         }
@@ -353,6 +398,18 @@ pub struct Reservation {
 }
 
 impl Reservation {
+    /// Exact destructor-free identity that will be installed in task-local
+    /// state if this reservation is started. Only a live (not yet started or
+    /// released) reservation has one — matching every call site, which reads
+    /// it before `start_with_cancel` consumes the reservation.
+    #[doc(hidden)]
+    pub fn task_id(&self) -> TaskId {
+        TaskId(
+            self.reservation_id
+                .expect("Reservation::task_id read after the reservation was consumed"),
+        )
+    }
+
     pub fn spawn_with_cancel(
         self,
         cancel: impl Fn() + Send + Sync + 'static,
@@ -392,7 +449,7 @@ impl Reservation {
         let thread_name = format!("nmp-native-{}", sanitize_name(&component));
         let executor_id = self.core.id;
         let completed = self.core.reaper_tx.clone();
-        let (start_tx, start_rx) = mpsc::sync_channel::<Box<dyn FnOnce() + Send + 'static>>(0);
+        let (start_tx, start_rx) = mpsc::sync_channel::<StartedWork>(0);
         // Hold the state lock across OS spawn and the reservation->running
         // transition. Shutdown can therefore either invalidate the untouched
         // reservation or observe the registered cancellable task, never a
@@ -409,13 +466,21 @@ impl Reservation {
         let handle = match spawn(
             thread::Builder::new().name(thread_name),
             Box::new(move || {
-                CURRENT_EXECUTOR.with(|current| current.set(executor_id));
-                let outcome = start_rx
-                    .recv()
-                    .map(|task| std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)));
-                CURRENT_EXECUTOR.with(|current| current.set(0));
-                let _ = completed.send(ReaperMsg::Completed(task_id));
-                if let Ok(Err(payload)) = outcome {
+                CURRENT_TASK.with(|current| current.set(Some((executor_id, TaskId(task_id)))));
+                let outcome = match start_rx.recv() {
+                    Ok(work) => {
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(work.task));
+                        let _ = completed.send(ReaperMsg::Completed(task_id, work.release));
+                        Some(outcome)
+                    }
+                    Err(_) => {
+                        let _ = completed.send(ReaperMsg::Completed(task_id, None));
+                        None
+                    }
+                };
+                CURRENT_TASK.with(|current| current.set(None));
+                if let Some(Err(payload)) = outcome {
                     std::panic::resume_unwind(payload);
                 }
             }),
@@ -466,12 +531,38 @@ impl Reservation {
 }
 
 pub struct StartedTask {
-    start: mpsc::SyncSender<Box<dyn FnOnce() + Send + 'static>>,
+    start: mpsc::SyncSender<StartedWork>,
+}
+
+struct StartedWork {
+    task: Box<dyn FnOnce() + Send + 'static>,
+    release: Option<ReleaseEdge>,
 }
 
 impl StartedTask {
     pub fn run(self, task: impl FnOnce() + Send + 'static) {
-        let _ = self.start.send(Box::new(task));
+        let _ = self.start.send(StartedWork {
+            task: Box::new(task),
+            release: None,
+        });
+    }
+
+    /// Run `task`, then deliver its closed release id from the executor
+    /// reaper only after the task is joined and its slot is released. Rich
+    /// caller state must remain outside the executor, keyed by `release_id`.
+    pub fn run_with_release_signal(
+        self,
+        task: impl FnOnce() + Send + 'static,
+        release_sender: Sender<ReleaseId>,
+        release_id: ReleaseId,
+    ) {
+        let _ = self.start.send(StartedWork {
+            task: Box::new(task),
+            release: Some(ReleaseEdge {
+                sender: release_sender,
+                id: release_id,
+            }),
+        });
     }
 }
 
@@ -493,7 +584,7 @@ fn reaper_loop(shared: Arc<Shared>, rx: mpsc::Receiver<ReaperMsg>) {
     let mut shutdown = false;
     while let Ok(message) = rx.recv() {
         match message {
-            ReaperMsg::Completed(task_id) => {
+            ReaperMsg::Completed(task_id, release) => {
                 let handle = {
                     let mut state = shared
                         .state
@@ -509,6 +600,9 @@ fn reaper_loop(shared: Arc<Shared>, rx: mpsc::Receiver<ReaperMsg>) {
                         .unwrap_or_else(|poison| poison.into_inner());
                     state.admitted -= 1;
                     shared.changed.notify_all();
+                }
+                if let Some(release) = release {
+                    release.signal();
                 }
             }
             ReaperMsg::SlotReleased => {}
@@ -565,6 +659,66 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn dropping_started_task_before_run_releases_admission_and_shutdown() {
+        let executor = Executor::new(1).unwrap();
+        let started = executor
+            .reserve("drop-before-run")
+            .unwrap()
+            .start_with_cancel(|| {})
+            .unwrap();
+        drop(started);
+        executor.wait_for_idle();
+        assert_eq!(executor.census().admitted, 0);
+        executor.shutdown();
+    }
+
+    #[test]
+    fn dropped_release_receiver_cannot_kill_reaper() {
+        let executor = Executor::new(1).unwrap();
+        let (release_tx, release_rx) = mpsc::channel::<ReleaseId>();
+        drop(release_rx);
+        executor
+            .reserve("panic-release")
+            .unwrap()
+            .start_with_cancel(|| {})
+            .unwrap()
+            .run_with_release_signal(|| {}, release_tx, ReleaseId::new(7));
+        executor.wait_for_idle();
+        executor
+            .reserve("after-release-panic")
+            .expect("capacity released after callback panic")
+            .spawn_with_cancel(|| {}, || {})
+            .expect("reaper remains alive after callback panic");
+        executor.wait_for_idle();
+        executor.shutdown();
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+    }
+
+    #[test]
+    fn closed_release_id_arrives_after_exact_slot_release() {
+        let executor = Executor::new(1).unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        executor
+            .reserve("typed-release")
+            .unwrap()
+            .start_with_cancel(|| {})
+            .unwrap()
+            .run_with_release_signal(|| {}, release_tx, ReleaseId::new(41));
+        assert_eq!(release_rx.recv().unwrap(), ReleaseId::new(41));
+        assert_eq!(executor.census().admitted, 0);
+        executor.shutdown();
+    }
+
+    #[test]
+    fn release_id_is_copy_and_cannot_own_a_destructor() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<ReleaseId>();
+        assert!(!std::mem::needs_drop::<ReleaseId>());
+        assert_eq!(std::mem::size_of::<ReleaseId>(), std::mem::size_of::<u64>());
     }
 
     #[test]
@@ -778,6 +932,43 @@ mod tests {
         assert_eq!(executor.census().admitted, 0);
         assert_eq!(executor.census().running, 0);
         assert!(!executor.census().accepting);
+    }
+
+    #[test]
+    fn current_task_identity_is_exact_and_scoped_to_its_executor() {
+        let executor = Executor::new(1).unwrap();
+        let other = Executor::new(1).unwrap();
+        let reservation = executor.reserve("identity").unwrap();
+        let expected = reservation.task_id();
+        assert_eq!(executor.current_task_id(), None);
+        assert_eq!(other.current_task_id(), None);
+
+        let task_executor = executor.clone();
+        let task_other = other.clone();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        reservation
+            .spawn_with_cancel(
+                || {},
+                move || {
+                    observed_tx
+                        .send((
+                            task_executor.current_task_id(),
+                            task_other.current_task_id(),
+                        ))
+                        .unwrap();
+                },
+            )
+            .unwrap();
+
+        assert_eq!(observed_rx.recv().unwrap(), (Some(expected), None));
+        executor.wait_for_idle();
+        executor.shutdown();
+        other.shutdown();
+        assert_eq!(executor.current_task_id(), None);
+        assert_eq!(executor.census().admitted, 0);
+        assert_eq!(executor.census().running, 0);
+        assert_eq!(other.census().admitted, 0);
+        assert_eq!(other.census().running, 0);
     }
 
     #[test]
