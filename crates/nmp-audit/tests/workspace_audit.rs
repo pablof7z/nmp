@@ -47,6 +47,16 @@ fn registry() -> Vec<(&'static str, Enrollment)> {
         ),
         ("nmp-blossom", Enrollment::Claims(nmp_blossom::claims())),
         ("nmp-nip68", Enrollment::Claims(nmp_nip68::claims())),
+        (
+            "nmp-media",
+            Enrollment::DeclaresNoClaims {
+                rationale: "composition/orchestration is not kind ownership \
+                    (routing-and-ownership.md §3.2.1); the crate deliberately \
+                    exports no claims() -- it wraps nmp-blossom (kind:24242) and \
+                    nmp-nip68 (kind:20) artifacts without defining any, see its \
+                    lib.rs ownership_audit module (#559)",
+            },
+        ),
     ]
 }
 

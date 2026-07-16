@@ -1,0 +1,38 @@
+[package]
+name = "nmp-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Engine-free by default, exactly the nmp-nip29/nmp-blossom/nmp-nip68
+# discipline (#559, epic #216 T15-C-MEDIA-COMPOSITION): this crate is the
+# app-facing STAGED composition seam only. It NEVER signs, NEVER publishes,
+# and NEVER touches the engine/facade/outbox/store -- there is nothing here
+# that would consume a router/resolver/store, so no `engine` feature exists.
+default = []
+
+# The composition seam wires exactly three upstream crates together:
+# nmp-blossom (standalone async upload -> VerifiedUpload) and nmp-nip68
+# (VerifiedUpload -> kind:20 draft). nmp-ownership is a NORMAL dependency
+# purely so this crate enrolls in nmp-audit's workspace ownership registry
+# (as DeclaresNoClaims) -- the SAME pattern nmp-nip29 uses; it is used only
+# for that enrollment coupling, never to export a claims() of our own
+# (composition is not kind ownership, routing-and-ownership.md §3.2.1).
+[dependencies]
+nostr.workspace = true
+nmp-ownership.workspace = true
+nmp-blossom.workspace = true
+nmp-nip68.workspace = true
+
+# tokio drives the async upload-stage falsifiers; the loopback Blossom mock
+# in tests/support/mod.rs is a raw std::net::TcpListener (no extra deps),
+# reused verbatim from crates/nmp-blossom/tests/support (the #538 lesson:
+# drain the FULL request before replying, one connection per server).
+# `time` is required alongside `rt-multi-thread`/`macros`: the async upload
+# stage drives `nmp_blossom::BlossomClient`, whose reqwest request deadline
+# uses the tokio time driver -- the same dev-dep shape as nmp-blossom's
+# upload_contract suite (without it the timeout panics at runtime).
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
