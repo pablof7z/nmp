@@ -195,9 +195,7 @@ impl std::fmt::Display for AuthValidationError {
                 "authorization binds no `x` tag equal to {}",
                 expected.to_hex()
             ),
-            Self::MissingExpiration => {
-                f.write_str("authorization event has no `expiration` tag")
-            }
+            Self::MissingExpiration => f.write_str("authorization event has no `expiration` tag"),
             Self::Expired { expiration, now } => write!(
                 f,
                 "authorization expired: expiration {} is not after now {}",

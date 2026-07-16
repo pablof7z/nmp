@@ -18,7 +18,9 @@ enum Enrollment {
     /// export either a static table (`nmp-nip02`/`nmp-nip51`) or an owned
     /// `Vec` (`nmp-blossom`, #545), and the audit folds both identically.
     Claims(Vec<KindClaim>),
-    DeclaresNoClaims { rationale: &'static str },
+    DeclaresNoClaims {
+        rationale: &'static str,
+    },
 }
 
 /// The hand-maintained enrollment registry. Every workspace crate that
@@ -27,8 +29,14 @@ enum Enrollment {
 /// the two sets are exactly equal, in both directions.
 fn registry() -> Vec<(&'static str, Enrollment)> {
     vec![
-        ("nmp-nip02", Enrollment::Claims(nmp_nip02::claims().to_vec())),
-        ("nmp-nip51", Enrollment::Claims(nmp_nip51::claims().to_vec())),
+        (
+            "nmp-nip02",
+            Enrollment::Claims(nmp_nip02::claims().to_vec()),
+        ),
+        (
+            "nmp-nip51",
+            Enrollment::Claims(nmp_nip51::claims().to_vec()),
+        ),
         (
             "nmp-nip29",
             Enrollment::DeclaresNoClaims {

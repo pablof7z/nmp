@@ -8,14 +8,12 @@ use std::net::TcpListener;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use nostr::{
-    Alphabet, Event, EventBuilder, JsonUtil, Keys, Kind, Tag, TagKind, Tags, Timestamp,
-};
+use nostr::{Alphabet, Event, EventBuilder, JsonUtil, Keys, Kind, Tag, TagKind, Tags, Timestamp};
 
 use nmp_blossom::{
     upload_authorization_draft, AuthDraftError, AuthValidationError, BlossomClient,
-    BlossomClientConfig, BlossomServerUrl, BlossomVerb, ExpectedAuthorization,
-    SignedAuthorization, Sha256Hash, UploadError,
+    BlossomClientConfig, BlossomServerUrl, BlossomVerb, ExpectedAuthorization, Sha256Hash,
+    SignedAuthorization, UploadError,
 };
 
 /// Minimal scripted HTTP/1.1 test double. CRITICAL (#538 lesson): the mock
@@ -68,10 +66,7 @@ mod support {
                 let (mut stream, _peer) = listener.accept().expect("accept mock connection");
                 thread_accepted.fetch_add(1, Ordering::SeqCst);
                 let request = read_full_request(&mut stream);
-                thread_requests
-                    .lock()
-                    .expect("requests lock")
-                    .push(request);
+                thread_requests.lock().expect("requests lock").push(request);
                 let mut wire = format!("{}\r\n", response.status_line).into_bytes();
                 for (name, value) in &response.extra_headers {
                     wire.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
@@ -108,8 +103,7 @@ mod support {
         let mut received = Vec::new();
         let mut buffer = [0u8; 4096];
         let header_end = loop {
-            if let Some(position) = received.windows(4).position(|window| window == b"\r\n\r\n")
-            {
+            if let Some(position) = received.windows(4).position(|window| window == b"\r\n\r\n") {
                 break position + 4;
             }
             let count = stream.read(&mut buffer).expect("read request headers");
@@ -467,7 +461,7 @@ fn expired_or_inverted_expiration_is_refused_at_build_time() {
     let created_at = Timestamp::from(1_700_000_000u64);
 
     for expiration in [
-        created_at,                                // equal
+        created_at,                                 // equal
         Timestamp::from(created_at.as_secs() - 60), // inverted
     ] {
         assert_eq!(

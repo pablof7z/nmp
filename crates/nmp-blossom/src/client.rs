@@ -72,13 +72,10 @@ impl std::fmt::Display for ServerUrlError {
                 write!(f, "Blossom server URL scheme {scheme:?} is not http/https")
             }
             Self::Credentialed => f.write_str("Blossom server URL carries credentials"),
-            Self::NonRootPath { path } => write!(
-                f,
-                "Blossom server URL path {path:?} is not the domain root"
-            ),
-            Self::QueryOrFragment => {
-                f.write_str("Blossom server URL carries a query or fragment")
+            Self::NonRootPath { path } => {
+                write!(f, "Blossom server URL path {path:?} is not the domain root")
             }
+            Self::QueryOrFragment => f.write_str("Blossom server URL carries a query or fragment"),
         }
     }
 }
@@ -172,7 +169,11 @@ pub struct ClientBuildError {
 
 impl std::fmt::Display for ClientBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Blossom HTTP client construction failed: {}", self.reason)
+        write!(
+            f,
+            "Blossom HTTP client construction failed: {}",
+            self.reason
+        )
     }
 }
 
@@ -366,13 +367,14 @@ impl BlossomClient {
         if let Some(content_type) = content_type {
             request = request.header(reqwest::header::CONTENT_TYPE, content_type.to_string());
         }
-        let mut response = request
-            .body(blob.to_vec())
-            .send()
-            .await
-            .map_err(|error| UploadError::Network {
-                detail: error.to_string(),
-            })?;
+        let mut response =
+            request
+                .body(blob.to_vec())
+                .send()
+                .await
+                .map_err(|error| UploadError::Network {
+                    detail: error.to_string(),
+                })?;
 
         let status = response.status();
         let reason = response
@@ -445,7 +447,9 @@ impl BlossomClient {
             .and_then(|inner| inner.strip_suffix(']'))
             .unwrap_or(host);
         if literal_host_class(bare) == RelayHostClass::Local
-            && !self.allowed_local_hosts.contains(&normalize_bare_host(bare))
+            && !self
+                .allowed_local_hosts
+                .contains(&normalize_bare_host(bare))
         {
             return Err(UploadError::LocalHostNotAdmitted {
                 host: host.to_string(),
@@ -490,8 +494,7 @@ impl AdmittedDnsResolver {
     fn new(allowed_local_hosts: Arc<BTreeSet<String>>) -> Result<Self, String> {
         let mut builder = hickory_resolver::TokioResolver::builder_tokio()
             .map_err(|error| format!("could not read the system DNS configuration: {error}"))?;
-        builder.options_mut().ip_strategy =
-            hickory_resolver::config::LookupIpStrategy::Ipv4AndIpv6;
+        builder.options_mut().ip_strategy = hickory_resolver::config::LookupIpStrategy::Ipv4AndIpv6;
         Ok(Self {
             resolver: builder.build(),
             allowed_local_hosts,
