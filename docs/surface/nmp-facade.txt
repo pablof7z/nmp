@@ -740,7 +740,6 @@ impl !core::panic::unwind_safe::RefUnwindSafe for nmp::WindowHandle
 impl !core::panic::unwind_safe::UnwindSafe for nmp::WindowHandle
 pub trait nmp::AuthPolicy: core::marker::Send
 pub fn nmp::AuthPolicy::evaluate(&self, nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp
-pub fn nmp::admits_network_relay_hint(&nostr::types::url::RelayUrl) -> bool
 pub type nmp::AuthPolicyResult = core::result::Result<nmp::AuthPolicyDecision, nmp::AuthPolicyError>
 
 # resolved dependency-owned reexports (rustdoc JSON format 60)
