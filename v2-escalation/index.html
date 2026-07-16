@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMP v2 Architecture Decisions — 15 Rulings</title>
+<meta name="description" content="Consolidated record of 15 NMP v2 architecture and scope decisions: two-noun model, type-over-convention, closed vocabularies, and the wallet scope escalation — with audio briefings for each ruling.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5; --fg: #16181c; --muted: #5b6270; --card: #ffffff;
+    --border: #e3e5e8; --accent: #1f7a3f; --accent-bg: #e9f7ee;
+    --mono-bg: #eef0f2; --link: #1a56db; --shadow: rgba(20,20,30,0.06);
+    --escalated: #a3540d; --escalated-bg: #fbeee0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1013; --fg: #e8eaed; --muted: #9aa2b1; --card: #171a1f;
+      --border: #2a2e35; --accent: #3ddc73; --accent-bg: #10241a;
+      --mono-bg: #1d2127; --link: #7aa2f7; --shadow: rgba(0,0,0,0.35);
+      --escalated: #f0a860; --escalated-bg: #2b2011;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1013; --fg: #e8eaed; --muted: #9aa2b1; --card: #171a1f;
+    --border: #2a2e35; --accent: #3ddc73; --accent-bg: #10241a;
+    --mono-bg: #1d2127; --link: #7aa2f7; --shadow: rgba(0,0,0,0.35);
+    --escalated: #f0a860; --escalated-bg: #2b2011;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f7f5; --fg: #16181c; --muted: #5b6270; --card: #ffffff;
+    --border: #e3e5e8; --accent: #1f7a3f; --accent-bg: #e9f7ee;
+    --mono-bg: #eef0f2; --link: #1a56db; --shadow: rgba(20,20,30,0.06);
+    --escalated: #a3540d; --escalated-bg: #fbeee0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  a { color: var(--link); }
+  .eyebrow {
+    text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.75rem;
+    font-weight: 600; color: var(--muted); margin-bottom: 0.2rem;
+  }
+  h1 { font-size: 1.6rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); font-size: 0.98rem; margin: 0 0 1.25rem; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.75rem; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    font-size: 0.9rem; font-weight: 600; text-decoration: none;
+    padding: 0.5rem 0.9rem; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--fg); background: var(--card);
+  }
+  .btn.primary { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+  .btn:hover { border-color: var(--accent); }
+
+  .player-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 1.25rem 1.4rem 1.4rem; box-shadow: 0 1px 3px var(--shadow);
+    margin-bottom: 1.75rem;
+  }
+  .now-playing {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--accent); font-weight: 700; margin: 0 0 0.35rem;
+  }
+  .ep-title { font-size: 1.2rem; font-weight: 700; margin: 0 0 0.2rem; }
+  .ep-sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.9rem; }
+  audio { width: 100%; height: 40px; margin: 0.2rem 0 0.9rem; display: block; }
+
+  .tldr {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 1.1rem 1.4rem 1.2rem; box-shadow: 0 1px 3px var(--shadow);
+    margin-bottom: 2.2rem;
+  }
+  .tldr h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 0.6rem; color: var(--muted); }
+  .tldr ul { margin: 0; padding-left: 1.2rem; }
+  .tldr li { margin-bottom: 0.4rem; }
+  .tldr li:last-child { margin-bottom: 0; }
+
+  .through-line {
+    font-size: 0.95rem; color: var(--muted); margin: 0 0 2rem; padding: 0.9rem 1.1rem;
+    border-left: 3px solid var(--accent); background: var(--accent-bg); border-radius: 0 10px 10px 0;
+  }
+  .through-line b { color: var(--fg); }
+
+  h2.section-heading {
+    font-size: 1.05rem; margin: 0 0 1.1rem; padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border); color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+  }
+
+  .decision {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 1.3rem 1.5rem 1.5rem; box-shadow: 0 1px 3px var(--shadow);
+    margin-bottom: 1.6rem;
+  }
+  .decision h3 { font-size: 1.15rem; margin: 0 0 0.15rem; }
+  .decision .src { font-size: 0.82rem; color: var(--muted); margin: 0 0 0.9rem; }
+  .decision .src a { color: var(--muted); text-decoration: underline; }
+  .status-pill {
+    display: inline-block; font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 0.15rem 0.55rem; border-radius: 999px;
+    background: var(--mono-bg); color: var(--muted); font-weight: 700; margin-left: 0.4rem;
+    vertical-align: middle;
+  }
+  .status-pill.escalated { background: var(--escalated-bg); color: var(--escalated); }
+  .decision ul.bullets { margin: 0 0 0.9rem; padding-left: 1.2rem; }
+  .decision ul.bullets li { margin-bottom: 0.45rem; }
+  .decision ul.bullets li:last-child { margin-bottom: 0; }
+  .decision .explain { font-size: 0.92rem; color: var(--fg); margin: 0.9rem 0; }
+  .decision .explain p { margin: 0 0 0.7rem; }
+  .decision .explain p:last-child { margin-bottom: 0; }
+  .decision .links { font-size: 0.85rem; margin: 0.9rem 0; display: flex; gap: 0.7rem; flex-wrap: wrap; }
+  .decision code { background: var(--mono-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.85em; }
+
+  footer { margin-top: 2.5rem; text-align: center; font-size: 0.78rem; color: var(--muted); }
+  footer a { color: var(--muted); }
+  footer p { margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">nmp v2 &middot; architecture decision record</div>
+  <h1>v2 Architecture Decisions — 15 Rulings</h1>
+  <p class="tagline">A consolidated record of every v2 architecture and scope call made in the 2026-07-16 session: 14 decided directly against standing doctrine, and one — wallet scope — escalated to and ruled by the project owner. Each decision below has its own spoken deep-dive; the player at the top covers the whole arc in one pass.</p>
+
+  <div class="actions">
+    <a class="btn primary" href="https://github.com/pablof7z/nmp/issues/548">📋 Consolidated issue #548</a>
+    <a class="btn" href="https://github.com/pablof7z/nmp">⭐ Repo</a>
+    <a class="btn" href="../status/">🎧 Status briefings</a>
+  </div>
+
+  <section class="player-card">
+    <p class="now-playing">▶ Overall briefing</p>
+    <p class="ep-title">The arc: two nouns, closed vocabularies, and the wallet fence</p>
+    <p class="ep-sub">What these 15 decisions are, the through-line across them, and how the wallet scope question got escalated and ruled &middot; ~5 min</p>
+    <audio controls preload="none" src="audio/overall.mp3">
+      Your browser does not support audio. <a href="audio/overall.mp3">Download the mp3</a>.
+    </audio>
+  </section>
+
+  <div class="tldr">
+    <h2>TL;DR</h2>
+    <ul>
+      <li>15 v2 architecture/scope questions were resolved in one session: 14 decided directly on doctrine, 1 (wallet, #219) escalated to the owner.</li>
+      <li>Every ruling holds the two-noun model intact — a query/observation and a write-intent/receipt — with zero new nouns admitted.</li>
+      <li><b>Type wins over convention</b>: bug classes close only when a mechanism makes the wrong path unreachable, not when everyone remembers a rule.</li>
+      <li>Vocabularies (selectors, reducers, order keys, reactive inputs) stay closed and open only behind a real consumer falsifier — never speculatively.</li>
+      <li>Scope fences hold: no reducer language, no blessed engine inputs, and — per owner ruling — <b>no wallet/payments surface through v2</b>.</li>
+    </ul>
+  </div>
+
+  <p class="through-line"><b>The through-line:</b> almost every open question here reduced to "does this need a third noun, or is it a variation on the two we already have?" The answer was always no. Closed vocabularies over open-ended escape hatches; mechanisms that make the wrong thing unrepresentable instead of conventions to remember; scope fences that hold until a real application, not a hypothetical one, proves they need to move.</p>
+
+  <h2 class="section-heading">The 15 rulings</h2>
+
+  <article class="decision" id="issue-5-9">
+    <h3>Collection grouping and ordering <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/5">#5</a> + <a href="https://github.com/pablof7z/nmp/issues/9">#9</a> — ruled jointly (same Collection-contract gate)</p>
+    <ul class="bullets">
+      <li>Grouped/aggregated collections (e.g. a DM conversation list) <b>are</b> expressible with a closed vocabulary — <code>Window::Grouped { key: Selector, reduce: Reducer::Newest }</code> — reusing the existing closed <code>Selector</code> vocabulary, no new noun.</li>
+      <li>The reducer set is closed and starts as exactly <code>{Newest}</code>; anything else needs its own consumer falsifier.</li>
+      <li>Grouping must be engine-owned once built: client-side grouping over a paged window is provably wrong (a peer's newest message can sit outside the window) — bug-class-ledger #13's failure mode, one level up.</li>
+      <li>Ordering: the closed <code>OrderKey</code> vocabulary survives. App-defined sort (e.g. interaction-frequency) is app-side presentation over engine-windowed acquisition, done in the view model — never an app comparator or mutable app-fed sort-key column inside engine ordering/cursor decisions.</li>
+      <li>Not v2-blocking: grouping builds only when a real consumer (a DM-list-shaped app) demands it; the Mixtape-shaped ordering probe remains the falsifier for revisiting ergonomics.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> <code>docs/VISION.md:75-76</code> — app closures never enter demand, admission, routing, ordering, or cursor decisions. The Collection contract already landed as <code>observe(query, window)</code> (#474/#485), and ledger #13 is BUILT with the two-cursor resolution these issues proposed: engine owns one canonical <code>(created_at DESC, event_id ASC)</code> cursor; app presentation may reorder rows but never redefine cursor/group membership. Bug-class-ledger #3-5 keeps the reducer set closed and falsifier-gated — no reducer language, no per-app reducer registration.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/5">Source issue #5 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/9">Source issue #9 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-5-9.mp3">
+      Your browser does not support audio. <a href="audio/issue-5-9.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-13">
+    <h3>Drafts module (NIP-37): spec only <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/13">#13</a></p>
+    <ul class="bullets">
+      <li>Ratified as a spec placeholder; "do not build yet" stands, with two precise blocking dependencies.</li>
+      <li><code>nmp-nip37</code> will exclusively claim the NIP-37 draft kind(s) plus kind:10013 via <code>KindClaim</code> (ledger #22: routing only exists inside a claim).</li>
+      <li>Routing fails <b>open</b> to <code>appRelay</code>/<code>fallbackRelay</code> when no kind:10013 is declared — a draft is the user's own recoverable content, unlike NIP-17's fail-closed private-inbox class.</li>
+      <li>Write path (NIP-44-to-self) is ready; the <b>read path is blocked</b> on the decrypt-result feedback gap — no bespoke decrypt path is allowed around it.</li>
+      <li>No new nouns: drafts are ordinary canonical rows plus ordinary write intents.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> the load-bearing trust distinction is your-own-recoverable-content (fail open) vs. someone-else's-private-inbox (fail closed) — <code>docs/design/routing-and-ownership.md:154</code>. Ledger #6 (no widen operation on private/narrow routes) stays untouched because the draft lane is a recoverable-content class, not a private-inbox class.</p>
+      <p><b>Build gate:</b> Unit E claim-table routing (ledger #22, PARTIAL under #521) and the M3-C decrypt-on-ingest feedback path must both land first.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/13">Source issue #13 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-13.mp3">
+      Your browser does not support audio. <a href="audio/issue-13.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-45">
+    <h3>NIP-module ownership and contextual composition <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/45">#45</a></p>
+    <ul class="bullets">
+      <li>The issue's contract is confirmed as settled doctrine, now promoted into <code>docs/VISION.md</code> §4 (lines 192-214) and bug-class-ledger #14.</li>
+      <li>The one open design fork is ruled: <b>kind ownership does not gate contextual route contribution.</b> A module claims only its exact NIP-defined schema; a contextual operation may contribute closed typed tags/route facts to a foreign-owned immutable draft without claiming that draft's kind.</li>
+      <li>Canonical example ratified verbatim: <code>nmp-nip51</code> exclusively owns kind:10009; <code>nmp-nip29</code> composes that output into <code>GroupRef</code>/host context and claims neither 10009 nor 30002.</li>
+      <li>Next implementation unit: the NIP-29 contextual group-publication operation (bind <code>GroupRef</code>, add typed <code>h</code>/host-relay constraint, core signs once, ordinary receipt stream, no Swift-owned optimistic mirror).</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> the legacy design "incorrectly gates every route contribution on kind ownership" (ledger #14, TARGET). No blessed kind:1/social-feed recipe ever lives in core (VISION §2.2, §4); <code>AuthorOutbox</code>-based composer workarounds are evidence of the gap, not an accepted pattern.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/45">Source issue #45 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-45.mp3">
+      Your browser does not support audio. <a href="audio/issue-45.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-46">
+    <h3>Bounded state delivery and overload/shortfall semantics <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/46">#46</a></p>
+    <ul class="bullets">
+      <li>The bounded-delivery contract (<code>docs/design/bounded-delivery.md</code> §1-§4) is settled: every limit outcome is exactly one of semantics-preserving chunk/coalesce, cached rows + explicit shortfall, typed pre-acceptance rejection, or backpressure/disconnect with a diagnostic reason.</li>
+      <li><b>Ratified addition 1:</b> GC-timed teardown (UniFFI <code>Cleaner</code>, any finalizer) is <i>not</i> a conforming teardown path on any platform — demand withdrawal must fire deterministically on explicit cancel/scope-close.</li>
+      <li><b>Ratified addition 2:</b> relay-advertised NIP-11 limits (<code>max_subscriptions</code>, <code>max_filters</code>, <code>max_limit</code>, size limits) join the compiled plan's budget set — ignoring them while planning is the "decorative configuration" this issue forbids.</li>
+      <li>No new nouns, no aggregate health/overload score; numeric defaults stay implementation policy, but limit categories and observable consequences are architectural contract.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> ledger #2 (lost/leaked subscription) closed by deriving wire demand from refcounted descriptors — unbounded-latency refcount release reopens that class in time rather than in code. Ledger #17 (silent truncation) is PARTIAL; this closes the wire/relay-advertised-limit gap in it.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/46">Source issue #46 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-46.mp3">
+      Your browser does not support audio. <a href="audio/issue-46.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-48">
+    <h3>Typed reactive inputs beyond currentPubkey <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/48">#48</a></p>
+    <ul class="bullets">
+      <li>Keep <b>one</b> reactive leaf: <code>Reactive(CurrentPubkey)</code> remains the only reactive grammar root. No new typed external input references are admitted now.</li>
+      <li>App-owned changing value sets are expressed through descriptor replacement (or literals / <code>Derived</code> / <code>SetOp</code> / a typed protocol query) — replacement already gives surgical, refcount-shared demand.</li>
+      <li>No blessed engine inputs like <code>allAccountPubkeys</code>, ever — that would move an app-owned fact into the engine.</li>
+      <li>A concrete, recorded admission test for reopening: a real consumer must show either that replacement breaks required handle/evidence continuity, or that it provably forces wire churn an engine-tracked dependency would avoid (measured, not asserted).</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> zero falsifier has surfaced since 2026-07-11 across any consumer (29er, Falsifier, Gallery, demo) — under the consumer-inward rule (<code>docs/design-record.md:146</code>), speculative grammar is exactly what YAGNI-but-correct forbids. <code>$currentPubkey</code> is special because VISION names it as the one reactive root spanning app-owned identity and engine-owned derived routing (<code>docs/VISION.md:89-91</code>).</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/48">Source issue #48 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-48.mp3">
+      Your browser does not support audio. <a href="audio/issue-48.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-49">
+    <h3>Context-scoped query acquisition evidence <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/49">#49</a></p>
+    <ul class="bullets">
+      <li>The <code>Derived</code>-context invariant proposed in review is ratified: every <code>Derived</code> inner node must carry an explicit full contextual demand (or an equivalent closed value naming its own source authority and access context).</li>
+      <li><b>No implicit outer-context inheritance</b> — an outer NIP-29 host/AUTH demand deriving from a NIP-51 list query must not route the inner query through the group host or borrow the outer AUTH evidence.</li>
+      <li>Default rule makes the invariant total: a fragment naming no context for an inner node gets ordinary/default authority and public access context, never the outer's — inheritance is unrepresentable, not just discouraged.</li>
+      <li>The rest of the issue (U1/U2 vocabulary signoff) was already decided; only implementation remains, tracked through #106/#107 and the AUTH half in #8.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> bug-class-ledger #18 is exactly this class — implicit inheritance would conflate contexts structurally, one level down where review can't see it. <code>docs/VISION.md:56-59</code>: NMP must never conflate acquisition evidence from different authorities or access contexts.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/49">Source issue #49 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-49.mp3">
+      Your browser does not support audio. <a href="audio/issue-49.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-158">
+    <h3>Typed state instead of thrown FFI errors <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/158">#158</a></p>
+    <ul class="bullets">
+      <li>Typed state wins over thrown FFI errors, via a three-way split with landed precedent on each edge.</li>
+      <li><b>Runtime/environmental failure during observation</b> (store degradation, executor saturation, transport/routing failure, shortfall) → typed state on the observation handle, never a throw.</li>
+      <li><b>Publish composition/acceptance failure</b> → the first typed fact on the ordinary nonthrowing receipt stream (precedent: tampered pre-signed events surface as <code>WriteStatus::Failed</code>, never a synchronous <code>FfiError</code>).</li>
+      <li><b>Deterministic value invalidity at construction</b> (malformed hex, invalid tags/signatures) stays a synchronous typed error — these are app programming bugs with no runtime state to represent.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> ledger #3-5 — a bug class closes only when a mechanism makes the bad path unreachable; hand-translating throws into view state at every call site is governance-by-convention. <code>docs/VISION.md</code> §2.3: a query delivers rows plus evidence, and failure evidence is evidence, not an exception.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/158">Source issue #158 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-158.mp3">
+      Your browser does not support audio. <a href="audio/issue-158.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-205">
+    <h3>NIP-77 eligibility, reconciliation, and fallback <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/205">#205</a></p>
+    <ul class="bullets">
+      <li><b>(a) Eligibility</b> is a typed, inspectable <code>EligibilityDecision</code> value per (descriptor, relay), carrying reasons — never an implicit boolean. Only a behaviorally-minted capability token admits NIP-77; NIP-11 advertisement alone can never mint it (ledger #8, BUILT).</li>
+      <li><b>(b) Strategy</b> is reconcile-then-subscribe: NIP-77 covers the cached/backfill window; live REQ always covers ongoing arrival. One-shot per plan generation, never on a timer/polling.</li>
+      <li><b>(c) Honest state:</b> reconciliation deltas enter only through the canonical store door; coverage watermarks update only from evidence actually obtained. Rejection/garbage/failure falls back to REQ plus a typed diagnostic fact recording why.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> doctrine already ordered "Negentropy FIRST, REQ second — DEFAULT not opt-in… only when probed" (<code>docs/design-record.md</code>). No global <code>synced</code>/completeness claim ever appears (VISION §2.3) — completion is a per-relay watermark fact.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/205">Source issue #205 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-205.mp3">
+      Your browser does not support audio. <a href="audio/issue-205.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-208">
+    <h3>Typed kind:0 profile reads and writes <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/208">#208</a></p>
+    <ul class="bullets">
+      <li>kind:0 is the second instance of the pattern NIP-02 already landed: a guarded replaceable protocol operation (ledger #20) plus a typed live-winner projection over ordinary demand.</li>
+      <li>Two named write operations, both ledger-#20-guarded: <code>editProfile</code> (preserves every unowned field byte-honestly; stale base yields typed <code>ReplaceableConflict</code>) and <code>createProfile</code> (explicit no-base signup operation; guards on no existing canonical row, never a silent upsert).</li>
+      <li>Read side is ordinary demand plus a typed winner projection — <b>no generic "resolved profile" object</b> that becomes a competing semantic owner.</li>
+      <li>Exactly one module claims the kind:0 schema; profile UX, navigation, avatar policy stay entirely application-owned.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> <code>docs/VISION.md</code> §7 table — presentation never lives in core (ledger #12); the #75 precedent requires create-when-absent to be its own named operation, never folded silently into edit.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/208">Source issue #208 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-208.mp3">
+      Your browser does not support audio. <a href="audio/issue-208.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-215">
+    <h3>Search authority: entity resolution, NIP-50, local FTS <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/215">#215</a></p>
+    <ul class="bullets">
+      <li>"Search" is not a noun. Three existing things stay separate: <b>codecs</b> (NIP-19/21 decoding, NIP-05 HTTP resolution via the NIP-11 precedent), <b>NIP-50</b> (a filter field — Selection — under capability-scoped source authority), and (if ever built) <b>local FTS</b> as a store capability.</li>
+      <li>NIP-50 results are ordinary canonical rows plus per-source evidence — no completeness claim; demand no capable relay can serve is uncovered demand with explicit shortfall evidence, never silently widened or dropped.</li>
+      <li><b>Local FTS is an explicit non-goal for v2 core</b> — no consumer falsifier demands it. Its shape-if-built is pre-ruled: a store-layer capability inside the same crash-atomic transaction as canonical mutations, local-authority-only.</li>
+      <li>Ranking, tabs, result layout, and any blended score are application policy, never a health/completeness number in core.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> <code>docs/design-record.md:146</code> (consumer-inward rule); ledger #7/#8 (per-source honesty, advertisement ≠ proof) applied symmetrically to search.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/215">Source issue #215 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-215.mp3">
+      Your browser does not support audio. <a href="audio/issue-215.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-217">
+    <h3>Web-of-Trust fact and computation boundary <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/217">#217</a></p>
+    <ul class="bullets">
+      <li>NMP exposes trust <b>facts</b> through ordinary live queries — now and always. No WoT computation ships in core, and no computation module is built until a consumer falsifier demands one.</li>
+      <li>Inputs (follow edges, mute lists, reports, relay lists) are ordinary Nostr facts via live queries/module projections — acquisition authority and trust policy never mix.</li>
+      <li>If ever built, the admissible shape is pre-ruled: a replaceable consumer above the engine (the <code>nmp-content</code> precedent) — deterministic, versioned, explicit typed inputs, resource-bounded, cancelable, structurally unable to open relays or filter a live query.</li>
+      <li>Thresholds, allow/hide decisions, ranking composition, and moderation meaning are app-owned, permanently. The no-NIP-85 boundary is retained.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> <code>docs/VISION.md:75-76</code> / §2.3 — nothing app-semantic enters demand/admission/routing, and rows are never filtered by an engine verdict; ledger #7's honesty rule applied to derived trust values.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/217">Source issue #217 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-217.mp3">
+      Your browser does not support audio. <a href="audio/issue-217.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-393">
+    <h3>Bounded live-only observation and publication of ephemeral events <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/393">#393</a></p>
+    <ul class="bullets">
+      <li>Ephemeral events (kinds 20000-29999) fit the existing two nouns with <b>zero new nouns</b>.</li>
+      <li><b>Read side:</b> a typed, bounded, live-only delivery lane on the ordinary observation handle, explicitly distinct from the canonical row set. No active observer means no buffering and no replay (honest live-only semantics, not data loss).</li>
+      <li><b>Write side:</b> the ordinary immutable-draft/signer/routing/receipt pipeline in its explicitly non-durable mode — receipts tell relay-acceptance truth, never claim cache presence.</li>
+      <li>Eligibility is a protocol fact driven by the kind range, not an app flag.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> a query snapshot is defined as current matching cache rows plus evidence (<code>docs/VISION.md:105-112</code>); injecting an ephemeral as a pretend row would let a conflated/windowed observer silently disagree with a delta observer's accumulated state. Ledger #13/#17/#2 govern the bounded-buffer and refcount mechanics.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/393">Source issue #393 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-393.mp3">
+      Your browser does not support audio. <a href="audio/issue-393.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-533">
+    <h3>Pre-signature write cancellation with typed durable evidence <span class="status-pill">decided</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/533">#533</a></p>
+    <ul class="bullets">
+      <li>Built as specified: <code>Cancelled</code> becomes a typed durable receipt fact, and the current <code>Failed("write cancelled before signing")</code> string-matched projection is <b>deleted in the same change</b> — no compatibility side door.</li>
+      <li>Exact outcome semantics by prior state: accepted-unsigned cancel commits atomically; already-cancelled is idempotent; unknown receipt id is a typed refusal; already-signed/terminal is a typed refusal naming the current state; persistence failure leaves the obligation live with no false terminal fact.</li>
+      <li>Surfaced as <code>cancel(receiptId)</code> on the canonical <code>nmp::Engine</code> facade plus governed UniFFI/Swift/Kotlin projections — the Destructive-API gate and Cross-SDK Parity gate both apply.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Why:</b> <code>docs/bug-class-ledger.md:3-5</code> — string-matching is convention, not mechanism. VISION §3.3: a durable intent remains live until explicit cancellation; VISION §3.1's one-way-door rule extends symmetrically to cancellation.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/533">Source issue #533 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-533.mp3">
+      Your browser does not support audio. <a href="audio/issue-533.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <article class="decision" id="issue-219">
+    <h3>Wallet protocol ownership and relay receipts vs. outcomes <span class="status-pill escalated">owner escalation</span></h3>
+    <p class="src">Source: <a href="https://github.com/pablof7z/nmp/issues/219">#219</a> (closed) — ruled by @pablof7z, 2026-07-16</p>
+    <ul class="bullets">
+      <li><b>Wallet is a non-goal through v2.</b> NMP ships no wallet/payments surface: no zap helpers, no NWC/NIP-47 credentials, no NIP-60/61 wallet state.</li>
+      <li>Apps hand-roll payments; NMP stays out of payment-outcome correctness — a relay accepting an event is not payment success, and the engine adds zero new credential surface.</li>
+      <li>The doctrine-decidable constraints already worked out remain the pre-ruled shape <b>if/when it reopens post-v2</b>: the recommended first step then is NIP-57 zap-request composition only (typed drafts + receipt correlation, no wallet state), gated on a real consumer falsifier.</li>
+      <li>This is the one ruling that could not be settled on doctrine alone — the scope-fence call needed explicit owner sign-off rather than a doctrine derivation.</li>
+    </ul>
+    <div class="explain">
+      <p><b>Status:</b> owner-escalated and decided. Issue closed as decided; reopens post-v2 only on consumer demand.</p>
+    </div>
+    <p class="links">
+      <a href="https://github.com/pablof7z/nmp/issues/219">Source issue #219 →</a>
+      <a href="https://github.com/pablof7z/nmp/issues/548">Consolidated record #548 →</a>
+    </p>
+    <audio controls preload="none" src="audio/issue-219.mp3">
+      Your browser does not support audio. <a href="audio/issue-219.mp3">Download the mp3</a>.
+    </audio>
+  </article>
+
+  <footer>
+    <p>Doctrine anchors: <code>docs/VISION.md</code>, <code>docs/bug-class-ledger.md</code>, <code>docs/design-record.md</code>. All 15 source issues carry their own decision comment dated 2026-07-16.</p>
+    <p><a href="https://github.com/pablof7z/nmp/issues/548">Consolidated decision record — issue #548</a> &middot; <a href="../status/">Status briefings</a> &middot; <a href="https://github.com/pablof7z/nmp">Repo</a></p>
+  </footer>
+</main>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  try { var saved = localStorage.getItem('nmp-theme'); if (saved) root.setAttribute('data-theme', saved); } catch (e) {}
+})();
+</script>
+</body>
+</html>
