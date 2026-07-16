@@ -84,8 +84,13 @@ impl PendingRows {
             (Some(PendingTransition::Removed), RowDelta::Added(row)) => {
                 Some(PendingTransition::Replaced(row))
             }
-            (Some(PendingTransition::Removed), RowDelta::SourcesGrew { sources, .. }) => {
-                Some(PendingTransition::SourcesGrew(sources))
+            // `SourcesGrew` is legal only while the row remains present. Once
+            // this pending transition has removed it, a source-only delta
+            // cannot prove presence again because it deliberately carries no
+            // row payload. Preserve the removal rather than resurrecting the
+            // receiver's stale baseline row if an upstream invariant breaks.
+            (Some(PendingTransition::Removed), RowDelta::SourcesGrew { .. }) => {
+                Some(PendingTransition::Removed)
             }
             (Some(PendingTransition::Removed), RowDelta::Removed(_)) => {
                 Some(PendingTransition::Removed)
@@ -325,6 +330,38 @@ mod tests {
                 if *delta_id == id && sources == &expected
         ));
         assert_eq!(evidence, latest_evidence());
+    }
+
+    #[test]
+    fn source_growth_after_removal_fails_closed_without_resurrecting_the_row() {
+        let keys = Keys::generate();
+        let initial = row(&keys, 1, "must-stay-removed");
+        let id = initial.event.id;
+        let (tx, rx) = rows_channel();
+        tx.send((
+            vec![RowDelta::Added(initial)],
+            AcquisitionEvidence::default(),
+        ));
+        let mut delivered = BTreeMap::new();
+        apply(&mut delivered, &rx.recv().unwrap().0);
+
+        tx.send((vec![RowDelta::Removed(id)], AcquisitionEvidence::default()));
+        let evidence = latest_evidence();
+        tx.send((
+            vec![RowDelta::SourcesGrew {
+                id,
+                sources: [RelayUrl::parse("wss://unexpected.example").unwrap()]
+                    .into_iter()
+                    .collect(),
+            }],
+            evidence.clone(),
+        ));
+
+        let (deltas, received_evidence) = rx.recv().unwrap();
+        assert!(matches!(deltas.as_slice(), [RowDelta::Removed(delta_id)] if *delta_id == id));
+        apply(&mut delivered, &deltas);
+        assert!(!delivered.contains_key(&id));
+        assert_eq!(received_evidence, evidence);
     }
 
     #[test]

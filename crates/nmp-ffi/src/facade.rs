@@ -978,9 +978,10 @@ mod tests {
     use super::*;
     use crate::types::{
         FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter, FfiFrame,
-        FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiWindow,
-        FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+        FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority,
+        FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
     };
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::Mutex;
@@ -2535,6 +2536,151 @@ mod tests {
             "on_closed must fire EXACTLY once, not once per cancel() call/Arc owner/Drop"
         );
 
+        engine.shutdown();
+    }
+
+    struct BlockingRebasedRowObserver {
+        frame_index: AtomicUsize,
+        first_frame_started: mpsc::Sender<()>,
+        release_first_frame: Mutex<mpsc::Receiver<()>>,
+        frames: mpsc::Sender<FfiFrame>,
+        closed: mpsc::Sender<()>,
+    }
+
+    impl RowObserver for BlockingRebasedRowObserver {
+        fn on_frame(&self, frame: FfiFrame) {
+            if self.frame_index.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = self.first_frame_started.send(());
+                self.release_first_frame
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test must release the blocked first callback");
+            }
+            let _ = self.frames.send(frame);
+        }
+
+        fn on_closed(&self) {
+            let _ = self.closed.send(());
+        }
+    }
+
+    /// Exercise the complete producer-mailbox -> `nmp::Subscription` -> FFI
+    /// drain-thread path under real callback backpressure. While the first
+    /// callback is blocked, durable local acceptance produces many distinct
+    /// rows and cancellation retracts half of them. The one subsequent frame
+    /// must be the exact net transition, then cancellation closes once.
+    #[test]
+    fn ffi_blocked_callback_receives_one_exact_rebased_frame_then_closes_once() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let keys = nostr::Keys::generate();
+        engine
+            .engine
+            .set_active_account(Some(keys.public_key()))
+            .expect("engine must accept a read-only active identity");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let observer = Box::new(BlockingRebasedRowObserver {
+            frame_index: AtomicUsize::new(0),
+            first_frame_started: started_tx,
+            release_first_frame: Mutex::new(release_rx),
+            frames: frame_tx,
+            closed: closed_tx,
+        });
+        let kind = nostr::Kind::Custom(44_646);
+        let handle = engine
+            .observe(
+                FfiFilter {
+                    kinds: Some(vec![kind.as_u16()]),
+                    ..FfiFilter::default()
+                },
+                None,
+                observer,
+            )
+            .expect("query must open");
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the initial callback must start and block");
+
+        let mut expected = BTreeSet::new();
+        for index in 0..64u64 {
+            let unsigned = nostr::UnsignedEvent::new(
+                keys.public_key(),
+                nostr::Timestamp::from(10_000 + index),
+                kind,
+                Vec::new(),
+                format!("blocked-row-{index}"),
+            );
+            let event_id = nostr::EventId::new(
+                &unsigned.pubkey,
+                &unsigned.created_at,
+                &unsigned.kind,
+                &unsigned.tags,
+                &unsigned.content,
+            );
+            let receipt = engine
+                .engine
+                .publish_tracked(nmp::WriteIntent {
+                    payload: nmp::WritePayload::Unsigned(unsigned),
+                    durability: nmp::Durability::Durable,
+                    routing: nmp::WriteRouting::AuthorOutbox,
+                    identity_override: None,
+                })
+                .expect("local durable acceptance must succeed");
+            if index % 2 == 0 {
+                engine
+                    .engine
+                    .cancel(receipt.id)
+                    .expect("an unsigned pending row must remain cancellable");
+            } else {
+                expected.insert(event_id.to_hex());
+            }
+        }
+
+        // A synchronous diagnostics open is a command-loop barrier: every
+        // preceding publish/cancel effect has reached the row mailbox before
+        // the blocked callback is released.
+        drop(
+            engine
+                .engine
+                .observe_diagnostics()
+                .expect("barrier observation must open"),
+        );
+        release_tx.send(()).unwrap();
+
+        let initial = frame_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the released initial frame must arrive");
+        assert!(initial.deltas.is_empty());
+        let rebased = frame_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the exact rebased frame must follow");
+        let actual: BTreeSet<_> = rebased
+            .deltas
+            .iter()
+            .map(|delta| match delta {
+                FfiRowDelta::Added { row } => row.id.clone(),
+                other => panic!("net add/remove cancellation must leave only additions: {other:?}"),
+            })
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(rebased.deltas.len(), expected.len());
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        handle.cancel();
+        closed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancel must close the blocked observer drain");
+        assert!(
+            closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the drain must call on_closed exactly once"
+        );
         engine.shutdown();
     }
 
