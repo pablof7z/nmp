@@ -27,14 +27,17 @@ use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
-use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
+use nmp_grammar::{
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
+    IdentityField, Selector, SourceAuthority,
+};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_signer::LocalKeySigner;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, EventStore, IntentSigState, MemoryStore, RedbStore,
-    RedbStoreResetError, RelayObserved, WriteDurability,
+    sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,
+    RedbStore, RedbStoreResetError, RelayObserved, WriteDurability,
 };
 use nmp_test_support::ConnectionOwner;
 use nmp_transport::PoolConfig;
@@ -93,6 +96,94 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()
     })
+}
+
+/// #565 product-path falsifier: `Freshness::MaxAge` is decided once when
+/// the runtime processes `Cmd::Subscribe`, so that command must first tick
+/// `EngineCore` to the current wall clock. The stored coverage below is
+/// fresh relative to the core's zero initial clock but stale relative to
+/// reality. A missing pre-subscribe tick would therefore suppress all wire
+/// work; the real TCP accept proves the stale handle became `Live` instead.
+#[test]
+fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind capture relay");
+    listener
+        .set_nonblocking(true)
+        .expect("make capture relay nonblocking");
+    let relay = RelayUrl::parse(&format!(
+        "ws://{}",
+        listener.local_addr().expect("capture relay address")
+    ))
+    .expect("parse capture relay URL");
+    let author = Keys::generate().public_key().to_hex();
+    let selection = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([author.clone()]))),
+        ..Filter::default()
+    };
+    let atom = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(BTreeSet::from([author.clone()])),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::AuthorOutboxes,
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let now = Timestamp::now().as_secs();
+    let mut store = MemoryStore::new();
+    store
+        .record_coverage(
+            &atom,
+            &relay,
+            CoverageInterval::new(
+                Timestamp::from(0u64),
+                Timestamp::from(now.saturating_sub(60)),
+            ),
+        )
+        .expect("seed stale coverage");
+    let directory = FixtureDirectory::new().with_write(author, std::iter::once(relay.clone()));
+    let (engine_thread, handle) = EngineThread::spawn(
+        store,
+        directory,
+        10,
+        PoolConfig {
+            reconnect_delay_initial: Some(Duration::from_secs(3600)),
+            ..PoolConfig::default()
+        },
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+    )
+    .expect("spawn runtime");
+    let mut demand = Demand::from_filter(selection);
+    demand.freshness = Freshness::MaxAge { seconds: 1 };
+    let (_query, _rows) = handle
+        .subscribe(LiveQuery(demand))
+        .expect("subscribe through runtime product path");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let connected = loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                drop(stream);
+                break true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("capture relay accept failed: {error}"),
+        }
+    };
+    assert!(
+        connected,
+        "stale MaxAge coverage must become Live after Cmd::Subscribe advances the core to wall time"
+    );
+
+    handle.shutdown();
+    engine_thread.join();
 }
 
 /// #489: store-layer ownership must survive the lowest supported raw runtime

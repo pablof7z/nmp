@@ -29,7 +29,7 @@ pub use concrete::{
 };
 pub use demand::{DemandDelta, DemandOp};
 pub use descriptor::{
-    AccessContext, CacheMode, Demand, DemandError, RelaySessionKey, SourceAuthority,
+    AccessContext, CacheMode, Demand, DemandError, Freshness, RelaySessionKey, SourceAuthority,
 };
 pub use indexed_tag_name::IndexedTagName;
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};

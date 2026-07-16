@@ -104,7 +104,32 @@ pub enum CacheMode {
     Strict,
 }
 
-/// The full live-query identity: `selection + source + access` (#106).
+/// How one query handle uses existing coverage when deciding whether it
+/// contributes remote acquisition work. This is a third orthogonal axis on
+/// the existing live-query noun, beside [`SourceAuthority`] and
+/// [`CacheMode`]; it is not part of [`crate::ContextualAtom`] identity.
+/// Equal handles may therefore share their graph, rows, wire subscription,
+/// and coverage history while making independent freshness decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Freshness {
+    /// Cache-then-live: contribute ordinary wire work for the handle's
+    /// lifetime. This is the pre-existing behavior and the default.
+    #[default]
+    Live,
+    /// Suppress wire work when every currently planned source has coverage
+    /// through at least `seconds` before the handle's opening-time engine
+    /// clock. If not satisfied at opening, degrade once to [`Self::Live`].
+    /// Whole seconds are exact: Nostr timestamps and coverage watermarks do
+    /// not carry subsecond precision.
+    MaxAge { seconds: u64 },
+    /// Serve the canonical cache projection without ever contributing wire
+    /// work, regardless of coverage or row presence.
+    CacheOnly,
+}
+
+/// The full live-query declaration. Its semantic identity is
+/// `selection + source + access` (#106); `cache` and `freshness` remain
+/// per-handle policy axes.
 /// `selection` is pure `Filter` — no context field is ever added to `Filter`
 /// itself, keeping the grammar's own encoding/hashing untouched; `source`/
 /// `access` fold into identity one level up, at [`crate::ContextualAtom`].
@@ -117,6 +142,9 @@ pub struct Demand {
     /// sibling field, deliberately excluded from `ContextualAtom`'s hashed
     /// identity.
     pub cache: CacheMode,
+    /// Per-handle acquisition freshness. Deliberately excluded from atom,
+    /// wire, and coverage identity; see [`Freshness`].
+    pub freshness: Freshness,
 }
 
 /// The unconstructible `Demand` combinations (#106/#107, Fable's ratified
@@ -174,6 +202,7 @@ impl Demand {
             source,
             access: AccessContext::Public,
             cache: CacheMode::Agnostic,
+            freshness: Freshness::Live,
         }
     }
 
@@ -203,6 +232,7 @@ impl Demand {
             source,
             access,
             cache: CacheMode::Agnostic,
+            freshness: Freshness::Live,
         })
     }
 
@@ -333,13 +363,18 @@ mod tests {
 
     #[test]
     fn atom_context_projects_source_and_access_only() {
-        let demand = Demand::from_filter(Filter {
+        let mut demand = Demand::from_filter(Filter {
             authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
             ..Filter::default()
         });
+        assert_eq!(demand.freshness, Freshness::Live);
+        let context = demand.atom_context();
+        demand.cache = CacheMode::Strict;
+        demand.freshness = Freshness::MaxAge { seconds: 14_400 };
         assert_eq!(
             demand.atom_context(),
             (SourceAuthority::AuthorOutboxes, AccessContext::Public)
         );
+        assert_eq!(demand.atom_context(), context);
     }
 }

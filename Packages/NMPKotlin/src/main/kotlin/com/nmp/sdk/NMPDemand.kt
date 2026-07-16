@@ -10,6 +10,7 @@ package com.nmp.sdk
 import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiCacheMode
 import uniffi.nmp_ffi.FfiDemand
+import uniffi.nmp_ffi.FfiFreshness
 import uniffi.nmp_ffi.FfiSourceAuthority
 
 /** Which authority resolves a query's relay set (`nmp_grammar::
@@ -96,13 +97,38 @@ enum class NMPCacheMode {
     }
 }
 
-/** The full live-query identity a dev declares -- `selection + source +
- * access + cache` (`nmp_grammar::Demand` mirror, #106/#107). */
+/** Per-handle coverage/wire policy (`nmp_grammar::Freshness`, #565).
+ * Whole seconds match Nostr timestamp and coverage-watermark precision. */
+sealed class NMPFreshness {
+    object Live : NMPFreshness()
+    data class MaxAge(val seconds: ULong) : NMPFreshness()
+    object CacheOnly : NMPFreshness()
+
+    fun toFfi(): FfiFreshness =
+        when (this) {
+            is Live -> FfiFreshness.Live
+            is MaxAge -> FfiFreshness.MaxAge(seconds)
+            is CacheOnly -> FfiFreshness.CacheOnly
+        }
+
+    companion object {
+        fun from(ffi: FfiFreshness): NMPFreshness =
+            when (ffi) {
+                is FfiFreshness.Live -> Live
+                is FfiFreshness.MaxAge -> MaxAge(ffi.seconds)
+                is FfiFreshness.CacheOnly -> CacheOnly
+            }
+    }
+}
+
+/** The full live-query declaration a dev supplies -- `selection + source +
+ * access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). */
 data class NMPDemand(
     val selection: NMPFilter,
     val source: NMPSourceAuthority,
     val access: NMPAccessContext = NMPAccessContext.Public,
     val cache: NMPCacheMode = NMPCacheMode.Agnostic,
+    val freshness: NMPFreshness = NMPFreshness.Live,
 ) {
     fun toFfi(): FfiDemand =
         FfiDemand(
@@ -110,6 +136,7 @@ data class NMPDemand(
             source = source.toFfi(),
             access = access.toFfi(),
             cache = cache.toFfi(),
+            freshness = freshness.toFfi(),
         )
 
     companion object {
@@ -119,6 +146,7 @@ data class NMPDemand(
                 source = NMPSourceAuthority.from(ffi.source),
                 access = NMPAccessContext.from(ffi.access),
                 cache = NMPCacheMode.from(ffi.cache),
+                freshness = NMPFreshness.from(ffi.freshness),
             )
     }
 }

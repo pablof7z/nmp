@@ -80,6 +80,56 @@ A persisted watermark helps NMP avoid redundant work and explain prior
 acquisition. If GC removes data within its proven interval, the store must
 shrink or remove that watermark in the same correctness path.
 
+## Choose freshness per observation
+
+Freshness is a closed policy on the existing query handle:
+
+```swift
+let feedAvatar = NMPDemand(
+    selection: profileFilter,
+    source: .authorOutboxes,
+    freshness: .maxAge(seconds: 4 * 60 * 60)
+)
+
+let profilePage = NMPDemand(
+    selection: profileFilter,
+    source: .authorOutboxes,
+    freshness: .live
+)
+
+let preview = NMPDemand(
+    selection: eventFilter,
+    source: .pinned(explicitRelays),
+    cache: .strict,
+    freshness: .cacheOnly
+)
+```
+
+- `live` serves cached rows immediately and keeps ordinary remote acquisition
+  open until the handle is dropped.
+- `maxAge(seconds:)` checks existing coverage once when the handle opens. Every
+  currently assigned relay for every atom in the query subtree must cover the
+  requested floor and be recent enough. If so, this handle opens no wire work;
+  otherwise it becomes ordinary `live` and its EOSE/NEG completion refreshes
+  coverage.
+- `cacheOnly` always opens zero wire work, with or without cached rows or
+  coverage.
+
+`maxAge` is deliberately conservative for a filter whose `until` is already
+older than the freshness cutoff. Coverage attribution cannot honestly advance
+past that sent `until`, so the handle becomes `live`; NMP does not currently
+apply a separate "historical bounded query" suppression rule.
+
+An empty cache can still be fresh under `maxAge`: coverage proves that the
+scoped question was recently checked. Conversely, the timestamp of a cached or
+incoming event does not prove freshness. Coverage is capped by the engine's
+wall clock when the relay check completes, so a future-dated event cannot fake
+a recent check.
+
+The choice belongs to the component or app observation that owns the handle.
+Equal `live`, `maxAge`, and `cacheOnly` demands may share graph/cache state, but
+one handle's policy never opens, closes, or lends evidence to another.
+
 ## Durable history and resident bounds
 
 NMP retains fetched, verified events in its durable store by default. Ordinary

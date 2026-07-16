@@ -58,6 +58,20 @@ wire coalescing. Identical selection subgraphs may share internally, but NMP
 must not conflate acquisition evidence from different authorities or access
 contexts.
 
+Two per-observation policy axes sit beside that semantic identity:
+
+- **Cache mode** controls which matching local rows are projected, including
+  strict provenance filtering for pinned sources.
+- **Freshness** is `Live` (cache then maintain live wire work),
+  `MaxAge(seconds)` (suppress this handle's wire contribution when every
+  currently assigned source has sufficiently recent coverage), or `CacheOnly`
+  (never contribute wire work).
+
+Neither axis changes atom, wire, or coverage identity. Equal observations can
+share the same graph and coverage history while retaining independent local-row
+and wire-lifetime contracts. Freshness is decided once when a handle opens; it
+does not create a polling loop or a third app-facing noun.
+
 ### 2.2 Reactive binding grammar
 
 ```text

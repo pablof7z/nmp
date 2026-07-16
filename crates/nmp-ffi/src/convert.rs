@@ -21,8 +21,9 @@ use nmp::{
 use nmp_grammar::{
     AccessContext as GAccessContext, Binding as GBinding, CacheMode as GCacheMode,
     Demand as GDemand, DemandError as GDemandError, Derived as GDerived, Filter as GFilter,
-    IdentityField as GIdentityField, IndexedTagName, Selector as GSelector,
-    SetAlgebra as GSetAlgebra, SetOp as GSetOp, SourceAuthority as GSourceAuthority,
+    Freshness as GFreshness, IdentityField as GIdentityField, IndexedTagName,
+    Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
+    SourceAuthority as GSourceAuthority,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{
@@ -32,9 +33,9 @@ use nostr::{
 use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDiagnostics, FfiAuthPhase, FfiBinding,
     FfiCacheMode, FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot,
-    FfiDurability, FfiFilter, FfiFilterCoverage, FfiFrame, FfiIdentityField, FfiKindCount,
-    FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow, FfiRowDelta,
-    FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
+    FfiDurability, FfiFilter, FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentityField,
+    FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow,
+    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
     FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
     FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
     FfiWriteStatus,
@@ -976,6 +977,22 @@ fn cache_mode_to_ffi(c: GCacheMode) -> FfiCacheMode {
     }
 }
 
+fn freshness_from_ffi(freshness: FfiFreshness) -> GFreshness {
+    match freshness {
+        FfiFreshness::Live => GFreshness::Live,
+        FfiFreshness::MaxAge { seconds } => GFreshness::MaxAge { seconds },
+        FfiFreshness::CacheOnly => GFreshness::CacheOnly,
+    }
+}
+
+fn freshness_to_ffi(freshness: GFreshness) -> FfiFreshness {
+    match freshness {
+        GFreshness::Live => FfiFreshness::Live,
+        GFreshness::MaxAge { seconds } => FfiFreshness::MaxAge { seconds },
+        GFreshness::CacheOnly => FfiFreshness::CacheOnly,
+    }
+}
+
 /// `FfiDemand -> nmp_grammar::Demand` -- the explicit, validating
 /// constructor (#107). Unlike `Demand::from_filter`'s total static default,
 /// this can fail: an unbound-author `AuthorOutboxes` selection or an empty
@@ -988,6 +1005,7 @@ pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
         access_context_from_ffi(d.access)?,
     )?;
     demand.cache = cache_mode_from_ffi(d.cache);
+    demand.freshness = freshness_from_ffi(d.freshness);
     Ok(demand)
 }
 
@@ -997,6 +1015,7 @@ pub fn demand_to_ffi(d: GDemand) -> FfiDemand {
         source: source_authority_to_ffi(d.source),
         access: access_context_to_ffi(d.access),
         cache: cache_mode_to_ffi(d.cache),
+        freshness: freshness_to_ffi(d.freshness),
     }
 }
 
@@ -2441,10 +2460,12 @@ mod tests {
             },
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Strict,
+            freshness: FfiFreshness::MaxAge { seconds: 14_400 },
         };
 
         let g = demand_from_ffi(demand).expect("nonempty pinned relay set is legal");
         assert_eq!(g.cache, GCacheMode::Strict);
+        assert_eq!(g.freshness, GFreshness::MaxAge { seconds: 14_400 });
         match &g.source {
             GSourceAuthority::Pinned(relays) => {
                 // BTreeSet<RelayUrl> is canonically sorted regardless of the
@@ -2457,6 +2478,7 @@ mod tests {
 
         let back = demand_to_ffi(g);
         assert_eq!(back.cache, FfiCacheMode::Strict);
+        assert_eq!(back.freshness, FfiFreshness::MaxAge { seconds: 14_400 });
         match back.source {
             FfiSourceAuthority::Pinned { relays } => {
                 assert_eq!(relays, vec!["wss://a.example.com", "wss://b.example.com"]);
@@ -2475,6 +2497,7 @@ mod tests {
             source: FfiSourceAuthority::Pinned { relays: vec![] },
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
         };
 
         match demand_from_ffi(demand) {
@@ -2498,6 +2521,7 @@ mod tests {
             },
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
         };
 
         match demand_from_ffi(demand) {
@@ -2521,6 +2545,7 @@ mod tests {
             source: FfiSourceAuthority::AuthorOutboxes,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
         };
 
         match demand_from_ffi(demand) {
@@ -2529,6 +2554,25 @@ mod tests {
                 "expected AuthorOutboxesRequiresBoundAuthors, got a different FfiError: {other:?}"
             ),
             Ok(_) => panic!("must fail closed, not construct"),
+        }
+    }
+
+    #[test]
+    fn demand_freshness_round_trips_all_whole_second_variants() {
+        for freshness in [
+            FfiFreshness::Live,
+            FfiFreshness::MaxAge { seconds: 14_400 },
+            FfiFreshness::CacheOnly,
+        ] {
+            let demand = FfiDemand {
+                selection: ffi_filter_kind1_author(&pk_hex()),
+                source: FfiSourceAuthority::AuthorOutboxes,
+                access: FfiAccessContext::Public,
+                cache: FfiCacheMode::Agnostic,
+                freshness,
+            };
+            let back = demand_to_ffi(demand_from_ffi(demand).unwrap());
+            assert_eq!(back.freshness, freshness);
         }
     }
 }

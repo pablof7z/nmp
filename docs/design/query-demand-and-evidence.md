@@ -8,7 +8,7 @@
 - **Owns:** live-query identity, reusable derived demand, snapshot evidence, and
   the boundary between ordinary observations and diagnostics.
 
-## 1. The semantic descriptor
+## 1. The semantic descriptor and per-handle policy
 
 An app observes a demand, not merely a Nostr filter:
 
@@ -25,6 +25,43 @@ Names and concrete record layouts remain provisional. The invariant is that all
 three dimensions participate in descriptor identity, explainability, routing,
 wire sharing, and acquisition evidence.
 
+An observation also carries two orthogonal, per-handle policies that do not
+participate in that semantic identity:
+
+```text
+CacheMode := Agnostic | Strict
+Freshness := Live | MaxAge(seconds: u64) | CacheOnly
+```
+
+`Live` is the default and preserves cache-then-live behavior. `CacheOnly`
+projects the canonical cache and contributes no remote work under every
+condition. `MaxAge` performs one opening-time check over existing store
+coverage. It suppresses this handle's remote work only when every atom in the
+full resolved subtree has fresh coverage from every relay session assigned by
+the same router/directory/admission/cap path that would plan the candidate as
+live. Missing routing, cap shortfall, missing coverage, a coverage floor above
+the atom's requested floor, or any stale assigned relay degrades the handle
+once to ordinary `Live` for its lifetime.
+
+The opening check is currently conservative for a query whose `until` is
+already older than the `MaxAge` cutoff: it still requires coverage through the
+cutoff, while honest attribution caps `through` at that sent `until`. Such a
+handle therefore becomes `Live` rather than claiming suppression from a
+special bounded-past rule. No broader bounded-window freshness semantics are
+implied by `MaxAge` today.
+
+Freshness is coverage of the question, not event presence. A recently covered
+empty result is fresh. `MaxAge` deliberately accepts that a newer replaceable
+event may exist remotely within the tolerated interval. A satisfied handle
+remains suppressed even after its evidence ages; a new handle makes a new
+decision. No timer, shared coordinator, polling lane, or new persistence state
+exists.
+
+Coverage time remains the attribution ruling's send-shape/completion-clock
+fact: `through = min(engine wall clock at EOSE/NEG completion, until captured
+when the request was sent)`. Event `created_at` is not an attribution input, so
+a hostile future-dated event cannot manufacture freshness.
+
 ### Safe sharing
 
 - Equal full descriptors may share graph nodes, wire demand, and evidence.
@@ -34,6 +71,8 @@ wire sharing, and acquisition evidence.
   valid for every participating source/access context.
 - Evidence from one source/access context never proves acquisition under
   another.
+- Handles that differ only in cache/freshness policy share acquisition identity
+  but keep independent projection and wire-contribution decisions.
 
 ## 2. Selection remains a closed value language
 
@@ -110,6 +149,10 @@ The compact evidence vocabulary should report facts, not judgment. Useful facts
 include whether a planned source is cached-only, connecting, AUTH-blocked,
 requesting, EOSE-observed, reconciled through a watermark, disconnected, or in
 error. Exact raw wire filters and counters remain diagnostics.
+
+A coverage-satisfied `MaxAge` snapshot retains the exact opening-time plan that
+justified suppression and reports those scoped watermarks. `CacheOnly` does not
+borrow a live sibling's plan or evidence. Neither is relabeled as global truth.
 
 ### No global completeness claim
 

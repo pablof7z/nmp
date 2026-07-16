@@ -1078,6 +1078,7 @@ mod tests {
             source: FfiSourceAuthority::AuthorOutboxes,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
+            freshness: crate::types::FfiFreshness::Live,
         }
     }
 
@@ -1366,6 +1367,7 @@ mod tests {
                     source: crate::types::FfiSourceAuthority::Public,
                     access: crate::types::FfiAccessContext::Public,
                     cache: crate::types::FfiCacheMode::Agnostic,
+                    freshness: crate::types::FfiFreshness::Live,
                 },
                 None,
                 Box::new(CensusRowObserver),

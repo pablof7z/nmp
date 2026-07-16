@@ -1,6 +1,6 @@
 // A construction/round-trip test of the ergonomic Demand descriptor (#107).
 // No network -- this only proves the Swift-value <-> Ffi-value conversion
-// is lossless for every SourceAuthority/AccessContext/CacheMode case.
+// is lossless for every SourceAuthority/AccessContext/CacheMode/Freshness case.
 
 import XCTest
 @testable import NMP
@@ -16,6 +16,7 @@ final class NMPDemandTests: XCTestCase {
         XCTAssertEqual(ffi.source, .authorOutboxes)
         XCTAssertEqual(ffi.access, .public)
         XCTAssertEqual(ffi.cache, .agnostic)
+        XCTAssertEqual(ffi.freshness, .live)
         XCTAssertEqual(NMPDemand(ffi), demand)
     }
 
@@ -50,5 +51,20 @@ final class NMPDemandTests: XCTestCase {
 
         XCTAssertEqual(demand.toFfi().access, .nip42(publicKey: publicKey))
         XCTAssertEqual(NMPDemand(demand.toFfi()), demand)
+    }
+
+    func testFreshnessRoundTripsEveryWholeSecondVariant() {
+        for freshness in [
+            NMPFreshness.live,
+            .maxAge(seconds: 14_400),
+            .cacheOnly,
+        ] {
+            let demand = NMPDemand(
+                selection: NMPFilter(kinds: [0]),
+                source: .authorOutboxes,
+                freshness: freshness
+            )
+            XCTAssertEqual(NMPDemand(demand.toFfi()), demand)
+        }
     }
 }

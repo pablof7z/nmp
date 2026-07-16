@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, DemandOp, Derived, Filter,
-    IdentityField, IndexedTagName, RoutingEvidence, RoutingEvidenceKind, Selector, SetAlgebra,
-    SetOp, SourceAuthority,
+    Freshness, IdentityField, IndexedTagName, RoutingEvidence, RoutingEvidenceKind, Selector,
+    SetAlgebra, SetOp, SourceAuthority,
 };
 use nmp_resolver::testkit::{
     addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
@@ -667,6 +667,33 @@ fn identical_descriptors_share_graph() {
     let close_second = h.unsubscribe(handle2.id());
     assert_eq!(close_second.closed(), vec![&outbox_atom(inner.clone())]);
     assert!(h.demand().is_empty());
+}
+
+#[test]
+fn freshness_is_per_handle_and_does_not_split_the_shared_graph() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    h.set_active(Some(a.public_key()));
+
+    let mut live = Demand::from_filter(my_follows_filter());
+    live.freshness = Freshness::Live;
+    let mut cached = live.clone();
+    cached.freshness = Freshness::MaxAge { seconds: 14_400 };
+    let (live_handle, first) = h.subscribe(LiveQuery(live));
+    let (cached_handle, second) = h.subscribe(LiveQuery(cached));
+
+    assert_eq!(live_handle.freshness(), Freshness::Live);
+    assert_eq!(
+        cached_handle.freshness(),
+        Freshness::MaxAge { seconds: 14_400 }
+    );
+    assert!(!first.is_empty());
+    assert!(
+        second.is_empty(),
+        "freshness cannot split acquisition identity"
+    );
+    assert!(h.unsubscribe(cached_handle.id()).is_empty());
+    assert!(!h.unsubscribe(live_handle.id()).is_empty());
 }
 
 // ---- 9. follows_minus_mutes_surgical ------------------------------------
