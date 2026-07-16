@@ -160,6 +160,22 @@ jobs:
       - name: Install xcodegen
         run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
 
+      # The runner's DEFAULT active Xcode can be older than the pbxproj
+      # format xcodegen emits (observed: default Xcode 15.4 refused a
+      # freshly xcodegen-generated project as "a future Xcode project file
+      # format"). Select the newest Xcode.app actually installed on the
+      # runner instead of assuming a specific version is default, so this
+      # does not go stale as GitHub updates the macOS image's bundled
+      # Xcodes.
+      - name: Select the newest installed Xcode
+        run: |
+          set -euo pipefail
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          latest=${latest:-/Applications/Xcode.app}
+          echo "Selecting $latest"
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
       - name: xcodegen generate (apps/Falsifier)
         run: xcodegen generate
         working-directory: apps/Falsifier
