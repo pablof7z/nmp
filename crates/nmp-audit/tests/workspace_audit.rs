@@ -46,6 +46,7 @@ fn registry() -> Vec<(&'static str, Enrollment)> {
             },
         ),
         ("nmp-blossom", Enrollment::Claims(nmp_blossom::claims())),
+        ("nmp-nip68", Enrollment::Claims(nmp_nip68::claims())),
     ]
 }
 
