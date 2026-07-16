@@ -1,0 +1,22 @@
+[package]
+name = "nmp-nip68"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Engine-free by default (the nmp-nip29/nmp-blossom discipline, #115): this
+# crate NEVER signs and NEVER touches the engine -- it owns the NIP-68 kind:20
+# picture-first event SCHEMA only. No engine feature exists; there is nothing
+# in this unit that would consume a router/resolver/store.
+default = []
+
+# nmp-blossom is the artifact seam: a NIP-68 image is minted only from a
+# content-addressed BlobDescriptor / VerifiedUpload (the #421 "protected kind
+# without artifact provenance fails" contract). nmp-ownership carries the
+# KindClaim vocabulary this crate exports through claims().
+[dependencies]
+nostr.workspace = true
+nmp-ownership.workspace = true
+nmp-blossom.workspace = true
