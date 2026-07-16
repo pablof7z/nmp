@@ -1613,6 +1613,7 @@ name = "nmp-audit"
 version = "0.1.0"
 dependencies = [
  "nmp-blossom",
+ "nmp-media",
  "nmp-nip02",
  "nmp-nip29",
  "nmp-nip51",
@@ -1752,6 +1753,17 @@ dependencies = [
  "blake3",
  "nostr 0.44.4",
  "serde_json",
+]
+
+[[package]]
+name = "nmp-media"
+version = "0.1.0"
+dependencies = [
+ "nmp-blossom",
+ "nmp-nip68",
+ "nmp-ownership",
+ "nostr 0.44.4",
+ "tokio",
 ]
 
 [[package]]
