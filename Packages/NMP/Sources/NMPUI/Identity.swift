@@ -2,7 +2,7 @@ import NMPContent
 import SwiftUI
 
 public enum NMPDisplayName {
-    public static func resolve(pubkey: String, profile: NostrProfileMetadata?) -> String {
+    public static func resolve(pubkey: String, profile: NMPProfilePresentation?) -> String {
         let candidates = [profile?.displayName, profile?.name]
         if let value = candidates.compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
             .first(where: { !$0.isEmpty }) {
@@ -21,9 +21,9 @@ public enum NMPDisplayName {
 /// component. It remains useful before kind:0 arrives.
 public struct NMPName: View {
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
 
-    public init(pubkey: String, profile: NostrProfileMetadata? = nil) {
+    public init(pubkey: String, profile: NMPProfilePresentation? = nil) {
         self.pubkey = pubkey
         self.profile = profile
     }
@@ -41,10 +41,10 @@ public struct NMPAvatar: View {
     @Environment(\.nmpImageLoader) private var imageLoader
 
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
     public let size: CGFloat
 
-    public init(pubkey: String, profile: NostrProfileMetadata? = nil, size: CGFloat = 40) {
+    public init(pubkey: String, profile: NMPProfilePresentation? = nil, size: CGFloat = 40) {
         self.pubkey = pubkey
         self.profile = profile
         self.size = size
@@ -99,13 +99,13 @@ public struct NMPProfileIdentity: View {
     @Environment(\.nmpUITheme) private var theme
 
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
     public let avatarSize: CGFloat
     public let showsNIP05: Bool
 
     public init(
         pubkey: String,
-        profile: NostrProfileMetadata? = nil,
+        profile: NMPProfilePresentation? = nil,
         avatarSize: CGFloat = 40,
         showsNIP05: Bool = true
     ) {

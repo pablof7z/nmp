@@ -13,23 +13,46 @@ struct ConformanceGallery: View {
                 GalleryIntro(
                     eyebrow: "REPEATABLE CONFORMANCE",
                     title: "Every awkward state stays useful.",
-                    description: "These are deterministic, network-free sessions and native environment probes. They make failure, accessibility, and fallback behavior inspectable instead of implied."
+                    description: "These deterministic component policies and native environment probes keep fallback, accessibility, and rendering behavior inspectable."
                 )
 
-                GallerySection("Scripted reference states", note: "No engine exists behind these sessions. Loading, shortfall, and cycle states remain visible and open no query.") {
+                GallerySection("Reference component policies", note: "The same parsed target can remain literal, render without an engine, or stop at an immutable cycle boundary. None requires a document session or shared coordinator.") {
                     VStack(alignment: .leading, spacing: 12) {
-                        stateRow("Loading", session: model.loadingSession)
-                        stateRow("No planned source", session: model.shortfallSession)
-                        stateRow("Cycle boundary", session: model.cycleSession)
+                        policyRow("Literal · zero fetch") {
+                            NostrContent(
+                                document: model.profileDocument,
+                                observationFactory: model.observationFactory,
+                                renderers: .literalReferences,
+                                maximumBlocks: 1,
+                                maximumLinesPerBlock: 1
+                            )
+                        }
+                        policyRow("No factory") {
+                            NostrContent(
+                                document: model.profileDocument,
+                                maximumBlocks: 1,
+                                maximumLinesPerBlock: 1
+                            )
+                        }
+                        policyRow("Cycle boundary") {
+                            NostrContent(
+                                document: model.noteDocument,
+                                observationFactory: model.observationFactory,
+                                context: cycleContext,
+                                purpose: .preview,
+                                maximumBlocks: 1,
+                                maximumLinesPerBlock: 1
+                            )
+                        }
                     }
                 }
-                .accessibilityIdentifier("gallery.states.scripted")
+                .accessibilityIdentifier("gallery.states.reference-policies")
 
-                GallerySection("Unknown kind", note: "A made-up kind:55555 receives generic event chrome and readable nested content until this app installs an exact renderer.") {
+                GallerySection("Unknown kind", note: "A deterministic app loader supplies kind:55555 to the same actual-kind table. With no exact registration, generic event chrome remains readable.") {
                     NostrContent(
-                        session: model.unknownKindSession,
+                        document: model.noteDocument,
                         purpose: .embedded,
-                        renderers: .standard
+                        renderers: unknownKindRenderers
                     )
                 }
                 .accessibilityIdentifier("gallery.states.unknown-kind")
@@ -44,7 +67,7 @@ struct ConformanceGallery: View {
                 }
                 .accessibilityIdentifier("gallery.states.dynamic-type")
 
-                GallerySection("Follow action states", note: "The production controlled primitive renders the closed NMP state vocabulary. These fixtures make every state inspectable; the live user cards use the connected NMPFollowing resource.") {
+                GallerySection("Follow action states", note: "The production controlled primitive renders the closed NMP state vocabulary. These fixtures make every state inspectable; live user cards use the connected NMPFollowing resource.") {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack(spacing: 10) {
                             NMPFollowButtonBody(
@@ -116,7 +139,7 @@ struct ConformanceGallery: View {
                 }
                 .accessibilityIdentifier("gallery.states.rtl")
 
-                GallerySection("Reduced motion", note: "This button uses the same production component with Reduce Motion forced on; state changes without the spring pulse.") {
+                GallerySection("Reduced motion", note: "This button uses the production component with Reduce Motion forced on; state changes without the spring pulse.") {
                     NMPReactionButton(
                         isReacted: reducedMotionReaction,
                         count: reducedMotionReaction ? 43 : 42,
@@ -149,9 +172,10 @@ struct ConformanceGallery: View {
                 }
                 .accessibilityIdentifier("gallery.states.avatar-group")
 
-                GallerySection("Long Markdown", note: "Headings, inline native mentions, lists, quotes, code, and long wrapping exercise the full content walk at production text sizes.") {
+                GallerySection("Long Markdown", note: "Headings, inline native mentions, lists, quotes, code, and long wrapping exercise the pure document walk at production text sizes.") {
                     NostrContent(
-                        session: model.longContentSession,
+                        document: model.longContentDocument,
+                        observationFactory: model.observationFactory,
                         purpose: .detail,
                         renderers: .standard
                     )
@@ -164,18 +188,38 @@ struct ConformanceGallery: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func stateRow(_ label: String, session: NostrContentSession) -> some View {
+    private var cycleContext: NostrContentRenderContext {
+        let key = model.noteDocument.references.first?.target.key ?? "missing"
+        return NostrContentRenderContext(
+            ancestorTargetKeys: [key],
+            depth: 1,
+            maximumDepth: 3
+        )
+    }
+
+    private var unknownKindRenderers: NostrContentRenderers {
+        NostrContentRenderers.standard.eventLoader { input in
+            if let context = input.context.descending(into: input.occurrence.target.key) {
+                NMPResolvedEventDispatcher(
+                    reference: input,
+                    event: Self.unknownEvent,
+                    context: context
+                )
+            } else {
+                Text("recursive embed stopped")
+            }
+        }
+    }
+
+    private func policyRow<Content: View>(
+        _ label: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(label)
                 .font(.caption.weight(.semibold))
-                .frame(width: 116, alignment: .leading)
-            NostrContent(
-                session: session,
-                purpose: .preview,
-                renderers: .standard,
-                maximumBlocks: 1,
-                maximumLinesPerBlock: 1
-            )
+                .frame(width: 124, alignment: .leading)
+            content()
         }
     }
 
@@ -196,8 +240,7 @@ struct ConformanceGallery: View {
 
     private static let placeholderPubkey = String(repeating: "7a", count: 32)
 
-    private static let longProfile = NostrProfileMetadata(
-        pubkey: placeholderPubkey,
+    private static let longProfile = NMPProfilePresentation(
         name: "aurora",
         displayName: "Aurora Over the Aegean",
         about: "A deliberately long biography that exercises wrapping, large accessibility text, follow controls, and deterministic avatar fallbacks without relying on the network.",
@@ -212,4 +255,15 @@ struct ConformanceGallery: View {
         NMPAvatarItem(pubkey: String(repeating: "5e", count: 32)),
         NMPAvatarItem(pubkey: String(repeating: "6f", count: 32))
     ]
+
+    private static let unknownEvent = Row(
+        id: String(repeating: "55", count: 32),
+        pubkey: placeholderPubkey,
+        createdAt: 1_700_000_000,
+        kind: 55_555,
+        tags: [],
+        content: "Unknown kinds retain generic event chrome and readable content.",
+        sig: String(repeating: "aa", count: 64),
+        sources: []
+    )
 }

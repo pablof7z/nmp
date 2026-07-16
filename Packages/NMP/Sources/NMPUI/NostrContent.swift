@@ -1,13 +1,12 @@
 import NMPContent
 import SwiftUI
 
-/// The one public rendering root. It renders the shared semantic document,
-/// claims visible references from the supplied session, and dispatches through
-/// an explicit renderer value. There are no public markdown block components
-/// an app must assemble itself.
+/// Pure document walk plus app-selected components. Reference detection does
+/// not attach a modifier, open an observation, or imply network work.
 public struct NostrContent: View {
-    @ObservedObject private var session: NostrContentSession
-
+    public let document: NostrContentDocument
+    public let observationFactory: NMPReferenceObservationFactory?
+    public let context: NostrContentRenderContext
     public let purpose: NostrContentPurpose
     public let renderers: NostrContentRenderers
     public let actions: NostrContentActions
@@ -15,19 +14,46 @@ public struct NostrContent: View {
     public let maximumLinesPerBlock: Int?
 
     public init(
-        session: NostrContentSession,
+        document: NostrContentDocument,
+        observationFactory: NMPReferenceObservationFactory? = nil,
+        context: NostrContentRenderContext = .root,
         purpose: NostrContentPurpose = .body,
         renderers: NostrContentRenderers = .standard,
         actions: NostrContentActions = NostrContentActions(),
         maximumBlocks: Int? = nil,
         maximumLinesPerBlock: Int? = nil
     ) {
-        self.session = session
+        self.document = document
+        self.observationFactory = observationFactory
+        self.context = context
         self.purpose = purpose
         self.renderers = renderers
         self.actions = actions
         self.maximumBlocks = maximumBlocks.map { max(1, $0) }
         self.maximumLinesPerBlock = maximumLinesPerBlock.map { max(1, $0) }
+    }
+
+    public init(
+        content: String,
+        syntax: NostrContentSyntax = .plainText,
+        observationFactory: NMPReferenceObservationFactory? = nil,
+        context: NostrContentRenderContext = .root,
+        purpose: NostrContentPurpose = .body,
+        renderers: NostrContentRenderers = .standard,
+        actions: NostrContentActions = NostrContentActions(),
+        maximumBlocks: Int? = nil,
+        maximumLinesPerBlock: Int? = nil
+    ) {
+        self.init(
+            document: parseNostrContent(content, syntax: syntax),
+            observationFactory: observationFactory,
+            context: context,
+            purpose: purpose,
+            renderers: renderers,
+            actions: actions,
+            maximumBlocks: maximumBlocks,
+            maximumLinesPerBlock: maximumLinesPerBlock
+        )
     }
 
     public var body: some View {
@@ -120,16 +146,8 @@ public struct NostrContent: View {
                 let node = renderedReference(occurrence)
                 result.append(
                     Fragment(
-                        id: "\(block.id)-reference-\(occurrence.id)",
-                        role: node.layout == .block ? .block : .inline,
-                        view: AnyView(
-                            node.view.modifier(
-                                NMPReferenceClaimModifier(
-                                    session: session,
-                                    referenceID: occurrence.id
-                                )
-                            )
-                        )
+                        id: Self.referenceFragmentID(blockID: block.id, occurrence: occurrence),
+                        node: node
                     )
                 )
             case .hashtag(let hashtag, let original, _, _):
@@ -174,39 +192,26 @@ public struct NostrContent: View {
     }
 
     private func renderedReference(_ occurrence: NostrReferenceOccurrence) -> NMPRenderedNode {
-        let state = session.snapshot.state(for: occurrence)
         switch occurrence.target {
         case .profile(let pubkey, _):
-            return renderers.renderProfile(
-                NMPProfileMentionInput(
+            return renderers.renderProfileReference(
+                NMPProfileReferenceInput(
                     occurrence: occurrence,
-                    state: state,
                     pubkey: pubkey,
-                    profile: state.resource?.profile,
                     purpose: purpose,
+                    observationFactory: observationFactory,
                     actions: actions
                 )
             )
         case .event, .address:
-            if let event = state.resource?.event {
-                return renderers.renderEvent(
-                    NMPEventRenderInput(
-                        occurrence: occurrence,
-                        state: state,
-                        event: event,
-                        purpose: purpose,
-                        context: session.context.descending(into: occurrence.target.key),
-                        session: session,
-                        renderers: renderers,
-                        actions: actions
-                    )
-                )
-            }
-            return renderers.renderReferenceFallback(
-                NMPReferenceFallbackInput(
+            return renderers.renderEventReference(
+                NMPEventReferenceInput(
                     occurrence: occurrence,
-                    state: state,
-                    purpose: purpose
+                    purpose: purpose,
+                    context: context,
+                    observationFactory: observationFactory,
+                    renderers: renderers,
+                    actions: actions
                 )
             )
         }
@@ -229,8 +234,8 @@ public struct NostrContent: View {
     }
 
     private var visibleBlocks: [NostrContentBlock] {
-        guard let maximumBlocks else { return session.snapshot.document.blocks }
-        return Array(session.snapshot.document.blocks.prefix(maximumBlocks))
+        guard let maximumBlocks else { return document.blocks }
+        return Array(document.blocks.prefix(maximumBlocks))
     }
 
     private static func textPieces(_ text: String) -> [String] {
@@ -263,6 +268,13 @@ public struct NostrContent: View {
         return result
     }
 
+    static func referenceFragmentID(
+        blockID: UInt64,
+        occurrence: NostrReferenceOccurrence
+    ) -> String {
+        "\(blockID)-reference-\(occurrence.id)-\(occurrence.target.key)"
+    }
+
     private struct Fragment: Identifiable {
         let id: String
         let role: NMPFlowRole
@@ -291,7 +303,10 @@ private struct NMPStyledText: View {
     var body: some View {
         styledText
             .padding(.horizontal, styles.contains(.code) ? 3 : 0)
-            .background(styles.contains(.code) ? Color.secondary.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 3))
+            .background(
+                styles.contains(.code) ? Color.secondary.opacity(0.10) : .clear,
+                in: RoundedRectangle(cornerRadius: 3)
+            )
     }
 
     private var styledText: Text {
@@ -311,8 +326,7 @@ private struct NMPStyledTextRuns: View {
     let maximumLines: Int?
 
     var body: some View {
-        composed
-            .lineLimit(maximumLines)
+        composed.lineLimit(maximumLines)
     }
 
     private var composed: Text {
@@ -335,60 +349,10 @@ private struct NMPStyledTextRuns: View {
         if styles.contains(.code) {
             text = text.font(.system(.body, design: .monospaced))
         }
-        if styles.contains(.strong) {
-            text = text.bold()
-        }
-        if styles.contains(.emphasis) {
-            text = text.italic()
-        }
-        if styles.contains(.strikethrough) {
-            text = text.strikethrough()
-        }
+        if styles.contains(.strong) { text = text.bold() }
+        if styles.contains(.emphasis) { text = text.italic() }
+        if styles.contains(.strikethrough) { text = text.strikethrough() }
         return text
-    }
-}
-
-private struct NMPReferenceClaimModifier: ViewModifier {
-    @ObservedObject var session: NostrContentSession
-    let referenceID: UInt64
-    @State private var claim: NostrContentClaim?
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-#if compiler(>=6.0)
-        if #available(iOS 18.0, macOS 15.0, *) {
-            content
-                .onAppear { setClaimed(true) }
-                .onScrollVisibilityChange(threshold: 0.01) { isVisible in
-                    setClaimed(isVisible)
-                }
-                .onDisappear { setClaimed(false) }
-        } else {
-            content
-                .onAppear { setClaimed(true) }
-                .onDisappear { setClaimed(false) }
-        }
-#else
-        content
-            .onAppear { setClaimed(true) }
-            .onDisappear { setClaimed(false) }
-#endif
-    }
-
-    private func setClaimed(_ isClaimed: Bool) {
-        if isClaimed {
-            if claim == nil { claim = session.claim(referenceID: referenceID) }
-        } else {
-            claim?.cancel()
-            claim = nil
-        }
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func italic(_ enabled: Bool) -> some View {
-        if enabled { italic() } else { self }
     }
 }
 
