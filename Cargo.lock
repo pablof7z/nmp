@@ -1606,6 +1606,7 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "tempfile",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]

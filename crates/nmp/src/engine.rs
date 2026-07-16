@@ -768,6 +768,109 @@ mod tests {
     }
 
     #[test]
+    fn allowed_local_relay_host_reaches_the_facade_transport_pool() {
+        use std::collections::BTreeSet;
+        use std::time::{Duration, Instant};
+
+        use nostr::{ClientMessage, EventBuilder, JsonUtil, RelayMessage};
+        use tungstenite::Message;
+
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind the intentional local relay");
+        let relay_address = listener.local_addr().expect("read local relay address");
+        let relay =
+            RelayUrl::parse(&format!("ws://{relay_address}")).expect("parse local relay URL");
+        let author = Keys::generate();
+        let event = EventBuilder::text_note("facade local relay proof")
+            .sign_with_keys(&author)
+            .expect("sign relay fixture");
+        let expected_id = event.id;
+
+        let relay_thread = std::thread::spawn({
+            let event = event.clone();
+            move || {
+                let (stream, _) = listener.accept().expect("accept facade connection");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("bound relay read");
+                let mut socket = tungstenite::accept(stream).expect("accept WebSocket");
+                while let Ok(message) = socket.read() {
+                    let Message::Text(text) = message else {
+                        continue;
+                    };
+                    let Ok(ClientMessage::Req {
+                        subscription_id, ..
+                    }) = ClientMessage::from_json(text.as_str())
+                    else {
+                        continue;
+                    };
+                    socket
+                        .send(Message::text(
+                            RelayMessage::event(subscription_id.clone().into_owned(), event)
+                                .as_json(),
+                        ))
+                        .expect("send matching event");
+                    socket
+                        .send(Message::text(
+                            RelayMessage::eose(subscription_id.into_owned()).as_json(),
+                        ))
+                        .expect("send EOSE");
+                    socket.flush().expect("flush relay frames");
+                    while socket.read().is_ok() {}
+                    return;
+                }
+                panic!("facade connection ended before a REQ reached the local relay");
+            }
+        });
+
+        let engine = Engine::new(EngineConfig {
+            app_relays: vec![relay.to_string()],
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+            ..EngineConfig::default()
+        })
+        .expect("local relay opt-in must build");
+        let query = LiveQuery(
+            crate::Demand::new(
+                crate::Filter {
+                    kinds: Some(BTreeSet::from([1])),
+                    authors: Some(crate::Binding::Literal(BTreeSet::from([author
+                        .public_key()
+                        .to_hex()]))),
+                    ..crate::Filter::default()
+                },
+                crate::SourceAuthority::Pinned(BTreeSet::from([relay])),
+                crate::AccessContext::Public,
+            )
+            .expect("build pinned local-relay demand"),
+        );
+        let subscription = engine
+            .observe(query, None)
+            .expect("observe through supported facade");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut found = false;
+        while !found && Instant::now() < deadline {
+            if let Ok(frame) = subscription.recv_timeout(Duration::from_millis(250)) {
+                found = frame
+                    .deltas
+                    .iter()
+                    .filter_map(|delta| delta.event())
+                    .any(|received| received.id == expected_id);
+            }
+        }
+
+        subscription.cancel();
+        engine.shutdown();
+        if !found {
+            // Unblock `accept` when the regression under test prevents the
+            // engine from dialing at all, so failure stays bounded.
+            let _ = std::net::TcpStream::connect(relay_address);
+        }
+        let relay_result = relay_thread.join();
+        assert!(found, "allowed local relay never reached the facade query");
+        relay_result.expect("join local relay");
+    }
+
+    #[test]
     fn persistent_store_reset_is_destructive_and_idempotent() {
         let fixture = tempfile::tempdir().expect("temporary directory");
         let path = fixture.path().join("nmp.redb");

@@ -40,10 +40,11 @@ pub struct EngineConfig {
     /// kind:10002) relays on a loopback / RFC-1918 / link-local / `.onion`
     /// host are rejected by default; listing a host here (e.g. `"127.0.0.1"`
     /// or `"localhost"` for a local dev relay) re-admits DISCOVERED relays on
-    /// that exact host. Matched host-only (port- and path-insensitive). This
-    /// never affects the operator relay lanes above — those are trusted
-    /// config, not discovery, and are admitted regardless. Default empty
-    /// (fail closed).
+    /// that exact host. Matched host-only (port- and path-insensitive).
+    /// Operator relay lanes bypass discovered-relay admission, but every
+    /// socket still passes the resolved-IP dial guard; an intentional local
+    /// operator relay therefore needs the same explicit host opt-in. Default
+    /// empty (fail closed).
     pub allowed_local_relay_hosts: Vec<String>,
     /// The one whole-engine relay ceiling. The same effective value bounds
     /// the router's complete current demand and the transport's live workers;
@@ -86,7 +87,8 @@ fn parse_relay_url(url: &str) -> Result<RelayUrl, EngineError> {
 /// Build the engine's discovered-relay admission policy (issue #121) from the
 /// operator's opt-in local-host list. Everything not listed here is subject
 /// to the secure default: a discovered private/loopback/onion relay is
-/// rejected.
+/// rejected. The runtime also threads this policy's normalized host set into
+/// the transport and NIP-11 resolved-IP guards.
 pub(crate) fn build_admission_policy(
     config: &EngineConfig,
 ) -> nmp_engine::core::RelayAdmissionPolicy {
