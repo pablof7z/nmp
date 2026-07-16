@@ -199,7 +199,10 @@ mod tests {
             "Debug output must not contain the secret key hex"
         );
         assert!(
-            !debug.as_bytes().windows(secret_bytes.len()).any(|w| w == secret_bytes),
+            !debug
+                .as_bytes()
+                .windows(secret_bytes.len())
+                .any(|w| w == secret_bytes),
             "Debug output must not contain the raw secret bytes"
         );
         assert!(
@@ -241,8 +244,7 @@ mod tests {
         // SAFETY: see falsifier doc comment above.
         let after_drop = unsafe { *raw_ptr };
         assert_eq!(
-            after_drop,
-            [0u8; 32],
+            after_drop, [0u8; 32],
             "secret bytes must be zeroized once the signer drops"
         );
     }
