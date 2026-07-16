@@ -1099,6 +1099,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
     let mut expected = vec![
         "add_auth_policy",
         "add_signer",
+        "cancel_write",
         "observe_diagnostics",
         "publish",
         "publish_tracked",

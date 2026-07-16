@@ -2050,6 +2050,123 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiCancelWriteError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "UnknownReceipt",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "AlreadySigned",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "AlreadyCompensated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "AlreadyAbandoned",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "PersistenceFailed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiCancelWriteOutcome",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Cancelled",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Typed refusal from explicit pre-signature write cancellation. The current\nreceipt fact survives intact when cancellation is no longer legal.",
+    ),
+}
+
+enum Enum {
     name: "FfiContentClaimDecision",
     module_path: "nmp_ffi",
     remote: false,
@@ -4540,6 +4657,12 @@ enum Enum {
     variants: [
         Variant {
             name: "Accepted",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Cancelled",
             discr: None,
             fields: [],
             docstring: None,
@@ -10286,6 +10409,70 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_await_native_tasks_idle",
             checksum: Some(
                 47867,
+            ),
+        },
+        Method {
+            name: "cancel",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiCancelWriteOutcome",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "receipt_id",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiCancelWriteOutcome",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Explicitly cancel one accepted unsigned write. A successful outcome\nmeans the matching durable terminal fact was delivered to receipt\nobservers.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiCancelWriteError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_cancel",
+            checksum: Some(
+                28491,
             ),
         },
         Method {

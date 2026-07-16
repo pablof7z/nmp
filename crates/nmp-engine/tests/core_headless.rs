@@ -26,10 +26,11 @@ use nmp_grammar::{
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome, CoverageInterval,
-    CoverageKey, EventStore, GcReport, InsertOutcome, MemoryStore, PersistenceError,
-    PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision,
-    RedbStore, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome, ClaimSet,
+    CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey, EventStore, GcReport,
+    InsertOutcome, MemoryStore, PersistenceError, PromoteOutcome, RecoveredAttempt,
+    RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RedbStore, RelayObserved,
+    RetractReason, StoredEvent,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -284,6 +285,29 @@ impl EventStore for FailOnceCompensationStore {
             self.inner.compensate_write(intent_id)
         }
     }
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        reason: CompensationReason,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        if self.fail_next_compensation {
+            self.fail_next_compensation = false;
+            Err(PersistenceError(
+                "injected compensation failure".to_string(),
+            ))
+        } else {
+            self.inner.compensate_write_with_state(intent_id, reason)
+        }
+    }
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
+        self.inner.cancel_ephemeral_receipt(receipt_id)
+    }
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        self.inner.mark_ephemeral_signed(receipt_id)
+    }
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
         self.inner.recover_outbox()
     }
@@ -362,6 +386,22 @@ impl SharedFailStartStore {
 }
 
 impl EventStore for SharedFailStartStore {
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        reason: CompensationReason,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write_with_state(intent_id, reason)
+    }
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
+        self.inner.cancel_ephemeral_receipt(receipt_id)
+    }
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        self.inner.mark_ephemeral_signed(receipt_id)
+    }
     fn insert(
         &mut self,
         event: nostr::Event,
@@ -502,6 +542,22 @@ impl RedbFailStartStore {
 }
 
 impl EventStore for RedbFailStartStore {
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        reason: CompensationReason,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write_with_state(intent_id, reason)
+    }
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
+        self.inner.cancel_ephemeral_receipt(receipt_id)
+    }
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        self.inner.mark_ephemeral_signed(receipt_id)
+    }
     fn insert(
         &mut self,
         event: nostr::Event,
@@ -3906,6 +3962,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
         "newer",
     );
     let newer_id = newer_unsigned.clone().sign_with_keys(&a).unwrap().id;
+    let cancel_sink = CapturingReceiptSink::default();
     let effects = core.handle(EngineMsg::Publish(
         WriteIntent {
             payload: WritePayload::Unsigned(newer_unsigned),
@@ -3913,7 +3970,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
         },
-        Box::new(CapturingReceiptSink::default()),
+        Box::new(cancel_sink.clone()),
     ));
     let (newer_receipt, _, _) = find_sign_request(&effects);
     assert!(all_row_deltas(&effects)
@@ -3923,13 +3980,91 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == older.id)));
 
-    let effects = core.handle(EngineMsg::CancelWrite(newer_receipt));
+    let (outcome, effects) = core.cancel_write(newer_receipt);
+    assert_eq!(
+        outcome,
+        Ok(nmp_engine::outbox::CancelWriteOutcome::Cancelled)
+    );
+    assert_eq!(
+        cancel_sink.0.lock().unwrap().last(),
+        Some(&WriteStatus::Cancelled)
+    );
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newer_id)));
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == older.id)));
+}
+
+#[test]
+fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://write.example.com").unwrap();
+    let mut core =
+        new_core(FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]));
+    activate(&mut core, &a);
+
+    let sink = CapturingReceiptSink::default();
+    let published = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 10, "cancel typed")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        },
+        Box::new(sink.clone()),
+    ));
+    let (receipt, generation, template) = find_sign_request(&published);
+    let signed = template.sign_with_keys(&a).unwrap();
+
+    assert_eq!(
+        core.cancel_write(receipt).0,
+        Ok(nmp_engine::outbox::CancelWriteOutcome::Cancelled)
+    );
+    assert_eq!(
+        core.cancel_write(receipt).0,
+        Ok(nmp_engine::outbox::CancelWriteOutcome::Cancelled)
+    );
+    assert!(core
+        .handle(EngineMsg::SignerCompleted(receipt, generation, Ok(signed)))
+        .is_empty());
+    assert_eq!(
+        sink.0.lock().unwrap().as_slice(),
+        [WriteStatus::Accepted, WriteStatus::Cancelled]
+    );
+    assert!(matches!(
+        core.cancel_write(ReceiptId(u64::MAX)).0,
+        Err(nmp_engine::outbox::CancelWriteError::UnknownReceipt { .. })
+    ));
+
+    let signed_sink = CapturingReceiptSink::default();
+    let signed_event = unsigned(&a, 11, "already signed")
+        .sign_with_keys(&a)
+        .unwrap();
+    let signed_publish = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Signed(signed_event.clone()),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        },
+        Box::new(signed_sink),
+    ));
+    let signed_receipt = signed_publish
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        core.cancel_write(signed_receipt).0,
+        Err(nmp_engine::outbox::CancelWriteError::AlreadySigned {
+            event_id: id,
+            ..
+        }) if id == signed_event.id
+    ));
 }
 
 #[test]
@@ -4802,13 +4937,82 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
 
-    let retried = core.handle(EngineMsg::CancelWrite(id));
+    let (outcome, retried) = core.cancel_write(id);
+    assert_eq!(
+        outcome,
+        Ok(nmp_engine::outbox::CancelWriteOutcome::Cancelled)
+    );
     assert!(retried.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id)
+        |effect| matches!(effect, Effect::EmitReceipt(rid, WriteStatus::Cancelled) if *rid == id)
     ));
     assert!(all_row_deltas(&retried)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(removed) if *removed == event_id)));
+}
+
+#[test]
+fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_retry() {
+    let a = Keys::generate();
+    let mut core = EngineCore::new(
+        FailOnceCompensationStore::new(),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    activate(&mut core, &a);
+    core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let sink = CapturingReceiptSink::default();
+    let published = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 2, "cancel must commit first")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        },
+        Box::new(sink.clone()),
+    ));
+    let (id, _, template) = find_sign_request(&published);
+    let event_id = template.sign_with_keys(&a).unwrap().id;
+
+    let (refused, effects) = core.cancel_write(id);
+    assert!(matches!(
+        refused,
+        Err(nmp_engine::outbox::CancelWriteError::PersistenceFailed {
+            receipt_id,
+            reason,
+        }) if receipt_id == id && reason.contains("injected compensation failure")
+    ));
+    assert!(
+        effects.is_empty(),
+        "a refused cancel must emit no terminal fact"
+    );
+    assert_eq!(sink.0.lock().unwrap().as_slice(), [WriteStatus::Accepted]);
+
+    let fresh = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    assert!(all_row_deltas(&fresh)
+        .iter()
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
+
+    let (committed, effects) = core.cancel_write(id);
+    assert_eq!(
+        committed,
+        Ok(nmp_engine::outbox::CancelWriteOutcome::Cancelled)
+    );
+    assert!(effects.iter().any(
+        |effect| matches!(effect, Effect::EmitReceipt(rid, WriteStatus::Cancelled) if *rid == id)
+    ));
+    assert!(all_row_deltas(&effects)
+        .iter()
+        .any(|delta| matches!(delta, RowDelta::Removed(removed) if *removed == event_id)));
+    assert_eq!(
+        sink.0.lock().unwrap().as_slice(),
+        [WriteStatus::Accepted, WriteStatus::Cancelled]
+    );
 }
 
 /// #52 Q2 smoking gun: `EngineCore::on_publish` is the ONE place every
@@ -7368,6 +7572,22 @@ impl FailIngestStore {
 }
 
 impl EventStore for FailIngestStore {
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        reason: CompensationReason,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write_with_state(intent_id, reason)
+    }
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
+        self.inner.cancel_ephemeral_receipt(receipt_id)
+    }
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        self.inner.mark_ephemeral_signed(receipt_id)
+    }
     fn insert(
         &mut self,
         event: nostr::Event,
@@ -7583,6 +7803,22 @@ impl WakeLaneProbeStore {
 }
 
 impl EventStore for WakeLaneProbeStore {
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: nmp_store::IntentId,
+        reason: CompensationReason,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write_with_state(intent_id, reason)
+    }
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
+        self.inner.cancel_ephemeral_receipt(receipt_id)
+    }
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        self.inner.mark_ephemeral_signed(receipt_id)
+    }
     fn insert(
         &mut self,
         event: nostr::Event,

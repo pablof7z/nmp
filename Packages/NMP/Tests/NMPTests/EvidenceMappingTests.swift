@@ -3,6 +3,34 @@ import XCTest
 import NMPFFI
 
 final class EvidenceMappingTests: XCTestCase {
+    func testCancellationFactAndEveryRefusalRemainTyped() {
+        XCTAssertEqual(WriteStatus(.cancelled), .cancelled)
+        XCTAssertEqual(
+            NMPWriteCancellationError(.UnknownReceipt(receiptId: 42)),
+            .unknownReceipt(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPWriteCancellationError(.AlreadySigned(receiptId: 42, eventId: "event")),
+            .alreadySigned(receiptId: 42, eventId: "event")
+        )
+        XCTAssertEqual(
+            NMPWriteCancellationError(.AlreadyCompensated(receiptId: 42)),
+            .alreadyCompensated(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPWriteCancellationError(.AlreadyAbandoned(receiptId: 42)),
+            .alreadyAbandoned(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPWriteCancellationError(.PersistenceFailed(receiptId: 42, reason: "disk")),
+            .persistenceFailed(receiptId: 42, reason: "disk")
+        )
+        XCTAssertEqual(
+            NMPWriteCancellationError(.EngineClosed),
+            .engineClosed
+        )
+    }
+
     func testReceiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
         XCTAssertEqual(
             NMPError(.ReceiptCorrelationIdExhausted),

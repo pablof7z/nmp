@@ -191,6 +191,17 @@ fn redb_crash_worker() {
                 .intent_id;
             let _ = store.compensate_write(intent);
         }
+        "cancel-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::CompensateBeforeCommit)
+                    .expect("open worker store");
+            let intent = store
+                .recover_outbox()
+                .last()
+                .expect("latest intent")
+                .intent_id;
+            let _ = store.cancel_write(intent);
+        }
         "observation-before-commit" => {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::ObservationBeforeCommit)
@@ -534,6 +545,35 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
         store.reattach_receipt(receipt).unwrap().unwrap().state,
         ReceiptState::Compensated
     );
+}
+
+#[test]
+fn cancellation_crash_cannot_claim_a_terminal_fact_before_compensation_commits() {
+    let (_dir, path) = fixture();
+    let (intent, receipt) = {
+        let mut store = RedbStore::open(&path).expect("open");
+        accepted(&mut store)
+    };
+
+    crash(&path, "cancel-before-commit");
+    {
+        let mut store = RedbStore::open(&path).expect("reopen after cancellation crash");
+        assert_eq!(
+            store.reattach_receipt(receipt).unwrap().unwrap().state,
+            ReceiptState::Accepted
+        );
+        assert_eq!(store.recover_outbox()[0].intent_id, intent);
+        assert!(matches!(
+            store.cancel_write(intent).unwrap(),
+            CompensateOutcome::Compensated { .. }
+        ));
+    }
+    let store = RedbStore::open(&path).expect("reopen cancelled state");
+    assert_eq!(
+        store.reattach_receipt(receipt).unwrap().unwrap().state,
+        ReceiptState::Cancelled
+    );
+    assert!(store.recover_outbox().is_empty());
 }
 
 #[test]

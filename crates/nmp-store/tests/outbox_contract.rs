@@ -17,10 +17,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, ClaimSet, CompensateOutcome,
-    EventCursor, EventStore, InsertOutcome, IntentSigState, LocalOrigin, MemoryStore,
-    PromoteOutcome, ReceiptState, RedbStore, RefuseReason, RelayObserved, RetractReason, SigState,
-    WriteDurability,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome,
+    ClaimSet, CompensateOutcome, EventCursor, EventStore, InsertOutcome, IntentSigState,
+    LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState, RedbStore, RefuseReason, RelayObserved,
+    RetractReason, SigState, WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -364,7 +364,9 @@ fn compensate_removes_pending_and_restores_displaced() {
                 let restored = restored.expect("the displaced predecessor is restored");
                 assert_eq!(restored.event.id, frozen_a_id);
             }
-            CompensateOutcome::NotFound => panic!("expected Compensated"),
+            CompensateOutcome::AlreadySigned | CompensateOutcome::NotFound => {
+                panic!("expected Compensated")
+            }
         }
 
         // The rejected pending row is gone; the predecessor is back.
@@ -1698,7 +1700,7 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
         let compensated = store
             .compensate_write(intent)
             .expect("compensate persistence");
-        assert!(matches!(compensated, CompensateOutcome::NotFound));
+        assert!(matches!(compensated, CompensateOutcome::AlreadySigned));
         assert!(
             store
                 .query(&Filter::new().id(target_id))
@@ -2499,13 +2501,13 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
 
         // A's OWN journal is already `Signed` (advanced by B's call
         // above) — its own (now redundant) compensation attempt correctly
-        // answers `NotFound`, never undoing B's already-promoted,
+        // answers `AlreadySigned`, never undoing B's already-promoted,
         // permanent deletion.
         let compensated_a = store
             .compensate_write(intent_a)
             .expect("compensate persistence");
         assert!(
-            matches!(compensated_a, CompensateOutcome::NotFound),
+            matches!(compensated_a, CompensateOutcome::AlreadySigned),
             "A's own journal is already Signed -- compensation is pre-signature only"
         );
         assert!(
@@ -3246,13 +3248,14 @@ fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
 
         // A's OWN journal is already `Signed` (advanced by B's call above)
         // — its own (now redundant) promotion/compensation attempts must
-        // both answer `NotFound`, never resurrect or re-transition
+        // promotion answers `NotFound` and compensation `AlreadySigned`,
+        // never resurrecting or re-transitioning
         // anything.
         let compensated_a = store
             .compensate_write(intent_a)
             .expect("compensate persistence");
         assert!(
-            matches!(compensated_a, CompensateOutcome::NotFound),
+            matches!(compensated_a, CompensateOutcome::AlreadySigned),
             "A's own journal is already Signed -- compensation is pre-signature only"
         );
 
@@ -3374,7 +3377,7 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
         let compensated_c = store
             .compensate_write(intent_c)
             .expect("compensate persistence");
-        assert!(matches!(compensated_c, CompensateOutcome::NotFound));
+        assert!(matches!(compensated_c, CompensateOutcome::AlreadySigned));
         let promoted_c = store
             .promote_signed(intent_c, signed_a.sig)
             .expect("promote persistence");
@@ -3509,11 +3512,11 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
         let compensated_a = store
             .compensate_write(intent_a)
             .expect("compensate persistence");
-        assert!(matches!(compensated_a, CompensateOutcome::NotFound));
+        assert!(matches!(compensated_a, CompensateOutcome::AlreadySigned));
         let compensated_b = store
             .compensate_write(intent_b)
             .expect("compensate persistence");
-        assert!(matches!(compensated_b, CompensateOutcome::NotFound));
+        assert!(matches!(compensated_b, CompensateOutcome::AlreadySigned));
     });
 }
 
@@ -3775,7 +3778,7 @@ fn reinsert_stashed_collision_with_relay_signed_row_adopts_and_fans_out() {
             .compensate_write(intent_a)
             .expect("compensate persistence");
         assert!(
-            matches!(compensated_a, CompensateOutcome::NotFound),
+            matches!(compensated_a, CompensateOutcome::AlreadySigned),
             "compensation is pre-signature only -- A's journal is already Signed"
         );
     });
@@ -4029,4 +4032,74 @@ fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event.sig, signed.sig);
     });
+}
+
+#[test]
+fn explicit_cancellation_is_a_distinct_durable_receipt_fact_on_both_backends() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, _) = compose(&k, Kind::TextNote, "cancel me", 100);
+        let outcome = do_accept(store, accept(frozen, k.public_key(), 100));
+        let intent = outcome.journaled_intent_id().unwrap();
+        let receipt = outcome.journaled_receipt_id().unwrap();
+
+        assert!(matches!(
+            store.cancel_write(intent).unwrap(),
+            CompensateOutcome::Compensated { .. }
+        ));
+        assert_eq!(
+            store.reattach_receipt(receipt).unwrap().unwrap().state,
+            ReceiptState::Cancelled
+        );
+        assert!(matches!(
+            store.cancel_write(intent).unwrap(),
+            CompensateOutcome::NotFound
+        ));
+    });
+}
+
+#[test]
+fn explicit_ephemeral_cancellation_is_retained_without_an_outbox_intent() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, _) = compose(&k, Kind::TextNote, "cancel ephemeral", 101);
+        let receipt = store
+            .accept_ephemeral(frozen.id, k.public_key())
+            .expect("accept ephemeral");
+
+        assert_eq!(
+            store.cancel_ephemeral_receipt(receipt).unwrap(),
+            CancelEphemeralOutcome::Cancelled
+        );
+        let retained = store.reattach_receipt(receipt).unwrap().unwrap();
+        assert_eq!(retained.intent_id, None);
+        assert_eq!(retained.state, ReceiptState::Cancelled);
+        assert_eq!(
+            store.cancel_ephemeral_receipt(receipt).unwrap(),
+            CancelEphemeralOutcome::AlreadyCancelled
+        );
+    });
+}
+
+#[test]
+fn redb_reopen_replays_cancelled_without_recovering_open_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cancelled.redb");
+    let k = keys();
+    let (frozen, _) = compose(&k, Kind::TextNote, "cancel across restart", 102);
+    let receipt = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 102));
+        let intent = outcome.journaled_intent_id().unwrap();
+        let receipt = outcome.journaled_receipt_id().unwrap();
+        store.cancel_write(intent).unwrap();
+        receipt
+    };
+
+    let store = RedbStore::open(&path).unwrap();
+    assert!(store.recover_outbox().is_empty());
+    assert_eq!(
+        store.reattach_receipt(receipt).unwrap().unwrap().state,
+        ReceiptState::Cancelled
+    );
 }

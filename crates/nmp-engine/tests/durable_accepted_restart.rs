@@ -888,6 +888,88 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
             | Effect::PublishEvent(..)
             | Effect::RequestSign(..)
     )));
+
+    let (cancelled, cancellation) = core.cancel_write(receipt);
+    assert_eq!(
+        cancelled,
+        Ok(nmp_engine::outbox::CancelWriteOutcome::Cancelled)
+    );
+    assert!(cancellation.iter().any(
+        |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::Cancelled) if *id == receipt)
+    ));
+    assert!(!cancellation.iter().any(|effect| matches!(
+        effect,
+        Effect::EnsureRelay(_) | Effect::PublishEvent(..) | Effect::RequestSign(..)
+    )));
+
+    drop(core);
+    let store = RedbStore::open(&path).unwrap();
+    assert!(store.recover_outbox().is_empty());
+    let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    assert!(reopened.recover_on_boot().is_empty());
+    let replay = Sink::default();
+    assert!(reopened
+        .reattach_receipt(receipt, Box::new(replay.clone()))
+        .is_attached());
+    assert_eq!(*replay.0.lock().unwrap(), vec![WriteStatus::Cancelled]);
+}
+
+#[test]
+fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("signed-ephemeral.redb");
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://signed-ephemeral.example").unwrap();
+    let event = signed(&keys, "signed ephemeral", 778);
+    let receipt = {
+        let store = RedbStore::open(&path).unwrap();
+        let mut core = EngineCore::new(
+            store,
+            Box::new(directory(keys.public_key(), relay.clone())),
+            10,
+        );
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let effects = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Signed(event.clone()),
+                durability: Durability::Ephemeral,
+                routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
+            },
+            Box::new(Sink::default()),
+        ));
+        assert!(effects.iter().any(
+            |effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Signed(id)) if *id == event.id)
+        ));
+        receipt_id(&effects)
+    };
+
+    let store = RedbStore::open(&path).unwrap();
+    assert!(store.recover_outbox().is_empty());
+    let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    assert!(reopened.recover_on_boot().is_empty());
+    let replay = Sink::default();
+    assert!(reopened
+        .reattach_receipt(receipt, Box::new(replay.clone()))
+        .is_attached());
+    assert_eq!(
+        *replay.0.lock().unwrap(),
+        vec![WriteStatus::Signed(event.id)]
+    );
+
+    let (refused, effects) = reopened.cancel_write(receipt);
+    assert!(matches!(
+        refused,
+        Err(nmp_engine::outbox::CancelWriteError::AlreadySigned {
+            receipt_id,
+            event_id,
+        }) if receipt_id == receipt && event_id == event.id
+    ));
+    assert!(effects.is_empty());
+    assert_eq!(
+        *replay.0.lock().unwrap(),
+        vec![WriteStatus::Signed(event.id)]
+    );
 }
 
 #[test]
@@ -1006,10 +1088,7 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
         core.reattach_receipt(receipt, Box::new(replay.clone())),
         ReattachOutcome::Attached
     );
-    assert_eq!(
-        *replay.0.lock().unwrap(),
-        vec![WriteStatus::Failed("write compensated".to_string())]
-    );
+    assert_eq!(*replay.0.lock().unwrap(), vec![WriteStatus::Cancelled]);
 }
 
 #[test]
@@ -1070,12 +1149,36 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         ReattachOutcome::RetainedButUnreadable
     );
     assert!(replay.0.lock().unwrap().is_empty());
+
+    let (refused, effects) = core.cancel_write(receipt_id);
+    assert!(matches!(
+        refused,
+        Err(nmp_engine::outbox::CancelWriteError::PersistenceFailed {
+            receipt_id: failed_id,
+            reason,
+        }) if failed_id == receipt_id && reason.contains("decode outbox receipt")
+    ));
+    assert!(
+        effects.is_empty(),
+        "corruption must not fabricate cancellation"
+    );
+    assert!(replay.0.lock().unwrap().is_empty());
+
     drop(core);
-    assert!(RedbStore::open(&path)
-        .unwrap()
+    let store = RedbStore::open(&path).unwrap();
+    let recovered = store
         .recover_outbox()
-        .iter()
-        .any(|intent| intent.intent_id == intent_id));
+        .into_iter()
+        .find(|intent| intent.intent_id == intent_id)
+        .expect("failed cancellation must retain open work");
+    assert_eq!(
+        store
+            .query(&nostr::Filter::new().id(recovered.frozen.id))
+            .unwrap()
+            .len(),
+        1,
+        "the cancellation transaction must roll back its pending-row retraction"
+    );
 }
 
 /// #115, cedar's flagged gap: the ruling text only said "resolve_routes

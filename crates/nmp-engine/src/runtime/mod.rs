@@ -104,7 +104,7 @@ use crate::core::{
     HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink, PublishError,
     ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row, RowDelta, RowSink,
 };
-use crate::outbox::{ReceiptSink, WriteStatus};
+use crate::outbox::{CancelWriteError, CancelWriteOutcome, ReceiptSink, WriteStatus};
 use crate::relay_information::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
     RelayInformationSnapshot,
@@ -674,6 +674,10 @@ enum Cmd {
         sink: Box<dyn ReceiptSink>,
         reply: Sender<ReattachOutcome>,
     },
+    CancelWrite {
+        id: ReceiptId,
+        reply: Sender<Result<CancelWriteOutcome, CancelWriteError>>,
+    },
     /// Register a new signing capability (M4 §5: `SignerRegistry`). The
     /// reply carries the pubkey the engine thread's registry keyed it under,
     /// or a typed error if the capability has no stable identity.
@@ -731,6 +735,7 @@ enum Cmd {
 #[derive(Default)]
 struct SignerRegistry {
     signers: HashMap<PublicKey, RegisteredSigner>,
+    pending_writes: RefCell<HashMap<(ReceiptId, u64), PendingSignerCancel>>,
 }
 
 /// Typed outcome vocabulary for the governed sign-only operation. This is
@@ -921,6 +926,40 @@ impl SignerRegistry {
 
     fn len(&self) -> usize {
         self.signers.len()
+    }
+
+    fn track_pending_write(&self, id: ReceiptId, generation: u64, cancel: PendingSignerCancel) {
+        if let Some(stale) = self
+            .pending_writes
+            .borrow_mut()
+            .insert((id, generation), cancel)
+        {
+            stale.cancel();
+        }
+    }
+
+    fn finish_pending_write(&self, id: ReceiptId, generation: u64) {
+        self.pending_writes.borrow_mut().remove(&(id, generation));
+    }
+
+    fn cancel_pending_write(&self, id: ReceiptId) {
+        let mut pending = self.pending_writes.borrow_mut();
+        let keys = pending
+            .keys()
+            .filter(|(receipt, _)| *receipt == id)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(cancel) = pending.remove(&key) {
+                cancel.cancel();
+            }
+        }
+    }
+
+    fn cancel_all_pending_writes(&self) {
+        for (_, cancel) in self.pending_writes.borrow_mut().drain() {
+            cancel.cancel();
+        }
     }
 
     /// Register `signer` under its own `public_key()`, replacing any prior
@@ -3307,6 +3346,9 @@ fn engine_loop<S, D>(
                 Cmd::PublishTracked { reply, .. } => {
                     let _ = reply.send(Err(PublishError::EngineShuttingDown));
                 }
+                Cmd::CancelWrite { reply, .. } => {
+                    let _ = reply.send(Err(CancelWriteError::EngineClosed));
+                }
                 Cmd::SignEvent { reply, .. } => {
                     let _ = reply.send(Err(SignEventError::EngineClosed));
                 }
@@ -3363,6 +3405,7 @@ fn engine_loop<S, D>(
             Cmd::Shutdown => {
                 shutting_down = true;
                 auth_tasks.borrow_mut().shutdown();
+                registry.cancel_all_pending_writes();
                 for active in sign_event_cancellations.values() {
                     active.terminal.cancel();
                 }
@@ -3751,6 +3794,24 @@ fn engine_loop<S, D>(
                 let found = core.reattach_receipt(id, sink);
                 let _ = reply.send(found);
             }
+            Cmd::CancelWrite { id, reply } => {
+                let (result, effects) = core.cancel_write(id);
+                if result == Ok(CancelWriteOutcome::Cancelled) {
+                    registry.cancel_pending_write(id);
+                }
+                let _ = reply.send(result);
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
             Cmd::PublishTracked {
                 intent,
                 sink,
@@ -4138,6 +4199,21 @@ fn engine_loop<S, D>(
                     dispatch_runtime,
                 );
             }
+            Cmd::Engine(EngineMsg::SignerCompleted(id, generation, result)) => {
+                registry.finish_pending_write(id, generation);
+                let effects = core.handle(EngineMsg::SignerCompleted(id, generation, result));
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+            }
             Cmd::Engine(msg) => {
                 let effects = core.handle(msg);
                 dispatch_core_effects(
@@ -4156,6 +4232,7 @@ fn engine_loop<S, D>(
     }
 
     auth_tasks.borrow_mut().shutdown();
+    registry.cancel_all_pending_writes();
     for (_, active) in sign_event_cancellations.drain() {
         active.terminal.cancel();
     }
@@ -4625,9 +4702,10 @@ fn dispatch_effect(
                     // on a remote signer round-trip.
                     let inbox = runtime.self_inbox.clone();
                     let (cancel, cancelled) = pending_signer_cancellation();
+                    let shutdown_cancel = cancel.clone();
                     let result = runtime.native_tasks.spawn_with_cancel(
                         "engine-signer-waiter",
-                        move || cancel.cancel(),
+                        move || shutdown_cancel.cancel(),
                         move || {
                             let result = pending
                                 .recv_or_cancel(cancelled)
@@ -4637,7 +4715,9 @@ fn dispatch_effect(
                             )));
                         },
                     );
-                    if result.is_err() {
+                    if result.is_ok() {
+                        registry.track_pending_write(id, generation, cancel);
+                    } else {
                         let _ = runtime
                             .self_inbox
                             .send(Cmd::Engine(EngineMsg::SignerCompleted(
@@ -4730,7 +4810,10 @@ fn dispatch_effect(
                 tx.send(snapshot.clone());
             }
         }
-        Effect::EmitReceipt(..) => {
+        Effect::EmitReceipt(id, status) => {
+            if matches!(status, WriteStatus::Signed(_) | WriteStatus::Cancelled) {
+                registry.cancel_pending_write(id);
+            }
             // The `ReceiptSink` passed to `Publish` already delivered this
             // exact `WriteStatus` synchronously inside `EngineCore` (see the
             // module doc's "two delivery channels" note) -- redelivering
@@ -5429,6 +5512,22 @@ impl Handle {
             ReattachOutcome::NotFound => ReceiptReattachment::NotFound,
             ReattachOutcome::RetainedButUnreadable => ReceiptReattachment::RetainedButUnreadable,
         }
+    }
+
+    /// Explicitly cancel one accepted unsigned write. A successful outcome
+    /// means the durable `Cancelled` fact observers receive and reattachment
+    /// replays committed.
+    pub fn cancel_write(&self, id: ReceiptId) -> Result<CancelWriteOutcome, CancelWriteError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::CancelWrite {
+                id,
+                reply: reply_tx,
+            })
+            .map_err(|_| CancelWriteError::EngineClosed)?;
+        reply_rx
+            .recv()
+            .map_err(|_| CancelWriteError::EngineClosed)?
     }
 
     /// Open a live diagnostics stream (M5 plan §1.2 step 4) — see

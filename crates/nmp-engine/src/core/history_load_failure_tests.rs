@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex};
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureDirectory;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, ClaimSet, CompensateOutcome, CoverageInterval, CoverageKey,
-    EventCursor, EventStore, GcReport, InsertOutcome, MemoryStore, PersistenceError,
-    PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision,
-    RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, ClaimSet, CompensateOutcome,
+    CompensationReason, CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport,
+    InsertOutcome, MemoryStore, PersistenceError, PromoteOutcome, RecoveredAttempt,
+    RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RelayObserved, RetractReason,
+    StoredEvent,
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 
@@ -70,6 +71,23 @@ impl FailingReadStore {
 }
 
 impl EventStore for FailingReadStore {
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: IntentId,
+        reason: CompensationReason,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write_with_state(intent_id, reason)
+    }
+
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
+        self.inner.cancel_ephemeral_receipt(receipt_id)
+    }
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        self.inner.mark_ephemeral_signed(receipt_id)
+    }
     fn insert(
         &mut self,
         event: Event,

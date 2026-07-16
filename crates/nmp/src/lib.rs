@@ -69,7 +69,10 @@ pub use diagnostics::{
 #[doc(hidden)]
 pub use engine::NativeTaskCancel;
 pub use engine::RelayInformationRequestError;
-pub use engine::{AccountRegistration, AuthPolicyRegistration, Engine, SignEventRequest};
+pub use engine::{
+    AccountRegistration, AuthPolicyRegistration, CancelWriteError, CancelWriteOutcome, Engine,
+    SignEventRequest,
+};
 pub use error::EngineError;
 #[doc(hidden)]
 pub use nmp_executor::{

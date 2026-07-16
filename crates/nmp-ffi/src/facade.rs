@@ -31,7 +31,8 @@ use crate::auth::{
     FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
 };
 use crate::convert::{
-    demand_from_ffi, diagnostics_snapshot_to_ffi, filter_from_ffi, frame_to_ffi, parse_pubkey,
+    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, demand_from_ffi,
+    diagnostics_snapshot_to_ffi, filter_from_ffi, frame_to_ffi, parse_pubkey,
     relay_information_error_kind, sign_event_failure, sign_event_request_from_ffi,
     sign_event_start_error, signed_event_to_ffi, window_from_ffi, write_intent_from_ffi,
     write_status_to_ffi, FfiError, FfiRequestRowsError, WriteStatusRef,
@@ -42,9 +43,10 @@ use crate::nip02::{
 };
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
 use crate::types::{
-    FfiDemand, FfiFilter, FfiReceiptReattachment, FfiRelayInformation,
-    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
-    FfiRelayInformationLimitations, FfiSignEventRequest, FfiWindow, FfiWriteIntent,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiDemand, FfiFilter, FfiReceiptReattachment,
+    FfiRelayInformation, FfiRelayInformationCachePolicy, FfiRelayInformationDocument,
+    FfiRelayInformationFreshness, FfiRelayInformationLimitations, FfiSignEventRequest, FfiWindow,
+    FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -815,6 +817,16 @@ impl NmpEngine {
             }
         }
         Ok(ffi_result)
+    }
+
+    /// Explicitly cancel one accepted unsigned write. A successful outcome
+    /// means the matching durable terminal fact was delivered to receipt
+    /// observers.
+    pub fn cancel(&self, receipt_id: u64) -> Result<FfiCancelWriteOutcome, FfiCancelWriteError> {
+        self.engine
+            .cancel(nmp::ReceiptId(receipt_id))
+            .map(cancel_write_outcome_to_ffi)
+            .map_err(cancel_write_error_to_ffi)
     }
 
     /// Open a live diagnostics stream (M5 plan §1.2 step 5) -- "the
@@ -2067,6 +2079,60 @@ mod tests {
         );
 
         engine.shutdown();
+    }
+
+    #[test]
+    fn ffi_cancel_returns_and_observes_the_same_typed_durable_fact() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let keys = nostr::Keys::generate();
+        engine
+            .set_active_account(Some(keys.public_key().to_hex()))
+            .unwrap();
+        let intent = FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey: keys.public_key().to_hex(),
+                created_at: 10,
+                kind: 1,
+                tags: Vec::new(),
+                content: "cancel through ffi".to_string(),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        let receipt = engine
+            .publish(
+                intent,
+                Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) }),
+            )
+            .unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            FfiWriteStatus::Accepted
+        );
+
+        assert_eq!(engine.cancel(receipt), Ok(FfiCancelWriteOutcome::Cancelled));
+        let mut observed = false;
+        while let Ok(status) = rx.recv_timeout(Duration::from_secs(1)) {
+            if status == FfiWriteStatus::Cancelled {
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed);
+        assert_eq!(engine.cancel(receipt), Ok(FfiCancelWriteOutcome::Cancelled));
+        assert_eq!(
+            engine.cancel(u64::MAX),
+            Err(FfiCancelWriteError::UnknownReceipt {
+                receipt_id: u64::MAX
+            })
+        );
+        engine.shutdown();
+        assert_eq!(
+            engine.cancel(receipt),
+            Err(FfiCancelWriteError::EngineClosed)
+        );
     }
 
     /// #156 account-switch falsifier through the public native boundary.
