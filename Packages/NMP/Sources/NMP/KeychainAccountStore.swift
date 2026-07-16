@@ -44,7 +44,7 @@ public final class NMPKeychainAccountStore: NMPLocalAccountCheckpoint, @unchecke
     ///     `defaultAccount`.
     ///   - accessibility: The `kSecAttrAccessible` policy applied when the
     ///     item is first created. Defaults to
-    ///     `kSecAttrAccessibleAfterFirstThisDeviceOnly`: unreadable until
+    ///     `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: unreadable until
     ///     the device has been unlocked at least once since boot, never
     ///     synced by iCloud Keychain to another device, and excluded from
     ///     encrypted device-to-device migrations/backups -- appropriate for
@@ -53,14 +53,14 @@ public final class NMPKeychainAccountStore: NMPLocalAccountCheckpoint, @unchecke
     public init(
         service: String = NMPKeychainAccountStore.defaultService,
         account: String = NMPKeychainAccountStore.defaultAccount,
-        accessibility: CFString = kSecAttrAccessibleAfterFirstThisDeviceOnly
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     ) {
         self.service = service
         self.account = account
         self.accessibility = accessibility
     }
 
-    func loadSecretKey() throws -> String? {
+    public func loadSecretKey() throws -> String? {
         try locked {
             var query = baseQuery()
             query[kSecReturnData as String] = true
@@ -85,7 +85,7 @@ public final class NMPKeychainAccountStore: NMPLocalAccountCheckpoint, @unchecke
         }
     }
 
-    func saveSecretKey(_ secretKey: String) throws {
+    public func saveSecretKey(_ secretKey: String) throws {
         try locked {
             let data = Data(secretKey.utf8)
 
@@ -110,7 +110,7 @@ public final class NMPKeychainAccountStore: NMPLocalAccountCheckpoint, @unchecke
         }
     }
 
-    func clear() throws {
+    public func clear() throws {
         try locked {
             let status = SecItemDelete(baseQuery() as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
