@@ -229,22 +229,18 @@ Two decisions harden the raw scan into an enforceable check:
   allowlist**, `scripts/check-sdk-parity-allowlist.txt`: one concept word on
   one side per entry, each with a reviewable one-line justification, format
   validated by the checker, suppressed words still printed, unused entries
-  reported. The founding entry is `decision`/swift: Swift consumes
-  `FfiContentClaimDecision` through exhaustive dot-shorthand `switch` arms in
-  `NMPContent/ContentSession.swift` and models the app-facing handle as
-  `NostrContentClaim`, so the type name never appears as a hand-written
-  Swift identifier, while Kotlin must `import` it by name — all four
-  decision arms are handled identically on both platforms. That is an
-  idiomatic naming difference, not a parity gap, so it is documented rather
-  than "fixed" with un-idiomatic Swift churn.
+  reported. The file is currently empty of entries. Its former `decision` /
+  Swift exception named the removed content-session/claim surface; #561
+  deleted the surface and the exception rather than retaining a justification
+  for symbols that no longer exist.
 
 Backtested against real history: at the commit before the #493 Kotlin
 Following port (`920033e^`), the check fails with exactly the five real
 missing-concept words (`follow`/`following`/`unfollow`/`relationship`/
-`availability`) while the allowlist correctly suppresses only `decision`; on
-post-#493 masters it passes. Treat any new report line as a starting point
-for a human read — the remedy is an SDK fix or, only for a genuinely
-intentional modeling difference, a justified allowlist entry.
+`availability`); on post-#493 masters it passes. Treat any new report line as
+a starting point for a human read — the remedy is an SDK fix or, only for a
+genuinely intentional modeling difference, a current, source-verifiable
+allowlist entry.
 
 **CI wiring.** The check runs as a blocking job (`sdk-parity`) in
 `.github/workflows/architecture-gates.yml` on every PR and on pushes to
