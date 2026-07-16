@@ -984,12 +984,14 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
     }
     methods.sort_unstable();
     let mut expected = vec![
+        "add_auth_policy",
         "add_signer",
         "observe_diagnostics",
         "publish",
         "publish_tracked",
         "reattach_receipt",
         "relay_information",
+        "remove_auth_policy",
         "remove_signer",
         "request_rows",
         "set_active_account",
@@ -1016,7 +1018,14 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         .filter(|l| !l.starts_with("//"))
         .collect();
     assert!(
-        !code_lines.iter().any(|l| l.contains("relays:")),
+        !code_lines.iter().any(|line| {
+            line.match_indices("relays:").any(|(index, _)| {
+                index == 0 || {
+                    let before = line.as_bytes()[index - 1];
+                    !before.is_ascii_alphanumeric() && before != b'_'
+                }
+            })
+        }),
         "no method signature on the runtime surface may take a bare `relays:` parameter"
     );
     assert!(

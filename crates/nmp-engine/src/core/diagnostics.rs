@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use nostr::{JsonUtil, RelayUrl};
+use nostr::{EventId, JsonUtil, RelayUrl};
 
 use nmp_grammar::{AccessContext, RelaySessionKey};
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
@@ -79,15 +79,38 @@ pub struct RelayDiagnosticsSnapshot {
     pub nip77_behavior: &'static str,
 }
 
-// The public AUTH-diagnostics projection (`AuthDiagnosticsSnapshot`,
-// `AuthDiagnosticsPhase`, and `DiagnosticsSnapshot.auth_sessions`) is
-// deliberately NOT part of Wave 2 (#8 U2). The reducer already tracks every
-// per-session AUTH phase internally (`EngineCore::auth_sessions` +
-// `AuthSessionPhase`), but exposing the read-out through the governed facade
-// this wave would ship half of the auth-diagnostics contract without its FFI
-// projection or the app-facing policy API — both of which land in Wave 3.
-// The whole auth-diagnostics surface (facade + FFI) therefore lands together
-// then, alongside the policy registry. See the surface change-log's U2 entry.
+/// Bounded, session-scoped AUTH reducer facts (#8 U4 — the engine-level
+/// read-out deferred by Wave 2; the governed facade/FFI projection remains a
+/// later wave). Raw challenges and opaque capability identities are
+/// deliberately absent; the challenge is exposed only as a stable BLAKE3
+/// descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthDiagnosticsSnapshot {
+    pub relay: RelayUrl,
+    pub access: AccessContext,
+    pub transport_slot: u32,
+    pub transport_generation: u64,
+    pub epoch_sequence: Option<u64>,
+    pub challenge_hash: Option<String>,
+    pub phase: AuthDiagnosticsPhase,
+    pub policy_bound: bool,
+    pub signer_bound: bool,
+    pub auth_event_id: Option<EventId>,
+    pub send_handoff_accepted: bool,
+    pub relay_ok_accepted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDiagnosticsPhase {
+    AwaitingChallenge,
+    AwaitingPolicy,
+    AwaitingSignature,
+    AwaitingSend,
+    AwaitingRelayAck,
+    Ready,
+    Denied,
+    Error,
+}
 
 /// The engine-global diagnostics snapshot (M5 plan §1.1) — "the acceptance
 /// test rendered on screen, permanently." One snapshot covers every
@@ -97,6 +120,18 @@ pub struct RelayDiagnosticsSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsSnapshot {
     pub relays: Vec<RelayDiagnosticsSnapshot>,
+    /// At most one entry per currently connected protected session.
+    ///
+    /// `#[doc(hidden)]`: the ENGINE owns this per-session AUTH read-out (#8
+    /// U4 — the capstone and runtime falsifiers consume it), but the governed
+    /// `nmp` facade re-exports `DiagnosticsSnapshot`, and the documented
+    /// facade projection of the auth-diagnostics contract (with its FFI
+    /// mapping and the app-facing policy API) is deliberately a later wave.
+    /// Hiding the field keeps it out of the frozen facade surface snapshot
+    /// exactly like Wave 2's deferral did, without denying engine-level
+    /// consumers the fact.
+    #[doc(hidden)]
+    pub auth_sessions: Vec<AuthDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,
     pub dropped_merge_rules: Vec<&'static str>,
     /// DISCOVERED relays rejected by the engine's relay admission policy
@@ -192,6 +227,7 @@ pub(crate) fn build(
 
     DiagnosticsSnapshot {
         relays,
+        auth_sessions: Vec::new(),
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
         discovered_private_relays_rejected,

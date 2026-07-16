@@ -1189,6 +1189,7 @@ impl SessionWorker {
                 }
             }
             PoolEvent::Health { .. }
+            | PoolEvent::InitialReadCompleted { .. }
             | PoolEvent::EventHandoff { .. }
             | PoolEvent::WorkerRetired => {}
         }

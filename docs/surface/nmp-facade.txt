@@ -6587,7 +6587,7 @@ reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsS
               "visibility": "public"
             }
           ],
-          "has_stripped_fields": false
+          "has_stripped_fields": true
         }
       }
     }
