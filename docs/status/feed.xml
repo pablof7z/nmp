@@ -15,7 +15,36 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 05:54:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 06:56:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 06:56 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0015.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0015</guid>
+<pubDate>Thu, 16 Jul 2026 06:56:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Last hour's headline was that content-relay authentication, N I P forty-two, shipped complete and issue eight closed. This hour has three real merges, and they tell two different stories: the project locking in its own review discipline, and the next epic starting to land.
+
+First, the discipline story. Pull request five forty seven closes issue four ninety six, and it's worth taking seriously. There's a standing rule here that a bug class only really closes when a mechanism makes the bad path unreachable, not when a convention just says not to do it. Up to now, the architecture-review checklist -- checking whether a change introduces a new noun, breaks reachability, mishandles a boolean lifecycle, or touches a destructive A P I -- lived in a document a reviewer had to remember to open. Now it's a checked list right in the contributor guide, backed by two actual blocking continuous-integration jobs: cross-S D K parity, which fails if the Swift or Kotlin interface drifts from Rust, and falsifier honesty, which checks that a pull request's claimed updated falsifiers actually name real symbols and files. Backtested clean against eight recent merged pull requests and forty-three named claims, and it does catch a fabricated claim and a simulated version of the exact bug class that slipped through once before.
+
+Second, the signer-lifecycle epic, issue forty-seven, just landed its headline unit. An application can now publish a single write under a registered secondary identity -- a podcast account, a disposable identity -- without touching the app's active account at all, across Rust, the foreign-function interface, Swift, and Kotlin. The proven part is the sharp one: once that write is accepted under the override identity, it is pinned there permanently. A later switch of the active account cannot retarget it to a different signer, even if that signer becomes available first -- proven directly, including across a real close-and-reopen of the store. Naming an identity with no attached signer yet just parks the write durably until the right key shows up. Right behind this, standard Keychain and Android Keystore secure-signer providers are staged and ready to build on top.
+
+Smaller but real: the local key signer's secret now lives in a zeroizing byte buffer the compiler fences to wipe on drop, with its debug output redacted to just the public key -- the first landed unit of this same epic, from a session or two back.
+
+Two things just got underway, worth naming honestly because neither has shipped code yet: a Blossom media module, authenticated blob upload with sha-two-fifty-six content addressing, has its scoping issue opened; and a consolidated architecture decision record landed, fifteen rulings against this project's own standing doctrine.
+
+One unchanged note: the flaky macOS-only ingest-smoke test is still just that, tracked infrastructure, not a product bug.
+
+That's the pulse -- the project enforcing its own review rules by machine, and the post-authentication push, secure signer lifecycle first, genuinely underway.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0015.mp3" type="audio/mpeg" length="3636524"/>
+<itunes:title>NMP Pulse — 2026-07-16 06:56 UTC</itunes:title>
+<itunes:duration>227</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Briefing — 2026-07-16 05:54 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0014.mp3</link>
