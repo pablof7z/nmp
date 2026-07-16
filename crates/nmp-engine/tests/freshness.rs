@@ -127,6 +127,23 @@ fn closes(effects: &[Effect]) -> usize {
         .sum()
 }
 
+fn requested_filters(effects: &[Effect]) -> BTreeSet<(RelaySessionKey, ConcreteFilter)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(&delta.ops),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|(session, ops)| {
+            ops.iter().filter_map(move |op| match op {
+                WireOp::Req(_, filter) => Some((session.clone(), filter.clone())),
+                WireOp::Close(_) => None,
+            })
+        })
+        .collect()
+}
+
 fn wire_id(effects: &[Effect]) -> String {
     effects
         .iter()
@@ -221,6 +238,14 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
         query(&keys, Freshness::MaxAge { seconds: 14_400 }),
     );
     assert_eq!(reqs(&stale_effects), 1);
+    let mut live = core(MemoryStore::new(), &keys, &relay);
+    tick(&mut live, 100_000);
+    let live_effects = subscribe(&mut live, query(&keys, Freshness::Live));
+    assert_eq!(
+        requested_filters(&stale_effects),
+        requested_filters(&live_effects),
+        "stale MaxAge must use the exact ordinary Live plan"
+    );
 
     let mut empty_store = MemoryStore::new();
     record(&mut empty_store, &demand_atom, &relay, 96_400);

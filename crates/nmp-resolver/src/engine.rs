@@ -128,7 +128,7 @@ use crate::graph::{
 };
 use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 
-/// The descriptor value of a live query: a full [`Demand`] (#106) --
+/// The declaration value of a live query: a full [`Demand`] (#106) --
 /// `selection + source + access + cache + freshness`, not a bare `Filter`. Two `Demand`s
 /// with the same `Filter` but different `source`/`access` are DIFFERENT
 /// subscriptions with distinct atom/wire/coverage identity (bug-class ledger

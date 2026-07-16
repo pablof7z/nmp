@@ -24,17 +24,26 @@ use nostr::Timestamp;
 /// from the sub's CURRENT filter later.
 #[derive(Debug, Clone)]
 struct AttributionSnapshot {
+    send_id: AttributionSendId,
     absorbed: BTreeSet<CoverageKey>,
     floor: Option<Timestamp>,
     until: Option<Timestamp>,
     limited: bool,
 }
 
+/// Opaque identity of one exact send-time attribution snapshot. Ordinary
+/// EOSE is intentionally ambiguous when a subscription id is overwritten,
+/// so it uses FIFO intersection. A NEG completion is correlated to the
+/// exact NEG session that completed and uses this identity instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AttributionSendId(u64);
+
 /// All coverage-attribution bookkeeping `EngineCore` owns. Keyed by `SubId`
 /// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash, AccessContext)`), so a
 /// FIFO lookup is also implicitly relay-scoped.
 #[derive(Debug, Default)]
 pub(crate) struct AttributionState {
+    next_send_id: u64,
     inflight: HashMap<SubId, VecDeque<AttributionSnapshot>>,
     /// `(session, wire-format subscription_id string) -> SubId`, populated at
     /// send time. `nmp-transport::Pool` is an unimplemented Step 0 shell in
@@ -142,8 +151,11 @@ impl AttributionState {
         sub_id: &SubId,
         filter: &ConcreteFilter,
         absorbed: BTreeSet<CoverageKey>,
-    ) {
+    ) -> AttributionSendId {
+        let send_id = AttributionSendId(self.next_send_id);
+        self.next_send_id = self.next_send_id.wrapping_add(1);
         let snapshot = AttributionSnapshot {
+            send_id,
             absorbed,
             floor: filter.since.map(Timestamp::from),
             until: filter.until.map(Timestamp::from),
@@ -157,6 +169,7 @@ impl AttributionState {
             (session.clone(), wire_sub_id_string(sub_id)),
             sub_id.clone(),
         );
+        send_id
     }
 
     /// Resolve a wire subscription-id string back to the `SubId`
@@ -270,6 +283,52 @@ impl AttributionState {
 
         fifo.pop_front();
         result
+    }
+
+    /// Attribute a completion that is structurally correlated to one exact
+    /// send. This is the NEG counterpart to [`Self::attribute_eose`]: unlike
+    /// an overwritten REQ's ambiguous EOSE, a live `NegSession` retains the
+    /// identity returned by [`Self::record_send`], so later live-tail sends
+    /// sharing its wire subscription id must not narrow the completed NEG's
+    /// coverage window. `completion_time` is captured when NEG finishes,
+    /// even when credit is deferred until a backfill EOSE proves ingestion.
+    pub(crate) fn attribute_correlated_completion(
+        &mut self,
+        session: &RelaySessionKey,
+        wire_sub_id: &str,
+        send_id: AttributionSendId,
+        completion_time: Timestamp,
+    ) -> Vec<(CoverageKey, CoverageInterval)> {
+        let Some(sub_id) = self
+            .sub_id_by_wire
+            .get(&(session.clone(), wire_sub_id.to_string()))
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(fifo) = self.inflight.get_mut(&sub_id) else {
+            return Vec::new();
+        };
+        let Some(position) = fifo.iter().position(|snapshot| snapshot.send_id == send_id) else {
+            return Vec::new();
+        };
+        let snapshot = fifo
+            .remove(position)
+            .expect("position came from this exact attribution FIFO");
+        if snapshot.limited {
+            return Vec::new();
+        }
+
+        let from = snapshot.floor.unwrap_or_else(|| Timestamp::from(0u64));
+        let through = snapshot
+            .until
+            .map_or(completion_time, |until| completion_time.min(until));
+        let interval = CoverageInterval::new(from, through);
+        snapshot
+            .absorbed
+            .into_iter()
+            .map(|key| (key, interval))
+            .collect()
     }
 }
 

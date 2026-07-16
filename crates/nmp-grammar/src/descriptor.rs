@@ -127,7 +127,9 @@ pub enum Freshness {
     CacheOnly,
 }
 
-/// The full live-query identity: `selection + source + access` (#106).
+/// The full live-query declaration. Its semantic identity is
+/// `selection + source + access` (#106); `cache` and `freshness` remain
+/// per-handle policy axes.
 /// `selection` is pure `Filter` — no context field is ever added to `Filter`
 /// itself, keeping the grammar's own encoding/hashing untouched; `source`/
 /// `access` fold into identity one level up, at [`crate::ContextualAtom`].

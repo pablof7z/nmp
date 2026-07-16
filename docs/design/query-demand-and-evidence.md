@@ -43,6 +43,13 @@ live. Missing routing, cap shortfall, missing coverage, a coverage floor above
 the atom's requested floor, or any stale assigned relay degrades the handle
 once to ordinary `Live` for its lifetime.
 
+The opening check is currently conservative for a query whose `until` is
+already older than the `MaxAge` cutoff: it still requires coverage through the
+cutoff, while honest attribution caps `through` at that sent `until`. Such a
+handle therefore becomes `Live` rather than claiming suppression from a
+special bounded-past rule. No broader bounded-window freshness semantics are
+implied by `MaxAge` today.
+
 Freshness is coverage of the question, not event presence. A recently covered
 empty result is fresh. `MaxAge` deliberately accepts that a newer replaceable
 event may exist remotely within the tolerated interval. A satisfied handle

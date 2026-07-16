@@ -48,8 +48,7 @@ use nostr::{
 use nmp_grammar::{
     fold_byte, AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
     Durability, Filter, Freshness, HostAuthority, NarrowOnly, PrivateRoute, RelaySessionKey,
-    RoutingEvidence,
-    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    RoutingEvidence, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery,
@@ -185,6 +184,66 @@ mod relay_session_key_tests {
                 .attribute_eose(&session_a, &wire_id, Timestamp::from(10u64))
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn correlated_completion_uses_exact_send_shape_and_completion_cap() {
+        let relay = relay();
+        let session = RelaySessionKey::public(relay.clone());
+        let filter = ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            until: Some(150),
+            ..ConcreteFilter::default()
+        };
+        let atom = ContextualAtom {
+            filter: filter.clone(),
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let key = coverage_key(&atom);
+        let sub_id = SubId::for_wire(
+            relay,
+            &filter,
+            &SourceAuthority::Public,
+            AccessContext::Public,
+        );
+        let mut attribution = AttributionState::new();
+        let completed_send =
+            attribution.record_send(&session, &sub_id, &filter, BTreeSet::from([key]));
+        attribution.record_send(
+            &session,
+            &sub_id,
+            &ConcreteFilter {
+                since: Some(100),
+                ..filter.clone()
+            },
+            BTreeSet::from([key]),
+        );
+
+        assert_eq!(
+            attribution.attribute_correlated_completion(
+                &session,
+                &wire_sub_id_string(&sub_id),
+                completed_send,
+                Timestamp::from(200u64),
+            ),
+            vec![(
+                key,
+                nmp_store::CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64),),
+            )]
+        );
+        assert_eq!(
+            attribution.attribute_eose(
+                &session,
+                &wire_sub_id_string(&sub_id),
+                Timestamp::from(200u64),
+            ),
+            vec![(
+                key,
+                nmp_store::CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(150u64),),
+            )]
         );
     }
 
@@ -491,7 +550,7 @@ mod durable_retry_policy_tests {
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 pub use admission::RelayAdmissionPolicy;
-use attribution::AttributionState;
+use attribution::{AttributionSendId, AttributionState};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
     RelayDiagnosticsSnapshot,
@@ -1104,6 +1163,7 @@ struct NegSession {
     relay: RelayUrl,
     filter: ConcreteFilter,
     absorbed: BTreeSet<CoverageKey>,
+    attribution_send: AttributionSendId,
     started_at: Timestamp,
     reconciler: Reconciler,
 }
@@ -1128,6 +1188,8 @@ enum TemporaryReq {
     MissingIds {
         plan_sub_id: SubId,
         neg_sub_id: SubId,
+        attribution_send: AttributionSendId,
+        completed_at: Timestamp,
     },
     /// Plain unlimited backlog fallback after NEG failure/timeout. Its own
     /// attribution snapshot earns coverage directly at EOSE.
@@ -6149,8 +6211,19 @@ impl<S: EventStore> EngineCore<S> {
                         }));
                         self.attribution.discard_sub(&resolved);
                         match request {
-                            TemporaryReq::MissingIds { neg_sub_id, .. } => {
-                                self.credit_neg_coverage(&neg_sub_id, &session.relay, &mut effects);
+                            TemporaryReq::MissingIds {
+                                neg_sub_id,
+                                attribution_send,
+                                completed_at,
+                                ..
+                            } => {
+                                self.credit_neg_coverage(
+                                    &neg_sub_id,
+                                    attribution_send,
+                                    completed_at,
+                                    &session.relay,
+                                    &mut effects,
+                                );
                                 self.attribution.discard_sub(&neg_sub_id);
                             }
                             TemporaryReq::Backlog { .. } => {}
@@ -6176,7 +6249,6 @@ impl<S: EventStore> EngineCore<S> {
                             }
                         }
                     }
-
                     // State transitions above are diagnostics state in
                     // their own right; publish them without waiting for a
                     // later router recompile.
@@ -6637,7 +6709,6 @@ impl<S: EventStore> EngineCore<S> {
         let needed: BTreeSet<PubkeyHex> = wire_demand
             .iter()
             .cloned()
-            .into_iter()
             .filter_map(|atom| atom.filter.authors)
             .flatten()
             // NOT `write_relays(..).is_empty()`: that collapses "known,
@@ -6972,7 +7043,7 @@ impl<S: EventStore> EngineCore<S> {
 
         let neg_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
 
-        self.attribution.record_send(
+        let attribution_send = self.attribution.record_send(
             &RelaySessionKey::public(probed.url().clone()),
             &neg_sub_id,
             &neg_filter,
@@ -6985,6 +7056,7 @@ impl<S: EventStore> EngineCore<S> {
                 relay: probed.url().clone(),
                 filter: neg_filter.clone(),
                 absorbed,
+                attribution_send,
                 started_at: self.clock,
                 reconciler,
             },
@@ -7052,11 +7124,16 @@ impl<S: EventStore> EngineCore<S> {
         need_ids: BTreeSet<EventId>,
         effects: &mut Vec<Effect>,
     ) {
-        let NegSession { plan_sub_id, .. } = session;
+        let NegSession {
+            plan_sub_id,
+            attribution_send,
+            ..
+        } = session;
+        let completed_at = self.clock;
         effects.push(Effect::NegClose(relay.clone(), sub_id.clone()));
 
         if need_ids.is_empty() {
-            self.credit_neg_coverage(&sub_id, &relay, effects);
+            self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects);
             self.attribution.discard_sub(&sub_id);
         } else {
             let backfill = ConcreteFilter {
@@ -7076,6 +7153,8 @@ impl<S: EventStore> EngineCore<S> {
                 TemporaryReq::MissingIds {
                     plan_sub_id,
                     neg_sub_id: sub_id.clone(),
+                    attribution_send,
+                    completed_at,
                 },
             );
             // No coverage credit of its OWN for this one-shot id-set fetch
@@ -7098,18 +7177,26 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
     }
 
-    /// Attribute coverage for `sub_id` through the EXACT SAME
-    /// `AttributionState::attribute_eose` call the real EOSE path uses --
-    /// no second coverage mechanism, whether called directly (no backfill
-    /// needed) or from the missing-id EOSE arm once deferred backfill lands.
-    fn credit_neg_coverage(&mut self, sub_id: &SubId, relay: &RelayUrl, effects: &mut Vec<Effect>) {
+    /// Attribute the exact NEG send-time snapshot that completed. Unlike an
+    /// ordinary REQ's ambiguous EOSE, NEG-DONE is structurally correlated to
+    /// its live `NegSession`. Credit may wait for a backfill EOSE, but
+    /// `completed_at` remains the NEG completion time.
+    fn credit_neg_coverage(
+        &mut self,
+        sub_id: &SubId,
+        attribution_send: AttributionSendId,
+        completed_at: Timestamp,
+        relay: &RelayUrl,
+        effects: &mut Vec<Effect>,
+    ) {
         // Negentropy sessions are opened exclusively on the Public session
         // (#8), so their credit resolves through the same Public-session
         // attribution key `open_neg_session` recorded under.
-        let attributed = self.attribution.attribute_eose(
+        let attributed = self.attribution.attribute_correlated_completion(
             &RelaySessionKey::public(relay.clone()),
             &wire_sub_id_string(sub_id),
-            self.clock,
+            attribution_send,
+            completed_at,
         );
         for (key, interval) in attributed {
             if let Some(shape) = self.attribution.shape_of(key) {

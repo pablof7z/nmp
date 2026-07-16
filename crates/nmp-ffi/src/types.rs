@@ -256,7 +256,7 @@ pub enum FfiFreshness {
     CacheOnly,
 }
 
-/// The full live-query identity an app declares -- `selection + source +
+/// The full live-query declaration an app supplies -- `selection + source +
 /// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). `NmpEngine::
 /// observe` still accepts a bare [`FfiFilter`] for the common case (the
 /// static `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);

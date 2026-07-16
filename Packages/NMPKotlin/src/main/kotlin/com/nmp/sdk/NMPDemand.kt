@@ -121,7 +121,7 @@ sealed class NMPFreshness {
     }
 }
 
-/** The full live-query identity a dev declares -- `selection + source +
+/** The full live-query declaration a dev supplies -- `selection + source +
  * access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). */
 data class NMPDemand(
     val selection: NMPFilter,

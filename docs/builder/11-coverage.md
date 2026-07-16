@@ -115,6 +115,11 @@ let preview = NMPDemand(
 - `cacheOnly` always opens zero wire work, with or without cached rows or
   coverage.
 
+`maxAge` is deliberately conservative for a filter whose `until` is already
+older than the freshness cutoff. Coverage attribution cannot honestly advance
+past that sent `until`, so the handle becomes `live`; NMP does not currently
+apply a separate "historical bounded query" suppression rule.
+
 An empty cache can still be fresh under `maxAge`: coverage proves that the
 scoped question was recently checked. Conversely, the timestamp of a cached or
 incoming event does not prove freshness. Coverage is capped by the engine's

@@ -48,7 +48,7 @@ public enum NMPFreshness: Sendable, Hashable {
     case cacheOnly
 }
 
-/// The full live-query identity a dev declares -- `selection + source +
+/// The full live-query declaration a dev supplies -- `selection + source +
 /// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565).
 public struct NMPDemand: Sendable, Hashable {
     public var selection: NMPFilter
