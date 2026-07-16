@@ -125,6 +125,10 @@ public enum NMPNip46Failure: Sendable, Equatable {
     case threadUnavailable(component: String, reason: String)
     case executorSaturated(component: String, capacity: UInt64)
     case signerMissingPublicKey
+    /// A restore/import's live answer did not match the checkpoint's
+    /// expected identity (#571). No signer was attached under the wrong
+    /// pubkey.
+    case restoredIdentityMismatch(expected: String, actual: String)
 
     init(_ ffi: FfiNip46Failure) {
         switch ffi {
@@ -142,6 +146,8 @@ public enum NMPNip46Failure: Sendable, Equatable {
         case .executorSaturated(let component, let capacity):
             self = .executorSaturated(component: component, capacity: capacity)
         case .signerMissingPublicKey: self = .signerMissingPublicKey
+        case .restoredIdentityMismatch(let expected, let actual):
+            self = .restoredIdentityMismatch(expected: expected, actual: actual)
         }
     }
 }
@@ -197,20 +203,38 @@ final class NIP46Observer: Nip46ConnectionObserver, @unchecked Sendable {
 public final class NMPNip46Connection: @unchecked Sendable {
     public let states: AsyncStream<NMPNip46ConnectionState>
     fileprivate let observer: NIP46Observer
+    /// `nil` only for the test-only `closeAction`-only initializer below;
+    /// every connection produced by pairing/restore/import carries this.
+    private let ffiConnection: Nip46Connection?
     private let closeAction: () -> Void
     private let closeLock = NSLock()
     private var isClosed = false
 
     fileprivate init(observer: NIP46Observer, ffiConnection: Nip46Connection) {
         self.observer = observer
+        self.ffiConnection = ffiConnection
         closeAction = { ffiConnection.disconnect() }
         states = observer.stream
     }
 
     init(observer: NIP46Observer, closeAction: @escaping () -> Void) {
         self.observer = observer
+        ffiConnection = nil
         self.closeAction = closeAction
         states = observer.stream
+    }
+
+    /// Read out this session's checkpoint (#571): the minimum secrets and
+    /// descriptor needed to reconnect without another pairing handshake --
+    /// see `NMPNip46SessionCheckpoint`'s doc. Refused with a typed error
+    /// before this connection has reached `.ready`; checkpointing a session
+    /// that never authenticated would persist meaningless material.
+    public func checkpoint() throws -> NMPNip46SessionCheckpoint {
+        guard let ffiConnection else {
+            throw NMPError.invalidSigner("no underlying NIP-46 connection to checkpoint")
+        }
+        let ffi = try nmpRethrowing { try ffiConnection.checkpoint() }
+        return NMPNip46SessionCheckpoint(ffi)
     }
 
     /// Idempotently detach this exact signer session and finish `states`.
@@ -282,6 +306,80 @@ extension NMPEngine {
         let ffiConnection = try nmpRethrowing {
             try ffi.connectNip46Invitation(
                 invitation: invitation.ffi,
+                timeoutMillis: timeout.milliseconds,
+                observer: observer
+            )
+        }
+        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
+    }
+
+    /// Restore an already-authorized NIP-46 client session from `store`'s
+    /// checkpoint (#571) -- reconnects the SAME client transport identity to
+    /// the SAME remote signer with NO re-pairing handshake. Returns `nil`
+    /// without connecting anything when `store` holds no checkpoint. As with
+    /// `connectNip46`, `.ready(userPublicKey:)` fires only once the
+    /// checkpoint's expected identity is validated against a live answer and
+    /// the signer is attached to this engine; a mismatch/corrupt/unavailable
+    /// outcome surfaces as a typed `.failed` state, never a thrown error from
+    /// this call.
+    @discardableResult
+    public func restoreNip46Session(
+        from store: any NMPNip46SessionCheckpointStore,
+        timeout: Duration = .seconds(60)
+    ) throws -> NMPNip46Connection? {
+        guard let checkpoint = try store.loadCheckpoint() else {
+            return nil
+        }
+        return try restoreNip46Session(checkpoint, timeout: timeout)
+    }
+
+    /// Reconnect from an explicit checkpoint value with no store involved --
+    /// the primitive `restoreNip46Session(from:)` builds on directly.
+    @discardableResult
+    public func restoreNip46Session(
+        _ checkpoint: NMPNip46SessionCheckpoint,
+        timeout: Duration = .seconds(60)
+    ) throws -> NMPNip46Connection {
+        let observer = NIP46Observer()
+        let ffiConnection = try nmpRethrowing {
+            try ffi.restoreNip46Session(
+                checkpoint: checkpoint.toFfi(),
+                timeoutMillis: timeout.milliseconds,
+                observer: observer
+            )
+        }
+        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
+    }
+
+    /// Brownfield migration door (#571): import a pre-NMP legacy client
+    /// session (for example Pod0's Keychain-persisted `nostrconnect://`
+    /// material) directly from its raw parts, without first constructing an
+    /// NMP-owned checkpoint or ever writing one to a store. Validates
+    /// `expectedUserPublicKey` before `.ready` exactly like
+    /// `restoreNip46Session`, and never deletes or overwrites the caller's
+    /// legacy material -- a mismatch/corrupt import surfaces only as a typed
+    /// `.failed` connection state, never by touching `clientSecretKey`'s
+    /// original source.
+    @discardableResult
+    public func importNip46Session(
+        clientSecretKey: String,
+        expectedUserPublicKey: String,
+        remoteSignerPublicKey: String,
+        relays: [String],
+        origin: NMPNip46SessionOrigin,
+        timeout: Duration = .seconds(60)
+    ) throws -> NMPNip46Connection {
+        let parts = NMPNip46SessionCheckpoint(
+            clientSecretKey: clientSecretKey,
+            userPublicKey: expectedUserPublicKey,
+            remoteSignerPublicKey: remoteSignerPublicKey,
+            relays: relays,
+            origin: origin
+        )
+        let observer = NIP46Observer()
+        let ffiConnection = try nmpRethrowing {
+            try ffi.nip46SessionFromParts(
+                parts: parts.toFfi(),
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
             )

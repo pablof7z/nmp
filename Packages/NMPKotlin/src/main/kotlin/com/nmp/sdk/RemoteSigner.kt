@@ -115,6 +115,11 @@ sealed interface NMPNip46Failure {
     data class ExecutorSaturated(val component: String, val capacity: ULong) : NMPNip46Failure
     data object SignerMissingPublicKey : NMPNip46Failure
 
+    /** A restore/import's live answer did not match the checkpoint's
+     * expected identity (#571). No signer was attached under the wrong
+     * pubkey. */
+    data class RestoredIdentityMismatch(val expected: String, val actual: String) : NMPNip46Failure
+
     companion object {
         internal fun from(ffi: FfiNip46Failure): NMPNip46Failure =
             when (ffi) {
@@ -131,6 +136,8 @@ sealed interface NMPNip46Failure {
                 is FfiNip46Failure.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
                 is FfiNip46Failure.ExecutorSaturated -> ExecutorSaturated(ffi.component, ffi.capacity)
                 FfiNip46Failure.SignerMissingPublicKey -> SignerMissingPublicKey
+                is FfiNip46Failure.RestoredIdentityMismatch ->
+                    RestoredIdentityMismatch(ffi.expected, ffi.actual)
             }
     }
 }
@@ -205,15 +212,34 @@ internal class NMPNip46Observer : Nip46ConnectionObserver {
 
 class NMPNip46Connection internal constructor(
     internal val observer: NMPNip46Observer,
+    private val ffiConnection: Nip46Connection?,
     private val disconnect: () -> Unit,
 ) : AutoCloseable {
+    internal constructor(observer: NMPNip46Observer, disconnect: () -> Unit) : this(
+        observer,
+        null,
+        disconnect,
+    )
+
     internal constructor(observer: NMPNip46Observer, ffiConnection: Nip46Connection) : this(
         observer,
+        ffiConnection,
         ffiConnection::disconnect,
     )
 
     private val closed = AtomicBoolean(false)
     val states: Flow<NMPNip46ConnectionState> = observer.states
+
+    /** Read out this session's checkpoint (#571): the minimum secrets and
+     * descriptor needed to reconnect without another pairing handshake --
+     * see [NMPNip46SessionCheckpoint]'s doc. Refused with a typed error
+     * before this connection has reached `Ready`; checkpointing a session
+     * that never authenticated would persist meaningless material. */
+    fun checkpoint(): NMPNip46SessionCheckpoint {
+        val connection = ffiConnection
+            ?: throw NMPError.InvalidSigner("no underlying NIP-46 connection to checkpoint")
+        return NMPNip46SessionCheckpoint(nmpRethrowing { connection.checkpoint() })
+    }
 
     /** Idempotently detach this exact signer session and emit [NMPNip46ConnectionState.Closed]. */
     override fun close() {
@@ -276,6 +302,75 @@ fun NMPEngine.connectNip46(
     val ffiConnection = nmpRethrowing {
         ffi.connectNip46Invitation(
             invitation.ffi,
+            timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
+            observer,
+        )
+    }
+    return NMPNip46Connection(observer, ffiConnection)
+}
+
+/** Restore an already-authorized NIP-46 client session from [store]'s
+ * checkpoint (#571) -- reconnects the SAME client transport identity to the
+ * SAME remote signer with NO re-pairing handshake. Returns `null` without
+ * connecting anything when [store] holds no checkpoint. As with
+ * [connectNip46], [NMPNip46ConnectionState.Ready] fires only once the
+ * checkpoint's expected identity is validated against a live answer and the
+ * signer is attached to this engine; a mismatch/corrupt/unavailable outcome
+ * surfaces as a typed [NMPNip46ConnectionState.Failed], never a thrown
+ * exception from this call. */
+fun NMPEngine.restoreNip46Session(
+    store: NMPNip46SessionCheckpointStore,
+    timeout: Duration = 60.seconds,
+): NMPNip46Connection? {
+    val checkpoint = store.loadCheckpoint() ?: return null
+    return restoreNip46Session(checkpoint, timeout)
+}
+
+/** Reconnect from an explicit checkpoint value with no store involved --
+ * the primitive [restoreNip46Session] (store overload) builds on directly. */
+fun NMPEngine.restoreNip46Session(
+    checkpoint: NMPNip46SessionCheckpoint,
+    timeout: Duration = 60.seconds,
+): NMPNip46Connection {
+    val observer = NMPNip46Observer()
+    val ffiConnection = nmpRethrowing {
+        ffi.restoreNip46Session(
+            checkpoint.toFfi(),
+            timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
+            observer,
+        )
+    }
+    return NMPNip46Connection(observer, ffiConnection)
+}
+
+/** Brownfield migration door (#571): import a pre-NMP legacy client session
+ * (for example Pod0's securely-persisted `nostrconnect://` material)
+ * directly from its raw parts, without first constructing an NMP-owned
+ * checkpoint or ever writing one to a store. Validates
+ * [expectedUserPublicKey] before `Ready` exactly like [restoreNip46Session],
+ * and never deletes or overwrites the caller's legacy material -- a
+ * mismatch/corrupt import surfaces only as a typed
+ * [NMPNip46ConnectionState.Failed], never by touching [clientSecretKey]'s
+ * original source. */
+fun NMPEngine.importNip46Session(
+    clientSecretKey: String,
+    expectedUserPublicKey: String,
+    remoteSignerPublicKey: String,
+    relays: List<String>,
+    origin: NMPNip46SessionOrigin,
+    timeout: Duration = 60.seconds,
+): NMPNip46Connection {
+    val parts = NMPNip46SessionCheckpoint(
+        clientSecretKey = clientSecretKey,
+        userPublicKey = expectedUserPublicKey,
+        remoteSignerPublicKey = remoteSignerPublicKey,
+        relays = relays,
+        origin = origin,
+    )
+    val observer = NMPNip46Observer()
+    val ffiConnection = nmpRethrowing {
+        ffi.nip46SessionFromParts(
+            parts.toFfi(),
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
         )
