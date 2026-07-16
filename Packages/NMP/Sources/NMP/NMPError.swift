@@ -77,6 +77,10 @@ public enum NMPError: Error, Sendable, Equatable {
     case relayInformationUnavailable(RelayInformationErrorKind)
     /// One relay's in-flight NIP-11 waiter set is at its finite bound.
     case relayInformationWaitersSaturated(capacity: UInt64)
+    /// #591: `WriteIntent.correlation`/`reattachReceipt(correlation:)` was
+    /// given a token that failed `CorrelationToken`'s bounded/non-empty
+    /// validation.
+    case invalidCorrelationToken(got: String, reason: String)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -117,6 +121,8 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
         case .RelayInformationWaitersSaturated(let capacity):
             self = .relayInformationWaitersSaturated(capacity: capacity)
+        case .InvalidCorrelationToken(let got, let reason):
+            self = .invalidCorrelationToken(got: got, reason: reason)
         }
     }
 }

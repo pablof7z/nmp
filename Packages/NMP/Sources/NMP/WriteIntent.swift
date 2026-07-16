@@ -84,17 +84,31 @@ public struct WriteIntent: Sendable, Hashable {
     public var durability: Durability
     public var routing: WriteRouting
     public var identityOverride: String?
+    /// Crash-safe client correlation token (#591). `nil` -- the default --
+    /// opts this write out of correlation entirely. A non-`nil` token is
+    /// validated by `nmp_grammar::CorrelationToken::new` on the way across
+    /// the boundary (non-empty, length-capped); a malformed token throws
+    /// `NMPError.invalidCorrelationToken` synchronously from `publish`,
+    /// before any engine call. A token that already resolves to a
+    /// previously-accepted receipt reattaches that existing obligation
+    /// instead of enqueuing a second write -- no body comparison against
+    /// `payload`. See `NMPEngine.reattachReceipt(correlation:)` for the
+    /// door that recovers a receipt after a crash that happened BEFORE the
+    /// app could durably persist the id `publish` returned.
+    public var correlation: String?
 
     public init(
         payload: WritePayload,
         durability: Durability,
         routing: WriteRouting,
-        identityOverride: String? = nil
+        identityOverride: String? = nil,
+        correlation: String? = nil
     ) {
         self.payload = payload
         self.durability = durability
         self.routing = routing
         self.identityOverride = identityOverride
+        self.correlation = correlation
     }
 
     func toFfi() -> FfiWriteIntent {
@@ -102,7 +116,8 @@ public struct WriteIntent: Sendable, Hashable {
             payload: payload.toFfi(),
             durability: durability.toFfi(),
             routing: routing.toFfi(),
-            identityOverride: identityOverride
+            identityOverride: identityOverride,
+            correlation: correlation
         )
     }
 }

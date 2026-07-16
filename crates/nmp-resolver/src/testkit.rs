@@ -269,5 +269,6 @@ pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
         routing: "author-outbox".to_string(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
+        correlation: None,
     }
 }

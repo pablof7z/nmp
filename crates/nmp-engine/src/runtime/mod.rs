@@ -548,12 +548,16 @@ pub struct ReceiptStream {
     pub statuses: Receiver<WriteStatus>,
 }
 
-/// Result of looking up retained receipt facts by stable id.
+/// Result of looking up retained receipt facts by stable id (or, #591, by a
+/// caller correlation token translated to one).
 pub enum ReceiptReattachment {
     /// The observer is attached and this channel is already primed with all
-    /// readable retained facts.
-    Attached(Receiver<WriteStatus>),
-    /// No retained receipt with this id exists.
+    /// readable retained facts. Carries the resolved [`ReceiptId`] -- for
+    /// [`Handle::reattach_receipt`] this is simply the caller's own input
+    /// echoed back; for [`Handle::reattach_by_correlation`] (#591) it is the
+    /// id the token resolved to, which the caller could not otherwise learn.
+    Attached(ReceiptId, Receiver<WriteStatus>),
+    /// No retained receipt with this id (or token) exists.
     NotFound,
     /// The id is retained, but durable receipt or attempt evidence is corrupt
     /// or unreadable. The obligation remains untouched and nothing publishes.
@@ -677,6 +681,14 @@ enum Cmd {
         id: ReceiptId,
         sink: Box<dyn ReceiptSink>,
         reply: Sender<ReattachOutcome>,
+    },
+    /// #591: reattach by caller correlation token instead of a `ReceiptId`
+    /// -- the door a client uses after a crash that happened before it
+    /// could durably record the id `publish_tracked` returned.
+    ReattachByCorrelation {
+        token: String,
+        sink: Box<dyn ReceiptSink>,
+        reply: Sender<(ReattachOutcome, Option<ReceiptId>)>,
     },
     CancelWrite {
         id: ReceiptId,
@@ -2594,6 +2606,7 @@ mod relay_worker_reconciliation_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(NullReceiptSink),
         ));
@@ -3373,6 +3386,9 @@ fn engine_loop<S, D>(
                 Cmd::ReattachReceipt { id, sink, reply } => {
                     let _ = reply.send(core.reattach_receipt(id, sink));
                 }
+                Cmd::ReattachByCorrelation { token, sink, reply } => {
+                    let _ = reply.send(core.reattach_by_correlation(token, sink));
+                }
                 Cmd::ObserveDiagnostics { reply } => {
                     let id = next_diag_id;
                     next_diag_id = next_diag_id.saturating_add(1);
@@ -3796,6 +3812,10 @@ fn engine_loop<S, D>(
             }
             Cmd::ReattachReceipt { id, sink, reply } => {
                 let found = core.reattach_receipt(id, sink);
+                let _ = reply.send(found);
+            }
+            Cmd::ReattachByCorrelation { token, sink, reply } => {
+                let found = core.reattach_by_correlation(token, sink);
                 let _ = reply.send(found);
             }
             Cmd::CancelWrite { id, reply } => {
@@ -5512,9 +5532,43 @@ impl Handle {
             .recv()
             .expect("nmp-engine: engine dropped reattach reply")
         {
-            ReattachOutcome::Attached => ReceiptReattachment::Attached(rx),
+            ReattachOutcome::Attached => ReceiptReattachment::Attached(id, rx),
             ReattachOutcome::NotFound => ReceiptReattachment::NotFound,
             ReattachOutcome::RetainedButUnreadable => ReceiptReattachment::RetainedButUnreadable,
+        }
+    }
+
+    /// #591: recover a receipt after a crash that happened BEFORE the app
+    /// could durably record the `ReceiptId` `publish_tracked` returned --
+    /// looked up by the caller's own correlation token instead. Otherwise
+    /// identical to [`Self::reattach_receipt`] (same replay/attach
+    /// behavior, same `ReceiptReattachment` outcome vocabulary) -- the
+    /// resolved id the caller could not otherwise learn rides along on
+    /// `Attached`.
+    pub fn reattach_by_correlation(&self, token: String) -> ReceiptReattachment {
+        let (tx, rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ReattachByCorrelation {
+                token,
+                sink: Box::new(ChannelReceiptSink(tx)),
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: reattach called after shutdown");
+        match reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped reattach reply")
+        {
+            (ReattachOutcome::Attached, Some(id)) => ReceiptReattachment::Attached(id, rx),
+            (ReattachOutcome::Attached, None) => {
+                unreachable!(
+                    "EngineCore::reattach_by_correlation always resolves an id when Attached"
+                )
+            }
+            (ReattachOutcome::NotFound, _) => ReceiptReattachment::NotFound,
+            (ReattachOutcome::RetainedButUnreadable, _) => {
+                ReceiptReattachment::RetainedButUnreadable
+            }
         }
     }
 

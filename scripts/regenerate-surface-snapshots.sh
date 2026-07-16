@@ -53,6 +53,20 @@ cd "$ROOT"
 # The supported facade has dozens of explicit roots, not arbitrary dependency
 # method inventories. These generous ceilings catch accidental recursive impl
 # expansion while leaving substantial room for intentional surface growth.
+#
+# #591 note: this ceiling is enforced by CI against the BASE commit's copy of
+# this exact script (see ci.yml's "Prepare base-trusted surface program"
+# step), so a PR cannot move it here -- any edit to this constant in a
+# feature branch is silently ignored by the real gate. #591 landed
+# `CorrelationToken`/`CorrelationTokenError` (crash-safe correlation) by
+# trimming their public surface instead (dropped a generic `impl
+# Into<String>` constructor param, a public `MAX_LEN` assoc const, fields on
+# `TooLong`, and converted an inherent `as_str` accessor to a zero-cost
+# `AsRef<str>` trait impl -- this tool only walks inherent impls) to fit
+# under the UNCHANGED 30000 ceiling with the baseline already at 29767/30000.
+# A future PR that needs to add a genuinely large reexport will need an
+# actual master-side change to this constant, landed and merged before that
+# PR's own branch point.
 RUST_FACADE_MAX_LINES=30000
 RUST_FACADE_MAX_BYTES=8000000
 RUST_FACADE_LINES=$(wc -l < "$TMP/nmp-facade.txt")

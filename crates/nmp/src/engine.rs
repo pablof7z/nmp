@@ -532,6 +532,17 @@ impl Engine {
         self.with_handle(|handle| handle.reattach_receipt(id))
     }
 
+    /// #591: recover a receipt after a crash that happened BEFORE the app
+    /// could durably persist the `ReceiptId` `publish_tracked` returned --
+    /// looked up by the caller's own crash-safe correlation token instead.
+    /// Otherwise identical to [`Self::reattach_receipt`].
+    pub fn reattach_by_correlation(
+        &self,
+        token: String,
+    ) -> Result<ReceiptReattachment, EngineError> {
+        self.with_handle(|handle| handle.reattach_by_correlation(token))
+    }
+
     /// Explicitly cancel one accepted unsigned write by its stable receipt
     /// id. [`CancelWriteOutcome::Cancelled`] means the durable
     /// [`WriteStatus::Cancelled`] fact committed; signed or otherwise terminal
@@ -1070,6 +1081,7 @@ mod tests {
                 durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             })
             .expect("accept write");
         assert_eq!(
@@ -1094,7 +1106,8 @@ mod tests {
         assert!(saw_cancelled);
         assert_eq!(engine.cancel(receipt.id), Ok(CancelWriteOutcome::Cancelled));
 
-        let ReceiptReattachment::Attached(replay) = engine.reattach_receipt(receipt.id).unwrap()
+        let ReceiptReattachment::Attached(_id, replay) =
+            engine.reattach_receipt(receipt.id).unwrap()
         else {
             panic!("cancelled receipt must remain reattachable")
         };
@@ -1130,13 +1143,15 @@ mod tests {
                 durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             })
             .expect("accept write");
         let receipt_id = receipt.id;
         assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
         drop(receipt.statuses);
 
-        let ReceiptReattachment::Attached(replay) = engine.reattach_receipt(receipt_id).unwrap()
+        let ReceiptReattachment::Attached(_id, replay) =
+            engine.reattach_receipt(receipt_id).unwrap()
         else {
             panic!("dropping the observer must not remove the receipt")
         };
@@ -1478,6 +1493,7 @@ mod tests {
                     durability: nmp_grammar::Durability::Durable,
                     routing: nmp_grammar::WriteRouting::AuthorOutbox,
                     identity_override: None,
+                    correlation: None,
                 })
                 .expect("write must be accepted")
         };
@@ -2024,6 +2040,7 @@ mod tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             })
             .expect("engine is open");
 
@@ -2080,6 +2097,7 @@ mod tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: Some(pk_b),
+                correlation: None,
             })
             .expect("engine is open");
 
@@ -2165,6 +2183,7 @@ mod tests {
             durability: Durability::Ephemeral,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         });
         assert_eq!(publish_result.err(), Some(EngineError::EngineClosed));
     }

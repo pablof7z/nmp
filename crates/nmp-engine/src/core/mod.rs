@@ -2767,6 +2767,31 @@ impl<S: EventStore> EngineCore<S> {
         ReattachOutcome::Attached
     }
 
+    /// #591: recover a receipt id from a caller-generated correlation token
+    /// -- the door a client uses after a crash that happened BEFORE it
+    /// could durably record the `Receipt.id` `publish_tracked` returned.
+    /// A resolved token is translated to its receipt id and handed straight
+    /// to [`Self::reattach_receipt`], reusing its EXACT replay/attach
+    /// behavior unchanged: no new outcome enum, no separate machinery. The
+    /// resolved [`ReceiptId`] is returned alongside the outcome (`Some` iff
+    /// `Attached`) purely so the caller -- who by construction does NOT
+    /// already know it, unlike a plain [`Self::reattach_receipt`] caller --
+    /// can learn it.
+    pub fn reattach_by_correlation(
+        &mut self,
+        token: String,
+        sink: Box<dyn ReceiptSink>,
+    ) -> (ReattachOutcome, Option<ReceiptId>) {
+        match self.resolver.store().lookup_correlation(&token) {
+            Ok(Some(receipt_id)) => {
+                let id = ReceiptId(receipt_id);
+                (self.reattach_receipt(id, sink), Some(id))
+            }
+            Ok(None) => (ReattachOutcome::NotFound, None),
+            Err(_) => (ReattachOutcome::RetainedButUnreadable, None),
+        }
+    }
+
     /// Read-only access to the resolver's current demand (test/diagnostic
     /// convenience — the whole point of a headlessly-testable reducer is
     /// that its state can be inspected directly). Returns the TRUE
@@ -3863,7 +3888,35 @@ impl<S: EventStore> EngineCore<S> {
             durability,
             routing,
             identity_override,
+            correlation,
         } = intent;
+
+        // #591: a token that already resolves to a previously-accepted
+        // receipt REATTACHES that existing obligation -- this call enqueues
+        // no second write, and `payload`/`durability`/`routing`/
+        // `identity_override` above are discarded entirely without so much
+        // as a body comparison (a legitimately re-composed draft with a
+        // fresh `created_at` is the exact scenario the token exists for).
+        // The lookup runs inside this single-threaded reducer step, before
+        // any store mutation for THIS call -- TOCTOU-free by construction
+        // (no concurrent `&mut self` call can be interleaved).
+        if let Some(token) = &correlation {
+            match self.resolver.store().lookup_correlation(token.as_ref()) {
+                Ok(Some(existing_receipt_id)) => {
+                    let receipt_id = ReceiptId(existing_receipt_id);
+                    self.reattach_receipt(receipt_id, sink);
+                    // `reattach_receipt` already fed `sink` synchronously
+                    // (or dropped it, for the same rare corrupt/quarantined
+                    // cases the ordinary by-id reattach door tolerates);
+                    // this effect exists only so `publish_result` can
+                    // extract the EXISTING receipt id for the synchronous
+                    // `publish_tracked` reply.
+                    return vec![Effect::EmitReceipt(receipt_id, WriteStatus::Accepted)];
+                }
+                Ok(None) => {}
+                Err(err) => return self.fail_unaccepted(sink, err.to_string()),
+            }
+        }
 
         let replaceable_base = match &payload {
             WritePayload::UnsignedReplaceableEdit { expected_base, .. } => Some(*expected_base),
@@ -3991,6 +4044,7 @@ impl<S: EventStore> EngineCore<S> {
                     WritePayload::Signed(_) => IntentSigState::Pending,
                 },
                 accepted_at: self.clock,
+                correlation,
             };
             let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept)
             {
@@ -9022,6 +9076,7 @@ mod receipt_allocator_tests {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         }
     }
 
@@ -9072,6 +9127,7 @@ mod receipt_allocator_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(sink.clone()),
         ));
@@ -9178,6 +9234,7 @@ mod receipt_allocator_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -9662,6 +9719,7 @@ mod affected_handle_invalidation_tests {
             durability: Durability::Durable,
             routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
             identity_override: None,
+            correlation: None,
         }
     }
 
@@ -9824,6 +9882,7 @@ mod affected_handle_invalidation_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -9912,6 +9971,7 @@ mod affected_handle_invalidation_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -9998,6 +10058,7 @@ mod affected_handle_invalidation_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -10080,6 +10141,7 @@ mod affected_handle_invalidation_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -11692,6 +11754,7 @@ mod history_mutation_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );

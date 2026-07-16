@@ -144,4 +144,35 @@ extension NMPEngine {
         }
         return mapReceiptReattachment(result, id: id, status: stream)
     }
+
+    /// #591: recover a receipt after a crash that happened BEFORE the app
+    /// could durably persist the receipt id `publish`/`publishComposed`
+    /// returned -- looked up by the caller's own crash-safe correlation
+    /// token instead. Otherwise identical to `reattachReceipt(id:)`.
+    public func reattachReceipt(correlation: String) throws -> ReceiptReattachment {
+        var continuation: AsyncStream<WriteStatus>.Continuation!
+        let stream = AsyncStream<WriteStatus> { continuation = $0 }
+        let bridge = ReceiptBridge(continuation: continuation)
+        let result = try nmpRethrowing {
+            try ffi.reattachByCorrelation(correlation: correlation, observer: bridge)
+        }
+        if result.outcome != .attached {
+            continuation.finish()
+        }
+        guard let id = result.receiptId else {
+            // `outcome` is `.notFound`/`.retainedButUnreadable` -- no id was
+            // ever resolved, so there is nothing to build a `Receipt` from.
+            switch result.outcome {
+            case .attached:
+                preconditionFailure(
+                    "FfiCorrelationReattachment.receiptId must be present when outcome is .attached"
+                )
+            case .notFound:
+                return .notFound
+            case .retainedButUnreadable:
+                return .retainedButUnreadable
+            }
+        }
+        return mapReceiptReattachment(result.outcome, id: id, status: stream)
+    }
 }

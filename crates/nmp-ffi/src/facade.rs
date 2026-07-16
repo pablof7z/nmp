@@ -43,10 +43,10 @@ use crate::nip02::{
 };
 use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiDemand, FfiFilter, FfiReceiptReattachment,
-    FfiRelayInformation, FfiRelayInformationCachePolicy, FfiRelayInformationDocument,
-    FfiRelayInformationFreshness, FfiRelayInformationLimitations, FfiSignEventRequest, FfiWindow,
-    FfiWriteIntent,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDemand, FfiFilter,
+    FfiReceiptReattachment, FfiRelayInformation, FfiRelayInformationCachePolicy,
+    FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
+    FfiSignEventRequest, FfiWindow, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -177,7 +177,7 @@ mod thread_spawn_tests {
 
 fn reattachment_to_ffi(value: &ReceiptReattachment) -> FfiReceiptReattachment {
     match value {
-        ReceiptReattachment::Attached(_) => FfiReceiptReattachment::Attached,
+        ReceiptReattachment::Attached(_, _) => FfiReceiptReattachment::Attached,
         ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
         ReceiptReattachment::RetainedButUnreadable => FfiReceiptReattachment::RetainedButUnreadable,
     }
@@ -817,7 +817,7 @@ impl NmpEngine {
         let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
         let ffi_result = reattachment_to_ffi(&result);
         match result {
-            ReceiptReattachment::Attached(receipt_rx) => {
+            ReceiptReattachment::Attached(_id, receipt_rx) => {
                 starter.run(move || {
                     while let Ok(status) = receipt_rx.recv() {
                         observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
@@ -830,6 +830,48 @@ impl NmpEngine {
             }
         }
         Ok(ffi_result)
+    }
+
+    /// #591: recover a receipt after a crash that happened BEFORE the app
+    /// could durably persist the receipt id `publish`/`publish_composed`
+    /// returned -- looked up by the caller's own crash-safe correlation
+    /// token instead. Otherwise identical to [`Self::reattach_receipt`],
+    /// except the caller cannot already know the receipt id (that is
+    /// exactly what a token recovers) -- `FfiCorrelationReattachment.
+    /// receipt_id` carries it back, `Some` iff `outcome == Attached`.
+    pub fn reattach_by_correlation(
+        &self,
+        correlation: String,
+        observer: Box<dyn ReceiptObserver>,
+    ) -> Result<FfiCorrelationReattachment, FfiError> {
+        let reservation = self
+            .engine
+            .reserve_native_task("reattached-receipt-observer")?;
+        let task_cancel = self.engine.native_task_cancel()?;
+        let starter = start_native_bridge(reservation, task_cancel, "reattached-receipt-observer")?;
+        let result = self.engine.reattach_by_correlation(correlation)?;
+        let ffi_result = reattachment_to_ffi(&result);
+        let receipt_id = match &result {
+            ReceiptReattachment::Attached(id, _) => Some(id.0),
+            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => None,
+        };
+        match result {
+            ReceiptReattachment::Attached(_id, receipt_rx) => {
+                starter.run(move || {
+                    while let Ok(status) = receipt_rx.recv() {
+                        observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
+                    }
+                    observer.on_closed();
+                });
+            }
+            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {
+                drop(starter);
+            }
+        }
+        Ok(FfiCorrelationReattachment {
+            outcome: ffi_result,
+            receipt_id,
+        })
     }
 
     /// Explicitly cancel one accepted unsigned write. A successful outcome
@@ -1515,7 +1557,7 @@ mod tests {
     fn reattachment_mapping_is_exhaustive_and_distinct() {
         let (_tx, rx) = mpsc::channel();
         assert_eq!(
-            reattachment_to_ffi(&ReceiptReattachment::Attached(rx)),
+            reattachment_to_ffi(&ReceiptReattachment::Attached(nmp::ReceiptId(1), rx)),
             FfiReceiptReattachment::Attached
         );
         assert_eq!(
@@ -2005,6 +2047,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -2063,6 +2106,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: Some(overridden.public_key().to_hex()),
+            correlation: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -2113,6 +2157,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
         let (tx, rx) = mpsc::channel();
         let receipt = engine
@@ -2324,6 +2369,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -2441,6 +2487,7 @@ mod tests {
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             };
             let (tx, rx) = mpsc::channel();
             let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
@@ -2640,6 +2687,7 @@ mod tests {
                     durability: nmp::Durability::Durable,
                     routing: nmp::WriteRouting::AuthorOutbox,
                     identity_override: None,
+                    correlation: None,
                 })
                 .expect("local durable acceptance must succeed");
             if index % 2 == 0 {
@@ -2741,6 +2789,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
 
         let (status_tx, status_rx) = mpsc::channel();
