@@ -53,7 +53,7 @@ cd "$ROOT"
 # The supported facade has dozens of explicit roots, not arbitrary dependency
 # method inventories. These generous ceilings catch accidental recursive impl
 # expansion while leaving substantial room for intentional surface growth.
-# 2026-07-16 (#8 Wave 2, PR #PRNUM): raised 30000 -> 31000 for the NIP-42
+# 2026-07-16 (#8 Wave 2, PR #541): raised 30000 -> 31000 for the NIP-42
 # auth-diagnostics facade surface (AuthDiagnosticsSnapshot / AuthDiagnosticsPhase
 # / AuthPhase variants / DiagnosticsSnapshot.auth_sessions), which is
 # adversarially-reviewed intended growth (+~399 lines, no over-exposure).
