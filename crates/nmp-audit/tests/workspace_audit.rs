@@ -14,7 +14,10 @@ use nmp_ownership::{ClaimSet, KindClaim, KindScope, ModuleId};
 /// kinds (routing-and-ownership.md §3.2.1 -- contextual publication is not
 /// kind ownership).
 enum Enrollment {
-    Claims(&'static [KindClaim]),
+    /// Owned rows rather than `&'static [KindClaim]`: enrolled crates
+    /// export either a static table (`nmp-nip02`/`nmp-nip51`) or an owned
+    /// `Vec` (`nmp-blossom`, #545), and the audit folds both identically.
+    Claims(Vec<KindClaim>),
     DeclaresNoClaims { rationale: &'static str },
 }
 
@@ -24,8 +27,8 @@ enum Enrollment {
 /// the two sets are exactly equal, in both directions.
 fn registry() -> Vec<(&'static str, Enrollment)> {
     vec![
-        ("nmp-nip02", Enrollment::Claims(nmp_nip02::claims())),
-        ("nmp-nip51", Enrollment::Claims(nmp_nip51::claims())),
+        ("nmp-nip02", Enrollment::Claims(nmp_nip02::claims().to_vec())),
+        ("nmp-nip51", Enrollment::Claims(nmp_nip51::claims().to_vec())),
         (
             "nmp-nip29",
             Enrollment::DeclaresNoClaims {
@@ -34,17 +37,18 @@ fn registry() -> Vec<(&'static str, Enrollment)> {
                     exports no claims() -- see its lib.rs ownership_audit module",
             },
         ),
+        ("nmp-blossom", Enrollment::Claims(nmp_blossom::claims())),
     ]
 }
 
 /// Every `KindClaim` contributed by an enrolled `Claims(...)` entry,
 /// flattened across the whole registry. `DeclaresNoClaims` entries
 /// contribute nothing, by definition.
-fn all_registered_claims() -> Vec<&'static KindClaim> {
+fn all_registered_claims() -> Vec<KindClaim> {
     registry()
         .into_iter()
         .filter_map(|(_, enrollment)| match enrollment {
-            Enrollment::Claims(claims) => Some(claims.iter()),
+            Enrollment::Claims(claims) => Some(claims),
             Enrollment::DeclaresNoClaims { .. } => None,
         })
         .flatten()
@@ -183,8 +187,7 @@ fn declares_no_claims_entries_carry_a_nonempty_rationale() {
 /// including modules no app currently links.
 #[test]
 fn workspace_claims_fold_without_exclusive_overlap() {
-    let claims: Vec<KindClaim> = all_registered_claims().into_iter().cloned().collect();
-    if let Err(overlap) = ClaimSet::build(claims) {
+    if let Err(overlap) = ClaimSet::build(all_registered_claims()) {
         panic!("{overlap}");
     }
 }
@@ -194,7 +197,7 @@ fn workspace_claims_fold_without_exclusive_overlap() {
 /// shared/non-exclusive claim is drift, §4.3).
 #[test]
 fn route_authority_rides_exclusive_claims() {
-    for claim in all_registered_claims() {
+    for claim in &all_registered_claims() {
         if claim.route_policy.is_some() {
             assert!(
                 claim.exclusive,
@@ -213,7 +216,8 @@ fn route_authority_rides_exclusive_claims() {
 /// directions.
 #[test]
 fn discovery_kind_claims_are_consciously_acknowledged() {
-    let violations = discovery_ack_violations(all_registered_claims());
+    let claims = all_registered_claims();
+    let violations = discovery_ack_violations(&claims);
     assert!(
         violations.is_empty(),
         "discovery_ack mismatch for: {}",
@@ -230,11 +234,11 @@ fn discovery_kind_claims_are_consciously_acknowledged() {
 
 // --- Fixture falsifiers (routing-build-plan.md §4.3/§4.4) ---
 //
-// Zero real module crates exist beyond nip02/nip51/nip29 at this milestone,
-// so the falsifiers below drive the SAME mechanisms (`ClaimSet::build`,
-// `discovery_ack_violations`) against synthetic `fixture-*` module ids, per
-// build-plan §4.4: "do not fake a real module -- the fixtures live in the
-// audit crate's test tree."
+// Zero real module crates exist beyond nip02/nip51/nip29/blossom at this
+// milestone, so the falsifiers below drive the SAME mechanisms
+// (`ClaimSet::build`, `discovery_ack_violations`) against synthetic
+// `fixture-*` module ids, per build-plan §4.4: "do not fake a real module --
+// the fixtures live in the audit crate's test tree."
 
 #[test]
 fn two_exclusive_claims_on_one_kind_fail_the_fold() {

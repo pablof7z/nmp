@@ -22,6 +22,8 @@ members = [
     "crates/nmp-nip51",
     "crates/nmp-nip02",
     "crates/nmp-nip29",
+    # Blossom (BUD-01/02/11) blob-upload core (#545, epic #216 T15-A-BLOSSOM).
+    "crates/nmp-blossom",
     "crates/nmp-content",
     "crates/nmp-test-support",
 ]
@@ -59,6 +61,7 @@ nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
+nmp-blossom = { path = "crates/nmp-blossom" }
 nmp-content = { path = "crates/nmp-content" }
 nmp-test-support = { path = "crates/nmp-test-support" }
 proptest = "1"
@@ -66,3 +69,6 @@ uniffi = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12.28", default-features = false, features = ["hickory-dns", "rustls-tls-webpki-roots"] }
+# BUD-11 `Authorization: Nostr <base64url-no-padding(event JSON)>` encoding
+# (#545); already at 0.22.1 in Cargo.lock via transitive resolution.
+base64 = "0.22"
