@@ -1612,6 +1612,7 @@ dependencies = [
 name = "nmp-audit"
 version = "0.1.0"
 dependencies = [
+ "nmp-blossom",
  "nmp-nip02",
  "nmp-nip29",
  "nmp-nip51",
@@ -1635,6 +1636,21 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "nmp-blossom"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hickory-resolver",
+ "nmp-ownership",
+ "nmp-transport",
+ "nostr 0.44.4",
+ "reqwest",
+ "serde",
  "serde_json",
  "tokio",
 ]
