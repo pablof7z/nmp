@@ -14,7 +14,7 @@
 #   contain, and fails when one side has concepts the other lacks entirely.
 #
 # HOW IT DECIDES "PUBLIC SURFACE" (read this before trusting a red run)
-#   Rust side (crates/nmp-ffi/src/*.rs):
+#   Rust side (every .rs file under crates/nmp-ffi/src/, recursively):
 #     - Every `#[derive(... Object|Enum|Record|Error ...)]` (uniffi-prefixed
 #       or bare, e.g. `use uniffi::{Enum, Record}; #[derive(.., Enum)]`)
 #       immediately followed by a `struct`/`enum` declaration contributes
@@ -38,9 +38,25 @@
 #       feature can legitimately live in a separate Swift target) and every
 #       `.kt` file under `Packages/NMPKotlin/src/main/kotlin/**` is
 #       tokenized the same way into a word set.
+#     - The generated UniFFI bindings (`Packages/NMP/Sources/NMPFFI/**` and
+#       `Packages/NMPKotlin/src/main/kotlin/uniffi/**`) are EXCLUDED. They
+#       are gitignored build artifacts that by construction contain every
+#       Rust FFI symbol name; a locally-built tree that included them would
+#       make this whole check vacuously green (CI checkouts never contain
+#       them, so including them would also make local runs disagree with CI).
+#       Only the hand-written SDK surface counts as "present".
 #
 #   A Rust concept word that does not appear anywhere in the Swift word set
 #   (or the Kotlin word set) is reported as missing on that side.
+#
+# ALLOWLIST (documented per-platform modeling exceptions)
+#   `scripts/check-sdk-parity-allowlist.txt` may suppress exactly one concept
+#   word on exactly one side per entry, each with a one-line justification.
+#   Suppressed words are still printed (as allowlisted) so they stay visible;
+#   entries that currently suppress nothing are reported so they cannot rot
+#   silently (an entry may deliberately outlive incidental word presence --
+#   its justification line says which). A malformed allowlist line is a hard
+#   error -- the escape hatch stays narrow.
 #
 # KNOWN LIMITATIONS (this is a heuristic text scan, not semantic diffing)
 #   - Word-level, not symbol-level: it proves a *concept* (e.g. "following")
@@ -67,8 +83,12 @@
 #   scripts/check-sdk-parity.sh --quiet    # summary counts only
 #
 # EXIT STATUS
-#   0  Rust FFI concept words are all represented in both Swift and Kotlin.
-#   1  At least one concept word is missing from Swift and/or Kotlin.
+#   0  Rust FFI concept words are all represented in both Swift and Kotlin
+#      (allowlisted exceptions excluded).
+#   1  At least one non-allowlisted concept word is missing from Swift and/or
+#      Kotlin.
+#   2  The script itself could not run soundly (layout moved, extraction
+#      broke, malformed allowlist).
 #
 set -u
 
@@ -86,6 +106,12 @@ fi
 FFI_DIR="$REPO_ROOT/crates/nmp-ffi/src"
 SWIFT_DIR="$REPO_ROOT/Packages/NMP/Sources"
 KOTLIN_DIR="$REPO_ROOT/Packages/NMPKotlin/src/main/kotlin"
+ALLOWLIST_FILE="$REPO_ROOT/scripts/check-sdk-parity-allowlist.txt"
+
+# Generated UniFFI bindings: gitignored build artifacts that contain every FFI
+# symbol by construction. Never count them as SDK surface (see header).
+SWIFT_GENERATED_EXCLUDE="*/Sources/NMPFFI/*"
+KOTLIN_GENERATED_EXCLUDE="*/kotlin/uniffi/*"
 
 for d in "$FFI_DIR" "$SWIFT_DIR" "$KOTLIN_DIR"; do
   if [[ ! -d "$d" ]]; then
@@ -117,12 +143,21 @@ tokenize() {
 }
 
 # --- 1. Rust exported type names: Object/Enum/Record/Error derives ---------
+# Recursive on purpose: if FFI exports move into src/ subdirectories, a
+# top-level-only glob would silently drop them and this check would go
+# vacuously green.
+find "$FFI_DIR" -type f -name '*.rs' | LC_ALL=C sort > "$tmp/ffi_files.txt"
+if [[ ! -s "$tmp/ffi_files.txt" ]]; then
+  echo "check-sdk-parity: found zero .rs files under $FFI_DIR -- the repo layout has moved; update FFI_DIR at the top of this script." >&2
+  exit 2
+fi
+
 : > "$tmp/rust_types.txt"
-for f in "$FFI_DIR"/*.rs; do
+while IFS= read -r f; do
   grep -A1 -E '#\[derive\(.*\b(Object|Enum|Record|Error)\b.*\)\]' "$f" 2>/dev/null \
     | grep -E '^(pub )?(struct|enum) ' \
     | sed -E 's/^(pub )?(struct|enum)[ \t]+([A-Za-z0-9_]+).*/\3/' >> "$tmp/rust_types.txt"
-done
+done < "$tmp/ffi_files.txt"
 
 # --- 2. Rust exported fn/method names: state machine over export blocks ---
 # An export block is opened by a `#[uniffi::export...]` attribute line and
@@ -131,7 +166,7 @@ done
 # while "inside" such a block is captured, whether it is a free function, an
 # impl method, or a callback-interface trait method.
 : > "$tmp/rust_fns.txt"
-for f in "$FFI_DIR"/*.rs; do
+while IFS= read -r f; do
   capturing=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" =~ ^#\[uniffi::export ]]; then
@@ -148,7 +183,7 @@ for f in "$FFI_DIR"/*.rs; do
       fi
     fi
   done < "$f"
-done
+done < "$tmp/ffi_files.txt"
 
 cat "$tmp/rust_types.txt" "$tmp/rust_fns.txt" | sort -u > "$tmp/rust_symbols.txt"
 
@@ -171,18 +206,55 @@ cut -f1 "$tmp/rust_word_symbol_sorted.txt" | sort -u > "$tmp/rust_words.txt"
 
 # --- 3. Swift / Kotlin word sets -------------------------------------------
 extract_words() {
-  local dir="$1" ext="$2"
-  find "$dir" -type f -name "*.$ext" -print0 2>/dev/null \
+  local dir="$1" ext="$2" exclude="$3"
+  find "$dir" -type f -name "*.$ext" -not -path "$exclude" -print0 2>/dev/null \
     | xargs -0 grep -hEo '[A-Za-z_][A-Za-z0-9_]*' 2>/dev/null \
     | tokenize \
     | sort -u
 }
 
-extract_words "$SWIFT_DIR" swift > "$tmp/swift_words.txt"
-extract_words "$KOTLIN_DIR" kt > "$tmp/kotlin_words.txt"
+extract_words "$SWIFT_DIR" swift "$SWIFT_GENERATED_EXCLUDE" > "$tmp/swift_words.txt"
+extract_words "$KOTLIN_DIR" kt "$KOTLIN_GENERATED_EXCLUDE" > "$tmp/kotlin_words.txt"
 
-comm -23 "$tmp/rust_words.txt" "$tmp/swift_words.txt" > "$tmp/missing_swift.txt"
-comm -23 "$tmp/rust_words.txt" "$tmp/kotlin_words.txt" > "$tmp/missing_kotlin.txt"
+for side in swift kotlin; do
+  if [[ ! -s "$tmp/${side}_words.txt" ]]; then
+    echo "check-sdk-parity: extracted zero $side identifier words -- the repo layout or exclusion pattern likely broke. Treating this as a hard failure rather than reporting everything missing." >&2
+    exit 2
+  fi
+done
+
+comm -23 "$tmp/rust_words.txt" "$tmp/swift_words.txt" > "$tmp/missing_swift_raw.txt"
+comm -23 "$tmp/rust_words.txt" "$tmp/kotlin_words.txt" > "$tmp/missing_kotlin_raw.txt"
+
+# --- 4. Allowlist: documented per-platform modeling exceptions -------------
+: > "$tmp/allow_swift.txt"
+: > "$tmp/allow_kotlin.txt"
+if [[ -f "$ALLOWLIST_FILE" ]]; then
+  lineno=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
+    [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
+    word=$(printf '%s\n' "$line" | awk '{print $1}')
+    side=$(printf '%s\n' "$line" | awk '{print $2}')
+    just=$(printf '%s\n' "$line" | awk '{$1=""; $2=""; sub(/^  */,""); print}')
+    if [[ ! "$word" =~ ^[a-z0-9]{3,}$ || ! "$side" =~ ^(swift|kotlin)$ || -z "${just//[[:space:]]/}" ]]; then
+      echo "check-sdk-parity: malformed allowlist line $lineno in $ALLOWLIST_FILE (need: <lowercase-word> <swift|kotlin> <justification>): $line" >&2
+      exit 2
+    fi
+    printf '%s\n' "$word" >> "$tmp/allow_$side.txt"
+  done < "$ALLOWLIST_FILE"
+  sort -u "$tmp/allow_swift.txt" -o "$tmp/allow_swift.txt"
+  sort -u "$tmp/allow_kotlin.txt" -o "$tmp/allow_kotlin.txt"
+fi
+
+# Split each raw missing list into allowlisted (visible, non-failing) and
+# real (failing); report allowlist entries that suppress nothing as stale.
+comm -23 "$tmp/missing_swift_raw.txt" "$tmp/allow_swift.txt" > "$tmp/missing_swift.txt"
+comm -12 "$tmp/missing_swift_raw.txt" "$tmp/allow_swift.txt" > "$tmp/allowed_swift.txt"
+comm -13 "$tmp/missing_swift_raw.txt" "$tmp/allow_swift.txt" > "$tmp/stale_allow_swift.txt"
+comm -23 "$tmp/missing_kotlin_raw.txt" "$tmp/allow_kotlin.txt" > "$tmp/missing_kotlin.txt"
+comm -12 "$tmp/missing_kotlin_raw.txt" "$tmp/allow_kotlin.txt" > "$tmp/allowed_kotlin.txt"
+comm -13 "$tmp/missing_kotlin_raw.txt" "$tmp/allow_kotlin.txt" > "$tmp/stale_allow_kotlin.txt"
 
 missing_swift_count=$(wc -l < "$tmp/missing_swift.txt" | tr -d ' ')
 missing_kotlin_count=$(wc -l < "$tmp/missing_kotlin.txt" | tr -d ' ')
@@ -196,24 +268,46 @@ report_side() {
   done < "$file"
 }
 
+report_allowlisted() {
+  local label="$1" file="$2"
+  if [[ -s "$file" ]]; then
+    echo "ALLOWLISTED FOR $label ($(wc -l < "$file" | tr -d ' ') word(s) absent but documented in scripts/check-sdk-parity-allowlist.txt -- not failing):"
+    report_side "$label" "$file"
+    echo
+  fi
+}
+
+report_stale() {
+  local label="$1" file="$2"
+  if [[ -s "$file" ]]; then
+    echo "CURRENTLY-UNUSED ALLOWLIST ENTRIES FOR $label (word is present on that side today, so the entry suppresses nothing; check scripts/check-sdk-parity-allowlist.txt -- delete the entry if the SDK now genuinely covers the concept, keep it if the entry says presence is incidental):"
+    sed 's/^/  - /' "$file"
+    echo
+  fi
+}
+
 if [[ $QUIET -eq 0 ]]; then
   echo "check-sdk-parity: Rust FFI export concept words: $(wc -l < "$tmp/rust_words.txt" | tr -d ' ')"
   echo
   if [[ $missing_swift_count -gt 0 ]]; then
-    echo "MISSING FROM SWIFT ($missing_swift_count concept word(s) present in the Rust FFI surface but absent from Packages/NMP/Sources/**):"
+    echo "MISSING FROM SWIFT ($missing_swift_count concept word(s) present in the Rust FFI surface but absent from hand-written Packages/NMP/Sources/**):"
     report_side swift "$tmp/missing_swift.txt"
     echo
   fi
   if [[ $missing_kotlin_count -gt 0 ]]; then
-    echo "MISSING FROM KOTLIN ($missing_kotlin_count concept word(s) present in the Rust FFI surface but absent from Packages/NMPKotlin/src/main/kotlin/**):"
+    echo "MISSING FROM KOTLIN ($missing_kotlin_count concept word(s) present in the Rust FFI surface but absent from hand-written Packages/NMPKotlin/src/main/kotlin/**):"
     report_side kotlin "$tmp/missing_kotlin.txt"
     echo
   fi
+  report_allowlisted swift "$tmp/allowed_swift.txt"
+  report_allowlisted kotlin "$tmp/allowed_kotlin.txt"
+  report_stale swift "$tmp/stale_allow_swift.txt"
+  report_stale kotlin "$tmp/stale_allow_kotlin.txt"
   if [[ $missing_swift_count -eq 0 && $missing_kotlin_count -eq 0 ]]; then
-    echo "OK: no Rust FFI concept word is entirely absent from Swift or Kotlin."
+    echo "OK: no Rust FFI concept word is entirely absent from Swift or Kotlin (outside documented allowlist entries)."
   fi
 else
-  echo "check-sdk-parity: missing-from-swift=$missing_swift_count missing-from-kotlin=$missing_kotlin_count"
+  echo "check-sdk-parity: missing-from-swift=$missing_swift_count missing-from-kotlin=$missing_kotlin_count allowlisted-swift=$(wc -l < "$tmp/allowed_swift.txt" | tr -d ' ') allowlisted-kotlin=$(wc -l < "$tmp/allowed_kotlin.txt" | tr -d ' ')"
 fi
 
 if [[ $missing_swift_count -gt 0 || $missing_kotlin_count -gt 0 ]]; then

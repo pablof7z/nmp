@@ -1,10 +1,12 @@
 # Architecture review gates
 
-- **Status:** active PR-review checklist (gates 1-4) plus one mechanical CI
-  check (gate 5, `scripts/check-sdk-parity.sh`). Gate 6 (falsifier-honesty) is
-  documented here as a review gate only — **no CI mechanism for it exists
-  yet**; do not claim otherwise in a PR that references this file (that would
-  itself be the exact failure gate 6 exists to catch).
+- **Status:** active PR-review checklist (gates 1-4) plus two mechanical CI
+  checks: gate 5 (`scripts/check-sdk-parity.sh`, with the documented
+  exception list `scripts/check-sdk-parity-allowlist.txt`) and gate 6
+  (`scripts/check-falsifier-honesty.sh`). Both run as blocking jobs in
+  `.github/workflows/architecture-gates.yml` on every PR; making them
+  branch-protection *required* checks is a repo-admin setting the workflow
+  itself cannot grant.
 - **Origin:** issue #496, written after the #485 architectural sweep. History\*
   (issue #474/#484) was a parallel-noun modeling error caught by a manual
   architectural read before merge. `Engine::reset_persistent_store` (issue
@@ -32,9 +34,14 @@ to:
 
 Run gates 1-4 by eye against the diff of any PR that adds a public type,
 error variant, destructive verb, or a `bool` living next to a handle/executor.
-They are cheap — each is a single question with a yes/no trained "tell." Run
-gate 5 (`scripts/check-sdk-parity.sh`) locally (CI wiring is a follow-up; see gate 5).
-Gate 6 has no tooling yet; apply it by eye until it does.
+They are cheap — each is a single question with a yes/no trained "tell."
+Gates 5 and 6 run mechanically in CI (`.github/workflows/architecture-gates.yml`)
+and locally via `scripts/check-sdk-parity.sh` and
+`scripts/check-falsifier-honesty.sh <base> <head> [pr-body-file]`. The
+mechanical halves are floors, not replacements: gate 5 proves a concept is
+*mentioned*, not correctly projected; gate 6 proves a named mechanism
+*exists*, not that it falsifies anything. The by-eye halves of both gates
+still apply in review.
 
 ---
 
@@ -210,28 +217,46 @@ Run it locally with:
 scripts/check-sdk-parity.sh
 ```
 
-As of this writing (this PR), running it against `master` reports exactly the
-expected #493 gap — `follow` / `following` / `unfollow` / `relationship` /
-`availability` missing from Kotlin — plus one known-benign false positive
-(`decision`, from `FfiContentClaimDecision`/`FfiContentResolutionDecision`:
-Kotlin names a wrapper type containing that word, Swift pattern-matches the
-FFI enum cases directly without a renaming wrapper — same functionality,
-different naming convention, not a real gap). This is the exact worked
-example the script's own "known limitations" section describes; treat any
-report as a starting point for a human read, not an auto-fail oracle.
+Two decisions harden the raw scan into an enforceable check:
 
-Wiring this into CI is a **proposed follow-up**, not done in this PR:
-`.github/workflows/ci.yml` is a protected surface-governance file, so adding
-the job requires the owner-controlled governance bootstrap path, not an
-ordinary PR. When wired, it should run **advisory/non-blocking**
-(`continue-on-error: true`) — reporting on every PR without gating merges —
-until its false-positive rate has been observed across enough real PRs to
-decide whether to make it blocking. Until then, run
-`scripts/check-sdk-parity.sh` locally or in a manual check.
+- **Generated bindings are excluded.** The gitignored UniFFI outputs
+  (`Packages/NMP/Sources/NMPFFI/**`,
+  `Packages/NMPKotlin/src/main/kotlin/uniffi/**`) contain every Rust FFI
+  symbol by construction; a locally-built tree that counted them would make
+  the whole check vacuously green (and disagree with a clean CI checkout).
+  Only the hand-written SDK surface counts as "present."
+- **Intentional per-platform modeling differences use a documented
+  allowlist**, `scripts/check-sdk-parity-allowlist.txt`: one concept word on
+  one side per entry, each with a reviewable one-line justification, format
+  validated by the checker, suppressed words still printed, unused entries
+  reported. The founding entry is `decision`/swift: Swift consumes
+  `FfiContentClaimDecision` through exhaustive dot-shorthand `switch` arms in
+  `NMPContent/ContentSession.swift` and models the app-facing handle as
+  `NostrContentClaim`, so the type name never appears as a hand-written
+  Swift identifier, while Kotlin must `import` it by name — all four
+  decision arms are handled identically on both platforms. That is an
+  idiomatic naming difference, not a parity gap, so it is documented rather
+  than "fixed" with un-idiomatic Swift churn.
+
+Backtested against real history: at the commit before the #493 Kotlin
+Following port (`920033e^`), the check fails with exactly the five real
+missing-concept words (`follow`/`following`/`unfollow`/`relationship`/
+`availability`) while the allowlist correctly suppresses only `decision`; on
+post-#493 masters it passes. Treat any new report line as a starting point
+for a human read — the remedy is an SDK fix or, only for a genuinely
+intentional modeling difference, a justified allowlist entry.
+
+**CI wiring.** The check runs as a blocking job (`sdk-parity`) in
+`.github/workflows/architecture-gates.yml` on every PR and on pushes to
+`master`. It lives in its own workflow file because
+`.github/workflows/ci.yml` is a protected surface-governance program that an
+ordinary PR must not modify. Marking the job branch-protection **required**
+is a repo-admin setting; until it is flipped, the job is still red/green on
+every PR.
 
 ---
 
-## Gate 6 — Falsifier-honesty (documented gate; no CI mechanism yet)
+## Gate 6 — Falsifier-honesty (mechanical CI check)
 
 **Rule.** If a PR's description or "Falsifiers" section names a mechanism it
 claims to add (a typed error variant, a guard, a registry, a lock), that
@@ -248,8 +273,33 @@ the diff (or found only in a doc comment, not in a type/test) fails.
 adjacent test is not proof."* Applied to a single PR instead of the ledger as
 a whole: a PR's own prose is not proof of what its diff does either.
 
-**Status.** Issue #496 tracks this as a mechanical CI check (grep the diff
-for claimed-but-absent mechanisms), but no such tooling exists in this
-repository yet — this PR delivers gate 5's script only. Apply gate 6 by eye
-in review until a mechanical version lands; do not cite this section as
-evidence a falsifier-honesty CI check runs today.
+**Mechanical check.** `scripts/check-falsifier-honesty.sh BASE HEAD
+[claims-file]`, run as the blocking `falsifier-honesty` job in
+`.github/workflows/architecture-gates.yml` on every PR (the job feeds it the
+PR base SHA, the merged tree, and the PR body as the claims file). Claim
+sources are deliberately narrow: the "Updated falsifiers:" fields of
+change-log entries *added* by the PR to `docs/surface-change-log.md`, plus
+any "falsifier"-headed section or `falsifiers...:` line of the PR body. From
+those regions only backtick code spans that parse cleanly as **one** symbol
+(`snake_case`, `Camel::Case::path`, `.swiftCase`, `fn_name()` — normalized
+to the last path component, prose-shaped words dropped) or **one** source
+path are checked; every checked name must exist in the HEAD tree outside
+markdown (as whole-word file content, or as a test file's exact stem/path).
+Anything that does not parse as a single concrete name is skipped as
+unverifiable prose, never failed — so the check catches fabricated
+mechanisms without punishing ordinary description. A PR that makes no
+falsifier claim passes: making no claim is honest; *naming* an absent one is
+the lie this gate exists to catch. Presence is textual: a bare mention in a
+source-code comment or dead code satisfies the grep, so a deliberately
+dishonest PR can plant the word — but the plant sits in the same diff the
+reviewer reads, and the by-eye half of this gate still owns that case.
+
+Backtested against the eight most recent merged PRs (#535–#544 era; five of
+them appended change-log falsifier claims, 43 named claims total, and the
+other three correctly resolved to "no claims"): zero false failures,
+including crate-relative test-path citations and test-file-stem citations. Simulated dishonesty fails as
+intended: claiming `EngineError::StoreStillOpen` against the tree from
+before #489's fix (where the mechanism did not exist) exits 1; the same
+claim against the #489 tree passes. The check proves presence, not
+sufficiency — whether the named falsifier actually falsifies the invariant
+remains a by-eye review question.
