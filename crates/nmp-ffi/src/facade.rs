@@ -342,6 +342,18 @@ pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
     Ok(())
 }
 
+/// Generate a fresh local-account secret key via OS RNG (hex-encoded,
+/// `NmpEngine::add_account`-compatible) -- the one keygen-only FFI door #588
+/// asks for. This function touches no engine state, installs no signer, and
+/// persists nothing: a native wrapper composes it with the existing
+/// `add_account` to give a clean-start client its first identity, inheriting
+/// that method's save-with-rollback choreography and checkpoint tracking
+/// wholesale instead of a second, parallel registration pipeline.
+#[uniffi::export]
+pub fn generate_account_secret_key() -> String {
+    nostr::Keys::generate().secret_key().to_secret_hex()
+}
+
 // Keep the native-facing literal pinned to the canonical finite default.
 const _: () = assert!(DEFAULT_MAX_RELAYS == 10);
 const _: () = assert!(DEFAULT_MAX_NATIVE_TASKS == 12);

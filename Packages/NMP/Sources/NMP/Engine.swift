@@ -238,6 +238,19 @@ public final class NMPEngine: Sendable {
 
     // MARK: - Identity (P3; multi-account)
 
+    /// Generate and register a brand-new local account (#588) -- the
+    /// NMP-owned door for a clean-start client that has no existing secret
+    /// material to hand in. Composes one keygen-only FFI call with the
+    /// existing `addAccount(secretKey:)`, so it inherits that method's
+    /// save-with-rollback choreography and checkpoint tracking wholesale
+    /// rather than a second, parallel registration pipeline. Mirrors
+    /// `addAccount`'s own "does not activate" semantics -- use
+    /// `registration.publicKey` with `setActiveAccount` for that.
+    public func generateAccount() async throws -> NMPAccountRegistration {
+        let secretKey = NMPFFI.generateAccountSecretKey()
+        return try await addAccount(secretKey: secretKey)
+    }
+
     /// Register an account from its secret key (hex or bech32 `nsec`). The
     /// key crosses this boundary exactly once and lives engine-side from
     /// this point on. When an `NMPLocalAccountCheckpoint` was explicitly
