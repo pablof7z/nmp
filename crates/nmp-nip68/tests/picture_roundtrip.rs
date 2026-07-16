@@ -7,7 +7,7 @@ use nmp_nip68::{
     build_picture, decode_picture, ContentWarning, ImageDim, PictureBuildError, PictureDiagnostic,
     PictureImage, PictureImageError, PictureSpec, PICTURE_KIND,
 };
-use nostr::{Keys, Kind};
+use nostr::{Keys, Kind, Timestamp};
 
 fn descriptor(url: &str, seed: &[u8], mime: Option<&str>) -> BlobDescriptor {
     BlobDescriptor {
@@ -23,7 +23,8 @@ fn descriptor(url: &str, seed: &[u8], mime: Option<&str>) -> BlobDescriptor {
 /// yields an event that decodes back to the same picture facts. This proves the
 /// unsigned draft is well-formed without the crate ever signing.
 fn sign_and_decode(spec: &PictureSpec, keys: &Keys) -> nmp_nip68::Picture {
-    let unsigned = build_picture(keys.public_key(), spec).expect("valid spec builds");
+    let unsigned = build_picture(keys.public_key(), Timestamp::from(1_700_000_000u64), spec)
+        .expect("valid spec builds");
     let event = unsigned
         .sign_with_keys(keys)
         .expect("caller signs the draft");
@@ -167,7 +168,7 @@ fn a_picture_with_no_images_is_refused() {
         hashtags: vec![],
     };
     assert_eq!(
-        build_picture(keys.public_key(), &spec),
+        build_picture(keys.public_key(), Timestamp::from(1_700_000_000u64), &spec),
         Err(PictureBuildError::NoImages)
     );
 }
@@ -219,7 +220,7 @@ fn content_warning_round_trips_and_empty_hashtag_is_refused() {
         hashtags: vec![String::new()],
     };
     assert_eq!(
-        build_picture(keys.public_key(), &bad),
+        build_picture(keys.public_key(), Timestamp::from(1_700_000_000u64), &bad),
         Err(PictureBuildError::EmptyHashtag)
     );
 }
