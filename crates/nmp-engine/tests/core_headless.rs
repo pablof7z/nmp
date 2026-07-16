@@ -2802,6 +2802,149 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
     assert!(attempts.iter().all(|attempt| attempt.event == event));
 }
 
+/// A durable write parked `WaitingAuth` (the relay demanded auth in response
+/// to the EVENT) must never wedge across a transport disconnect/reconnect.
+/// The authenticated grant is generation-scoped, so on disconnect the lane
+/// falls back to `WaitingConnection` and the fresh generation re-drives it:
+/// re-send the EVENT, re-provoke the challenge, re-park, authenticate, wake.
+/// Regression guard for the reconnect missed-wakeup the adversarial review
+/// caught (the ONLY `WaitingAuth` wake is `finish_auth_ok`, which a
+/// lazy-challenging relay never fires again without a client-provoked EVENT).
+#[test]
+fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://auth-reconnect.example").unwrap();
+    let session = signer_session(&relay, author.public_key());
+
+    let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+    let sink = CapturingReceiptSink::default();
+    let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+
+    // First generation: connect, hand off, and let the relay demand auth via
+    // an `OK false auth-required` on the durable EVENT. The lane parks.
+    let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+    mark_written(&mut core, &connected, &relay);
+    let parked = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        session.clone(),
+        RelayFrame::from(RelayMessage::ok(
+            event.id,
+            false,
+            "auth-required: authenticate",
+        )),
+    ));
+    assert!(parked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay: waiting }) if waiting == &relay
+    )));
+
+    // The socket drops mid-handshake (before any AUTH OK). The parked lane
+    // must fall back to `WaitingConnection`, surfacing `AwaitingRelay`.
+    let disconnected = core.handle(EngineMsg::RelayDisconnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        session.clone(),
+        DisconnectReason::Closed,
+    ));
+    assert!(disconnected.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(_, WriteStatus::AwaitingRelay { relay: waiting }) if waiting == &relay
+    )));
+
+    // A fresh generation reconnects. The ordinary (non-auth) reconnect wake
+    // must re-drive the lane: a new `PublishEvent` is scheduled on the exact
+    // authenticated session, re-provoking the challenge. Without the fix the
+    // lane would remain `WaitingAuth` and no publish would ever be emitted.
+    let mut reconnected = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        session.clone(),
+    ));
+    reconnected.extend(core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None)));
+    assert!(
+        reconnected
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &session)),
+        "reconnect must re-drive the parked auth write, not leave it wedged in WaitingAuth"
+    );
+}
+
+/// The boot-path analog of the reconnect re-drive: a durable write persisted
+/// `WaitingAuth` must not survive a restart as `WaitingAuth` (its
+/// authenticated grant was generation-scoped to a socket the prior process
+/// held). `recover_on_boot` recovers it as `WaitingConnection`, so the first
+/// post-boot connect re-drives it instead of stranding it.
+#[test]
+fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://auth-boot.example").unwrap();
+    let session = signer_session(&relay, author.public_key());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth-boot.redb");
+
+    let event = {
+        let mut core = EngineCore::new(
+            RedbStore::open(&path).unwrap(),
+            Box::new(FixtureDirectory::new()),
+            10,
+        );
+        let (_receipt, event, _) = publish_private(
+            &mut core,
+            &author,
+            [relay.clone()],
+            CapturingReceiptSink::default(),
+        );
+        let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+        mark_written(&mut core, &connected, &relay);
+        let parked = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            session.clone(),
+            RelayFrame::from(RelayMessage::ok(
+                event.id,
+                false,
+                "auth-required: authenticate",
+            )),
+        ));
+        assert!(parked.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay: waiting }) if waiting == &relay
+        )));
+        event
+    };
+
+    // Fresh process: recover from the persisted store, then connect.
+    let mut core = EngineCore::new(
+        RedbStore::open(&path).unwrap(),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    let recovery = core.recover_on_boot();
+    assert!(
+        recovery
+            .iter()
+            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)),
+        "boot must redial the exact authenticated session for the recovered lane"
+    );
+    let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+    assert!(
+        connected.iter().any(
+            |effect| matches!(effect, Effect::PublishEvent(r, current, _)
+                if r == &session && current.id == event.id)
+        ),
+        "boot-recovered auth write must re-drive on the first connect, not stay wedged"
+    );
+}
+
 #[test]
 fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
     let author = Keys::generate();

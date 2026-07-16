@@ -2303,9 +2303,34 @@ impl<S: EventStore> EngineCore<S> {
                     LaneState::InFlight {
                         phase: InFlightPhase::AwaitingAck { .. },
                         ..
-                    }
-                    | LaneState::WaitingAuth => {
+                    } => {
                         effects.push(Effect::EnsureRelay(session));
+                    }
+                    LaneState::WaitingAuth => {
+                        // A `WaitingAuth` park never survives a restart: its
+                        // authenticated grant was generation-scoped to a socket
+                        // this process no longer holds. Recover it as
+                        // `WaitingConnection` so the post-connect
+                        // `wake_relay_lanes(.., auth_only=false)` re-drives it;
+                        // leaving it `WaitingAuth` would strand it forever
+                        // (its only wake, `finish_auth_ok`, needs a fresh
+                        // client-provoked challenge that boot alone can't cause).
+                        // Fail-safe like the disconnect arm: a swallowed reset
+                        // failure would silently re-strand the lane — exactly
+                        // the missed-wakeup class this guards — so on error mark
+                        // recovery degraded (this function's own untrustworthy-
+                        // recovery signal) rather than warm a connection that
+                        // cannot wake a still-`WaitingAuth` lane.
+                        if self
+                            .resolver
+                            .store_mut()
+                            .set_lane_waiting(&lane.key, lane.revision, false)
+                            .is_ok()
+                        {
+                            effects.push(Effect::EnsureRelay(session));
+                        } else {
+                            self.lane_relay_index_degraded = true;
+                        }
                     }
                     LaneState::Terminal { .. } => {}
                 }
@@ -4556,8 +4581,34 @@ impl<S: EventStore> EngineCore<S> {
                         }
                     }
                 }
+                LaneState::WaitingAuth => {
+                    // A `WaitingAuth` park is authenticated-generation-scoped:
+                    // the relay demanded auth on THIS socket, and that grant
+                    // (and any in-flight challenge) died with the disconnect.
+                    // Fall the lane back to `WaitingConnection` so the ordinary
+                    // reconnect wake (`wake_relay_lanes(.., auth_only=false)`)
+                    // re-drives it — a fresh generation re-sends the event,
+                    // re-provokes the challenge, re-parks, authenticates, and
+                    // finally wakes via `finish_auth_ok`. Leaving it
+                    // `WaitingAuth` here would strand it: the ONLY `WaitingAuth`
+                    // wake is `finish_auth_ok`, which for a lazy-challenging
+                    // relay never fires again without a client-provoked EVENT.
+                    if self
+                        .resolver
+                        .store_mut()
+                        .set_lane_waiting(&lane.key, lane.revision, false)
+                        .is_ok()
+                    {
+                        self.emit_write_status(
+                            id,
+                            WriteStatus::AwaitingRelay {
+                                relay: relay.clone(),
+                            },
+                            effects,
+                        );
+                    }
+                }
                 LaneState::WaitingConnection
-                | LaneState::WaitingAuth
                 | LaneState::Transient { .. }
                 | LaneState::InFlight {
                     phase: InFlightPhase::AwaitingHandoff,
