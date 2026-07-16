@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -38,7 +38,9 @@ use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message;
 
 use crate::backoff;
-use crate::keepalive::{KeepaliveAction, KeepaliveState};
+use crate::keepalive::{
+    apply_resume_gap, KeepaliveAction, KeepaliveState, SuspendGapDetector, SUSPEND_GAP_THRESHOLD,
+};
 
 use super::connect::{open_relay_socket, RelaySocket};
 use super::frame::classify_message;
@@ -456,6 +458,13 @@ fn run_worker(
                 }
                 let mut keepalive =
                     KeepaliveState::new(Instant::now(), keepalive_idle, keepalive_pong_timeout);
+                // Resume-gap heuristic (issue #4): a fresh detector per
+                // connected generation, seeded from wall-clock `now` at
+                // connect time so a suspension DURING the reconnect/backoff
+                // wait doesn't retroactively look like a gap the instant the
+                // new socket comes up.
+                let mut suspend_gap =
+                    SuspendGapDetector::new(SystemTime::now(), SUSPEND_GAP_THRESHOLD);
                 let outcome = run_connected(
                     slot,
                     generation,
@@ -466,6 +475,7 @@ fn run_worker(
                     &mut pending,
                     &mut socket,
                     &mut keepalive,
+                    &mut suspend_gap,
                     &mut preamble,
                     &mut durable,
                     &mut write_accepted,
@@ -821,6 +831,7 @@ fn run_connected(
     pending: &mut VecDeque<String>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
+    suspend_gap: &mut SuspendGapDetector,
     preamble: &mut Vec<String>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
@@ -839,6 +850,7 @@ fn run_connected(
         pending,
         socket,
         keepalive,
+        suspend_gap,
         preamble,
         durable,
         write_accepted,
@@ -870,6 +882,7 @@ fn run_connected_inner(
     pending: &mut VecDeque<String>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
+    suspend_gap: &mut SuspendGapDetector,
     preamble: &mut Vec<String>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
@@ -1013,7 +1026,16 @@ fn run_connected_inner(
             }
         };
 
-        match keepalive.step(Instant::now()) {
+        // Resume-gap heuristic (issue #4): always observe this iteration's
+        // wall-clock reading (so the detector's baseline never goes stale
+        // across an iteration that happened not to trip it), then let a
+        // detected gap upgrade an otherwise-`Idle` verdict to `EmitPing` via
+        // `apply_resume_gap` -- see its doc for why a ping already in flight
+        // is left untouched.
+        let gap_detected = suspend_gap.observe(SystemTime::now());
+        let action = keepalive.step(Instant::now());
+        let action = apply_resume_gap(action, keepalive.ping_in_flight(), gap_detected);
+        match action {
             KeepaliveAction::Idle => {}
             KeepaliveAction::EmitPing => {
                 match flush_message(
@@ -1769,6 +1791,7 @@ mod tests {
                 Duration::from_secs(60),
                 Duration::from_secs(10),
             );
+            let mut suspend_gap = SuspendGapDetector::new(SystemTime::now(), SUSPEND_GAP_THRESHOLD);
             let mut preamble = Vec::new();
             let mut durable = VecDeque::new();
             let mut write_accepted = Vec::new();
@@ -1786,6 +1809,7 @@ mod tests {
                 &mut pending,
                 &mut socket,
                 &mut keepalive,
+                &mut suspend_gap,
                 &mut preamble,
                 &mut durable,
                 &mut write_accepted,
@@ -1806,6 +1830,70 @@ mod tests {
                 .all(|event| !matches!(event.kind, WorkerEventKind::InitialReadCompleted)),
             "a public session must never enter the protected marker handshake"
         );
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        if let Some(waker) = waker.lock().unwrap().as_ref() {
+            waker.wake().unwrap();
+        }
+        assert!(matches!(worker.join().unwrap(), ConnectedOutcome::Shutdown));
+    }
+
+    /// The resume-gap heuristic (issue #4), exercised end to end against a
+    /// real socket: a `SuspendGapDetector` seeded with a deliberately stale
+    /// baseline observes a huge gap on its very first real-wall-clock
+    /// `observe()` call inside the loop -- simulating "the process was just
+    /// resumed after a long suspension" without an actual sleep. With a
+    /// long (60s) keepalive idle threshold, no ordinary ping would fire for
+    /// a full minute; the heuristic must instead emit one immediately.
+    #[test]
+    fn resume_gap_triggers_immediate_ping_bypassing_the_idle_threshold() {
+        let (mut socket, mut peer) = real_websocket_pair();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let waker = Arc::new(Mutex::new(None));
+        let worker_waker = Arc::clone(&waker);
+        let worker = std::thread::spawn(move || {
+            let mut pending = VecDeque::new();
+            let mut keepalive = KeepaliveState::new(
+                Instant::now(),
+                Duration::from_secs(60),
+                Duration::from_secs(10),
+            );
+            let stale_baseline = SystemTime::now() - Duration::from_secs(120);
+            let mut suspend_gap = SuspendGapDetector::new(stale_baseline, SUSPEND_GAP_THRESHOLD);
+            let mut preamble = Vec::new();
+            let mut durable = VecDeque::new();
+            let mut write_accepted = Vec::new();
+            let mut ephemeral = VecDeque::new();
+            let mut ephemeral_write_accepted = Vec::new();
+            let mut outbound_released = true;
+            let shutdown = AtomicBool::new(false);
+            run_connected_inner(
+                3,
+                12,
+                &event_tx,
+                &command_rx,
+                &worker_waker,
+                &shutdown,
+                &mut pending,
+                &mut socket,
+                &mut keepalive,
+                &mut suspend_gap,
+                &mut preamble,
+                &mut durable,
+                &mut write_accepted,
+                &mut ephemeral,
+                &mut ephemeral_write_accepted,
+                &mut outbound_released,
+                false,
+            )
+        });
+
+        assert!(
+            matches!(peer.read().unwrap(), Message::Ping(_)),
+            "a detected resume gap must emit an immediate ping instead of waiting \
+             out the 60s idle threshold"
+        );
+
         command_tx.send(WorkerCommand::Shutdown).unwrap();
         if let Some(waker) = waker.lock().unwrap().as_ref() {
             waker.wake().unwrap();
