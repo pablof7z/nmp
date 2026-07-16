@@ -1786,7 +1786,8 @@ mod tests {
     #[test]
     fn every_delete_error_variant_crosses_distinct() {
         let blob = Sha256Hash::of(b"a");
-        let all = [delete_error_to_ffi(DeleteError::AuthorizationBlobMismatch {
+        let all = [
+            delete_error_to_ffi(DeleteError::AuthorizationBlobMismatch {
                 expected: blob,
                 authorized_verb: BlossomVerb::Upload,
                 authorized_blob: Some(blob),
@@ -1812,7 +1813,8 @@ mod tests {
             delete_error_to_ffi(DeleteError::ServerError {
                 status: 500,
                 reason: None,
-            })];
+            }),
+        ];
         assert_eq!(
             all[5],
             FfiBlossomDeleteError::NotFound {
