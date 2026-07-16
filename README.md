@@ -76,7 +76,9 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Local key signer — secret held in a `Zeroizing<[u8;32]>` (compiler-fenced wipe on drop), `Debug` redacted to public key only ([#47 Unit C](https://github.com/pablof7z/nmp/pull/546))
 - ✅ Full **NIP-46 bunker** — independent signer-relay connection, request correlation, `auth_url`/`switch_relays`, NIP-44 crypto, **reconnect across store close/reopen**, bounded sign-only across all four surfaces (Rust/FFI/Swift/Kotlin)
 - ✅ Per-write identity override — publish a single write under a registered secondary identity without changing the active account, across Rust/FFI/Swift/Kotlin. Retarget-immunity is proven: once accepted under the override, a later `set_active_account` can never redirect it to a different signer, even across a store close/reopen ([#47](https://github.com/pablof7z/nmp/issues/47) Unit A, [#550](https://github.com/pablof7z/nmp/pull/550))
-- ⛔ No Keychain/Keystore secure providers yet, no NIP-55
+- ✅ Platform secure-vault account stores — Keychain-backed (Swift, iOS/macOS) and JVM `KeyStore`-backed (Kotlin/desktop) checkpoint providers for automatic secure session restore ([#47](https://github.com/pablof7z/nmp/issues/47) vault providers, [#554](https://github.com/pablof7z/nmp/pull/554))
+- 🧪 Frozen identity on a parked write (`AwaitingCapability{pubkey}`) — in CI, not yet merged; the PR's own cross-surface parity test is currently **failing**, having caught direct-Rust and FFI reporting two *different* frozen pubkeys for the same reattached receipt ([#47](https://github.com/pablof7z/nmp/issues/47) Unit B, [#556](https://github.com/pablof7z/nmp/pull/556))
+- ⛔ No NIP-55 (Android intent-based signing)
 
 **Publishing**
 - ✅ **Durable write intents** — `Accepted` is one atomic persistence boundary (frozen body, receipt, pending row visible to queries)
@@ -89,7 +91,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ NIP-29 groups — metadata / membership / moderation, plus kind:9 group-chat **send + read** proven by a live round-trip test (device-scale room-open UX still to be re-measured)
 - ✅ Optional content module (plaintext/Markdown, NIP-19 refs, kind:0 / NIP-23) + a SwiftUI component family
 - 🧪 NIP-51 lists — decode/reading only today; list **editing** is deliberately gated on [#50](https://github.com/pablof7z/nmp/issues/50)
-- ⛔ No NIP-25 reactions, no general draft composition, no media/Blossom yet
+- 🧪 Blossom (BUD-11) media core — a new `nmp-blossom` crate ships kind:24242-authorized, sha256-verified blob upload ([#216](https://github.com/pablof7z/nmp/issues/216) epic, closes [#545](https://github.com/pablof7z/nmp/issues/545), [#552](https://github.com/pablof7z/nmp/pull/552)). Direct-Rust only — mirror/delete/list ([#551](https://github.com/pablof7z/nmp/issues/551)) and the FFI + Swift + Kotlin projection ([#555](https://github.com/pablof7z/nmp/issues/555)) are open; **no app-facing Blossom API on any platform yet**
+- ⛔ No NIP-25 reactions, no general draft composition
 
 **Storage**
 - ✅ Crash-safe redb: binary canonical rows, secondary + tag + cardinality indexes, interned relay URLs
@@ -115,8 +118,11 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - **Superseded:** [`remove_account` (#529)](https://github.com/pablof7z/nmp/pull/529) was closed — its pubkey-only shape contradicted #8's ratified `AccountRegistration` model. Wave 5 replaced it with `add_account -> AccountRegistration` / `remove_account(&AccountRegistration)`, which also closes [#495](https://github.com/pablof7z/nmp/issues/495).
 - **Headline (merged) — architecture review is now enforced by CI, not just convention.** [#547](https://github.com/pablof7z/nmp/pull/547) closes [#496](https://github.com/pablof7z/nmp/issues/496): `AGENTS.md` gets a checked Noun / Reachability / Bool-Lifecycle / Destructive-API review-gate list (the exact discipline that caught `History*` but missed [#489](https://github.com/pablof7z/nmp/issues/489)), backed by two new blocking CI jobs — cross-SDK parity (Swift/Kotlin FFI surface must match Rust, modulo one documented exception) and falsifier-honesty (a PR's claimed `Updated falsifiers:` symbols/paths must actually exist in the tree). Backtested clean against 8 recent merged PRs / 43 named claims, and catches a fabricated claim plus a simulated #489-class regression.
 - **Merged — signer hardening:** `LocalKeySigner`'s secret is now held in a `Zeroizing<[u8;32]>` with a redacted `Debug` impl ([#47](https://github.com/pablof7z/nmp/issues/47) Unit C, [#546](https://github.com/pablof7z/nmp/pull/546)) — the first landed unit of the broader signer-lifecycle epic.
-- **Merged — #47 signer-lifecycle epic, Unit A:** per-write identity override across Rust/FFI/Swift/Kotlin ([#550](https://github.com/pablof7z/nmp/pull/550)) — publish under a registered secondary identity without moving `currentPubkey`; retarget-immunity is proven directly, including across a real redb close/reopen replay. Keychain (iOS/macOS) and JVM-Keystore secure providers are staged behind it.
-- **In flight, not yet merged:** Also just opened — **Blossom media** ([#216](https://github.com/pablof7z/nmp/issues/216) epic, [#545](https://github.com/pablof7z/nmp/issues/545) core unit) — kind:24242-authorized, sha256-verified blob upload — and a consolidated **v2 architecture decision record** ([#548](https://github.com/pablof7z/nmp/issues/548), 15 rulings against standing doctrine).
+- **Merged — #47 signer-lifecycle epic, Unit A:** per-write identity override across Rust/FFI/Swift/Kotlin ([#550](https://github.com/pablof7z/nmp/pull/550)) — publish under a registered secondary identity without moving `currentPubkey`; retarget-immunity is proven directly, including across a real redb close/reopen replay.
+- **Merged — #47 signer-lifecycle epic, vault providers:** the secure-storage providers staged behind Unit A landed — a Keychain-backed account store (Swift, iOS/macOS) and a JVM `KeyStore`-backed account store (Kotlin/desktop), both restoring a session automatically ([#554](https://github.com/pablof7z/nmp/pull/554)). Combined with Unit A and the earlier zeroize-hardening (Unit C, [#546](https://github.com/pablof7z/nmp/pull/546)), the only remaining #47 unit is below.
+- **In CI, not yet merged — #47 Unit B:** carries the exact frozen pubkey on `WriteStatus::AwaitingCapability` so a parked write's stranded identity is observable, not just "still parked" ([#556](https://github.com/pablof7z/nmp/pull/556)). Honest status: as of this check, the PR's own cross-surface parity suite is **failing** — `direct_and_ffi_reattach_are_semantically_identical_for_a_live_retained_receipt` caught direct-Rust and FFI reattach reporting two genuinely *different* frozen pubkeys for the same receipt. That's the review net catching a real bug, not a flake; the PR is not merged and the fix is not yet in.
+- **Merged — Blossom (#216) core unit:** a new `nmp-blossom` crate ships BUD-11 kind:24242 upload authorization plus sha256-verified blob upload ([#552](https://github.com/pablof7z/nmp/pull/552), closes [#545](https://github.com/pablof7z/nmp/issues/545)). It's direct-Rust only today — mirror/delete/list ([#551](https://github.com/pablof7z/nmp/issues/551)) and the FFI + Swift + Kotlin projection ([#555](https://github.com/pablof7z/nmp/issues/555)) are open, unstarted work; no platform has an app-facing Blossom call yet.
+- **Also open:** a consolidated **v2 architecture decision record** ([#548](https://github.com/pablof7z/nmp/issues/548), 15 rulings against standing doctrine).
 
 ## Performance
 
@@ -140,12 +146,14 @@ Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime pen
 - Govern the provisional demand / receipt / signer shapes toward a **v2 freeze**
 - Encode lifecycle invariants **as types**, not conventions
 - Close **platform qualification** — an iOS-Simulator test target, an Android AAR
-- Ship standard **secure-storage signer providers** (Keychain / Keystore) — staged behind the now-merged per-write identity override, [#47](https://github.com/pablof7z/nmp/issues/47) Unit A
+- Close out **#47 signer lifecycle** — Unit B ([#556](https://github.com/pablof7z/nmp/pull/556), in CI, currently failing its own parity test) is the last piece
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
 - Land NIP-51 list editing; broaden opt-in protocol modules
-- Land the **Blossom** media/blob module ([#216](https://github.com/pablof7z/nmp/issues/216)) — upload authorization + content-addressed verification, core unit in progress
+- Finish the **Blossom** media/blob module ([#216](https://github.com/pablof7z/nmp/issues/216)) — mirror/delete/list ([#551](https://github.com/pablof7z/nmp/issues/551)) and the FFI + Swift + Kotlin projection ([#555](https://github.com/pablof7z/nmp/issues/555)) still open
 - **Shipped:** NIP-42 content-relay AUTH is complete end-to-end, Rust through Swift/Kotlin — all six waves merged, [#8](https://github.com/pablof7z/nmp/issues/8) closed. See Status / maturity above.
 - **Shipped:** architecture-review discipline is now machine-enforced — cross-SDK parity and falsifier-honesty run as blocking CI checks ([#547](https://github.com/pablof7z/nmp/pull/547), closes [#496](https://github.com/pablof7z/nmp/issues/496)).
+- **Shipped:** standard secure-storage signer providers — Keychain (Swift) and JVM `KeyStore` (Kotlin) — landed for #47 ([#554](https://github.com/pablof7z/nmp/pull/554)).
+- **Shipped:** Blossom (BUD-11) upload-authorization core landed as `nmp-blossom` ([#552](https://github.com/pablof7z/nmp/pull/552)), direct-Rust only — see Protocol modules above.
 
 ## The ownership boundary
 
@@ -163,7 +171,7 @@ Diagnostics are a **permanent, read-only proof surface** — source plan, wire f
 
 - `crates/nmp` — the supported Rust facade (`nmp::Engine`); `crates/nmp-ffi` projects it to Swift/Kotlin via UniFFI
 - `crates/nmp-{store,resolver,router,transport,engine,signer,executor}` — internal seams, not alternate APIs
-- `crates/nmp-{nip02,nip29,nip51,content}` — opt-in protocol modules
+- `crates/nmp-{nip02,nip29,nip51,content,blossom}` — opt-in protocol modules
 - `crates/nmp-demo` — the read-only CLI falsifier
 - `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM)
 - `apps/Falsifier`, `apps/UIGallery` — SwiftUI proving grounds
