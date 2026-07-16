@@ -15,7 +15,36 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 03:58:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 04:53:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 04:53 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0013.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0013</guid>
+<pubDate>Thu, 16 Jul 2026 04:53:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Big news this hour: pull request five forty three merged. That's wave five of content-relay authentication -- the wave that makes authentication something an application can actually call, not just something the engine proves to itself.
+
+Here's what landed. An application can now register an authentication policy through the stable Rust interface. It can add an account and get back a proper account-registration handle, and remove an account by that same handle -- replacing the old pubkey-only shape that pull request five twenty nine used, which is why that one was closed as superseded. That also closes out issue four ninety five for good. A session now exposes its own authentication diagnostics too, so an app can see what's happening instead of guessing.
+
+Worth calling out specifically: doing this the naive way -- re-exporting the engine's authentication types straight through the facade -- would have blown through the thirty-thousand-line ceiling this project holds itself to. Instead, every one of these types is facade-owned: defined fresh at the boundary, converted explicitly, at roughly one line each. Net effect: the governed public surface didn't grow to pay for this feature, it shrank, staying well under the ceiling. No exception granted, no guardrail moved. An independent adversarial review checked mirror-conversion completeness, exact-instance registration semantics, and strict delegation of the pending and cancel machinery, and passed all three clean.
+
+So here's where that leaves the authentication arc. Engine-level proof landed a few hours ago: a real WebSocket relay, a real challenge, a real authenticated read, end to end. This hour, the Rust application interface for that same capability landed too. What's left -- the final wave, wave six -- is projecting it out through the foreign-function interface into Swift and Kotlin, so a native iOS, Android, or desktop app can actually call it. That work is in flight right now.
+
+The honest framing hasn't changed in substance, just in scope: the whole thing is real, and every wave has been adversarially reviewed. What's missing is the last mile -- wiring it out to the platforms people actually ship apps on. Until that lands, only the NIP-46 remote-signer authentication path is shippable end to end today.
+
+One smaller, unchanged note: there's still a flaky macOS-only test in the ingest-smoke suite, tracked separately as infrastructure, not a product bug.
+
+That's the pulse. NIP-42 came in through the front door this arc -- no shortcuts, no guardrail bypass -- and next hour's story should be the first native platform seeing this authentication surface directly.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0013.mp3" type="audio/mpeg" length="3204908"/>
+<itunes:title>NMP Pulse — 2026-07-16 04:53 UTC</itunes:title>
+<itunes:duration>200</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-16 03:58 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0012.mp3</link>
