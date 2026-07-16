@@ -5,6 +5,7 @@
 
 package com.nmp.sdk
 
+import uniffi.nmp_ffi.FfiAuthDiagnostics
 import uniffi.nmp_ffi.FfiDiagnosticsSnapshot
 import uniffi.nmp_ffi.FfiCoverageInterval
 import uniffi.nmp_ffi.FfiFilterCoverage
@@ -94,11 +95,44 @@ data class RelayDiagnostics(
     }
 }
 
+/** One bounded exact-session AUTH diagnostics record. */
+data class AuthDiagnostics(
+    val relay: String,
+    val access: NMPAccessContext,
+    val transportGeneration: ULong,
+    val epochSequence: ULong?,
+    val challengeDescriptor: String?,
+    val phase: AuthPhase,
+    val policyBound: Boolean,
+    val signerBound: Boolean,
+    val authEventId: String?,
+    val sendHandoffAccepted: Boolean,
+    val relayOkAccepted: Boolean,
+) {
+    companion object {
+        fun from(ffi: FfiAuthDiagnostics): AuthDiagnostics =
+            AuthDiagnostics(
+                relay = ffi.relay,
+                access = NMPAccessContext.from(ffi.access),
+                transportGeneration = ffi.transportGeneration,
+                epochSequence = ffi.epochSequence,
+                challengeDescriptor = ffi.challengeDescriptor,
+                phase = AuthPhase.from(ffi.phase),
+                policyBound = ffi.policyBound,
+                signerBound = ffi.signerBound,
+                authEventId = ffi.authEventId,
+                sendHandoffAccepted = ffi.sendHandoffAccepted,
+                relayOkAccepted = ffi.relayOkAccepted,
+            )
+    }
+}
+
 /** The engine-global diagnostics snapshot -- one snapshot covers every
  * currently-planned relay. Delivered by `observeDiagnostics()`, pushed
  * reactively, never polled. */
 data class DiagnosticsSnapshot(
     val relays: List<RelayDiagnostics> = emptyList(),
+    val authSessions: List<AuthDiagnostics> = emptyList(),
     val uncoveredAuthorCount: UInt = 0u,
     val droppedMergeRules: List<String> = emptyList(),
     val transportDegraded: String? = null,
@@ -107,6 +141,7 @@ data class DiagnosticsSnapshot(
         fun from(ffi: FfiDiagnosticsSnapshot): DiagnosticsSnapshot =
             DiagnosticsSnapshot(
                 relays = ffi.relays.map { RelayDiagnostics.from(it) },
+                authSessions = ffi.authSessions.map { AuthDiagnostics.from(it) },
                 uncoveredAuthorCount = ffi.uncoveredAuthorCount,
                 droppedMergeRules = ffi.droppedMergeRules,
                 transportDegraded = ffi.transportDegraded,

@@ -27,6 +27,9 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::thread;
 
+use crate::auth::{
+    FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
+};
 use crate::convert::{
     demand_from_ffi, diagnostics_snapshot_to_ffi, filter_from_ffi, frame_to_ffi, parse_pubkey,
     relay_information_error_kind, sign_event_failure, sign_event_request_from_ffi,
@@ -254,7 +257,7 @@ fn start_following_action_with(
 /// relay facts a caller ever supplies are the three operator-configured
 /// lanes -- `indexer_relays`, `app_relays`, `fallback_relays`
 /// (`routing-and-ownership.md` §2.1) -- everything else is discovered live.
-#[derive(uniffi::Record, Clone, Debug, Default)]
+#[derive(uniffi::Record, Clone, Debug)]
 pub struct NmpEngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
     /// -> a persistent `RedbStore` opened at that path (the same file
@@ -292,6 +295,10 @@ pub struct NmpEngineConfig {
     /// stream behind a long-lived drain.
     #[uniffi(default = 12)]
     pub max_native_tasks: u32,
+    /// Maximum live signer and AUTH-policy registrations. Zero deliberately
+    /// admits none rather than selecting the default.
+    #[uniffi(default = 64)]
+    pub max_auth_capabilities: u32,
 }
 
 /// The default relay-count ceiling for a freshly-constructed engine config
@@ -299,6 +306,26 @@ pub struct NmpEngineConfig {
 /// on [`NmpEngineConfig::max_relays`] above — they must match.
 pub const DEFAULT_MAX_RELAYS: u32 = 10;
 pub const DEFAULT_MAX_NATIVE_TASKS: u32 = 12;
+pub const DEFAULT_MAX_AUTH_CAPABILITIES: u32 = 64;
+
+// A DERIVED `Default` would zero `max_auth_capabilities` — and zero
+// deliberately admits NO capability registrations — so the Rust-side
+// default is written out by hand to mirror every `#[uniffi(default = …)]`
+// literal above exactly.
+impl Default for NmpEngineConfig {
+    fn default() -> Self {
+        Self {
+            store_path: None,
+            indexer_relays: Vec::new(),
+            app_relays: Vec::new(),
+            fallback_relays: Vec::new(),
+            allowed_local_relay_hosts: Vec::new(),
+            max_relays: DEFAULT_MAX_RELAYS,
+            max_native_tasks: DEFAULT_MAX_NATIVE_TASKS,
+            max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
+        }
+    }
+}
 
 /// Destructively reset a closed persistent NMP store. This removes all
 /// canonical engine state at `store_path`, while leaving any separately
@@ -313,10 +340,10 @@ pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
     Ok(())
 }
 
-// Compile-time guard that the Rust `Default` derive for `NmpEngineConfig`
 // Keep the native-facing literal pinned to the canonical finite default.
 const _: () = assert!(DEFAULT_MAX_RELAYS == 10);
 const _: () = assert!(DEFAULT_MAX_NATIVE_TASKS == 12);
+const _: () = assert!(DEFAULT_MAX_AUTH_CAPABILITIES == 64);
 
 /// Exact, lock-protected executor accounting for deterministic lifecycle and
 /// saturation falsifiers. `admitted` includes a reservation during its brief
@@ -339,10 +366,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             allowed_local_relay_hosts: config.allowed_local_relay_hosts,
             max_relays: config.max_relays as usize,
             max_native_tasks: config.max_native_tasks as usize,
-            // #8 Wave 5: the FFI config knob (with its registration/policy
-            // projection) is the next wave; until then FFI engines keep the
-            // facade's finite default capability ceiling.
-            max_auth_capabilities: nmp::EngineConfig::default().max_auth_capabilities,
+            max_auth_capabilities: config.max_auth_capabilities as usize,
         }
     }
 }
@@ -428,15 +452,46 @@ impl NmpEngine {
     /// key crosses this boundary exactly once, as a value, and lives in the
     /// engine from this point on (VISION ledger #12; M4 plan §5) -- this
     /// method does NOT make the account active, call
-    /// [`Self::set_active_account`] for that. Returns the account's hex
-    /// public key.
-    pub fn add_account(&self, secret_key: String) -> Result<String, FfiError> {
-        // #8 Wave 5: the facade returns an exact `AccountRegistration`; the
-        // FFI registration/removal projection is the next wave, so this
-        // boundary keeps its hex-pubkey contract and drops the handle (the
-        // engine's per-key replace-on-add semantics are unchanged).
+    /// [`Self::set_active_account`] for that. Returns the opaque exact
+    /// registration required for stale-safe explicit removal.
+    pub fn add_account(&self, secret_key: String) -> Result<Arc<FfiAccountRegistration>, FfiError> {
         let registration = self.engine.add_account(&secret_key)?;
-        Ok(registration.public_key().to_hex())
+        Ok(Arc::new(FfiAccountRegistration {
+            inner: registration,
+        }))
+    }
+
+    /// Remove only the account installation proven by `registration`.
+    /// Repeated or stale cleanup returns `false`.
+    pub fn remove_account(
+        &self,
+        registration: Arc<FfiAccountRegistration>,
+    ) -> Result<bool, FfiError> {
+        Ok(self.engine.remove_account(&registration.inner)?)
+    }
+
+    /// Install a native-owned authorization policy for one exact account.
+    /// The callback may resolve inline or retain the supplied completion.
+    pub fn add_auth_policy(
+        &self,
+        expected_public_key: String,
+        callback: Box<dyn FfiAuthPolicyCallback>,
+    ) -> Result<Arc<FfiAuthPolicyRegistration>, FfiError> {
+        let expected_public_key = parse_pubkey(&expected_public_key)?;
+        let registration = self
+            .engine
+            .add_auth_policy(expected_public_key, FfiAuthPolicyAdapter::new(callback))?;
+        Ok(Arc::new(FfiAuthPolicyRegistration {
+            inner: registration,
+        }))
+    }
+
+    /// Remove only the policy installation proven by `registration`.
+    pub fn remove_auth_policy(
+        &self,
+        registration: Arc<FfiAuthPolicyRegistration>,
+    ) -> Result<bool, FfiError> {
+        Ok(self.engine.remove_auth_policy(&registration.inner)?)
     }
 
     /// Re-root every reactive query AND the active signing capability
@@ -917,6 +972,80 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    struct AllowPolicyCallback;
+
+    impl FfiAuthPolicyCallback for AllowPolicyCallback {
+        fn evaluate(
+            &self,
+            _request: crate::auth::FfiAuthPolicyRequest,
+            completion: Arc<crate::auth::FfiAuthPolicyCompletion>,
+        ) {
+            completion
+                .resolve(crate::auth::FfiAuthPolicyOutcome::Allow)
+                .unwrap();
+        }
+
+        fn on_cancelled(&self, _request: crate::auth::FfiAuthPolicyRequest) {}
+    }
+
+    #[test]
+    fn ffi_config_manual_default_keeps_auth_capacity_finite() {
+        let config = NmpEngineConfig::default();
+        assert_eq!(config.max_auth_capabilities, 64);
+        assert_eq!(nmp::EngineConfig::from(config).max_auth_capabilities, 64);
+    }
+
+    #[test]
+    fn ffi_account_registration_is_explicit_repeatable_and_stale_safe() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_auth_capabilities: 1,
+            ..NmpEngineConfig::default()
+        })
+        .unwrap();
+        let secret = format!("{:064x}", 41u8);
+        let first = engine.add_account(secret.clone()).unwrap();
+        let replacement = engine.add_account(secret).unwrap();
+
+        assert_eq!(first.public_key(), replacement.public_key());
+        assert!(!engine.remove_account(Arc::clone(&first)).unwrap());
+        assert!(engine.remove_account(Arc::clone(&replacement)).unwrap());
+        assert!(!engine.remove_account(replacement).unwrap());
+    }
+
+    #[test]
+    fn ffi_auth_policy_registration_is_explicit_repeatable_and_stale_safe() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_auth_capabilities: 1,
+            ..NmpEngineConfig::default()
+        })
+        .unwrap();
+        let public_key = nostr::Keys::generate().public_key().to_hex();
+        let first = engine
+            .add_auth_policy(public_key.clone(), Box::new(AllowPolicyCallback))
+            .unwrap();
+        let replacement = engine
+            .add_auth_policy(public_key.clone(), Box::new(AllowPolicyCallback))
+            .unwrap();
+
+        assert_eq!(first.expected_public_key(), public_key);
+        assert!(!engine.remove_auth_policy(Arc::clone(&first)).unwrap());
+        assert!(engine.remove_auth_policy(Arc::clone(&replacement)).unwrap());
+        assert!(!engine.remove_auth_policy(replacement).unwrap());
+    }
+
+    #[test]
+    fn ffi_zero_auth_capacity_returns_typed_registry_refusal() {
+        let engine = NmpEngine::new(NmpEngineConfig {
+            max_auth_capabilities: 0,
+            ..NmpEngineConfig::default()
+        })
+        .unwrap();
+        assert_eq!(
+            engine.add_account(format!("{:064x}", 42u8)).unwrap_err(),
+            FfiError::AuthCapabilityRegistryFull { limit: 0 }
+        );
+    }
 
     struct CensusDiagnosticsObserver {
         closes: Arc<AtomicUsize>,
@@ -1429,7 +1558,7 @@ mod tests {
             .add_account(format!("{:064x}", 17u8))
             .expect("account must register");
         engine
-            .set_active_account(Some(author.clone()))
+            .set_active_account(Some(author.public_key()))
             .expect("account must activate");
         let request = FfiSignEventRequest {
             created_at: 1_723_456_789,
@@ -1449,7 +1578,7 @@ mod tests {
             SignEventOutcome::Signed(event) => event,
             SignEventOutcome::Failed(failure) => panic!("unexpected sign failure: {failure:?}"),
         };
-        assert_eq!(signed.pubkey, author);
+        assert_eq!(signed.pubkey, author.public_key());
         assert_eq!(signed.created_at, request.created_at);
         assert_eq!(signed.kind, request.kind);
         assert_eq!(signed.tags, request.tags);
@@ -1497,7 +1626,9 @@ mod tests {
         })
         .expect("engine must build");
         let author = engine.add_account(format!("{:064x}", 31u8)).unwrap();
-        engine.set_active_account(Some(author)).unwrap();
+        engine
+            .set_active_account(Some(author.public_key()))
+            .unwrap();
         let (tx, rx) = mpsc::channel();
 
         let result = engine.sign_event(
@@ -1734,7 +1865,9 @@ mod tests {
         })
         .expect("engine must build");
         let author = engine.add_account(format!("{:064x}", 32u8)).unwrap();
-        engine.set_active_account(Some(author.clone())).unwrap();
+        engine
+            .set_active_account(Some(author.public_key()))
+            .unwrap();
         let (tx, rx) = mpsc::channel();
         let handle = engine
             .sign_event(
@@ -1749,7 +1882,7 @@ mod tests {
         let (value, closed_after_shutdown) = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("reentrant callback must complete");
-        assert!(value.starts_with(&author));
+        assert!(value.starts_with(&author.public_key()));
         assert!(closed_after_shutdown);
         drop(handle);
         engine.await_native_tasks_idle();
@@ -1892,7 +2025,9 @@ mod tests {
             .add_account(format!("{:064x}", 2u8))
             .expect("B must register through the public FFI surface");
 
-        engine.set_active_account(Some(a)).expect("A must activate");
+        engine
+            .set_active_account(Some(a.public_key()))
+            .expect("A must activate");
         let intent = engine
             .group_message_intent(
                 "wss://group-host.example.com".to_string(),
@@ -1903,7 +2038,7 @@ mod tests {
             )
             .expect("composition as active A must succeed");
         engine
-            .set_active_account(Some(b))
+            .set_active_account(Some(b.public_key()))
             .expect("B must activate before publish");
 
         let (tx, rx) = mpsc::channel();

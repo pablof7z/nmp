@@ -43,8 +43,8 @@ data class Row(
     }
 }
 
-/** The AUTH negotiation phases worth surfacing while awaiting proof
- * (populated by the #8 AUTH reducer). */
+/** Closed AUTH negotiation phase vocabulary shared by evidence and
+ * diagnostics (populated by the #8 AUTH reducer). */
 sealed class AuthPhase {
     object AwaitingChallenge : AuthPhase()
 
@@ -54,6 +54,12 @@ sealed class AuthPhase {
 
     object AwaitingRelayAck : AuthPhase()
 
+    object Ready : AuthPhase()
+
+    object Denied : AuthPhase()
+
+    object Error : AuthPhase()
+
     companion object {
         fun from(ffi: FfiAuthPhase): AuthPhase =
             when (ffi) {
@@ -61,6 +67,9 @@ sealed class AuthPhase {
                 FfiAuthPhase.AWAITING_POLICY -> AwaitingPolicy
                 FfiAuthPhase.AWAITING_SIGNATURE -> AwaitingSignature
                 FfiAuthPhase.AWAITING_RELAY_ACK -> AwaitingRelayAck
+                FfiAuthPhase.READY -> Ready
+                FfiAuthPhase.DENIED -> Denied
+                FfiAuthPhase.ERROR -> Error
             }
     }
 }

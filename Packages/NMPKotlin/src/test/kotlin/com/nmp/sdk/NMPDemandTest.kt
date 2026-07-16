@@ -38,4 +38,15 @@ class NMPDemandTest {
         assertEquals(NMPCacheMode.Agnostic, demand.cache)
         assertEquals(NMPAccessContext.Public, demand.access)
     }
+
+    @Test
+    fun nip42AccessRoundTripsWithExactExpectedPublicKey() {
+        val demand =
+            NMPDemand(
+                selection = NMPFilter(kinds = listOf(1u)),
+                source = NMPSourceAuthority.Pinned(setOf("wss://relay.example.com")),
+                access = NMPAccessContext.Nip42("a".repeat(64)),
+            )
+        assertEquals(demand, NMPDemand.from(demand.toFfi()))
+    }
 }

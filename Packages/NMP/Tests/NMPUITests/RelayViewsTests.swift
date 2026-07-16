@@ -97,6 +97,11 @@ final class RelayViewsTests: XCTestCase {
             (.connecting, .connecting, "Connecting"),
             (.disconnected, .disconnected, "Disconnected"),
             (
+                .awaitingAuth(phase: .awaitingChallenge),
+                .awaitingAuth(phase: .awaitingChallenge),
+                "Awaiting authentication challenge"
+            ),
+            (
                 .awaitingAuth(phase: .awaitingPolicy),
                 .awaitingAuth(phase: .awaitingPolicy),
                 "Awaiting authentication policy"
@@ -105,6 +110,22 @@ final class RelayViewsTests: XCTestCase {
                 .awaitingAuth(phase: .awaitingSignature),
                 .awaitingAuth(phase: .awaitingSignature),
                 "Awaiting authentication signature"
+            ),
+            (
+                .awaitingAuth(phase: .awaitingRelayAck),
+                .awaitingAuth(phase: .awaitingRelayAck),
+                "Awaiting relay authentication acknowledgment"
+            ),
+            (.awaitingAuth(phase: .ready), .awaitingAuth(phase: .ready), "Authenticated"),
+            (
+                .awaitingAuth(phase: .denied),
+                .awaitingAuth(phase: .denied),
+                "Authentication denied"
+            ),
+            (
+                .awaitingAuth(phase: .error),
+                .awaitingAuth(phase: .error),
+                "Authentication error"
             ),
             (.authDenied, .authDenied, "Authentication denied"),
             (.error, .error, "Connection error"),

@@ -172,6 +172,9 @@ sealed interface NmpRelayRuntimePresentation {
                 AuthPhase.AwaitingPolicy -> "Awaiting authentication policy"
                 AuthPhase.AwaitingSignature -> "Awaiting authentication signature"
                 AuthPhase.AwaitingRelayAck -> "Awaiting relay authentication acknowledgment"
+                AuthPhase.Ready -> "Authenticated"
+                AuthPhase.Denied -> "Authentication denied"
+                AuthPhase.Error -> "Authentication error"
             }
     }
 

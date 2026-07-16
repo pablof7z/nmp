@@ -39,4 +39,16 @@ final class NMPDemandTests: XCTestCase {
         XCTAssertEqual(demand.cache, .agnostic)
         XCTAssertEqual(demand.access, .public)
     }
+
+    func testNip42AccessContextRoundTripsWithFrozenExpectedKey() {
+        let publicKey = String(repeating: "a", count: 64)
+        let demand = NMPDemand(
+            selection: NMPFilter(kinds: [1]),
+            source: .pinned(["wss://relay.example.com"]),
+            access: .nip42(publicKey: publicKey)
+        )
+
+        XCTAssertEqual(demand.toFfi().access, .nip42(publicKey: publicKey))
+        XCTAssertEqual(NMPDemand(demand.toFfi()), demand)
+    }
 }
