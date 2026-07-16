@@ -1726,6 +1726,7 @@ name = "nmp-ffi"
 version = "0.1.0"
 dependencies = [
  "nmp",
+ "nmp-blossom",
  "nmp-content",
  "nmp-grammar",
  "nmp-nip02",
@@ -1735,7 +1736,9 @@ dependencies = [
  "nmp-store",
  "nostr 0.44.4",
  "redb",
+ "serde_json",
  "tempfile",
+ "tokio",
  "tungstenite 0.29.0",
  "uniffi",
  "url",
