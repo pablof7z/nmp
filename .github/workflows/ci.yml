@@ -149,6 +149,45 @@ jobs:
         run: swift test
         working-directory: Packages/NMP
 
+      # #465: runnable iOS Simulator qualification. `swift test` above only
+      # proves the macOS SwiftPM host process; Hickory DNS/HTTP is
+      # compile-qualified for iOS by the sim-only xcframework build but was
+      # never RUN inside an actual iOS Simulator process. `apps/Falsifier`'s
+      # xcodegen-generated `FalsifierTests` target (ported from
+      # `RelayInformationTests.swift`'s `LocalNIP11Server` fixture) closes
+      # that gap by executing a hostname NIP-11 acquisition through
+      # `NMPEngine.relayInformation(for:policy:)` on a real simulator.
+      - name: Install xcodegen
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      - name: xcodegen generate (apps/Falsifier)
+        run: xcodegen generate
+        working-directory: apps/Falsifier
+
+      - name: Resolve an iOS Simulator destination (#465)
+        id: ios_sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available --json | python3 scripts/pick-ios-simulator-destination.py)
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: xcodebuild test (iOS Simulator NIP-11 runtime qualification, #465)
+        run: |
+          # `-retry-tests-on-failure`: observed locally, a simulator's first
+          # cold boot occasionally truncates the fixture's very first loopback
+          # HTTP response body (Network.framework/NECP simulator-only
+          # initialization race, not reproducible on a warm simulator and not
+          # present in the equivalent macOS-host `swift test` fixture this was
+          # ported from). A real regression still fails after the retry
+          # budget; this only absorbs the one-time cold-boot flake.
+          xcodebuild test \
+            -project Falsifier.xcodeproj \
+            -scheme Falsifier \
+            -destination "id=${{ steps.ios_sim.outputs.udid }}" \
+            -retry-tests-on-failure \
+            -test-iterations 3
+        working-directory: apps/Falsifier
+
   # Clean-clone Kotlin/JVM falsifier smoke test (#40): `Packages/NMPKotlin`
   # depends on uniffi-bindgen-generated Kotlin bindings + a compiled native
   # cdylib that are deliberately NOT committed (see
