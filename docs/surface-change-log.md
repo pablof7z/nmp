@@ -587,7 +587,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Superseded path removed:** none; this is the net-new projection of an existing crate — no prior FFI/Swift/Kotlin Blossom surface existed to alias or replace, and the direct-Rust `nmp-blossom` API is unchanged.
 - **Human signoff:** the repository owner's delegated orchestrator approves this surface contract for review in PR #560 on 2026-07-16, per the issue-#555 unit plan under epic #216; exact-head adversarial review and required CI, including surface-governance, remain merge gates.
 
-## 2026-07-16 — Expose the gap-free NIP-77 live-handoff phase ([#563](https://github.com/pablof7z/nmp/issues/563))
+## 2026-07-16 — Expose the gap-free NIP-77 live-handoff phase ([issue #563](https://github.com/pablof7z/nmp/issues/563), [PR #570](https://github.com/pablof7z/nmp/pull/570))
 
 - **Failure evidence:** issue #563 — reconciliation-first could snapshot local/remote holdings before the ongoing REQ became active, so an event published in between could be delivered by neither path. Canonical dedup handles overlap but cannot recover an event never delivered. The runtime also reused one internal identity shape across NIP-01/NIP-77 even though NIP-77 defines a separate subscription-id namespace, and reconnect temporarily regressed to a plain REQ.
 - **Changed projections:** ffi,kotlin,rust,swift
