@@ -79,7 +79,7 @@ class NMPSecureKeyStoreAccountStore(
     private val file: Path,
     password: CharArray,
     private val keyStoreType: String = "JCEKS",
-) {
+) : NMPLocalAccountCheckpoint {
     private val lock = Any()
 
     // Defensive copy: this type owns its lifetime of the password
@@ -87,7 +87,7 @@ class NMPSecureKeyStoreAccountStore(
     // afterwards.
     private val password: CharArray = password.copyOf()
 
-    internal fun loadSecretKey(): String? =
+    override fun loadSecretKey(): String? =
         synchronized(lock) {
             if (!Files.exists(file)) {
                 return@synchronized null
@@ -110,7 +110,7 @@ class NMPSecureKeyStoreAccountStore(
             }
         }
 
-    internal fun saveSecretKey(secretKey: String) {
+    override fun saveSecretKey(secretKey: String) {
         synchronized(lock) {
             val directory =
                 requireNotNull(file.parent) {
@@ -150,7 +150,7 @@ class NMPSecureKeyStoreAccountStore(
         }
     }
 
-    internal fun clear() {
+    override fun clear() {
         synchronized(lock) {
             Files.deleteIfExists(file)
         }
