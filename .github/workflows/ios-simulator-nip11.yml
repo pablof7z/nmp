@@ -1,0 +1,84 @@
+# iOS Simulator NIP-11 hostname runtime qualification (issue #465).
+#
+# This is a separate workflow file on purpose: .github/workflows/ci.yml is a
+# protected surface-governance program (scripts/check-surface-governance.sh
+# rejects ordinary-PR edits to it -- see architecture-gates.yml's doc for the
+# same reasoning), while this job is an ordinary, reviewable macOS CI job
+# with no toolchain governance implications of its own.
+#
+# PR #191 compiled the `nmp-ffi` iOS-simulator xcframework slices, but
+# `swift test` only ever proves the macOS SwiftPM host process -- Hickory
+# DNS/HTTP was compile-qualified for iOS but never actually RUN there. This
+# job builds the sim-only xcframework, xcodegen-generates the existing
+# `apps/Falsifier` project's `FalsifierTests` target, and runs it on a real
+# iOS Simulator, executing a hostname NIP-11 acquisition through
+# `NMPEngine.relayInformation(for:policy:)`.
+name: iOS Simulator NIP-11 qualification
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  ios-simulator-nip11:
+    name: iOS Simulator NIP-11 qualification
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Add Apple targets (sim + macOS slices)
+        run: rustup target add aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin
+
+      - name: Build NMP.xcframework + generated bindings (sim-only, no signing needed)
+        run: scripts/build-swift-xcframework.sh --sim-only
+
+      - name: Install xcodegen
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      # The runner's DEFAULT active Xcode can be older than the pbxproj
+      # format xcodegen emits (observed: default Xcode 15.4 refused a
+      # freshly xcodegen-generated project as "a future Xcode project file
+      # format"). Select the newest Xcode.app actually installed on the
+      # runner instead of assuming a specific version is default, so this
+      # does not go stale as GitHub updates the macOS image's bundled
+      # Xcodes.
+      - name: Select the newest installed Xcode
+        run: |
+          set -euo pipefail
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          latest=${latest:-/Applications/Xcode.app}
+          echo "Selecting $latest"
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
+      - name: xcodegen generate (apps/Falsifier)
+        run: xcodegen generate
+        working-directory: apps/Falsifier
+
+      - name: Resolve an iOS Simulator destination
+        id: ios_sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available --json | python3 scripts/pick-ios-simulator-destination.py)
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: xcodebuild test (iOS Simulator NIP-11 runtime qualification)
+        run: |
+          # `-retry-tests-on-failure`: observed locally, a simulator's first
+          # cold boot occasionally truncates the fixture's very first loopback
+          # HTTP response body (Network.framework/NECP simulator-only
+          # initialization race, not reproducible on a warm simulator and not
+          # present in the equivalent macOS-host `swift test` fixture this was
+          # ported from). A real regression still fails after the retry
+          # budget; this only absorbs the one-time cold-boot flake.
+          xcodebuild test \
+            -project Falsifier.xcodeproj \
+            -scheme Falsifier \
+            -destination "id=${{ steps.ios_sim.outputs.udid }}" \
+            -retry-tests-on-failure \
+            -test-iterations 3
+        working-directory: apps/Falsifier
