@@ -61,10 +61,10 @@ use nmp_router::{
 use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome,
-    CloseIntentOutcome, CompensateOutcome, CoverageKey, DeadlineKind, EventStore, HandoffEvidence,
-    InFlightPhase, IntentId, IntentSigState, LaneKey, LaneState, PersistenceError,
-    PostHandoffState, PromoteOutcome, ReceiptState, RecoveredLane, RelayObserved, TransientCause,
-    WriteDurability,
+    CancelEphemeralOutcome, CloseIntentOutcome, CompensateOutcome, CoverageKey, DeadlineKind,
+    EventStore, HandoffEvidence, InFlightPhase, IntentId, IntentSigState, LaneKey, LaneState,
+    PersistenceError, PostHandoffState, PromoteOutcome, ReceiptState, RecoveredLane, RelayObserved,
+    TransientCause, WriteDurability,
 };
 use nmp_transport::{
     AttemptCorrelation, DisconnectReason, HandoffResult, RelayFrame,
@@ -72,7 +72,7 @@ use nmp_transport::{
 };
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
-use crate::outbox::{ReceiptSink, WriteStatus};
+use crate::outbox::{CancelWriteError, CancelWriteOutcome, ReceiptSink, WriteStatus};
 use crate::relay_information::RelayInformationCapabilityEvidence;
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
@@ -1095,6 +1095,12 @@ struct RememberedRow {
 /// last per-relay ack (or `Ephemeral`'s generation-scoped handoff effects).
 /// Ephemeral still owns a receipt-only record and status stream; what it
 /// lacks is a durable delivery obligation and canonical pending row.
+#[derive(Clone)]
+struct QuarantinedWrite {
+    intent_id: IntentId,
+    frozen: SignedEvent,
+}
+
 struct PendingWrite {
     durability: Durability,
     routing: WriteRouting,
@@ -1297,7 +1303,7 @@ pub struct EngineCore<S: EventStore> {
     /// Persisted ordinary-write rows of reserved kind:22242 discovered at
     /// boot. They remain durably inspectable but never regain reducer
     /// ownership, attempt correlations, or a reattachable live sink.
-    quarantined_auth_receipts: HashMap<ReceiptId, String>,
+    quarantined_auth_receipts: HashMap<ReceiptId, QuarantinedWrite>,
     clock: Timestamp,
     active_pubkey: Option<PublicKey>,
     /// Correlation ids for failures that were never accepted use the upper
@@ -2316,7 +2322,13 @@ impl<S: EventStore> EngineCore<S> {
                 let id = ReceiptId(intent.receipt_id);
                 let reason = "recovered kind:22242 ordinary write quarantined from AUTH ownership"
                     .to_string();
-                self.quarantined_auth_receipts.insert(id, reason.clone());
+                self.quarantined_auth_receipts.insert(
+                    id,
+                    QuarantinedWrite {
+                        intent_id: intent.intent_id,
+                        frozen: intent.frozen.clone(),
+                    },
+                );
                 effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
                 continue;
             }
@@ -2532,6 +2544,18 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
     /// its retained facts. Unknown ids do not create state.
+    fn retained_receipt_status(receipt: &nmp_store::RecoveredReceipt) -> WriteStatus {
+        match receipt.state {
+            ReceiptState::Accepted => WriteStatus::Accepted,
+            ReceiptState::Signed => WriteStatus::Signed(receipt.frozen_id),
+            ReceiptState::Compensated => WriteStatus::Failed("write compensated".to_string()),
+            ReceiptState::Cancelled => WriteStatus::Cancelled,
+            ReceiptState::Abandoned => {
+                WriteStatus::Failed("ephemeral write abandoned after restart".to_string())
+            }
+        }
+    }
+
     pub fn reattach_receipt(
         &mut self,
         id: ReceiptId,
@@ -2583,14 +2607,7 @@ impl<S: EventStore> EngineCore<S> {
             }
             None => (Vec::new(), Vec::new(), Vec::new()),
         };
-        let status = match receipt.state {
-            ReceiptState::Accepted => WriteStatus::Accepted,
-            ReceiptState::Signed => WriteStatus::Signed(receipt.frozen_id),
-            ReceiptState::Compensated => WriteStatus::Failed("write compensated".to_string()),
-            ReceiptState::Abandoned => {
-                WriteStatus::Failed("ephemeral write abandoned after restart".to_string())
-            }
-        };
+        let status = Self::retained_receipt_status(&receipt);
         let mut replay = vec![status];
         if receipt.state == ReceiptState::Accepted
             && self
@@ -3150,11 +3167,7 @@ impl<S: EventStore> EngineCore<S> {
             EngineMsg::AuthCapabilityInvalidated(pubkey, capability, instance) => {
                 self.on_auth_capability_invalidated(pubkey, capability, instance)
             }
-            EngineMsg::CancelWrite(id) => {
-                let mut effects = self.on_cancel_write(id);
-                effects.extend(self.schedule_ready(self.clock));
-                effects
-            }
+            EngineMsg::CancelWrite(id) => self.cancel_write(id).1,
             EngineMsg::EventHandoff(correlation, result) => {
                 self.on_event_handoff(correlation, result)
             }
@@ -4157,14 +4170,235 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    fn on_cancel_write(&mut self, id: ReceiptId) -> Vec<Effect> {
+    /// Commit explicit cancellation only while this receipt is still an
+    /// accepted unsigned obligation. The synchronous result and emitted
+    /// receipt fact come from the same reducer turn.
+    fn retained_cancel_result(
+        id: ReceiptId,
+        receipt: &nmp_store::RecoveredReceipt,
+    ) -> Result<CancelWriteOutcome, CancelWriteError> {
+        match receipt.state {
+            ReceiptState::Cancelled => Ok(CancelWriteOutcome::Cancelled),
+            ReceiptState::Signed => Err(CancelWriteError::AlreadySigned {
+                receipt_id: id,
+                event_id: receipt.frozen_id,
+            }),
+            ReceiptState::Compensated => {
+                Err(CancelWriteError::AlreadyCompensated { receipt_id: id })
+            }
+            ReceiptState::Abandoned => Err(CancelWriteError::AlreadyAbandoned { receipt_id: id }),
+            ReceiptState::Accepted => Err(CancelWriteError::PersistenceFailed {
+                receipt_id: id,
+                reason: "accepted receipt has no live cancellation owner".to_string(),
+            }),
+        }
+    }
+
+    pub fn cancel_write(
+        &mut self,
+        id: ReceiptId,
+    ) -> (Result<CancelWriteOutcome, CancelWriteError>, Vec<Effect>) {
         let mut effects = Vec::new();
-        self.fail_and_compensate(
-            id,
-            "write cancelled before signing".to_string(),
-            &mut effects,
-        );
-        effects
+        let Some(pending) = self.pending.remove(&id) else {
+            if let Some(quarantined) = self.quarantined_auth_receipts.get(&id).cloned() {
+                match self
+                    .resolver
+                    .store_mut()
+                    .cancel_write(quarantined.intent_id)
+                {
+                    Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
+                        match self
+                            .resolver
+                            .react_to_compensation(quarantined.frozen, &outcome)
+                        {
+                            Ok(committed) => self.apply_committed_mutation(committed, &mut effects),
+                            Err(error) => self.degrade_store(error, &mut effects),
+                        }
+                        self.quarantined_auth_receipts.remove(&id);
+                        effects.push(Effect::EmitReceipt(id, WriteStatus::Cancelled));
+                        effects.extend(self.schedule_ready(self.clock));
+                        return (Ok(CancelWriteOutcome::Cancelled), effects);
+                    }
+                    Ok(CompensateOutcome::AlreadySigned) => {
+                        return (
+                            Err(CancelWriteError::AlreadySigned {
+                                receipt_id: id,
+                                event_id: quarantined.frozen.id,
+                            }),
+                            effects,
+                        );
+                    }
+                    Ok(CompensateOutcome::NotFound) => {}
+                    Err(error) => {
+                        return (
+                            Err(CancelWriteError::PersistenceFailed {
+                                receipt_id: id,
+                                reason: error.to_string(),
+                            }),
+                            effects,
+                        );
+                    }
+                }
+            }
+            let retained = match self.resolver.store().reattach_receipt(id.0) {
+                Ok(Some(receipt)) => receipt,
+                Ok(None) => {
+                    return (
+                        Err(CancelWriteError::UnknownReceipt { receipt_id: id }),
+                        effects,
+                    )
+                }
+                Err(error) => {
+                    return (
+                        Err(CancelWriteError::PersistenceFailed {
+                            receipt_id: id,
+                            reason: error.to_string(),
+                        }),
+                        effects,
+                    )
+                }
+            };
+            let result = Self::retained_cancel_result(id, &retained);
+            if result == Ok(CancelWriteOutcome::Cancelled) {
+                self.quarantined_auth_receipts.remove(&id);
+            }
+            return (result, effects);
+        };
+
+        if pending.already_signed || pending.event_id.is_some() {
+            let event_id = pending.event_id.unwrap_or(pending.frozen.id);
+            self.pending.insert(id, pending);
+            return (
+                Err(CancelWriteError::AlreadySigned {
+                    receipt_id: id,
+                    event_id,
+                }),
+                effects,
+            );
+        }
+
+        if let Some(intent_id) = pending.intent_id {
+            match self.resolver.store_mut().cancel_write(intent_id) {
+                Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
+                    match self
+                        .resolver
+                        .react_to_compensation(pending.frozen.clone(), &outcome)
+                    {
+                        Ok(committed) => self.apply_committed_mutation(committed, &mut effects),
+                        Err(error) => self.degrade_store(error, &mut effects),
+                    }
+                }
+                Ok(CompensateOutcome::AlreadySigned) => {
+                    let event_id = pending.frozen.id;
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::AlreadySigned {
+                            receipt_id: id,
+                            event_id,
+                        }),
+                        effects,
+                    );
+                }
+                Ok(CompensateOutcome::NotFound) => {
+                    let result = match self.resolver.store().reattach_receipt(id.0) {
+                        Ok(Some(receipt)) => Self::retained_cancel_result(id, &receipt),
+                        Ok(None) => {
+                            self.pending.insert(id, pending);
+                            return (
+                                Err(CancelWriteError::PersistenceFailed {
+                                    receipt_id: id,
+                                    reason: "accepted receipt disappeared during cancellation"
+                                        .to_string(),
+                                }),
+                                effects,
+                            );
+                        }
+                        Err(error) => {
+                            self.pending.insert(id, pending);
+                            return (
+                                Err(CancelWriteError::PersistenceFailed {
+                                    receipt_id: id,
+                                    reason: error.to_string(),
+                                }),
+                                effects,
+                            );
+                        }
+                    };
+                    self.pending.insert(id, pending);
+                    return (result, effects);
+                }
+                Err(error) => {
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::PersistenceFailed {
+                            receipt_id: id,
+                            reason: error.to_string(),
+                        }),
+                        effects,
+                    );
+                }
+            }
+        } else {
+            match self.resolver.store_mut().cancel_ephemeral_receipt(id.0) {
+                Ok(CancelEphemeralOutcome::Cancelled) => {}
+                Ok(CancelEphemeralOutcome::AlreadyCancelled) => {
+                    self.pending.insert(id, pending);
+                    return (Ok(CancelWriteOutcome::Cancelled), effects);
+                }
+                Ok(CancelEphemeralOutcome::AlreadySigned) => {
+                    let event_id = pending.frozen.id;
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::AlreadySigned {
+                            receipt_id: id,
+                            event_id,
+                        }),
+                        effects,
+                    );
+                }
+                Ok(CancelEphemeralOutcome::AlreadyAbandoned) => {
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::AlreadyAbandoned { receipt_id: id }),
+                        effects,
+                    );
+                }
+                Ok(CancelEphemeralOutcome::AlreadyCompensated) => {
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::AlreadyCompensated { receipt_id: id }),
+                        effects,
+                    );
+                }
+                Ok(CancelEphemeralOutcome::NotFound | CancelEphemeralOutcome::NotEphemeral) => {
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::PersistenceFailed {
+                            receipt_id: id,
+                            reason: "ephemeral cancellation owner does not match retained receipt"
+                                .to_string(),
+                        }),
+                        effects,
+                    );
+                }
+                Err(error) => {
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::PersistenceFailed {
+                            receipt_id: id,
+                            reason: error.to_string(),
+                        }),
+                        effects,
+                    );
+                }
+            }
+        }
+
+        self.forget_pending_indexes(id, &pending);
+        Self::notify(&pending, WriteStatus::Cancelled);
+        effects.push(Effect::EmitReceipt(id, WriteStatus::Cancelled));
+        effects.extend(self.schedule_ready(self.clock));
+        (Ok(CancelWriteOutcome::Cancelled), effects)
     }
 
     /// Shared by the pre-signed (`on_publish`) and signer-completed paths:
@@ -4225,6 +4459,30 @@ impl<S: EventStore> EngineCore<S> {
                         self.fail_and_compensate(id, err.to_string(), effects);
                         return;
                     }
+                }
+            }
+        } else {
+            match self.resolver.store_mut().mark_ephemeral_signed(id.0) {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Some(pending) = self.pending.get_mut(&id) {
+                        pending.sign_request_in_flight = false;
+                    }
+                    self.degrade_store(
+                        PersistenceError(
+                            "accepted ephemeral receipt disappeared during signature promotion"
+                                .to_string(),
+                        ),
+                        effects,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    if let Some(pending) = self.pending.get_mut(&id) {
+                        pending.sign_request_in_flight = false;
+                    }
+                    self.degrade_store(error, effects);
+                    return;
                 }
             }
         }
@@ -4555,7 +4813,7 @@ impl<S: EventStore> EngineCore<S> {
                         Err(e) => self.degrade_store(e, effects),
                     }
                 }
-                Ok(CompensateOutcome::NotFound) => {
+                Ok(CompensateOutcome::AlreadySigned | CompensateOutcome::NotFound) => {
                     // Promotion already made the row valid. Never retract a
                     // signed row; cancellation/signing errors arriving late
                     // cannot rewrite cache truth.
@@ -9584,7 +9842,7 @@ mod affected_handle_invalidation_tests {
         rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let cancelled = core.on_cancel_write(receipt);
+        let cancelled = core.cancel_write(receipt).1;
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
@@ -9676,7 +9934,7 @@ mod affected_handle_invalidation_tests {
         rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        core.on_cancel_write(receipt);
+        let _ = core.cancel_write(receipt);
 
         assert_eq!(core.projection_store_queries.get(), 1);
         assert_eq!(core.router_compiles.get(), 0);
@@ -9765,7 +10023,7 @@ mod affected_handle_invalidation_tests {
         rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        core.on_cancel_write(receipt);
+        let _ = core.cancel_write(receipt);
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
@@ -9839,7 +10097,7 @@ mod affected_handle_invalidation_tests {
         rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        core.on_cancel_write(receipt);
+        let _ = core.cancel_write(receipt);
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
@@ -11445,7 +11703,7 @@ mod history_mutation_tests {
         sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        core.on_cancel_write(receipt);
+        let _ = core.cancel_write(receipt);
 
         let batch = assert_one_atomic_batch(&sink);
         assert_eq!(

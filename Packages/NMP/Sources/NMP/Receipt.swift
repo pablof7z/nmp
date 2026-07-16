@@ -20,6 +20,37 @@ public enum ReceiptReattachment: Sendable {
     case retainedButUnreadable
 }
 
+/// Typed refusals from explicit pre-signature write cancellation.
+public enum WriteCancellationOutcome: Sendable, Equatable {
+    case cancelled
+}
+
+public enum NMPWriteCancellationError: Error, Sendable, Equatable {
+    case unknownReceipt(receiptId: UInt64)
+    case alreadySigned(receiptId: UInt64, eventId: String)
+    case alreadyCompensated(receiptId: UInt64)
+    case alreadyAbandoned(receiptId: UInt64)
+    case persistenceFailed(receiptId: UInt64, reason: String)
+    case engineClosed
+
+    init(_ ffi: FfiCancelWriteError) {
+        switch ffi {
+        case .UnknownReceipt(let receiptId):
+            self = .unknownReceipt(receiptId: receiptId)
+        case .AlreadySigned(let receiptId, let eventId):
+            self = .alreadySigned(receiptId: receiptId, eventId: eventId)
+        case .AlreadyCompensated(let receiptId):
+            self = .alreadyCompensated(receiptId: receiptId)
+        case .AlreadyAbandoned(let receiptId):
+            self = .alreadyAbandoned(receiptId: receiptId)
+        case .PersistenceFailed(let receiptId, let reason):
+            self = .persistenceFailed(receiptId: receiptId, reason: reason)
+        case .EngineClosed:
+            self = .engineClosed
+        }
+    }
+}
+
 /// Drains a publish's status updates into an `AsyncStream`. Not exposed
 /// publicly -- an implementation detail of `NMPEngine.publish`.
 private final class ReceiptBridge: ReceiptObserver, @unchecked Sendable {
@@ -57,6 +88,18 @@ func mapReceiptReattachment(
 }
 
 extension NMPEngine {
+    /// Cancel an accepted unsigned write. Returns the durable terminal fact;
+    /// repeated cancellation returns `.cancelled` idempotently.
+    public func cancel(receiptId: UInt64) throws -> WriteCancellationOutcome {
+        do {
+            switch try ffi.cancel(receiptId: receiptId) {
+            case .cancelled: return .cancelled
+            }
+        } catch let error as FfiCancelWriteError {
+            throw NMPWriteCancellationError(error)
+        }
+    }
+
     /// Enqueue a write. Returns as soon as the intent is accepted into the
     /// outbox; `Receipt.status` streams everything that happens to it after
     /// that (M4 plan §9 -- `publish` is a one-shot enqueue call, the

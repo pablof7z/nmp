@@ -10,10 +10,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    AcquisitionEvidence, AuthPhase, Binding, DiagnosticsSnapshot, Durability, Engine, EngineConfig,
-    Filter, Lane, LiveQuery, ObservationCancel, ReceiptId, ReceiptReattachment, Row, RowDelta,
-    ShortfallFact, SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
-    WriteStatus,
+    AcquisitionEvidence, AuthPhase, Binding, CancelWriteOutcome, DiagnosticsSnapshot, Durability,
+    Engine, EngineConfig, Filter, Lane, LiveQuery, ObservationCancel, ReceiptId,
+    ReceiptReattachment, Row, RowDelta, ShortfallFact, SourceStatus, Timestamp, UnsignedEvent,
+    WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
@@ -24,9 +24,10 @@ use nmp_ffi::nip02::{
 };
 use nmp_ffi::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
 use nmp_ffi::types::{
-    FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiDiagnosticsSnapshot, FfiDurability,
-    FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRowDelta, FfiShortfallFact, FfiSourceStatus,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
+    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiFrame, FfiReceiptReattachment,
+    FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiWriteIntent, FfiWritePayload,
+    FfiWriteRouting, FfiWriteStatus,
 };
 use nmp_nip02::{
     observe_following, set_following, FollowAction, FollowActionStatus, FollowAvailability,
@@ -141,6 +142,7 @@ struct NormEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NormStatus {
     Accepted,
+    Cancelled,
     /// #47 Unit B: carries the parked pubkey (hex) so the direct/FFI
     /// parity proof covers the payload, not just the variant tag.
     AwaitingCapability(String),
@@ -391,6 +393,7 @@ fn normalize_ffi_evidence(evidence: FfiAcquisitionEvidence, relay: &str) -> Norm
 fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
     match status {
         WriteStatus::Accepted => NormStatus::Accepted,
+        WriteStatus::Cancelled => NormStatus::Cancelled,
         WriteStatus::AwaitingCapability { pubkey } => {
             NormStatus::AwaitingCapability(pubkey.to_hex())
         }
@@ -453,6 +456,7 @@ fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
 fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
     match status {
         FfiWriteStatus::Accepted => NormStatus::Accepted,
+        FfiWriteStatus::Cancelled => NormStatus::Cancelled,
         FfiWriteStatus::AwaitingCapability { pubkey } => NormStatus::AwaitingCapability(pubkey),
         FfiWriteStatus::Signed { event_id } => NormStatus::Signed(event_id),
         FfiWriteStatus::Routed { mut relays } => {
@@ -1139,6 +1143,7 @@ fn normalize_ffi_follow_snapshot(snapshot: FfiFollowSnapshot) -> NormFollowSnaps
 fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
     match status {
         WriteStatus::Accepted => "accepted",
+        WriteStatus::Cancelled => "cancelled",
         WriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         WriteStatus::Signed(_) => "signed",
         WriteStatus::Routed(_) => "routed",
@@ -1161,6 +1166,7 @@ fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
 fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
     match status {
         FfiWriteStatus::Accepted => "accepted",
+        FfiWriteStatus::Cancelled => "cancelled",
         FfiWriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         FfiWriteStatus::Signed { .. } => "signed",
         FfiWriteStatus::Routed { .. } => "routed",
@@ -2401,14 +2407,133 @@ async fn run_ffi_reattach_live() -> ReattachProof {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct CancellationProof {
+    returned_cancelled: bool,
+    observed: Vec<NormStatus>,
+}
+
+fn run_direct_cancellation() -> CancellationProof {
+    let keys = fixed_keys();
+    let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
+    engine
+        .set_active_account(Some(keys.public_key()))
+        .expect("direct account must activate");
+    let tracked = engine
+        .publish_tracked(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(WRITE_CREATED_AT),
+                Kind::Custom(REATTACH_LIVE_KIND),
+                vec![],
+                "cancel-parity",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        })
+        .expect("direct publish must enqueue");
+    let deadline = Instant::now() + WAIT;
+    let mut observed = vec![
+        normalize_direct_status(
+            recv_before(&tracked.statuses, deadline, "direct cancellation Accepted"),
+            "n/a",
+        ),
+        normalize_direct_status(
+            recv_before(
+                &tracked.statuses,
+                deadline,
+                "direct cancellation AwaitingCapability",
+            ),
+            "n/a",
+        ),
+    ];
+    let returned_cancelled = engine
+        .cancel(tracked.id)
+        .expect("direct cancellation must commit")
+        == CancelWriteOutcome::Cancelled;
+    observed.push(normalize_direct_status(
+        recv_before(
+            &tracked.statuses,
+            Instant::now() + WAIT,
+            "direct cancellation terminal fact",
+        ),
+        "n/a",
+    ));
+    assert_eq!(
+        tracked.statuses.recv_timeout(WAIT),
+        Err(RecvTimeoutError::Disconnected),
+        "direct receipt stream must close after cancellation"
+    );
+    engine.shutdown();
+    CancellationProof {
+        returned_cancelled,
+        observed,
+    }
+}
+
+fn run_ffi_cancellation() -> CancellationProof {
+    let keys = fixed_keys();
+    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
+    engine
+        .set_active_account(Some(keys.public_key().to_hex()))
+        .expect("FFI account must activate");
+    let (tx, rx) = mpsc::channel();
+    let receipt_id = engine
+        .publish(
+            FfiWriteIntent {
+                payload: FfiWritePayload::Unsigned {
+                    pubkey: keys.public_key().to_hex(),
+                    created_at: WRITE_CREATED_AT,
+                    kind: REATTACH_LIVE_KIND,
+                    tags: vec![],
+                    content: "cancel-parity".to_string(),
+                },
+                durability: FfiDurability::Durable,
+                routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
+            },
+            Box::new(FfiReceipts { tx: Mutex::new(tx) }),
+        )
+        .expect("FFI publish must enqueue");
+    let deadline = Instant::now() + WAIT;
+    let mut observed = vec![
+        normalize_ffi_status(
+            recv_before(&rx, deadline, "FFI cancellation Accepted"),
+            "n/a",
+        ),
+        normalize_ffi_status(
+            recv_before(&rx, deadline, "FFI cancellation AwaitingCapability"),
+            "n/a",
+        ),
+    ];
+    let returned_cancelled = engine
+        .cancel(receipt_id)
+        .expect("FFI cancellation must commit")
+        == FfiCancelWriteOutcome::Cancelled;
+    observed.push(normalize_ffi_status(
+        recv_before(&rx, Instant::now() + WAIT, "FFI cancellation terminal fact"),
+        "n/a",
+    ));
+    assert_eq!(
+        rx.recv_timeout(WAIT),
+        Err(RecvTimeoutError::Disconnected),
+        "FFI receipt stream must close after cancellation"
+    );
+    engine.shutdown();
+    CancellationProof {
+        returned_cancelled,
+        observed,
+    }
+}
+
 /// TERMINAL half: publish an EPHEMERAL intent authored by an active account
 /// with no registered signer, so it durably persists as a receipt-only
 /// (`intent_id: None`) row still `Accepted` at shutdown time. Reopening the
 /// SAME `store_path` runs `RedbStore::open`'s own boot-time reconciliation
 /// (`reconcile_ephemeral_receipts_in_txn`), which abandons any such row --
-/// a real, publicly-reachable "terminal retained receipt" with no internal
-/// `EngineMsg`/`CancelWrite` reach-in needed (that verb is not on the
-/// supported facade surface at all).
+/// a real, publicly-reachable "terminal retained receipt" independent of the
+/// explicit cancellation path exercised above.
 async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     let keys = Keys::generate();
     let receipt_id = {
@@ -2579,6 +2704,25 @@ async fn direct_and_ffi_reattach_are_semantically_identical_for_a_live_retained_
     );
     assert_eq!(direct.outcome, NormReattach::Attached);
     assert_eq!(direct.unknown_id_outcome, NormReattach::NotFound);
+}
+
+#[test]
+fn direct_and_ffi_cancellation_return_and_observe_the_same_terminal_fact() {
+    let direct = run_direct_cancellation();
+    let ffi = run_ffi_cancellation();
+    assert_eq!(
+        direct, ffi,
+        "direct and FFI cancellation must return and stream identical typed facts"
+    );
+    assert!(direct.returned_cancelled);
+    assert_eq!(
+        direct.observed,
+        vec![
+            NormStatus::Accepted,
+            NormStatus::AwaitingCapability(fixed_keys().public_key().to_hex()),
+            NormStatus::Cancelled,
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

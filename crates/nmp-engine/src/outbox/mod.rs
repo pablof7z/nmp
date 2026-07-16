@@ -32,6 +32,10 @@ use crate::core::ReceiptId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteStatus {
     Accepted,
+    /// The app explicitly cancelled this accepted obligation before
+    /// signature promotion. Compensation committed atomically and this
+    /// terminal fact is retained for receipt reattachment.
+    Cancelled,
     /// No registered signer answers for `pubkey` -- the exact identity
     /// FROZEN at acceptance (`AcceptWrite::expected_pubkey` / an
     /// `identity_override`, #47 Unit A). Retained, not terminal: re-armed
@@ -110,6 +114,71 @@ pub enum WriteStatus {
     /// here because none was ever reached.
     Failed(String),
 }
+
+/// The only successful result of explicit write cancellation. Keeping this
+/// separate from [`WriteStatus`] makes every other receipt state
+/// unrepresentable as a successful cancellation result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelWriteOutcome {
+    Cancelled,
+}
+
+/// Typed refusal from explicit pre-signature cancellation. Each terminal
+/// state has its own construction path, so already-cancelled cannot be
+/// represented as a refusal and accepted cannot masquerade as terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelWriteError {
+    UnknownReceipt {
+        receipt_id: ReceiptId,
+    },
+    AlreadySigned {
+        receipt_id: ReceiptId,
+        event_id: EventId,
+    },
+    AlreadyCompensated {
+        receipt_id: ReceiptId,
+    },
+    AlreadyAbandoned {
+        receipt_id: ReceiptId,
+    },
+    PersistenceFailed {
+        receipt_id: ReceiptId,
+        reason: String,
+    },
+    EngineClosed,
+}
+
+impl std::fmt::Display for CancelWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownReceipt { receipt_id } => {
+                write!(f, "unknown receipt {}", receipt_id.0)
+            }
+            Self::AlreadySigned {
+                receipt_id,
+                event_id,
+            } => write!(
+                f,
+                "receipt {} is already signed as {event_id}",
+                receipt_id.0
+            ),
+            Self::AlreadyCompensated { receipt_id } => {
+                write!(f, "receipt {} is already compensated", receipt_id.0)
+            }
+            Self::AlreadyAbandoned { receipt_id } => {
+                write!(f, "receipt {} was abandoned after restart", receipt_id.0)
+            }
+            Self::PersistenceFailed { receipt_id, reason } => write!(
+                f,
+                "could not persist cancellation for receipt {}: {reason}",
+                receipt_id.0
+            ),
+            Self::EngineClosed => write!(f, "engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for CancelWriteError {}
 
 /// What `Handle::publish` returns: an id correlating to the status stream
 /// delivered on the caller's `ReceiptSink` — never a `bool`/`()`.

@@ -111,6 +111,15 @@ Explicit cancellation or terminal pre-signature failure removes the pending row
 through the ordinary store door. If it provisionally displaced a replaceable
 winner, that previous row is offered back through the same insertion logic.
 
+The supported Rust, Swift, and Kotlin engines expose cancellation by stable
+receipt id. It is legal only while the accepted write is still unsigned:
+successful cancellation returns `WriteCancellationOutcome.cancelled` and
+persists the matching receipt fact, repeating it is idempotent, and unknown,
+already-signed, already-compensated, or abandoned receipts produce distinct
+typed refusals. A persistence failure leaves the obligation live and cannot
+emit a false terminal fact. Dropping a receipt observer alone never cancels the
+write.
+
 There is no special "un-supersede" API.
 
 Once a valid signature promotes the row, relay ACK, rejection, timeout, and
