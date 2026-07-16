@@ -13,13 +13,13 @@ public enum NMPReadingTime {
 public struct NMPArticlePortraitCard: View {
     @Environment(\.nmpUITheme) private var theme
 
-    public let article: NostrArticle
-    public let authorProfile: NostrProfileMetadata?
+    public let article: NMPArticlePresentation
+    public let authorProfile: NMPProfilePresentation?
     public let action: (() -> Void)?
 
     public init(
-        article: NostrArticle,
-        authorProfile: NostrProfileMetadata? = nil,
+        article: NMPArticlePresentation,
+        authorProfile: NMPProfilePresentation? = nil,
         action: (() -> Void)? = nil
     ) {
         self.article = article
@@ -92,13 +92,13 @@ public struct NMPArticlePortraitCard: View {
 public struct NMPArticleMediumCard: View {
     @Environment(\.nmpUITheme) private var theme
 
-    public let article: NostrArticle
-    public let authorProfile: NostrProfileMetadata?
+    public let article: NMPArticlePresentation
+    public let authorProfile: NMPProfilePresentation?
     public let action: (() -> Void)?
 
     public init(
-        article: NostrArticle,
-        authorProfile: NostrProfileMetadata? = nil,
+        article: NMPArticlePresentation,
+        authorProfile: NMPProfilePresentation? = nil,
         action: (() -> Void)? = nil
     ) {
         self.article = article

@@ -1639,6 +1639,7 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1669,12 +1670,10 @@ dependencies = [
 name = "nmp-content"
 version = "0.1.0"
 dependencies = [
- "nmp",
- "nostr 0.44.4",
+ "nmp-grammar",
  "proptest",
  "pulldown-cmark",
  "regex",
- "serde_json",
 ]
 
 [[package]]
@@ -1817,7 +1816,9 @@ version = "0.1.0"
 dependencies = [
  "nmp",
  "nmp-bdd",
+ "nmp-content",
  "nmp-ffi",
+ "nmp-grammar",
  "nmp-nip02",
  "nostr 0.44.4",
  "tempfile",
