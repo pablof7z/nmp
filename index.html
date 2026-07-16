@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-16 03:58 UTC</p>
-    <p class="ep-sub">2026-07-16 &middot; NIP-42 Wave 3 merged — authenticated content-relay reads proven end to end at the engine level &middot; ~3.5 min</p>
-    <audio controls preload="none" src="reports/pulse-0012.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0012.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-16 04:53 UTC</p>
+    <p class="ep-sub">2026-07-16 &middot; NIP-42 Wave 5 merged — app-facing Rust auth API landed under the governed facade ceiling &middot; ~3.3 min</p>
+    <audio controls preload="none" src="reports/pulse-0013.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0013.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb"><a href="https://github.com/pablof7z/nmp/pull/542">#542</a> (NIP-42 Wave 3 — runtime capability binding + a real-WebSocket AUTH capstone, part of <a href="https://github.com/pablof7z/nmp/issues/8">#8</a>) merged. The capstone proves an authenticated content-relay read end to end against a real relay (challenge → policy → sign → AUTH → OK → REQ → EOSE → rows), plus denial-parking, reconnect-fresh-challenge, and a wrong-challenge oracle; all eight lifecycle/leak invariants passed adversarial review clean. Honest framing: this proves the engine layer, not an app-facing API yet — the <code>AuthPolicy</code> SDK surface and account registration through Swift/Kotlin are not merged; Wave 5 (Rust facade) is in the build gate now, Wave 6 (FFI/Swift/Kotlin) follows. Also: <a href="https://github.com/pablof7z/nmp/pull/529">#529</a> (<code>remove_account</code>) was closed as superseded — replaced by Wave 5's <code>add_account -&gt; AccountRegistration</code> / <code>remove_account(&amp;AccountRegistration)</code>, which closes <a href="https://github.com/pablof7z/nmp/issues/495">#495</a>. Unchanged: a macOS-only flaky test (<a href="https://github.com/pablof7z/nmp/issues/538">#538</a>) is testing-infra, not a product bug.</p>
+    <p class="ep-blurb"><a href="https://github.com/pablof7z/nmp/pull/543">#543</a> (NIP-42 Wave 5 — app-facing Rust facade auth surface, closes <a href="https://github.com/pablof7z/nmp/issues/495">#495</a>, part of <a href="https://github.com/pablof7z/nmp/issues/8">#8</a>) merged. An app can now register an <code>AuthPolicy</code>, manage accounts via <code>add_account -&gt; AccountRegistration</code> / <code>remove_account(&amp;AccountRegistration)</code>, and read per-session auth diagnostics — all facade-owned rather than re-exported, so the governed 30k-line facade snapshot <em>shrank</em> (29,957 &rarr; 29,557) instead of raising the ceiling. Independent adversarial review passed clean on mirror-conversion completeness, exact-instance registration semantics, and pending/cancel delegation. Honest framing: engine boundary (Wave 3) and Rust app API (Wave 5) are both proven; Wave 6 — the final wave, FFI + Swift + Kotlin projection — is in flight now. Also superseded: <a href="https://github.com/pablof7z/nmp/pull/529">#529</a> (<code>remove_account</code>), replaced by Wave 5's shape. Unchanged: a macOS-only flaky test (<a href="https://github.com/pablof7z/nmp/issues/538">#538</a>) is testing-infra, not a product bug.</p>
   </section>
 
   <details class="archive" id="archive">
