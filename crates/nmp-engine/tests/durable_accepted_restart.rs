@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId};
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
-    Durability, HostAuthority, RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Durability, HostAuthority, RelaySessionKey, WriteIntent, WritePayload,
+    WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{
@@ -50,12 +51,12 @@ fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureDirectory {
     FixtureDirectory::new().with_write(pk.to_hex(), [relay])
 }
 
-// #8 U1: the write plane rides the relay's PUBLIC session (no AUTH reducer
-// yet). The `signer` parameter is retained so call sites still name the
-// modelled write identity and the AUTH wave can restore an authenticated
-// session here without touching every caller.
-fn signer_session(relay: &RelayUrl, _signer: PublicKey) -> RelaySessionKey {
-    RelaySessionKey::public(relay.clone())
+// With the #8 AUTH reducer landed, the write plane rides the signing
+// identity's authenticated session again: every durable write demands
+// `AccessContext::Nip42(signing pubkey)`, so restart falsifiers that expect
+// attempts must connect exactly this session.
+fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
+    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
 }
 
 fn strip_additive_lane_rows(path: &std::path::Path, intent: nmp_store::IntentId, relay: &RelayUrl) {
@@ -578,6 +579,82 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
         .iter()
         .any(|intent| intent.intent_id == intent_id));
     assert!(store.recover_attempts(intent_id).unwrap().is_empty());
+}
+
+#[test]
+fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("quarantined-auth.redb");
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://quarantined-auth.example").unwrap();
+    let signed = EventBuilder::auth("persisted collision", relay.clone())
+        .custom_created_at(Timestamp::from(777))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let frozen = nostr::Event::new(
+        signed.id,
+        signed.pubkey,
+        signed.created_at,
+        signed.kind,
+        signed.tags.clone(),
+        signed.content.clone(),
+        sentinel_signature(),
+    );
+    let receipt = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let outcome = store
+            .accept_write(AcceptWrite {
+                frozen,
+                replaceable_base: None,
+                expected_pubkey: keys.public_key(),
+                signing_identity_ref: keys.public_key().to_hex(),
+                durability: WriteDurability::Durable,
+                routing: "author-outbox".to_string(),
+                sig_state: IntentSigState::Pending,
+                accepted_at: Timestamp::from(777),
+            })
+            .unwrap();
+        ReceiptId(outcome.journaled_receipt_id().unwrap())
+    };
+
+    let store = RedbStore::open(&path).unwrap();
+    let mut core = EngineCore::new(
+        store,
+        Box::new(directory(keys.public_key(), relay.clone())),
+        10,
+    );
+    let recovery = core.recover_on_boot();
+    assert!(recovery.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteStatus::Failed(reason))
+            if *id == receipt && reason.contains("kind:22242") && reason.contains("quarantined")
+    )));
+    assert!(!recovery.iter().any(|effect| matches!(
+        effect,
+        Effect::EnsureRelay(_) | Effect::PublishEvent(..) | Effect::RequestSign(..)
+    )));
+    assert_eq!(
+        core.reattach_receipt(receipt, Box::new(Sink::default())),
+        ReattachOutcome::RetainedButUnreadable
+    );
+
+    let session = signer_session(&relay, keys.public_key());
+    let handle = RelayHandle {
+        slot: 4,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+    let stale_ok = core.handle(EngineMsg::RelayFrame(
+        handle,
+        session,
+        RelayFrame::from(RelayMessage::ok(signed.id, true, "stale ordinary auth OK")),
+    ));
+    assert!(!stale_ok.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(_, WriteStatus::Acked(_))
+            | Effect::PublishEvent(..)
+            | Effect::RequestSign(..)
+    )));
 }
 
 #[test]

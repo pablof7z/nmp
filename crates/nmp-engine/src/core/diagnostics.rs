@@ -79,6 +79,16 @@ pub struct RelayDiagnosticsSnapshot {
     pub nip77_behavior: &'static str,
 }
 
+// The public AUTH-diagnostics projection (`AuthDiagnosticsSnapshot`,
+// `AuthDiagnosticsPhase`, and `DiagnosticsSnapshot.auth_sessions`) is
+// deliberately NOT part of Wave 2 (#8 U2). The reducer already tracks every
+// per-session AUTH phase internally (`EngineCore::auth_sessions` +
+// `AuthSessionPhase`), but exposing the read-out through the governed facade
+// this wave would ship half of the auth-diagnostics contract without its FFI
+// projection or the app-facing policy API — both of which land in Wave 3.
+// The whole auth-diagnostics surface (facade + FFI) therefore lands together
+// then, alongside the policy registry. See the surface change-log's U2 entry.
+
 /// The engine-global diagnostics snapshot (M5 plan §1.1) — "the acceptance
 /// test rendered on screen, permanently." One snapshot covers every
 /// currently-planned relay; there is no separate per-query diagnostics (that

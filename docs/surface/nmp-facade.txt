@@ -3729,6 +3729,17 @@ reexport nmp::AcquisitionEvidence => nmp_engine::core::evidence::AcquisitionEvid
                                                                                                     "kind": "plain"
                                                                                                   }
                                                                                                 },
+                                                                                                "name": "AwaitingChallenge",
+                                                                                                "visibility": "default"
+                                                                                              },
+                                                                                              {
+                                                                                                "attrs": [],
+                                                                                                "inner": {
+                                                                                                  "variant": {
+                                                                                                    "discriminant": null,
+                                                                                                    "kind": "plain"
+                                                                                                  }
+                                                                                                },
                                                                                                 "name": "AwaitingPolicy",
                                                                                                 "visibility": "default"
                                                                                               },
@@ -3741,6 +3752,17 @@ reexport nmp::AcquisitionEvidence => nmp_engine::core::evidence::AcquisitionEvid
                                                                                                   }
                                                                                                 },
                                                                                                 "name": "AwaitingSignature",
+                                                                                                "visibility": "default"
+                                                                                              },
+                                                                                              {
+                                                                                                "attrs": [],
+                                                                                                "inner": {
+                                                                                                  "variant": {
+                                                                                                    "discriminant": null,
+                                                                                                    "kind": "plain"
+                                                                                                  }
+                                                                                                },
+                                                                                                "name": "AwaitingRelayAck",
                                                                                                 "visibility": "default"
                                                                                               }
                                                                                             ]

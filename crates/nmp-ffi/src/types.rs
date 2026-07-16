@@ -431,12 +431,14 @@ pub enum FfiSourceStatus {
 }
 
 /// `nmp::AuthPhase` mirror -- the AUTH negotiation phases worth surfacing
-/// while awaiting proof (reserved for #8; see `nmp_engine::core::evidence`'s
-/// own doc).
+/// while awaiting proof (populated by the #8 AUTH reducer; see
+/// `nmp_engine::core::evidence`'s own doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiAuthPhase {
+    AwaitingChallenge,
     AwaitingPolicy,
     AwaitingSignature,
+    AwaitingRelayAck,
 }
 
 /// `nmp::SourceEvidence` mirror -- one relay's acquisition state for a

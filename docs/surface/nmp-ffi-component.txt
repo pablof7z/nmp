@@ -46,6 +46,12 @@ enum Enum {
     discr_type: None,
     variants: [
         Variant {
+            name: "AwaitingChallenge",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
             name: "AwaitingPolicy",
             discr: None,
             fields: [],
@@ -57,11 +63,17 @@ enum Enum {
             fields: [],
             docstring: None,
         },
+        Variant {
+            name: "AwaitingRelayAck",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp::AuthPhase` mirror -- the AUTH negotiation phases worth surfacing\nwhile awaiting proof (reserved for #8; see `nmp_engine::core::evidence`'s\nown doc).",
+        "`nmp::AuthPhase` mirror -- the AUTH negotiation phases worth surfacing\nwhile awaiting proof (populated by the #8 AUTH reducer; see\n`nmp_engine::core::evidence`'s own doc).",
     ),
 }
 

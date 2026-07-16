@@ -185,6 +185,33 @@ pub enum DurableSendOutcome {
     Resolved(HandoffResult),
 }
 
+/// Terminal result of one exact-generation, nonpersistent frame handoff.
+///
+/// This lane is for connection-scoped protocol messages whose authority
+/// disappears with the current socket generation (for example NIP-42 AUTH).
+/// It is intentionally separate from ordinary reconnecting traffic and from
+/// durable EVENT correlations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EphemeralSendOutcome {
+    /// The frame's socket write and flush completed on the exact requested
+    /// session generation.
+    Accepted,
+    /// No such live connected session existed, the generation changed, or
+    /// the generation ended before its write and flush completed.
+    Unavailable,
+}
+
+/// Immediate disposition of starting an exact-generation ephemeral send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EphemeralSendStart {
+    /// The exact worker owns the one-shot completion callback. It invokes it
+    /// exactly once with the terminal [`EphemeralSendOutcome`].
+    Pending,
+    /// The pool rejected the operation synchronously and did not retain or
+    /// invoke the callback.
+    Resolved(EphemeralSendOutcome),
+}
+
 /// One parsed, owned relay message off the wire.
 ///
 /// Text is parsed exactly once at the transport boundary. EVENT payloads move
@@ -588,6 +615,55 @@ impl Pool {
         }
     }
 
+    /// Hand off one connection-scoped frame only to the exact currently
+    /// connected `(session, handle)`.
+    ///
+    /// Unlike [`Self::send`], this operation is rejected while dialing or
+    /// disconnected and is never placed in the ordinary reconnecting queue
+    /// or reconnect preamble. Unlike [`Self::send_durable`], it has no
+    /// [`AttemptCorrelation`] and never enters durable EVENT bookkeeping.
+    /// The worker rechecks `handle.generation` when it drains the command;
+    /// a reconnect racing this call therefore resolves `Unavailable` rather
+    /// than carrying the frame into the new socket.
+    ///
+    /// A [`EphemeralSendStart::Pending`] callback fires exactly once, after
+    /// either a successful write+flush on that generation (`Accepted`) or a
+    /// stale generation / connection end (`Unavailable`). Synchronous
+    /// rejection — including a full bounded command queue, the same
+    /// backpressure signal [`Self::send_durable`] reports as
+    /// `NotHandedOff` — returns [`EphemeralSendStart::Resolved`] and drops
+    /// the callback without invocation.
+    pub fn send_ephemeral_exact(
+        &self,
+        session: &RelaySessionKey,
+        h: RelayHandle,
+        frame: WireFrame,
+        completion: impl FnOnce(EphemeralSendOutcome) + Send + 'static,
+    ) -> EphemeralSendStart {
+        let WireFrame::Text(text) = frame else {
+            return EphemeralSendStart::Resolved(EphemeralSendOutcome::Unavailable);
+        };
+        let Ok(guard) = self.inner.lock() else {
+            return EphemeralSendStart::Resolved(EphemeralSendOutcome::Unavailable);
+        };
+        let Some(worker) = guard.connected_command_tx_for(session, h) else {
+            return EphemeralSendStart::Resolved(EphemeralSendOutcome::Unavailable);
+        };
+        let command = worker::WorkerCommand::SendEphemeral {
+            generation: h.generation,
+            frame: text,
+            completion: worker::EphemeralCompletion::new(completion),
+        };
+        match worker.try_push(command) {
+            Ok(()) => EphemeralSendStart::Pending,
+            Err(worker::WorkerCommand::SendEphemeral { completion, .. }) => {
+                completion.disarm();
+                EphemeralSendStart::Resolved(EphemeralSendOutcome::Unavailable)
+            }
+            Err(_) => unreachable!("send_ephemeral_exact enqueues only SendEphemeral"),
+        }
+    }
+
     /// Close the slot for `h` and return its synchronous disconnect fact.
     /// A stale/already-closed handle returns `None`. The fact is returned,
     /// never delivered through the blocking pool sink while `PoolInner` is
@@ -780,5 +856,69 @@ mod thread_budget_tests {
             inner::configured_verifier_workers(usize::MAX),
             DEFAULT_VERIFIER_WORKERS
         );
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_send_tests {
+    use super::*;
+    use nmp_grammar::AccessContext;
+    use nostr::Keys;
+    use std::sync::mpsc;
+
+    #[test]
+    fn dialing_stale_wrong_session_and_binary_handoffs_fail_synchronously() {
+        let (events, _event_rx) = mpsc::channel();
+        let pool = Pool::new(
+            PoolConfig {
+                reconnect_delay_initial: Some(Duration::from_secs(30)),
+                reconnect_jitter_max: Some(Duration::ZERO),
+                ..PoolConfig::default()
+            },
+            events,
+        )
+        .unwrap();
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let session = RelaySessionKey::new(
+            relay.clone(),
+            AccessContext::Nip42(Keys::generate().public_key()),
+        );
+        let handle = pool.ensure_session(&session).unwrap();
+        let wrong_session =
+            RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
+        let stale = RelayHandle {
+            generation: handle.generation.wrapping_add(1),
+            ..handle
+        };
+
+        for (candidate_session, candidate_handle, frame) in [
+            (&session, handle, WireFrame::Text("dialing".to_string())),
+            (&session, stale, WireFrame::Text("stale".to_string())),
+            (
+                &wrong_session,
+                handle,
+                WireFrame::Text("wrong-session".to_string()),
+            ),
+            (&session, handle, WireFrame::Binary(vec![1, 2, 3])),
+        ] {
+            let (callback_tx, callback_rx) = mpsc::channel();
+            assert_eq!(
+                pool.send_ephemeral_exact(
+                    candidate_session,
+                    candidate_handle,
+                    frame,
+                    move |outcome| {
+                        let _ = callback_tx.send(outcome);
+                    },
+                ),
+                EphemeralSendStart::Resolved(EphemeralSendOutcome::Unavailable)
+            );
+            assert!(
+                callback_rx.try_recv().is_err(),
+                "synchronous refusal must not also invoke the callback"
+            );
+        }
+
+        pool.shutdown();
     }
 }
