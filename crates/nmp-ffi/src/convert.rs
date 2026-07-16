@@ -999,8 +999,10 @@ pub fn row_delta_to_ffi(d: &RowDelta) -> FfiRowDelta {
 
 fn auth_phase_to_ffi(p: AuthPhase) -> FfiAuthPhase {
     match p {
+        AuthPhase::AwaitingChallenge => FfiAuthPhase::AwaitingChallenge,
         AuthPhase::AwaitingPolicy => FfiAuthPhase::AwaitingPolicy,
         AuthPhase::AwaitingSignature => FfiAuthPhase::AwaitingSignature,
+        AuthPhase::AwaitingRelayAck => FfiAuthPhase::AwaitingRelayAck,
     }
 }
 

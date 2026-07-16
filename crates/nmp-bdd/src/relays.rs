@@ -39,7 +39,8 @@ use nmp_test_support::ConnectionOwner;
 use nostr::{JsonUtil, RelayUrl};
 
 use nostr_relay_builder::builder::{
-    LocalRelayBuilder, QueryPolicy, QueryPolicyResult, WritePolicy, WritePolicyResult,
+    LocalRelayBuilder, LocalRelayBuilderNip42, QueryPolicy, QueryPolicyResult, WritePolicy,
+    WritePolicyResult,
 };
 use nostr_relay_builder::local::LocalRelay;
 use nostr_relay_builder::prelude::{
@@ -63,6 +64,14 @@ pub struct RelayConfig {
     /// accept-but-never-EOSE relay (that behavior is not a plugin point
     /// `nostr-relay-builder` 0.45.0-alpha.3 exposes).
     pub reject_queries: bool,
+    /// NIP-42 write gating (`LocalRelayBuilderNip42::write()`). Verified
+    /// behavior of `LocalRelay` 0.45.0-alpha.3 in this mode: it does NOT
+    /// challenge on connect; on an unauthenticated EVENT it sends
+    /// `["AUTH", challenge]` followed by
+    /// `["OK", id, false, "auth-required: you must auth"]`. Reads are NOT
+    /// gated. Defaults to `false` so every existing scenario keeps its
+    /// ungated relay semantics.
+    pub auth_required_writes: bool,
 }
 
 /// Contact count + a `Notify` so a caller can WAIT (bounded, no spin-poll --
@@ -174,7 +183,7 @@ impl ScriptedRelay {
         let queries = Arc::new(QueryLog::default());
         let backend_port = free_port();
 
-        let relay = LocalRelayBuilder::default()
+        let mut builder = LocalRelayBuilder::default()
             .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
             .port(backend_port)
             .write_policy(LoggingWritePolicy {
@@ -185,8 +194,11 @@ impl ScriptedRelay {
                 contacted: contacted.clone(),
                 queries: queries.clone(),
                 reject: config.reject_queries,
-            })
-            .build();
+            });
+        if config.auth_required_writes {
+            builder = builder.nip42(LocalRelayBuilderNip42::write());
+        }
+        let relay = builder.build();
         relay
             .run()
             .await

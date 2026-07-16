@@ -304,7 +304,9 @@ fn direct_status_name(status: SourceStatus) -> String {
         SourceStatus::Disconnected => "disconnected".to_string(),
         SourceStatus::AwaitingAuth { phase } => match phase {
             AuthPhase::AwaitingPolicy => "awaiting_auth:policy".to_string(),
+            AuthPhase::AwaitingChallenge => "awaiting_auth:challenge".to_string(),
             AuthPhase::AwaitingSignature => "awaiting_auth:signature".to_string(),
+            AuthPhase::AwaitingRelayAck => "awaiting_auth:relay_ack".to_string(),
         },
         SourceStatus::AuthDenied => "auth_denied".to_string(),
         SourceStatus::Error => "error".to_string(),
@@ -318,7 +320,9 @@ fn ffi_status_name(status: FfiSourceStatus) -> String {
         FfiSourceStatus::Disconnected => "disconnected".to_string(),
         FfiSourceStatus::AwaitingAuth { phase } => match phase {
             FfiAuthPhase::AwaitingPolicy => "awaiting_auth:policy".to_string(),
+            FfiAuthPhase::AwaitingChallenge => "awaiting_auth:challenge".to_string(),
             FfiAuthPhase::AwaitingSignature => "awaiting_auth:signature".to_string(),
+            FfiAuthPhase::AwaitingRelayAck => "awaiting_auth:relay_ack".to_string(),
         },
         FfiSourceStatus::AuthDenied => "auth_denied".to_string(),
         FfiSourceStatus::Error => "error".to_string(),
@@ -872,7 +876,52 @@ fn collect_direct_receipts(rx: mpsc::Receiver<WriteStatus>, relay: &str) -> Vec<
     }
 }
 
-fn expected_success_receipts(keys: &Keys) -> Vec<NormStatus> {
+/// Bounded sibling of [`collect_direct_receipts`] for the fail-closed AUTH
+/// park: there IS no terminal status (the lane parks), so collection stops
+/// at the first `AwaitingAuth` beat instead. Borrows the receiver so the
+/// caller can afterwards prove NO further status arrives.
+fn collect_direct_receipts_until_awaiting_auth(
+    rx: &mpsc::Receiver<WriteStatus>,
+    relay: &str,
+) -> Vec<NormStatus> {
+    let mut statuses = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let status = recv_before(rx, deadline, "direct auth-parked receipt");
+        let normalized = normalize_direct_status(status, relay);
+        let parked = matches!(normalized, NormStatus::AwaitingAuth(_));
+        statuses.push(normalized);
+        if parked {
+            return statuses;
+        }
+    }
+}
+
+fn collect_ffi_receipts_until_awaiting_auth(
+    rx: &mpsc::Receiver<FfiWriteStatus>,
+    relay: &str,
+) -> Vec<NormStatus> {
+    let mut statuses = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let status = recv_before(rx, deadline, "FFI auth-parked receipt");
+        let normalized = normalize_ffi_status(status, relay);
+        let parked = matches!(normalized, NormStatus::AwaitingAuth(_));
+        statuses.push(normalized);
+        if parked {
+            return statuses;
+        }
+    }
+}
+
+/// The exact ordered pre-ack facts every durable parity write now exposes.
+/// #8 U2: durable writes ride the cold `AccessContext::Nip42` session
+/// instead of the already-warm public read session, so the reducer emits
+/// one deterministic `AwaitingRelay` beat between `Routed` and `Sent` (it
+/// schedules the eligible lane in the same turn that dials the session,
+/// before that dial can possibly complete) — for EVERY durable write, since
+/// worker reconciliation closes the write session once a write terminates.
+fn expected_send_preamble(keys: &Keys) -> Vec<NormStatus> {
     let event = UnsignedEvent::new(
         keys.public_key(),
         Timestamp::from(WRITE_CREATED_AT),
@@ -887,9 +936,25 @@ fn expected_success_receipts(keys: &Keys) -> Vec<NormStatus> {
         NormStatus::Accepted,
         NormStatus::Signed(event.id.to_hex()),
         NormStatus::Routed(vec![relay.clone()]),
-        NormStatus::Sent(relay.clone()),
-        NormStatus::Acked(relay),
+        NormStatus::AwaitingRelay(relay.clone()),
+        NormStatus::Sent(relay),
     ]
+}
+
+fn expected_success_receipts(keys: &Keys) -> Vec<NormStatus> {
+    let mut receipts = expected_send_preamble(keys);
+    receipts.push(NormStatus::Acked("<loopback-relay>".to_string()));
+    receipts
+}
+
+/// #8 U2 fail-closed park: no AUTH policy registry exists at this wave, so
+/// against a relay that answers an unauthenticated EVENT with
+/// `OK false "auth-required:"` the write emits exactly one `AwaitingAuth`
+/// beat and the lane stays parked — no retry, no terminal status.
+fn expected_auth_parked_receipts(keys: &Keys) -> Vec<NormStatus> {
+    let mut receipts = expected_send_preamble(keys);
+    receipts.push(NormStatus::AwaitingAuth("<loopback-relay>".to_string()));
+    receipts
 }
 
 struct FfiRows {
@@ -1589,7 +1654,8 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     assert_eq!(
         receipts,
         expected_success_receipts(keys),
-        "direct durable publish must expose the exact ordered acceptance/sign/route/send/ack facts"
+        "direct durable publish must expose the exact ordered \
+         acceptance/sign/route/await-relay/send/ack facts"
     );
 
     query_cancel.cancel();
@@ -1723,7 +1789,8 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     assert_eq!(
         receipts,
         expected_success_receipts(keys),
-        "FFI durable publish must expose the exact ordered acceptance/sign/route/send/ack facts"
+        "FFI durable publish must expose the exact ordered \
+         acceptance/sign/route/await-relay/send/ack facts"
     );
 
     query_handle.cancel();
@@ -1737,6 +1804,127 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         receipts,
         diagnostics,
     }
+}
+
+/// #8 U2 fail-closed AUTH park, direct half. Same seeding/discovery
+/// preamble as `run_direct_success` (reads are NOT gated by
+/// `auth_required_writes`, so real NIP-65 discovery works unchanged) and
+/// the identical engine construction/keys, but the relay answers the
+/// unauthenticated durable EVENT with `["AUTH", challenge]` +
+/// `["OK", id, false, "auth-required: ..."]`. No AUTH policy registry
+/// exists at this wave, so the write must park on exactly one
+/// `AwaitingAuth` beat and then stay silent — no retry, no terminal.
+async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<NormStatus> {
+    let relay = ScriptedRelay::start(&RelayConfig {
+        auth_required_writes: true,
+        ..RelayConfig::default()
+    })
+    .await;
+    relay.seed_own_relay_list(keys, QUERY_CREATED_AT - 1).await;
+    relay.seed_signed_event(query_event).await;
+    let relay_url = relay.url.to_string();
+    let engine = Engine::new(EngineConfig {
+        indexer_relays: vec![relay_url.clone()],
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..EngineConfig::default()
+    })
+    .expect("direct auth-parked engine must construct");
+    let pubkey = engine
+        .add_account(&keys.secret_key().to_secret_hex())
+        .expect("direct auth-parked account must register");
+    engine
+        .set_active_account(Some(pubkey))
+        .expect("direct auth-parked account must activate");
+
+    let discovery_cancel = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay);
+
+    let unsigned = UnsignedEvent::new(
+        pubkey,
+        Timestamp::from(WRITE_CREATED_AT),
+        Kind::Custom(WRITE_KIND),
+        vec![],
+        "parity-write",
+    );
+    let receipt_rx = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+        })
+        .expect("direct auth-parked publish must enqueue");
+    let receipts = collect_direct_receipts_until_awaiting_auth(&receipt_rx, &relay_url);
+    assert_eq!(
+        receipt_rx.recv_timeout(Duration::from_secs(2)),
+        Err(RecvTimeoutError::Timeout),
+        "a fail-closed AUTH park must emit no further direct status: no retry, no terminal"
+    );
+
+    discovery_cancel.cancel();
+    engine.shutdown();
+    relay.shutdown();
+    receipts
+}
+
+/// FFI half of the fail-closed AUTH park — its own isolated relay instance
+/// and the identical engine construction/keys as `run_ffi_success`, so the
+/// byte-identical comparison against the direct half is honest.
+async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<NormStatus> {
+    let relay = ScriptedRelay::start(&RelayConfig {
+        auth_required_writes: true,
+        ..RelayConfig::default()
+    })
+    .await;
+    relay.seed_own_relay_list(keys, QUERY_CREATED_AT - 1).await;
+    relay.seed_signed_event(query_event).await;
+    let relay_url = relay.url.to_string();
+    let engine = NmpEngine::new(NmpEngineConfig {
+        store_path: None,
+        indexer_relays: vec![relay_url.clone()],
+        app_relays: vec![],
+        fallback_relays: vec![],
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..NmpEngineConfig::default()
+    })
+    .expect("FFI auth-parked engine must construct");
+    let pubkey = engine
+        .add_account(keys.secret_key().to_secret_hex())
+        .expect("FFI auth-parked account must register");
+    engine
+        .set_active_account(Some(pubkey.clone()))
+        .expect("FFI auth-parked account must activate");
+
+    let discovery_handle = stage_ffi_discovery(&engine, &pubkey, &relay);
+
+    let (receipt_tx, receipt_rx) = mpsc::channel();
+    engine
+        .publish(
+            FfiWriteIntent {
+                payload: FfiWritePayload::Unsigned {
+                    pubkey,
+                    created_at: WRITE_CREATED_AT,
+                    kind: WRITE_KIND,
+                    tags: vec![],
+                    content: "parity-write".to_string(),
+                },
+                durability: FfiDurability::Durable,
+                routing: FfiWriteRouting::AuthorOutbox,
+            },
+            Box::new(FfiReceipts {
+                tx: Mutex::new(receipt_tx),
+            }),
+        )
+        .expect("FFI auth-parked publish must enqueue");
+    let receipts = collect_ffi_receipts_until_awaiting_auth(&receipt_rx, &relay_url);
+    assert_eq!(
+        receipt_rx.recv_timeout(Duration::from_secs(2)),
+        Err(RecvTimeoutError::Timeout),
+        "a fail-closed AUTH park must emit no further FFI status: no retry, no terminal"
+    );
+
+    discovery_handle.cancel();
+    engine.shutdown();
+    relay.shutdown();
+    receipts
 }
 
 async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
@@ -2270,6 +2458,35 @@ async fn direct_and_ffi_facades_are_semantically_identical_over_real_loopback() 
     );
 }
 
+/// #8 U2: against a relay that actually challenges (NIP-42 write gating),
+/// the durable write parks fail-closed — the relay's
+/// `OK false "auth-required:"` yields exactly one `AwaitingAuth` beat and
+/// the lane stays parked (no policy registry exists until Wave 3). That
+/// park must be byte-identical between the direct Rust facade and the FFI
+/// facade, and neither side may emit anything after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auth_required_relay_parks_write_identically_direct_and_ffi() {
+    let keys = fixed_keys();
+    let query_event = nostr::EventBuilder::new(Kind::Custom(QUERY_KIND), "parity-row")
+        .custom_created_at(Timestamp::from(QUERY_CREATED_AT))
+        .sign_with_keys(&keys)
+        .expect("parity row fixture must sign cleanly");
+
+    let direct = run_direct_auth_parked(&keys, &query_event).await;
+    let ffi = run_ffi_auth_parked(&keys, &query_event).await;
+
+    assert_eq!(
+        direct, ffi,
+        "the direct and FFI facades must expose the identical ordered fail-closed AUTH park"
+    );
+    assert_eq!(
+        direct,
+        expected_auth_parked_receipts(&keys),
+        "a protected durable write must park on exactly \
+         [Accepted, Signed, Routed, AwaitingRelay, Sent, AwaitingAuth]"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
     let author = fixed_keys();
@@ -2296,6 +2513,12 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
             NormFollowActionStatus::NoChange(true)
         ]
     );
+    // #8 U2: `FollowActionStatus::Receipt` forwards every underlying
+    // `WriteStatus` fact verbatim, so both durable kind:3 writes carry the
+    // deterministic cold-Nip42-session `awaiting_relay` beat between
+    // `routed` and `sent` (see `expected_send_preamble`) — the unfollow too,
+    // because worker reconciliation closed the write session when the
+    // follow write acked.
     assert!(matches!(
         direct.follow.as_slice(),
         [
@@ -2303,6 +2526,7 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
             NormFollowActionStatus::Receipt("accepted"),
             NormFollowActionStatus::Receipt("signed"),
             NormFollowActionStatus::Receipt("routed"),
+            NormFollowActionStatus::Receipt("awaiting_relay"),
             NormFollowActionStatus::Receipt("sent"),
             NormFollowActionStatus::Receipt("acked")
         ]
@@ -2314,6 +2538,7 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
             NormFollowActionStatus::Receipt("accepted"),
             NormFollowActionStatus::Receipt("signed"),
             NormFollowActionStatus::Receipt("routed"),
+            NormFollowActionStatus::Receipt("awaiting_relay"),
             NormFollowActionStatus::Receipt("sent"),
             NormFollowActionStatus::Receipt("acked")
         ]

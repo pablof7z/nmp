@@ -44,17 +44,23 @@ data class Row(
 }
 
 /** The AUTH negotiation phases worth surfacing while awaiting proof
- * (reserved for #8 -- not yet populated by the engine). */
+ * (populated by the #8 AUTH reducer). */
 sealed class AuthPhase {
+    object AwaitingChallenge : AuthPhase()
+
     object AwaitingPolicy : AuthPhase()
 
     object AwaitingSignature : AuthPhase()
 
+    object AwaitingRelayAck : AuthPhase()
+
     companion object {
         fun from(ffi: FfiAuthPhase): AuthPhase =
             when (ffi) {
+                FfiAuthPhase.AWAITING_CHALLENGE -> AwaitingChallenge
                 FfiAuthPhase.AWAITING_POLICY -> AwaitingPolicy
                 FfiAuthPhase.AWAITING_SIGNATURE -> AwaitingSignature
+                FfiAuthPhase.AWAITING_RELAY_ACK -> AwaitingRelayAck
             }
     }
 }

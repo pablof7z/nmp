@@ -168,8 +168,10 @@ sealed interface NmpRelayRuntimePresentation {
     data class AwaitingAuth(val phase: AuthPhase) : NmpRelayRuntimePresentation {
         override val label =
             when (phase) {
+                AuthPhase.AwaitingChallenge -> "Awaiting authentication challenge"
                 AuthPhase.AwaitingPolicy -> "Awaiting authentication policy"
                 AuthPhase.AwaitingSignature -> "Awaiting authentication signature"
+                AuthPhase.AwaitingRelayAck -> "Awaiting relay authentication acknowledgment"
             }
     }
 

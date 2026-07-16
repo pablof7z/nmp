@@ -7,14 +7,16 @@
 //! own reasoning demands (send-time snapshots, the EOSE intersection rule,
 //! `limit` poisoning, and per-query scoped acquisition evidence).
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::{
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta, RowSink,
-    ShortfallFact, SourceEvidence, SourceStatus,
+    AcquisitionEvidence, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendOutcome,
+    AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta, RowSink, ShortfallFact,
+    SourceEvidence, SourceStatus,
 };
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
@@ -673,13 +675,12 @@ fn public_session(relay: &RelayUrl) -> RelaySessionKey {
     RelaySessionKey::public(relay.clone())
 }
 
-// In the #8 U1 foundation the write plane rides the relay's PUBLIC session
-// (no AUTH reducer yet). This helper keeps its `signer` parameter so the
-// call sites still document which identity's write lane they model, and so
-// the AUTH wave can reintroduce an authenticated session here without
-// re-touching every caller — but today it resolves to the public session.
-fn signer_session(relay: &RelayUrl, _signer: nostr::PublicKey) -> RelaySessionKey {
-    RelaySessionKey::public(relay.clone())
+// With the #8 AUTH reducer landed, the write plane rides the signing
+// identity's authenticated session again: every durable/ephemeral write
+// demands `AccessContext::Nip42(signing pubkey)`, so tests that expect
+// attempts must connect exactly this session.
+fn signer_session(relay: &RelayUrl, signer: nostr::PublicKey) -> RelaySessionKey {
+    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
 }
 
 fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
@@ -741,7 +742,8 @@ fn mark_written<S: EventStore>(
         .iter()
         .find_map(|effect| match effect {
             Effect::PublishEvent(candidate, event, correlation)
-                if &candidate.relay == relay && candidate.access == AccessContext::Public =>
+                if &candidate.relay == relay
+                    && candidate.access == AccessContext::Nip42(event.pubkey) =>
             {
                 Some(*correlation)
             }
@@ -2702,12 +2704,69 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
-        let second = core.handle(EngineMsg::RelayAuthReady(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
+        let handle = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        let challenge = core.handle(EngineMsg::RelayFrame(
+            handle,
             session.clone(),
+            RelayFrame::from(RelayMessage::Auth {
+                challenge: Cow::Borrowed("retry challenge"),
+            }),
+        ));
+        let policy_token = challenge
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. }) => Some(token),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::AuthCapabilityBound {
+            token: policy_token.clone(),
+            capability: nmp_engine::core::AuthCapability::Policy,
+            instance: AuthCapabilityInstance(1),
+        });
+        let signature = core.handle(EngineMsg::AuthPolicyCompleted(
+            policy_token,
+            Some(AuthCapabilityInstance(1)),
+            AuthPolicyOutcome::Allow,
+        ));
+        let (sign_token, unsigned) = signature
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::RelayAuth(AuthEffect::RequestSignature { token, unsigned }) => {
+                    Some((token, unsigned))
+                }
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::AuthCapabilityBound {
+            token: sign_token.clone(),
+            capability: nmp_engine::core::AuthCapability::Signer,
+            instance: AuthCapabilityInstance(2),
+        });
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let send = core.handle(EngineMsg::AuthSignerCompleted(
+            sign_token,
+            Some(AuthCapabilityInstance(2)),
+            AuthSignerOutcome::Signed(signed),
+        ));
+        let (send_token, auth_event) = send
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::RelayAuth(AuthEffect::Send { token, event, .. }) => Some((token, event)),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::AuthSendCompleted(
+            send_token,
+            AuthSendOutcome::Accepted,
+        ));
+        let second = core.handle(EngineMsg::RelayFrame(
+            handle,
+            session.clone(),
+            RelayFrame::from(RelayMessage::ok(auth_event.id, true, "authenticated")),
         ));
         assert!(second.iter().any(|effect| matches!(
             effect,
@@ -2741,6 +2800,149 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         "offline/AUTH time allocates nothing; explicit AUTH wake allocates the next ordinal"
     );
     assert!(attempts.iter().all(|attempt| attempt.event == event));
+}
+
+/// A durable write parked `WaitingAuth` (the relay demanded auth in response
+/// to the EVENT) must never wedge across a transport disconnect/reconnect.
+/// The authenticated grant is generation-scoped, so on disconnect the lane
+/// falls back to `WaitingConnection` and the fresh generation re-drives it:
+/// re-send the EVENT, re-provoke the challenge, re-park, authenticate, wake.
+/// Regression guard for the reconnect missed-wakeup the adversarial review
+/// caught (the ONLY `WaitingAuth` wake is `finish_auth_ok`, which a
+/// lazy-challenging relay never fires again without a client-provoked EVENT).
+#[test]
+fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://auth-reconnect.example").unwrap();
+    let session = signer_session(&relay, author.public_key());
+
+    let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+    let sink = CapturingReceiptSink::default();
+    let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+
+    // First generation: connect, hand off, and let the relay demand auth via
+    // an `OK false auth-required` on the durable EVENT. The lane parks.
+    let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+    mark_written(&mut core, &connected, &relay);
+    let parked = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        session.clone(),
+        RelayFrame::from(RelayMessage::ok(
+            event.id,
+            false,
+            "auth-required: authenticate",
+        )),
+    ));
+    assert!(parked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay: waiting }) if waiting == &relay
+    )));
+
+    // The socket drops mid-handshake (before any AUTH OK). The parked lane
+    // must fall back to `WaitingConnection`, surfacing `AwaitingRelay`.
+    let disconnected = core.handle(EngineMsg::RelayDisconnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        session.clone(),
+        DisconnectReason::Closed,
+    ));
+    assert!(disconnected.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(_, WriteStatus::AwaitingRelay { relay: waiting }) if waiting == &relay
+    )));
+
+    // A fresh generation reconnects. The ordinary (non-auth) reconnect wake
+    // must re-drive the lane: a new `PublishEvent` is scheduled on the exact
+    // authenticated session, re-provoking the challenge. Without the fix the
+    // lane would remain `WaitingAuth` and no publish would ever be emitted.
+    let mut reconnected = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        session.clone(),
+    ));
+    reconnected.extend(core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None)));
+    assert!(
+        reconnected
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(r, _, _) if r == &session)),
+        "reconnect must re-drive the parked auth write, not leave it wedged in WaitingAuth"
+    );
+}
+
+/// The boot-path analog of the reconnect re-drive: a durable write persisted
+/// `WaitingAuth` must not survive a restart as `WaitingAuth` (its
+/// authenticated grant was generation-scoped to a socket the prior process
+/// held). `recover_on_boot` recovers it as `WaitingConnection`, so the first
+/// post-boot connect re-drives it instead of stranding it.
+#[test]
+fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://auth-boot.example").unwrap();
+    let session = signer_session(&relay, author.public_key());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth-boot.redb");
+
+    let event = {
+        let mut core = EngineCore::new(
+            RedbStore::open(&path).unwrap(),
+            Box::new(FixtureDirectory::new()),
+            10,
+        );
+        let (_receipt, event, _) = publish_private(
+            &mut core,
+            &author,
+            [relay.clone()],
+            CapturingReceiptSink::default(),
+        );
+        let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+        mark_written(&mut core, &connected, &relay);
+        let parked = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            session.clone(),
+            RelayFrame::from(RelayMessage::ok(
+                event.id,
+                false,
+                "auth-required: authenticate",
+            )),
+        ));
+        assert!(parked.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay: waiting }) if waiting == &relay
+        )));
+        event
+    };
+
+    // Fresh process: recover from the persisted store, then connect.
+    let mut core = EngineCore::new(
+        RedbStore::open(&path).unwrap(),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    let recovery = core.recover_on_boot();
+    assert!(
+        recovery
+            .iter()
+            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)),
+        "boot must redial the exact authenticated session for the recovered lane"
+    );
+    let connected = connect_signer(&mut core, 0, &relay, author.public_key());
+    assert!(
+        connected.iter().any(
+            |effect| matches!(effect, Effect::PublishEvent(r, current, _)
+                if r == &session && current.id == event.id)
+        ),
+        "boot-recovered auth write must re-drive on the first connect, not stay wedged"
+    );
 }
 
 #[test]
@@ -2986,7 +3188,9 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
     let published = first_wave
         .iter()
         .filter_map(|effect| match effect {
-            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
+            Effect::PublishEvent(session, event, _)
+                if session.access == AccessContext::Nip42(event.pubkey) =>
+            {
                 Some(session.relay.clone())
             }
             _ => None,
@@ -3009,7 +3213,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
             .iter()
             .filter_map(|effect| match effect {
                 Effect::PublishEvent(session, event, _)
-                    if session.access == AccessContext::Public =>
+                    if session.access == AccessContext::Nip42(event.pubkey) =>
                 {
                     Some(session.relay.clone())
                 }
@@ -5556,7 +5760,9 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
     let published: BTreeSet<RelayUrl> = effects
         .iter()
         .filter_map(|e| match e {
-            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
+            Effect::PublishEvent(session, event, _)
+                if session.access == AccessContext::Nip42(event.pubkey) =>
+            {
                 Some(session.relay.clone())
             }
             _ => None,

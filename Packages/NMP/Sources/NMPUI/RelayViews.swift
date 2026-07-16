@@ -174,8 +174,10 @@ public enum NMPRelayRuntimePresentation: Sendable, Hashable {
         case .disconnected: "Disconnected"
         case .awaitingAuth(let phase):
             switch phase {
+            case .awaitingChallenge: "Awaiting authentication challenge"
             case .awaitingPolicy: "Awaiting authentication policy"
             case .awaitingSignature: "Awaiting authentication signature"
+            case .awaitingRelayAck: "Awaiting relay authentication acknowledgment"
             }
         case .authDenied: "Authentication denied"
         case .error: "Connection error"
