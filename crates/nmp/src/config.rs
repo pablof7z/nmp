@@ -54,6 +54,12 @@ pub struct EngineConfig {
     /// Admission has no queue: saturation is returned before the associated
     /// stream or operation is accepted. Zero selects the finite default.
     pub max_native_tasks: usize,
+    /// Maximum live account-signer and AUTH-policy registrations admitted by
+    /// the shared capability registry (#8). Unlike the legacy zero-valued
+    /// relay/task settings, zero intentionally admits NONE — a registration
+    /// attempt then fails with
+    /// [`EngineError::AuthCapabilityRegistryFull`](crate::EngineError::AuthCapabilityRegistryFull).
+    pub max_auth_capabilities: usize,
 }
 
 impl Default for EngineConfig {
@@ -66,6 +72,7 @@ impl Default for EngineConfig {
             allowed_local_relay_hosts: Vec::new(),
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
             max_native_tasks: nmp_executor::DEFAULT_MAX_TASKS,
+            max_auth_capabilities: nmp_engine::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
         }
     }
 }

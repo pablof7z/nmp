@@ -339,6 +339,10 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             allowed_local_relay_hosts: config.allowed_local_relay_hosts,
             max_relays: config.max_relays as usize,
             max_native_tasks: config.max_native_tasks as usize,
+            // #8 Wave 5: the FFI config knob (with its registration/policy
+            // projection) is the next wave; until then FFI engines keep the
+            // facade's finite default capability ceiling.
+            max_auth_capabilities: nmp::EngineConfig::default().max_auth_capabilities,
         }
     }
 }
@@ -427,8 +431,12 @@ impl NmpEngine {
     /// [`Self::set_active_account`] for that. Returns the account's hex
     /// public key.
     pub fn add_account(&self, secret_key: String) -> Result<String, FfiError> {
-        let pk = self.engine.add_account(&secret_key)?;
-        Ok(pk.to_hex())
+        // #8 Wave 5: the facade returns an exact `AccountRegistration`; the
+        // FFI registration/removal projection is the next wave, so this
+        // boundary keeps its hex-pubkey contract and drops the handle (the
+        // engine's per-key replace-on-add semantics are unchanged).
+        let registration = self.engine.add_account(&secret_key)?;
+        Ok(registration.public_key().to_hex())
     }
 
     /// Re-root every reactive query AND the active signing capability

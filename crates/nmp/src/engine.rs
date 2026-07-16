@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex};
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{
-    EngineThread, Handle, ReceiptReattachment, ReceiptStream, SignEventError, SignEventOperation,
-    SignerRegistration,
+    EngineThread, Handle, ReceiptReattachment, ReceiptStream, RuntimeConfig, SignEventError,
+    SignEventOperation, SignerRegistration,
 };
 use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
@@ -38,6 +38,7 @@ use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
 use nostr::{Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
+use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 use crate::config::{build_admission_policy, build_directory, EngineConfig};
 use crate::error::EngineError;
 use crate::relay_information::{
@@ -63,6 +64,58 @@ struct Inner {
 pub struct Engine {
     inner: Mutex<Option<Inner>>,
     native_tasks: nmp_executor::Executor,
+}
+
+/// Opaque ownership proof for one exact local-account installation (#8's
+/// ratified account model, closing #495). Returned by
+/// [`Engine::add_account`]; the ONLY value that may later detach that exact
+/// installation via [`Engine::remove_account`]. Equality is capability-
+/// INSTANCE identity, not key equality: registering the same key again
+/// mints a NEW registration and invalidates this one, so a stale clone can
+/// never detach its replacement.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountRegistration {
+    inner: SignerRegistration,
+}
+
+impl AccountRegistration {
+    /// The registered account's public key.
+    #[must_use]
+    pub fn public_key(&self) -> PublicKey {
+        self.inner.public_key()
+    }
+}
+
+impl std::fmt::Debug for AccountRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountRegistration")
+            .field("public_key", &self.public_key())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opaque ownership proof for one exact AUTH-policy installation (#8).
+/// Same exact-instance discipline as [`AccountRegistration`]: replacement
+/// invalidates it, and a stale clone cannot detach the replacement.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthPolicyRegistration {
+    inner: nmp_engine::runtime::AuthPolicyRegistration,
+}
+
+impl AuthPolicyRegistration {
+    /// The frozen account identity this policy decides for.
+    #[must_use]
+    pub fn expected_public_key(&self) -> PublicKey {
+        self.inner.expected_pubkey()
+    }
+}
+
+impl std::fmt::Debug for AuthPolicyRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthPolicyRegistration")
+            .field("expected_public_key", &self.expected_public_key())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One event body to sign with the active account without publishing it.
@@ -144,30 +197,34 @@ impl Engine {
             ..PoolConfig::default()
         };
 
+        let runtime_config = RuntimeConfig {
+            max_native_tasks: config.max_native_tasks,
+            max_auth_capabilities: config.max_auth_capabilities,
+        };
         let (engine_thread, handle) = match &config.store_path {
             Some(path) => {
                 let store = RedbStore::open(path).map_err(|e| EngineError::StoreOpenFailed {
                     reason: e.to_string(),
                 })?;
-                EngineThread::spawn_with_native_task_limit(
+                EngineThread::spawn_with_runtime_config(
                     store,
                     directory,
                     config.max_relays,
                     pool_config,
                     admission,
-                    config.max_native_tasks,
+                    runtime_config,
                 )
                 .map_err(EngineError::from_thread_error)?
             }
             None => {
                 let store = MemoryStore::new();
-                EngineThread::spawn_with_native_task_limit(
+                EngineThread::spawn_with_runtime_config(
                     store,
                     directory,
                     config.max_relays,
                     pool_config,
                     admission,
-                    config.max_native_tasks,
+                    runtime_config,
                 )
                 .map_err(EngineError::from_thread_error)?
             }
@@ -367,21 +424,42 @@ impl Engine {
 
     /// Register an account from its secret key (hex or bech32 `nsec`). Does
     /// NOT make the account active -- call [`Self::set_active_account`] for
-    /// that. Returns the account's public key.
+    /// that. Returns the [`AccountRegistration`] -- the only value that may
+    /// later detach this exact installation via [`Self::remove_account`]
+    /// (#8's ratified account model; there is deliberately no pubkey-only
+    /// removal).
+    ///
+    /// Registering the same key again replaces the capability, mints a NEW
+    /// registration, and invalidates the prior one. Registration is bounded
+    /// by [`EngineConfig::max_auth_capabilities`](crate::EngineConfig::max_auth_capabilities)
+    /// (shared with [`Self::add_auth_policy`]); a full registry or an
+    /// exhausted instance namespace fails closed with a typed error and
+    /// registers nothing.
     ///
     /// This builds a `LocalKeySigner` internally, whose `public_key()`
     /// always reports `Some` -- there is no reachable "signer has no
     /// public key" state on this path (unlike an arbitrary third-party
     /// `SigningCapability`, which the `unstable-mechanism`-gated
     /// `add_signer` covers instead).
-    pub fn add_account(&self, secret_key: &str) -> Result<PublicKey, EngineError> {
+    pub fn add_account(&self, secret_key: &str) -> Result<AccountRegistration, EngineError> {
         let keys = Keys::parse(secret_key).map_err(|_| EngineError::InvalidSecretKey)?;
         let registration = self.with_handle(|handle| {
             handle
                 .add_signer(nmp_signer::LocalKeySigner::new(keys))
-                .expect("LocalKeySigner::public_key() always returns a key")
-        })?;
-        Ok(registration.public_key())
+                .map_err(EngineError::from_add_signer_error)
+        })??;
+        Ok(AccountRegistration {
+            inner: registration,
+        })
+    }
+
+    /// Detach one exact local-account installation without changing active
+    /// identity or any accepted write's frozen author. Returns `Ok(false)`
+    /// for a stale registration -- one already removed, or one superseded by
+    /// a newer [`Self::add_account`] for the same key -- which is a no-op
+    /// that can never detach the replacement.
+    pub fn remove_account(&self, registration: &AccountRegistration) -> Result<bool, EngineError> {
+        self.with_handle(|handle| handle.remove_signer(registration.inner.clone()))
     }
 
     /// Register an arbitrary signing capability (e.g. a NIP-46/bunker
@@ -400,7 +478,7 @@ impl Engine {
         self.with_handle(|handle| {
             handle
                 .add_signer(signer)
-                .map_err(|_| EngineError::SignerMissingPublicKey)
+                .map_err(EngineError::from_add_signer_error)
         })?
     }
 
@@ -409,6 +487,45 @@ impl Engine {
     /// detach a newer signer installed for the same public key.
     pub fn remove_signer(&self, registration: SignerRegistration) -> Result<bool, EngineError> {
         self.with_handle(|handle| handle.remove_signer(registration))
+    }
+
+    /// Install the NIP-42 authorization policy for one exact account
+    /// identity (#8). The engine consults it -- nonblocking, ready-or-
+    /// pending -- every time a relay challenges a protected session frozen
+    /// to `expected_public_key`; see [`AuthPolicy`]'s doc. Registering a
+    /// policy for the same key again replaces it, invalidates the prior
+    /// registration AND every in-flight decision bound to the prior
+    /// capability instance, and never grants the stale registration cleanup
+    /// authority over its replacement. Shares the finite
+    /// [`EngineConfig::max_auth_capabilities`](crate::EngineConfig::max_auth_capabilities)
+    /// ceiling with account/signer registrations.
+    pub fn add_auth_policy<P>(
+        &self,
+        expected_public_key: PublicKey,
+        policy: P,
+    ) -> Result<AuthPolicyRegistration, EngineError>
+    where
+        P: AuthPolicy + 'static,
+    {
+        let registration = self.with_handle(|handle| {
+            handle
+                .add_auth_policy(expected_public_key, EngineAuthPolicyAdapter::new(policy))
+                .map_err(EngineError::from_add_auth_policy_error)
+        })??;
+        Ok(AuthPolicyRegistration {
+            inner: registration,
+        })
+    }
+
+    /// Remove only the exact policy installation proven by `registration`.
+    /// Pending decisions bound to it are cancelled and their sessions fail
+    /// closed. Repeated or stale removal returns `Ok(false)` and cannot
+    /// detach a replacement installed for the same key.
+    pub fn remove_auth_policy(
+        &self,
+        registration: &AuthPolicyRegistration,
+    ) -> Result<bool, EngineError> {
+        self.with_handle(|handle| handle.remove_auth_policy(registration.inner.clone()))
     }
 
     /// Sign one immutable unsigned event through the currently active
@@ -749,7 +866,10 @@ mod tests {
         })
         .expect("engine must build");
         let secret = format!("{:064x}", 7u8);
-        let author = engine.add_account(&secret).expect("account must register");
+        let author = engine
+            .add_account(&secret)
+            .expect("account must register")
+            .public_key();
         engine
             .set_active_account(Some(author))
             .expect("account must activate");
@@ -1182,7 +1302,7 @@ mod tests {
         })
         .expect("engine must build");
         let secret = format!("{:064x}", 23u8);
-        let author = engine.add_account(&secret).unwrap();
+        let author = engine.add_account(&secret).unwrap().public_key();
         engine.set_active_account(Some(author)).unwrap();
         let _held = engine.reserve_native_task("test-capacity").unwrap();
         let request = SignEventRequest {
@@ -1254,7 +1374,7 @@ mod tests {
         let via_hex = engine
             .add_account(&keys.secret_key().to_secret_hex())
             .expect("hex secret key must parse");
-        assert_eq!(via_hex, keys.public_key());
+        assert_eq!(via_hex.public_key(), keys.public_key());
 
         let via_nsec = engine
             .add_account(
@@ -1264,7 +1384,7 @@ mod tests {
                     .expect("secret key must encode as bech32"),
             )
             .expect("bech32 nsec must parse");
-        assert_eq!(via_nsec, keys.public_key());
+        assert_eq!(via_nsec.public_key(), keys.public_key());
 
         engine.shutdown();
     }
@@ -1280,13 +1400,169 @@ mod tests {
         engine.shutdown();
     }
 
+    /// #8's ratified account model plus the #529 falsifier folded here: a
+    /// same-key replacement invalidates the prior exact instance, a stale
+    /// registration's removal is a `false` no-op that can never detach the
+    /// replacement, and removal is idempotent per exact instance.
+    #[test]
+    fn account_registration_is_exact_instance_repeatable_and_stale_safe() {
+        let engine = Engine::new(EngineConfig {
+            max_auth_capabilities: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let first = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("first account must register");
+        let replacement = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("same-key replacement must not consume another slot");
+
+        assert_eq!(first.public_key(), replacement.public_key());
+        assert_ne!(
+            first, replacement,
+            "a replacement must be a NEW exact instance, never equal to the stale one"
+        );
+        assert_eq!(
+            first.clone(),
+            first,
+            "clones of one registration share its exact instance identity"
+        );
+        assert!(
+            !engine.remove_account(&first).unwrap(),
+            "a stale registration must no-op instead of detaching its replacement"
+        );
+        assert!(engine.remove_account(&replacement).unwrap());
+        assert!(
+            !engine.remove_account(&replacement).unwrap(),
+            "removal is exact-instance idempotent"
+        );
+        engine.shutdown();
+    }
+
+    struct AllowAuthPolicy;
+
+    impl crate::AuthPolicy for AllowAuthPolicy {
+        fn evaluate(&self, _request: crate::AuthPolicyRequest) -> crate::AuthPolicyOp {
+            crate::AuthPolicyOp::allow()
+        }
+    }
+
+    /// The same exact-instance discipline for AUTH-policy registrations.
+    #[test]
+    fn auth_policy_registration_is_exact_instance_repeatable_and_stale_safe() {
+        let engine = Engine::new(EngineConfig {
+            max_auth_capabilities: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let public_key = Keys::generate().public_key();
+        let first = engine
+            .add_auth_policy(public_key, AllowAuthPolicy)
+            .expect("first policy must register");
+        let replacement = engine
+            .add_auth_policy(public_key, AllowAuthPolicy)
+            .expect("same-key replacement must not consume another slot");
+
+        assert_eq!(first.expected_public_key(), public_key);
+        assert_ne!(first, replacement);
+        assert!(
+            !engine.remove_auth_policy(&first).unwrap(),
+            "a stale policy registration must no-op instead of detaching its replacement"
+        );
+        assert!(engine.remove_auth_policy(&replacement).unwrap());
+        assert!(!engine.remove_auth_policy(&replacement).unwrap());
+        engine.shutdown();
+    }
+
+    /// Zero capabilities intentionally admits none, with the typed error.
+    #[test]
+    fn zero_auth_capabilities_admits_none_with_typed_error() {
+        let engine = Engine::new(EngineConfig {
+            max_auth_capabilities: 0,
+            ..EngineConfig::default()
+        })
+        .expect("zero-capability engine must still build");
+        assert_eq!(
+            engine
+                .add_account(&Keys::generate().secret_key().to_secret_hex())
+                .err(),
+            Some(EngineError::AuthCapabilityRegistryFull { limit: 0 })
+        );
+        assert_eq!(
+            engine
+                .add_auth_policy(Keys::generate().public_key(), AllowAuthPolicy)
+                .err(),
+            Some(EngineError::AuthCapabilityRegistryFull { limit: 0 })
+        );
+        engine.shutdown();
+    }
+
+    /// Accounts and AUTH policies share ONE finite capability ceiling;
+    /// removing a registration releases its shared slot.
+    #[test]
+    fn signer_and_policy_share_one_finite_capability_ceiling() {
+        let engine = Engine::new(EngineConfig {
+            max_auth_capabilities: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let account = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("account consumes the one shared slot");
+        assert_eq!(
+            engine
+                .add_auth_policy(keys.public_key(), AllowAuthPolicy)
+                .err(),
+            Some(EngineError::AuthCapabilityRegistryFull { limit: 1 })
+        );
+        assert!(engine.remove_account(&account).unwrap());
+        engine
+            .add_auth_policy(keys.public_key(), AllowAuthPolicy)
+            .expect("removing the account releases the shared slot");
+        engine.shutdown();
+    }
+
+    /// The account/policy lifecycle verbs fail closed after shutdown like
+    /// every other verb.
+    #[test]
+    fn account_and_policy_lifecycle_fail_closed_after_shutdown() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        let account = engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("account must register");
+        let policy = engine
+            .add_auth_policy(keys.public_key(), AllowAuthPolicy)
+            .expect("policy must register");
+        engine.shutdown();
+
+        assert_eq!(
+            engine.remove_account(&account).err(),
+            Some(EngineError::EngineClosed)
+        );
+        assert_eq!(
+            engine
+                .add_auth_policy(keys.public_key(), AllowAuthPolicy)
+                .err(),
+            Some(EngineError::EngineClosed)
+        );
+        assert_eq!(
+            engine.remove_auth_policy(&policy).err(),
+            Some(EngineError::EngineClosed)
+        );
+    }
+
     #[test]
     fn sign_event_uses_the_active_account_without_publishing() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let pubkey = engine
             .add_account(&keys.secret_key().to_secret_hex())
-            .expect("account must register");
+            .expect("account must register")
+            .public_key();
         engine
             .set_active_account(Some(pubkey))
             .expect("account must activate");

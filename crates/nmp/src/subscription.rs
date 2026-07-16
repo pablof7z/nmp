@@ -29,12 +29,12 @@ use std::sync::mpsc::{RecvError, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nmp_engine::core::{
-    AcquisitionEvidence, DiagnosticsSnapshot, HistoryAdvanceError, Row, RowDelta, WindowLoad,
-};
+use nmp_engine::core::{AcquisitionEvidence, HistoryAdvanceError, Row, RowDelta, WindowLoad};
 use nmp_engine::runtime::{
     DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle, RowsMsg,
 };
+
+use crate::diagnostics::DiagnosticsSnapshot;
 
 /// Window policy on the read noun (#485). One real variant today; future
 /// policies (e.g. latest-only, anchored) are new variants on this
@@ -374,13 +374,13 @@ impl Drop for Subscription {
 /// A live diagnostics stream. Same `Drop` discipline as [`Subscription`].
 pub struct DiagnosticsSubscription {
     cancel: ObservationCancel,
-    snapshots: LatestReceiver<DiagnosticsSnapshot>,
+    snapshots: LatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
 }
 
 impl DiagnosticsSubscription {
     pub(crate) fn new(
         diag_handle: DiagnosticsHandle,
-        snapshots: LatestReceiver<DiagnosticsSnapshot>,
+        snapshots: LatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
     ) -> Self {
         Self {
             cancel: ObservationCancel::new(move || diag_handle.cancel()),
@@ -388,12 +388,14 @@ impl DiagnosticsSubscription {
         }
     }
 
-    /// Block for the next `DiagnosticsSnapshot` -- delivers the CURRENT
+    /// Block for the next [`DiagnosticsSnapshot`] -- delivers the CURRENT
     /// snapshot immediately on the first call, then a fresh one on every
     /// recompile/EOSE-driven coverage change. `None` once the stream is
-    /// withdrawn.
+    /// withdrawn. This is the ONE delivery boundary where the engine's
+    /// snapshot is converted into the facade-owned mirror (see
+    /// [`crate::diagnostics`]'s module doc).
     pub fn recv(&self) -> Option<DiagnosticsSnapshot> {
-        self.snapshots.recv()
+        self.snapshots.recv().map(DiagnosticsSnapshot::from_engine)
     }
 
     /// Withdraw this diagnostics observer now, rather than waiting for

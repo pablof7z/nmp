@@ -1331,7 +1331,8 @@ async fn run_direct_follow_scenario(
     );
     let active = engine
         .add_account(&author.secret_key().to_secret_hex())
-        .expect("direct follow account must register");
+        .expect("direct follow account must register")
+        .public_key();
     engine
         .set_active_account(Some(active))
         .expect("direct follow account must activate");
@@ -1491,7 +1492,8 @@ async fn run_direct_missing_contact_list(
     );
     let active = engine
         .add_account(&author.secret_key().to_secret_hex())
-        .expect("direct missing-list account must register");
+        .expect("direct missing-list account must register")
+        .public_key();
     engine
         .set_active_account(Some(active))
         .expect("direct missing-list account must activate");
@@ -1578,7 +1580,8 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     .expect("direct engine must construct");
     let pubkey = engine
         .add_account(&keys.secret_key().to_secret_hex())
-        .expect("direct account must register");
+        .expect("direct account must register")
+        .public_key();
     engine
         .set_active_account(Some(pubkey))
         .expect("direct account must activate");
@@ -1847,7 +1850,8 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     .expect("direct auth-parked engine must construct");
     let pubkey = engine
         .add_account(&keys.secret_key().to_secret_hex())
-        .expect("direct auth-parked account must register");
+        .expect("direct auth-parked account must register")
+        .public_key();
     engine
         .set_active_account(Some(pubkey))
         .expect("direct auth-parked account must activate");

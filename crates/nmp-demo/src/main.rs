@@ -150,7 +150,10 @@ fn main() {
 
     match &args.nsec {
         Some(nsec) => match engine.add_account(nsec) {
-            Ok(pubkey) => println!("signer: loaded from --nsec ({})", pubkey.to_hex()),
+            Ok(account) => println!(
+                "signer: loaded from --nsec ({})",
+                account.public_key().to_hex()
+            ),
             Err(e) => {
                 eprintln!("nmp-demo: --nsec did not parse as a valid secret key: {e}");
                 std::process::exit(2);

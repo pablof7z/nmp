@@ -232,6 +232,16 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
             },
+            // #8 Wave 5: the facade's typed capability-registry refusals.
+            // The dedicated FFI error variants land with the FFI policy/
+            // registration projection (the next wave); until then the exact
+            // reason survives through the existing signer-refusal lane.
+            nmp::EngineError::AuthCapabilityRegistryFull { limit } => Self::InvalidSigner {
+                reason: format!("AUTH capability registry is full at {limit} entries"),
+            },
+            nmp::EngineError::AuthCapabilityInstanceExhausted => Self::InvalidSigner {
+                reason: "AUTH capability instance space exhausted".to_string(),
+            },
             nmp::EngineError::ReceiptCorrelationIdExhausted => Self::ReceiptCorrelationIdExhausted,
             nmp::EngineError::EngineClosed => Self::EngineClosed,
             nmp::EngineError::WindowInitialExceedsMax { initial, max } => {
@@ -1663,8 +1673,8 @@ mod tests {
     fn diagnostics_keeps_exact_intervals_distinct_from_query_evidence() {
         let relay = RelayUrl::parse("wss://diagnostics.example.com").unwrap();
         let ffi = diagnostics_snapshot_to_ffi(DiagnosticsSnapshot {
-            // Engine-level AUTH session read-out (#8 U4). Not yet projected
-            // through FFI — that read-out is a later-wave surface.
+            // Facade-owned AUTH session read-out (#8 Wave 5). Not yet
+            // projected through FFI — that mapping is the next wave.
             auth_sessions: Vec::new(),
             relays: vec![RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
