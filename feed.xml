@@ -15,7 +15,34 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 11:56:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 12:53:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 12:53 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0021.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0021</guid>
+<pubDate>Thu, 16 Jul 2026 12:53:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Two reliability stories this cycle, and they're both the unglamorous kind -- the sort that never show up on a feature list, but change whether you can actually trust the thing day to day.
+
+First: a macOS-only test flake in the ingest-smoke suite finally got root-caused, not just re-run until it went green. It turned out to be a real socket subtlety: when a mock server's listening socket is set non-blocking, on Linux a freshly accepted client connection does not inherit that flag -- but on macOS and B-S-D, it does. So the test would occasionally see a connection that was already non-blocking when its own logic assumed otherwise, producing a connection reset that had nothing to do with the actual relay-ingest code under test. Two of those races were in the test's own mock server, not in NMP itself, and both are fixed now; the flake, open long enough to earn its own tracked issue, is closed. Why it matters even though it's "just a test": a flaky test trains everyone to start ignoring red builds, and an ignored red build is exactly how a real regression sneaks through later.
+
+Second, and this one's app-facing: queries can now carry an explicit freshness policy. Before this, every observation did the same thing every time -- check the cache, then go live and hold a subscription open, even if you'd asked for the exact same data seconds ago and nothing had changed. Now a query can ask for max-age, a plain "don't bother hitting the network if the local cache is already fresh enough," or cache-only, which never touches the network and just tells you what's already on disk. Both are answered directly from coverage watermarks NMP already tracks per query -- no new polling loop, no new background job, just honest reuse of bookkeeping the engine already had.
+
+What that means if you're embedding NMP: your background refresh, your pull-to-refresh, your "did anything actually change" check can now say exactly how fresh they're willing to accept, instead of either hammering the network every time or hand-rolling your own staleness cache on top of the engine. And the tests proving relay ingest actually works just got more honest, not more lenient.
+
+One more thing, landing right as this cycle wrapped: writes can now be explicitly cancelled before they're signed. If your app accepts a post but the user backs out before it ever reaches a signer, there's now a real, durable cancel call on every platform -- not dropping a handle and hoping, an actual typed outcome that either succeeds durably or tells you precisely why it can't.
+
+That's the pulse.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0021.mp3" type="audio/mpeg" length="3058220"/>
+<itunes:title>NMP Pulse — 2026-07-16 12:53 UTC</itunes:title>
+<itunes:duration>191</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Briefing — 2026-07-16 11:56 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0020.mp3</link>
