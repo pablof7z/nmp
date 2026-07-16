@@ -53,9 +53,7 @@ impl std::fmt::Display for DescriptorError {
             }
             Self::Json { reason } => write!(f, "blob descriptor is not valid JSON: {reason}"),
             Self::MissingUrl => f.write_str("blob descriptor is missing the mandatory `url`"),
-            Self::MissingSha256 => {
-                f.write_str("blob descriptor is missing the mandatory `sha256`")
-            }
+            Self::MissingSha256 => f.write_str("blob descriptor is missing the mandatory `sha256`"),
             Self::MissingSize => f.write_str("blob descriptor is missing the mandatory `size`"),
             Self::BadSha256(error) => write!(f, "blob descriptor `sha256` is invalid: {error}"),
         }
@@ -85,8 +83,8 @@ impl BlobDescriptor {
                 limit_bytes: MAX_DESCRIPTOR_BYTES,
             });
         }
-        let raw: RawDescriptor = serde_json::from_slice(bytes)
-            .map_err(|error| DescriptorError::Json {
+        let raw: RawDescriptor =
+            serde_json::from_slice(bytes).map_err(|error| DescriptorError::Json {
                 reason: error.to_string(),
             })?;
         let url = raw.url.ok_or(DescriptorError::MissingUrl)?;
@@ -125,7 +123,8 @@ mod tests {
         assert_eq!(descriptor.mime_type.as_deref(), Some("text/plain"));
         assert_eq!(descriptor.uploaded, Some(1700000000));
 
-        let minimal = format!(r#"{{"url":"https://cdn.example.com/{hex}","sha256":"{hex}","size":4}}"#);
+        let minimal =
+            format!(r#"{{"url":"https://cdn.example.com/{hex}","sha256":"{hex}","size":4}}"#);
         let descriptor = BlobDescriptor::parse_json(minimal.as_bytes()).expect("minimal");
         assert_eq!(descriptor.mime_type, None);
         assert_eq!(descriptor.uploaded, None);
