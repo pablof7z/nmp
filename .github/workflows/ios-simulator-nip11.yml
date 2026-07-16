@@ -68,13 +68,16 @@ jobs:
 
       - name: xcodebuild test (iOS Simulator NIP-11 runtime qualification)
         run: |
-          # `-retry-tests-on-failure`: observed locally, a simulator's first
-          # cold boot occasionally truncates the fixture's very first loopback
-          # HTTP response body (Network.framework/NECP simulator-only
-          # initialization race, not reproducible on a warm simulator and not
-          # present in the equivalent macOS-host `swift test` fixture this was
-          # ported from). A real regression still fails after the retry
-          # budget; this only absorbs the one-time cold-boot flake.
+          # `-retry-tests-on-failure`: a simulator's first cold boot was
+          # observed locally to occasionally truncate the fixture's very
+          # first loopback HTTP response body (Network.framework/NECP
+          # simulator-only initialization race). Root-caused to the fixture
+          # calling `connection.cancel()` right after `.contentProcessed`
+          # (accepted by the stack, not necessarily delivered yet); the
+          # fixture now waits for the client to actually close its end of
+          # the connection before cancelling. This retry stays as
+          # defense-in-depth for exactly the DNS/HTTP path this gate exists
+          # to qualify -- a real regression still fails after the budget.
           xcodebuild test \
             -project Falsifier.xcodeproj \
             -scheme Falsifier \

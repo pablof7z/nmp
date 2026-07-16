@@ -25,7 +25,6 @@ import XCTest
 private final class LocalNIP11Server: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "nmp.simulator.nip11.fixture")
-    private let accepted = DispatchSemaphore(value: 0)
     private let body: Data
 
     private(set) var relayURL = ""
@@ -55,10 +54,6 @@ private final class LocalNIP11Server: @unchecked Sendable {
         listener.cancel()
     }
 
-    func waitUntilAccepted() -> Bool {
-        accepted.wait(timeout: .now() + 5) == .success
-    }
-
     private func serve(_ connection: NWConnection, received: Data) {
         connection.start(queue: queue)
         receiveHeaders(connection, received: received)
@@ -77,16 +72,34 @@ private final class LocalNIP11Server: @unchecked Sendable {
                 return
             }
 
-            self.accepted.signal()
             let headers = Data(
                 ("HTTP/1.1 200 OK\r\n" +
                     "Content-Type: application/nostr+json\r\n" +
                     "Content-Length: \(self.body.count)\r\n" +
                     "Connection: close\r\n\r\n").utf8
             )
-            connection.send(content: headers + self.body, completion: .contentProcessed { _ in
-                connection.cancel()
+            connection.send(content: headers + self.body, completion: .contentProcessed { [weak self] _ in
+                // `.contentProcessed` means "accepted by the network stack",
+                // not "delivered" -- cancelling here immediately can plausibly
+                // race the final flush (a suspected cause of an observed
+                // simulator-only cold-boot flake where the client read a
+                // truncated body). Wait for the client to actually finish
+                // reading and close/reset its end of the connection first.
+                self?.awaitClientCloseThenCancel(connection)
             })
+        }
+    }
+
+    private func awaitClientCloseThenCancel(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) {
+            [weak self] _, _, isComplete, error in
+            if isComplete || error != nil {
+                connection.cancel()
+            } else {
+                // Unexpected extra data from the client; keep waiting for
+                // its actual close rather than assuming EOF prematurely.
+                self?.awaitClientCloseThenCancel(connection)
+            }
         }
     }
 
@@ -114,7 +127,6 @@ final class NMPSimulatorQualificationTests: XCTestCase {
 
         let value = try await engine.relayInformation(for: server.relayURL, policy: .refresh)
 
-        XCTAssertTrue(server.waitUntilAccepted(), "the generated async call must start HTTP")
         XCTAssertEqual(value.document.name, "Simulator")
         XCTAssertEqual(value.document.supportedNips, [11, 77])
         XCTAssertEqual(value.documentRevision.count, 64)
