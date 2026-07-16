@@ -47,7 +47,8 @@ use nostr::{
 
 use nmp_grammar::{
     fold_byte, AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
-    Durability, Filter, HostAuthority, NarrowOnly, PrivateRoute, RelaySessionKey, RoutingEvidence,
+    Durability, Filter, Freshness, HostAuthority, NarrowOnly, PrivateRoute, RelaySessionKey,
+    RoutingEvidence,
     SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
@@ -935,6 +936,7 @@ pub enum Effect {
 /// compare against this remembered state, never a second bespoke mechanism.
 struct HandleState {
     _handle: QueryHandle,
+    acquisition: HandleAcquisition,
     sink: Box<dyn RowSink>,
     last_rows: BTreeMap<EventId, RememberedRow>,
     last_evidence: Option<AcquisitionEvidence>,
@@ -944,8 +946,33 @@ struct HandleState {
     projection_complete: bool,
 }
 
+/// The immutable opening-time result of one handle's freshness policy.
+/// Lifecycle ownership is represented by variants, never a teardown bool:
+/// only `Live` contributes atoms to the router; a coverage-satisfied handle
+/// retains the exact plan that justified suppression so its evidence remains
+/// scoped and inspectable without a mid-handle re-evaluation loop.
+enum HandleAcquisition {
+    Live,
+    CoverageSatisfied(RelayPlan),
+    CacheOnly(RelayPlan),
+}
+
+impl HandleAcquisition {
+    fn contributes_wire(&self) -> bool {
+        matches!(self, Self::Live)
+    }
+
+    fn evidence_plan(&self) -> Option<&RelayPlan> {
+        match self {
+            Self::CoverageSatisfied(plan) | Self::CacheOnly(plan) => Some(plan),
+            Self::Live => None,
+        }
+    }
+}
+
 struct HistoryState {
     query: HistoryQuery,
+    acquisition: HandleAcquisition,
     /// Resolver handles the session currently holds open: the one live-top
     /// demand (`live_handle_id`) plus at most the *current* advance's
     /// tie-second/older acquisition handles. Older advances' historical
@@ -2670,7 +2697,7 @@ impl<S: EventStore> EngineCore<S> {
     /// per the repo's no-compat-alias convention -- this mirrors
     /// `nmp_resolver::Engine::active_demand()` exactly.
     pub fn active_demand(&self) -> BTreeSet<ContextualAtom> {
-        self.resolver.active_demand()
+        self.wire_demand()
     }
 
     /// Read-only coverage introspection (test/diagnostic convenience,
@@ -3140,25 +3167,24 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         let id = qh.id();
-        self.recompile(&mut effects);
-        // A new query can change the capped greedy source plan for EVERY
-        // existing query, even when their rows are unchanged. Refresh the
-        // survivors against the newly-finalized plan before installing the
-        // new handle; otherwise their "current-plan" evidence can retain a
-        // source that the router just dropped (or omit one it just added).
-        self.refresh_all_handles(&mut effects);
-        self.refresh_all_histories(&mut effects);
+        let acquisition = self.decide_handle_acquisition(id, qh.freshness());
         self.handles.insert(
             id,
             HandleState {
                 _handle: qh,
+                acquisition,
                 sink,
                 last_rows: BTreeMap::new(),
                 last_evidence: None,
                 projection_complete: false,
             },
         );
-        self.refresh_handle(id, &mut effects);
+        self.recompile(&mut effects);
+        // A wire-contributing query can change the capped greedy source plan
+        // for every existing query. A suppressed query leaves that plan
+        // untouched but still needs its initial cache/evidence frame.
+        self.refresh_all_handles(&mut effects);
+        self.refresh_all_histories(&mut effects);
         effects
     }
 
@@ -3188,6 +3214,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         let handle_id = handle.id();
+        let acquisition = self.decide_handle_acquisition(handle_id, handle.freshness());
         let id = HistorySessionId(self.next_history_id);
         self.next_history_id = self.next_history_id.wrapping_add(1).max(1);
         self.history_by_handle.insert(handle_id, id);
@@ -3196,6 +3223,7 @@ impl<S: EventStore> EngineCore<S> {
             HistoryState {
                 target_rows: query.page_size(),
                 query,
+                acquisition,
                 handles: vec![handle],
                 handle_ids: BTreeSet::from([handle_id]),
                 live_handle_id: handle_id,
@@ -3448,7 +3476,7 @@ impl<S: EventStore> EngineCore<S> {
 
         // Build the prospective plan without touching live router,
         // attribution, diagnostics, other projections, or any sink.
-        let shadow_plan = self.history_shadow_plan();
+        let shadow_plan = self.history_shadow_plan(id);
         let requesting = self.history_batch(id, Vec::new(), WindowLoad::Requesting);
         let added = match self.advance_history_projection(id, boundary, old_len, &shadow_plan) {
             Ok((batch, added)) => {
@@ -3485,9 +3513,13 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         debug_assert!(added <= needed);
-        effects.push(Effect::PreflightHistoryRelays(
-            shadow_plan.reqs.keys().cloned().collect(),
-        ));
+        let preflight_relays = self
+            .histories
+            .get(&id)
+            .filter(|state| state.acquisition.contributes_wire())
+            .map(|_| shadow_plan.reqs.keys().cloned().collect())
+            .unwrap_or_default();
+        effects.push(Effect::PreflightHistoryRelays(preflight_relays));
         effects.push(Effect::HistoryLoadResult(id, Ok(())));
         effects
     }
@@ -6255,8 +6287,12 @@ impl<S: EventStore> EngineCore<S> {
         #[cfg(test)]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
-        self.sync_discovery(effects);
-        let demand = self.resolver.active_demand();
+        let mut demand = self.wire_demand();
+        self.sync_discovery(&demand, effects);
+        // `sync_discovery` may replace the internal discovery handle. Re-read
+        // the immutable handle union so that new/withdrawn discovery work is
+        // reflected in this same compile.
+        demand = self.wire_demand();
         self.attribution.observe_demand(demand.iter());
         // Finding E3 (epic #507): prune `shape_by_key` against the SAME
         // `demand` just observed above, plus every key still `absorbed` by
@@ -6405,10 +6441,43 @@ impl<S: EventStore> EngineCore<S> {
     /// window of an already-live descriptor, so every discovery dependency
     /// is already represented by the initial session; shadow planning never
     /// needs to mutate the widen-only discovery subscription.
-    fn history_shadow_plan(&self) -> RelayPlan {
-        let admitted = self
-            .resolver
-            .active_demand()
+    fn history_shadow_plan(&self, id: HistorySessionId) -> RelayPlan {
+        match self.histories.get(&id).map(|state| &state.acquisition) {
+            Some(HandleAcquisition::CoverageSatisfied(plan)) => plan.clone(),
+            Some(HandleAcquisition::CacheOnly(plan)) => plan.clone(),
+            Some(HandleAcquisition::Live) | None => self.shadow_plan_for(self.wire_demand()),
+        }
+    }
+
+    /// The exact atom union currently owned by handles whose immutable
+    /// opening-time freshness decision is `Live`, plus the engine's ordinary
+    /// internal discovery handle. Suppressed handles still own their graph
+    /// and cache projection, but are absent from this wire truth.
+    fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
+        let ordinary = self
+            .handles
+            .iter()
+            .filter(|(_, state)| state.acquisition.contributes_wire())
+            .flat_map(|(id, _)| self.resolver.subtree_atoms(*id));
+        let history = self
+            .histories
+            .values()
+            .filter(|state| state.acquisition.contributes_wire())
+            .flat_map(|state| state.handle_ids.iter().copied())
+            .flat_map(|id| self.resolver.subtree_atoms(id));
+        let discovery = self
+            .discovery_handle
+            .iter()
+            .flat_map(|handle| self.resolver.subtree_atoms(handle.id()));
+        ordinary.chain(history).chain(discovery).collect()
+    }
+
+    /// Compile an isolated plan through the same router/directory/admission/
+    /// cap path as a live recompile, without mutating live wire,
+    /// attribution, diagnostics, or any handle. Used once for `MaxAge` and
+    /// for staged history projection.
+    fn shadow_plan_for(&self, demand: BTreeSet<ContextualAtom>) -> RelayPlan {
+        let admitted = demand
             .into_iter()
             .map(|mut atom| {
                 atom.routing_evidence
@@ -6422,6 +6491,67 @@ impl<S: EventStore> EngineCore<S> {
         );
         let _ = router.compile(&admitted, self.directory.as_ref(), self.cap);
         router.plan().clone()
+    }
+
+    /// Freeze one handle's opening-time wire participation. An unsatisfied
+    /// `MaxAge` becomes `Live` once and stays there; a satisfied one retains
+    /// its exact evaluation plan for evidence and is never re-evaluated.
+    fn decide_handle_acquisition(&self, id: HandleId, freshness: Freshness) -> HandleAcquisition {
+        match freshness {
+            Freshness::Live => HandleAcquisition::Live,
+            Freshness::CacheOnly => HandleAcquisition::CacheOnly(RelayPlan::default()),
+            Freshness::MaxAge { seconds } => {
+                let atoms = self.resolver.subtree_atoms(id);
+                let mut candidate_demand = self.wire_demand();
+                candidate_demand.extend(atoms.iter().cloned());
+                let plan = self.shadow_plan_for(candidate_demand);
+                if self.plan_is_fresh_for(&atoms, &plan, seconds) {
+                    HandleAcquisition::CoverageSatisfied(plan)
+                } else {
+                    HandleAcquisition::Live
+                }
+            }
+        }
+    }
+
+    /// Unanimous current-assignment freshness. Presence of a matching event
+    /// is deliberately irrelevant: a coverage row proves the question was
+    /// checked, so an empty cached result can satisfy `MaxAge` too.
+    fn plan_is_fresh_for(
+        &self,
+        atoms: &BTreeSet<ContextualAtom>,
+        plan: &RelayPlan,
+        max_age_seconds: u64,
+    ) -> bool {
+        if atoms.is_empty() {
+            return false;
+        }
+        let cutoff = Timestamp::from(self.clock.as_secs().saturating_sub(max_age_seconds));
+        atoms.iter().all(|atom| {
+            let key = nmp_store::coverage_key(atom);
+            if plan.limited.contains(&key) {
+                return false;
+            }
+            let covering: Vec<&RelaySessionKey> = plan
+                .reqs
+                .iter()
+                .filter_map(|(session, reqs)| {
+                    reqs.iter()
+                        .any(|request| request.absorbed.contains(&key))
+                        .then_some(session)
+                })
+                .collect();
+            !covering.is_empty()
+                && covering.into_iter().all(|session| {
+                    let floor = Timestamp::from(atom.filter.since.unwrap_or(0));
+                    self.resolver
+                        .store()
+                        .get_coverage(key, &session.relay)
+                        .is_some_and(|interval| {
+                            interval.from <= floor && interval.through >= cutoff
+                        })
+                })
+        })
     }
 
     /// Gate every network-sourced selector hint/provenance URL before it
@@ -6499,10 +6629,14 @@ impl<S: EventStore> EngineCore<S> {
     /// at all. A content atom for an author with no known write relays
     /// simply routes nowhere in the meantime (never an indexer fallback --
     /// "indexers are never a content fallback").
-    fn sync_discovery(&mut self, effects: &mut Vec<Effect>) {
-        let needed: BTreeSet<PubkeyHex> = self
-            .resolver
-            .active_demand()
+    fn sync_discovery(
+        &mut self,
+        wire_demand: &BTreeSet<ContextualAtom>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let needed: BTreeSet<PubkeyHex> = wire_demand
+            .iter()
+            .cloned()
             .into_iter()
             .filter_map(|atom| atom.filter.authors)
             .flatten()
@@ -7279,9 +7413,13 @@ impl<S: EventStore> EngineCore<S> {
             by_id.retain(|event_id, _| keep.contains(event_id));
         }
         let auth_status = self.auth_status_map();
+        let evidence_plan = state
+            .acquisition
+            .evidence_plan()
+            .unwrap_or_else(|| self.router.plan());
         let evidence = evidence::acquisition_evidence(
             &subtree_atoms,
-            self.router.plan(),
+            evidence_plan,
             self.resolver.store(),
             &self.connected_relays,
             &auth_status,
@@ -8215,9 +8353,14 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         let auth_status = self.auth_status_map();
+        let evidence_plan = self
+            .handles
+            .get(&id)
+            .and_then(|state| state.acquisition.evidence_plan())
+            .unwrap_or_else(|| self.router.plan());
         let evidence = evidence::acquisition_evidence(
             &subtree_atoms,
-            self.router.plan(),
+            evidence_plan,
             self.resolver.store(),
             &self.connected_relays,
             &auth_status,
@@ -10882,6 +11025,7 @@ mod history_mutation_tests {
                 source: SourceAuthority::Pinned(BTreeSet::from([wanted])),
                 access: AccessContext::Public,
                 cache: CacheMode::Strict,
+                freshness: Freshness::Live,
             }),
             2,
             4,
@@ -10956,6 +11100,7 @@ mod history_mutation_tests {
                 source: SourceAuthority::Pinned(BTreeSet::from([wanted.clone()])),
                 access: AccessContext::Public,
                 cache: CacheMode::Strict,
+                freshness: Freshness::Live,
             }),
             3,
             3,

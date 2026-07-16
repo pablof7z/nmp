@@ -40,24 +40,35 @@ public enum NMPCacheMode: Sendable, Hashable {
     case strict
 }
 
+/// Per-handle coverage/wire policy (`nmp_grammar::Freshness`, #565).
+/// Whole seconds match Nostr timestamp and coverage-watermark precision.
+public enum NMPFreshness: Sendable, Hashable {
+    case live
+    case maxAge(seconds: UInt64)
+    case cacheOnly
+}
+
 /// The full live-query identity a dev declares -- `selection + source +
-/// access + cache` (`nmp_grammar::Demand` mirror, #106/#107).
+/// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565).
 public struct NMPDemand: Sendable, Hashable {
     public var selection: NMPFilter
     public var source: NMPSourceAuthority
     public var access: NMPAccessContext
     public var cache: NMPCacheMode
+    public var freshness: NMPFreshness
 
     public init(
         selection: NMPFilter,
         source: NMPSourceAuthority,
         access: NMPAccessContext = .public,
-        cache: NMPCacheMode = .agnostic
+        cache: NMPCacheMode = .agnostic,
+        freshness: NMPFreshness = .live
     ) {
         self.selection = selection
         self.source = source
         self.access = access
         self.cache = cache
+        self.freshness = freshness
     }
 }
 
@@ -113,13 +124,32 @@ extension NMPCacheMode {
     }
 }
 
+extension NMPFreshness {
+    func toFfi() -> FfiFreshness {
+        switch self {
+        case .live: return .live
+        case let .maxAge(seconds): return .maxAge(seconds: seconds)
+        case .cacheOnly: return .cacheOnly
+        }
+    }
+
+    init(_ ffi: FfiFreshness) {
+        switch ffi {
+        case .live: self = .live
+        case let .maxAge(seconds): self = .maxAge(seconds: seconds)
+        case .cacheOnly: self = .cacheOnly
+        }
+    }
+}
+
 extension NMPDemand {
     func toFfi() -> FfiDemand {
         FfiDemand(
             selection: selection.toFfi(),
             source: source.toFfi(),
             access: access.toFfi(),
-            cache: cache.toFfi()
+            cache: cache.toFfi(),
+            freshness: freshness.toFfi()
         )
     }
 
@@ -128,7 +158,8 @@ extension NMPDemand {
             selection: NMPFilter(ffi.selection),
             source: NMPSourceAuthority(ffi.source),
             access: NMPAccessContext(ffi.access),
-            cache: NMPCacheMode(ffi.cache)
+            cache: NMPCacheMode(ffi.cache),
+            freshness: NMPFreshness(ffi.freshness)
         )
     }
 }

@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test
 
 // A construction/round-trip test of the ergonomic Demand descriptor (#107).
 // No network -- this only proves the Kotlin-value <-> Ffi-value conversion
-// is lossless for every SourceAuthority/AccessContext/CacheMode case.
+// is lossless for every SourceAuthority/AccessContext/CacheMode/Freshness case.
 class NMPDemandTest {
     @Test
     fun authorOutboxesSourceRoundTrips() {
@@ -14,6 +14,7 @@ class NMPDemandTest {
         assertEquals(uniffi.nmp_ffi.FfiSourceAuthority.AuthorOutboxes, ffi.source)
         assertEquals(uniffi.nmp_ffi.FfiAccessContext.Public, ffi.access)
         assertEquals(uniffi.nmp_ffi.FfiCacheMode.AGNOSTIC, ffi.cache)
+        assertEquals(uniffi.nmp_ffi.FfiFreshness.Live, ffi.freshness)
         assertEquals(demand, NMPDemand.from(ffi))
     }
 
@@ -48,5 +49,22 @@ class NMPDemandTest {
                 access = NMPAccessContext.Nip42("a".repeat(64)),
             )
         assertEquals(demand, NMPDemand.from(demand.toFfi()))
+    }
+
+    @Test
+    fun freshnessRoundTripsEveryWholeSecondVariant() {
+        listOf(
+            NMPFreshness.Live,
+            NMPFreshness.MaxAge(14_400uL),
+            NMPFreshness.CacheOnly,
+        ).forEach { freshness ->
+            val demand =
+                NMPDemand(
+                    selection = NMPFilter(kinds = listOf(0u)),
+                    source = NMPSourceAuthority.AuthorOutboxes,
+                    freshness = freshness,
+                )
+            assertEquals(demand, NMPDemand.from(demand.toFfi()))
+        }
     }
 }

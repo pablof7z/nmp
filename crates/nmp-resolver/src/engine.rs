@@ -129,11 +129,11 @@ use crate::graph::{
 use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 
 /// The descriptor value of a live query: a full [`Demand`] (#106) --
-/// `selection + source + access + cache`, not a bare `Filter`. Two `Demand`s
+/// `selection + source + access + cache + freshness`, not a bare `Filter`. Two `Demand`s
 /// with the same `Filter` but different `source`/`access` are DIFFERENT
 /// subscriptions with distinct atom/wire/coverage identity (bug-class ledger
-/// #18); `cache` does NOT participate in that identity (see
-/// [`AcquisitionKey`]) -- it is a per-handle row-projection flag only.
+/// #18); `cache` and `freshness` do NOT participate in that identity (see
+/// [`AcquisitionKey`]) -- both are per-handle policies.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LiveQuery(pub Demand);
 
@@ -148,7 +148,7 @@ impl LiveQuery {
 
 /// The cache-FREE portion of a [`Demand`] that determines graph/atom/wire/
 /// coverage sharing (#106, atlas's resolver-threading forward-note): two
-/// `Demand`s differing ONLY in `cache` dedup onto the SAME graph node, the
+/// `Demand`s differing ONLY in `cache` or `freshness` dedup onto the SAME graph node, the
 /// SAME atoms, and the SAME wire/coverage history -- `cache` never widens
 /// what's shared, it only selects which cached rows a given HANDLE's own
 /// projection later serves (`nmp-engine`'s `rows_and_evidence_for`, #107).
@@ -187,6 +187,9 @@ pub struct QueryHandle {
     /// `nmp-engine`'s row-projection layer (#107), not consumed inside the
     /// resolver itself.
     cache: nmp_grammar::CacheMode,
+    /// This handle's own coverage/wire policy (#565), excluded from the
+    /// shared acquisition key exactly like `cache`.
+    freshness: nmp_grammar::Freshness,
     pending_drops: Weak<RefCell<Vec<HandleId>>>,
 }
 
@@ -197,6 +200,10 @@ impl QueryHandle {
 
     pub fn cache(&self) -> nmp_grammar::CacheMode {
         self.cache
+    }
+
+    pub fn freshness(&self) -> nmp_grammar::Freshness {
+        self.freshness
     }
 }
 
@@ -440,6 +447,7 @@ impl<S: EventStore> Engine<S> {
         let handle_id = self.alloc_handle();
         let key = AcquisitionKey::from(&q.0);
         let cache = q.0.cache;
+        let freshness = q.0.freshness;
 
         if let Some(&root) = self.descriptor_to_root.get(&key) {
             // Identical cache-free acquisition identity already has a
@@ -462,6 +470,7 @@ impl<S: EventStore> Engine<S> {
             let handle = QueryHandle {
                 id: handle_id,
                 cache,
+                freshness,
                 pending_drops: Rc::downgrade(&self.pending_drops),
             };
             return Ok((handle, merge_deltas(drop_delta, acc.into_delta())));
@@ -486,6 +495,7 @@ impl<S: EventStore> Engine<S> {
         let handle = QueryHandle {
             id: handle_id,
             cache,
+            freshness,
             pending_drops: Rc::downgrade(&self.pending_drops),
         };
         Ok((handle, merge_deltas(drop_delta, acc.into_delta())))
