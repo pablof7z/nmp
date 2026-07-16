@@ -87,6 +87,32 @@ impl BlobDescriptor {
             serde_json::from_slice(bytes).map_err(|error| DescriptorError::Json {
                 reason: error.to_string(),
             })?;
+        Self::from_raw(raw)
+    }
+
+    /// Strict parse of ONE already-decoded JSON value -- the per-row path
+    /// the BUD-12 `/list` client takes (#551), so every array element gets
+    /// EXACTLY the same mandatory-field and sha256 rules as
+    /// [`Self::parse_json`] without re-serializing the element. No byte
+    /// bound here: the value was decoded from a response body the caller
+    /// already bounded (`max_list_response_bytes` in `client.rs`). One
+    /// known divergence from `parse_json`: duplicate JSON keys were
+    /// already collapsed last-wins by the `serde_json::Value` decode
+    /// upstream, whereas `parse_json`'s direct struct decode refuses
+    /// them -- harmless here because the server authors the whole body,
+    /// and list rows are unverified server claims either way.
+    pub(crate) fn from_value(value: serde_json::Value) -> Result<Self, DescriptorError> {
+        let raw: RawDescriptor =
+            serde_json::from_value(value).map_err(|error| DescriptorError::Json {
+                reason: error.to_string(),
+            })?;
+        Self::from_raw(raw)
+    }
+
+    /// The one strictness gate both doors above share: absence of any
+    /// mandatory field is its own typed refusal, and `sha256` goes through
+    /// the strict lowercase-hex parser.
+    fn from_raw(raw: RawDescriptor) -> Result<Self, DescriptorError> {
         let url = raw.url.ok_or(DescriptorError::MissingUrl)?;
         let sha256_hex = raw.sha256.ok_or(DescriptorError::MissingSha256)?;
         let sha256 = Sha256Hash::from_hex(&sha256_hex).map_err(DescriptorError::BadSha256)?;
