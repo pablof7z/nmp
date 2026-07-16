@@ -3622,11 +3622,27 @@ impl<S: EventStore> EngineCore<S> {
     /// unconditionally instead of entry-point-dependent. A failed verify is
     /// a whole-intent terminal (`WriteStatus::Failed`): no `Accepted`, no
     /// pending write recorded, no `Effect::PublishEvent`.
+    ///
+    /// Identity resolution (#47): with `identity_override: None` the
+    /// single-identity contract holds verbatim — an unsigned draft must be
+    /// authored by the CURRENT active account, else fail closed
+    /// pre-acceptance. With `Some(pk)` the caller explicitly consents to
+    /// publish this one write as `pk`: `pk` must EQUAL the draft's author
+    /// (the reducer never restamps a draft; a mismatch fails closed with no
+    /// `Accepted`), and when it does the write is accepted with
+    /// `signing_pubkey = pk` regardless of the active account — including
+    /// while logged out. Acceptance pins `pk` (`expected_pubkey` /
+    /// `signing_identity_ref`), so everything downstream — the frozen body,
+    /// `RequestSign`, the `SignerAttached` re-arm, restart replay — targets
+    /// the override identity forever; a later `set_active_account` cannot
+    /// retarget it, and an override with no registered capability parks
+    /// durably as `AwaitingCapability` rather than failing or drifting.
     fn on_publish(&mut self, intent: WriteIntent, sink: Box<dyn ReceiptSink>) -> Vec<Effect> {
         let WriteIntent {
             payload,
             durability,
             routing,
+            identity_override,
         } = intent;
 
         let replaceable_base = match &payload {
@@ -3655,24 +3671,59 @@ impl<S: EventStore> EngineCore<S> {
 
         let signing_pubkey = match &payload {
             WritePayload::Unsigned(unsigned)
-            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => match self.active_pubkey {
-                Some(active) if active == unsigned.pubkey => active,
-                Some(_) => {
+            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => match identity_override {
+                // #47: explicit per-write consent to publish as `pk`. The
+                // override must equal the draft's author — the reducer never
+                // restamps a draft to match it — and once it does, the
+                // active account is irrelevant (even logged out): acceptance
+                // pins `pk` and downstream signing targets it forever.
+                Some(pk) if pk == unsigned.pubkey => pk,
+                Some(pk) => {
                     return self.fail_unaccepted(
                         sink,
-                        "unsigned draft author does not match current active account".to_string(),
+                        format!(
+                            "identity override {pk} does not match the unsigned draft author {}",
+                            unsigned.pubkey
+                        ),
                     );
                 }
-                None => {
-                    return self.fail_unaccepted(
-                        sink,
-                        "unsigned publish requires an active account".to_string(),
-                    );
-                }
+                // Default single-identity contract, unchanged: the draft's
+                // author must be the CURRENT active account, fail closed
+                // otherwise.
+                None => match self.active_pubkey {
+                    Some(active) if active == unsigned.pubkey => active,
+                    Some(_) => {
+                        return self.fail_unaccepted(
+                            sink,
+                            "unsigned draft author does not match current active account"
+                                .to_string(),
+                        );
+                    }
+                    None => {
+                        return self.fail_unaccepted(
+                            sink,
+                            "unsigned publish requires an active account".to_string(),
+                        );
+                    }
+                },
             },
             // Already-signed payloads are verified verbatim and never ask a
-            // local signer, so their author is intrinsically frozen.
-            WritePayload::Signed(event) => event.pubkey,
+            // local signer, so their author is intrinsically frozen. An
+            // explicit override may still name that author (a harmless
+            // restatement) — but naming anyone ELSE is a consent/author
+            // contradiction and fails closed before acceptance (#47).
+            WritePayload::Signed(event) => match identity_override {
+                Some(pk) if pk != event.pubkey => {
+                    return self.fail_unaccepted(
+                        sink,
+                        format!(
+                            "identity override {pk} does not match the signed event author {}",
+                            event.pubkey
+                        ),
+                    );
+                }
+                _ => event.pubkey,
+            },
         };
 
         if let WritePayload::Signed(event) = &payload {
@@ -8050,6 +8101,7 @@ mod receipt_allocator_tests {
             )),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         }
     }
 
@@ -8099,6 +8151,7 @@ mod receipt_allocator_tests {
                 },
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(sink.clone()),
         ));
@@ -8204,6 +8257,7 @@ mod receipt_allocator_tests {
                 )),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));
@@ -8687,6 +8741,7 @@ mod affected_handle_invalidation_tests {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
             routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
+            identity_override: None,
         }
     }
 
@@ -8848,6 +8903,7 @@ mod affected_handle_invalidation_tests {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -8935,6 +8991,7 @@ mod affected_handle_invalidation_tests {
                 )),
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -9020,6 +9077,7 @@ mod affected_handle_invalidation_tests {
                 },
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -9101,6 +9159,7 @@ mod affected_handle_invalidation_tests {
                 )),
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );
@@ -10710,6 +10769,7 @@ mod history_mutation_tests {
                 },
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         );

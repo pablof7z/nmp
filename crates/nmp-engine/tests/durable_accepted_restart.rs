@@ -206,6 +206,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
                 payload: WritePayload::Signed(event.clone()),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));
@@ -372,6 +373,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
                 payload: WritePayload::Signed(event),
                 durability: Durability::AtMostOnce,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));
@@ -440,6 +442,7 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));
@@ -481,6 +484,134 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
         .is_empty());
 }
 
+/// #47 falsifier (f), modeled on
+/// [`pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates`]:
+/// an unsigned intent accepted under an explicit `identity_override`
+/// (authored by B while A was the active account, B's signer absent)
+/// survives a genuine close/reopen still pinned to B. Replay shows
+/// `Accepted` + `AwaitingCapability`; re-rooting the reopened core onto A
+/// and attaching A's (wrong) signer produce no sign request; attaching the
+/// EXACT override key resumes the SAME receipt, and B's completion promotes
+/// the frozen body/id/pubkey to `Signed`.
+#[test]
+fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reopen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("override-signer.redb");
+    let active = Keys::generate();
+    let override_keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://override-signer.example").unwrap();
+    let unsigned = UnsignedEvent::new(
+        override_keys.public_key(),
+        Timestamp::from(147u64),
+        Kind::TextNote,
+        vec![],
+        "resume as the override identity",
+    );
+    let frozen_id = nostr::EventId::new(
+        &unsigned.pubkey,
+        &unsigned.created_at,
+        &unsigned.kind,
+        &unsigned.tags,
+        &unsigned.content,
+    );
+    let id = {
+        let store = RedbStore::open(&path).unwrap();
+        let mut core = EngineCore::new(
+            store,
+            Box::new(directory(override_keys.public_key(), relay.clone())),
+            10,
+        );
+        // A is the active account; the override alone authorizes B's draft.
+        core.handle(EngineMsg::SetActivePubkey(Some(active.public_key())));
+        let effects = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+                identity_override: Some(override_keys.public_key()),
+            },
+            Box::new(Sink::default()),
+        ));
+        receipt_id(&effects)
+    };
+
+    // Restart: the frozen pending row is B's body with a pending signature.
+    let store = RedbStore::open(&path).unwrap();
+    let rows = store.query(&nostr::Filter::new().id(frozen_id)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event.pubkey, override_keys.public_key());
+    assert_eq!(
+        rows[0].provenance.local.as_ref().unwrap().sig_state,
+        SigState::Pending
+    );
+    let mut core = EngineCore::new(
+        store,
+        Box::new(directory(override_keys.public_key(), relay)),
+        10,
+    );
+    assert!(core.recover_on_boot().is_empty());
+    let reattached = Sink::default();
+    assert!(core
+        .reattach_receipt(id, Box::new(reattached.clone()))
+        .is_attached());
+    assert_eq!(
+        *reattached.0.lock().unwrap(),
+        vec![WriteStatus::Accepted, WriteStatus::AwaitingCapability]
+    );
+
+    // Post-restart retarget attempts: activating A (the OLD active account)
+    // and attaching A's signer must both leave the B-pinned intent silent.
+    assert!(!core
+        .handle(EngineMsg::SetActivePubkey(Some(active.public_key())))
+        .iter()
+        .any(|e| matches!(e, Effect::RequestSign(..))));
+    assert!(!core
+        .handle(EngineMsg::SignerAttached(active.public_key()))
+        .iter()
+        .any(|e| matches!(e, Effect::RequestSign(..))));
+
+    // Only the exact override key's signer resumes the SAME receipt with
+    // the frozen template.
+    let (generation, template) = core
+        .handle(EngineMsg::SignerAttached(override_keys.public_key()))
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::RequestSign(request_id, generation, u)
+                if request_id == id && u.pubkey == override_keys.public_key() =>
+            {
+                Some((generation, u))
+            }
+            _ => None,
+        })
+        .expect("the override key's attach must re-arm the parked intent");
+    let signed = template.sign_with_keys(&override_keys).unwrap();
+    assert_eq!(signed.id, frozen_id, "the frozen body/id must be intact");
+    let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::EmitReceipt(rid, WriteStatus::Signed(event_id))
+                if *rid == id && *event_id == frozen_id
+        )),
+        "completion must promote the original receipt to Signed as the override identity"
+    );
+    assert!(
+        reattached.0.lock().unwrap().starts_with(&[
+            WriteStatus::Accepted,
+            WriteStatus::AwaitingCapability,
+            WriteStatus::Signed(frozen_id)
+        ]),
+        "the reattached stream is the SAME receipt, extended in place \
+         (routing facts may follow Signed) -- never a new one"
+    );
+    drop(core);
+    let store = RedbStore::open(&path).unwrap();
+    let rows = store.query(&nostr::Filter::new().id(frozen_id)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event.pubkey, override_keys.public_key());
+    assert!(rows[0].event.verify().is_ok());
+}
+
 #[test]
 fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -519,6 +650,7 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
                     payload: WritePayload::Signed(event.clone()),
                     durability: Durability::Durable,
                     routing: WriteRouting::AuthorOutbox,
+                    identity_override: None,
                 },
                 Box::new(Sink::default()),
             ))
@@ -771,6 +903,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
                 payload: WritePayload::Signed(event),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));
@@ -848,6 +981,7 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
             )),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(Sink::default()),
     ));
@@ -886,6 +1020,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
                 )),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));
@@ -968,6 +1103,7 @@ fn pinned_host_routing_round_trips_across_a_restart() {
                 payload: WritePayload::Signed(event.clone()),
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(host.clone())),
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));
@@ -1025,6 +1161,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
                 payload: WritePayload::Signed(event),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(Sink::default()),
         ));

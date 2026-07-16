@@ -57,6 +57,29 @@ pub struct WriteIntent {
     pub payload: WritePayload,
     pub durability: Durability,
     pub routing: WriteRouting,
+    /// Explicit per-write signing-identity override (issue #47).
+    ///
+    /// `None` is the default single-identity contract, unchanged: an
+    /// unsigned draft must be authored by the CURRENT active account and
+    /// the reducer fails closed pre-acceptance on any mismatch (or when no
+    /// account is active at all).
+    ///
+    /// `Some(pk)` is the caller's explicit consent to publish this one
+    /// write as `pk` — a registered/secondary identity — WITHOUT changing
+    /// the active account. It is a consent assertion, not a restamp
+    /// request: `pk` must EQUAL the draft's author (`UnsignedEvent.pubkey`,
+    /// or the signed `Event.pubkey` for an already-signed payload). The
+    /// engine never rewrites a draft's author to match an override; a
+    /// mismatch fails closed BEFORE acceptance, exactly like the
+    /// active-account check it bypasses. An override works regardless of
+    /// which account is active — including while fully logged out — and
+    /// acceptance pins `pk` into the frozen write (`expected_pubkey` /
+    /// `signing_identity_ref`), so later `set_active_account` calls can
+    /// never retarget the accepted intent. An override naming an identity
+    /// with no registered signing capability still ACCEPTS and parks
+    /// durably (`WriteStatus::AwaitingCapability`) until that exact key's
+    /// signer attaches — never a silent failure, never identity drift.
+    pub identity_override: Option<PublicKey>,
 }
 
 /// Where a `WriteIntent` is routed.
@@ -176,5 +199,36 @@ mod tests {
         let host = RelayUrl::parse("wss://host.example.com").unwrap();
         let auth = HostAuthority::from_selected_host(host.clone());
         assert_eq!(auth.host(), host);
+    }
+
+    /// #47: the override is plain intent vocab — an optional pubkey the
+    /// caller sets explicitly, defaulting to the active-account contract.
+    /// The equality-with-author enforcement lives in the reducer
+    /// (`nmp-engine`'s `on_publish`), not here; this pins the vocab shape.
+    #[test]
+    fn identity_override_carries_the_callers_explicit_choice() {
+        let keys = nostr::Keys::generate();
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            nostr::Timestamp::from(1),
+            nostr::Kind::TextNote,
+            Vec::new(),
+            "override vocab",
+        );
+        let default_intent = WriteIntent {
+            payload: WritePayload::Unsigned(unsigned.clone()),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        };
+        assert!(default_intent.identity_override.is_none());
+
+        let overridden = WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(keys.public_key()),
+        };
+        assert_eq!(overridden.identity_override, Some(keys.public_key()));
     }
 }

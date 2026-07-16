@@ -1976,6 +1976,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -1996,6 +1997,68 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_secs(1)).is_err(),
             "Failed must be the sole terminal status -- no Accepted, nothing further"
+        );
+
+        engine.shutdown();
+    }
+
+    /// #47 Unit A through the FFI boundary: an `identity_override` naming a
+    /// pubkey with NO registered signer capability is a well-formed intent
+    /// (it names its own payload's author), so acceptance admits it --
+    /// `Accepted` -- and then PARKS it as `AwaitingCapability` until that
+    /// signer attaches, exactly the retained steady state the reattach test
+    /// above builds on. It must never silently terminate: no `Failed`, no
+    /// terminal, and the receipt channel stays OPEN (a `Timeout`, never a
+    /// `Disconnected`) -- the obligation is retained, not abandoned. The
+    /// active account (a different, registered-active identity) must not be
+    /// silently substituted; the override is what pins the author.
+    #[test]
+    fn ffi_override_publish_for_unregistered_pubkey_parks_awaiting_capability() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let active = nostr::Keys::generate();
+        let overridden = nostr::Keys::generate();
+        engine
+            .set_active_account(Some(active.public_key().to_hex()))
+            .expect("active account must activate");
+
+        let intent = FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                // The payload author IS the override -- the one well-formed
+                // shape; a mismatch would be the acceptance boundary's
+                // Failed, tested at the engine tier (#47 Unit A).
+                pubkey: overridden.public_key().to_hex(),
+                created_at: nostr::Timestamp::now().as_secs(),
+                kind: 9999,
+                tags: vec![],
+                content: "override park".to_string(),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: Some(overridden.public_key().to_hex()),
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
+        let receipt_id = engine
+            .publish(intent, observer)
+            .expect("a well-formed override intent must enqueue");
+        assert!(receipt_id > 0, "publish must expose its stable receipt id");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("must observe Accepted"),
+            FfiWriteStatus::Accepted
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("must observe AwaitingCapability"),
+            FfiWriteStatus::AwaitingCapability
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "an unregistered override must park retained -- no further fact, and the receipt \
+             stream must stay open (Disconnected would be a silent termination)"
         );
 
         engine.shutdown();
@@ -2175,6 +2238,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -2287,6 +2351,7 @@ mod tests {
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
             };
             let (tx, rx) = mpsc::channel();
             let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
@@ -2441,6 +2506,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
         };
 
         let (status_tx, status_rx) = mpsc::channel();
