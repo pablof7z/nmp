@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-16 09:51 UTC</p>
-    <p class="ep-sub">2026-07-16 &middot; Pulse: Blossom media lands on Swift + Kotlin, not just Rust &middot; ~3.0 min</p>
-    <audio controls preload="none" src="reports/pulse-0018.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0018.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-16 10:51 UTC</p>
+    <p class="ep-sub">2026-07-16 &middot; Pulse: media-composition seam in CI, v2-escalation audio live &middot; ~3.0 min</p>
+    <audio controls preload="none" src="reports/pulse-0019.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0019.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">Blossom media (<a href="https://github.com/pablof7z/nmp/issues/216">#216</a>) T15-A is now complete end-to-end: the FFI + Swift + Kotlin projection (<a href="https://github.com/pablof7z/nmp/pull/560">#560</a>) that was red last cycle on a real <code>[UInt8]</code>&rarr;<code>Data</code> mismatch is fixed and merged clean &mdash; Rust, parity, falsifier-honesty, and both the Swift and Kotlin package builds all pass. Upload/mirror/delete/list are now callable from Rust, Swift, and Kotlin alike. Honest note: upload durability is currently <b>app-owned</b> (a standalone async call, not yet a persisted/retried engine obligation) &mdash; an engine-integrated durable-upload upgrade is tracked as an explicit additive follow-up (<a href="https://github.com/pablof7z/nmp/issues/562">#562</a>), not a silent gap. NIP-68 <code>imeta</code> (<a href="https://github.com/pablof7z/nmp/issues/558">#558</a>) and upload-then-publish composition (<a href="https://github.com/pablof7z/nmp/issues/559">#559</a>) are next.</p>
+    <p class="ep-blurb">NIP-68 imeta (<a href="https://github.com/pablof7z/nmp/issues/558">#558</a>) picked up a determinism fix &mdash; <code>build_picture</code> now takes an explicit <code>created_at</code> instead of sampling the clock, closing an FFI-parity gap (<a href="https://github.com/pablof7z/nmp/pull/568">#568</a>, merged). The bigger arc: the Blossom media-composition seam (<a href="https://github.com/pablof7z/nmp/issues/559">#559</a>, T15-C) is up as <a href="https://github.com/pablof7z/nmp/pull/575">#575</a>, in CI now &mdash; upload failure, publish failure, and success stay three separated outcomes by construction, never one collapsed boolean. Not merged yet, so it's reported honestly as in-flight. Also new: the <a href="https://pablof7z.github.io/nmp/v2-escalation/">v2 architecture-decisions escalation page</a> is live &mdash; fifteen rulings, each with its own audio deep-dive plus an overall briefing.</p>
   </section>
 
   <details class="archive" id="archive">
