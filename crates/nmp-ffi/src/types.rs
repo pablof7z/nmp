@@ -713,6 +713,7 @@ pub struct FfiDiagnosticsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteStatus {
     Accepted,
+    Cancelled,
     /// `nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`
     /// (64-char hex, the module-wide convention) is the exact identity
     /// FROZEN at acceptance that no registered signer currently answers
@@ -778,6 +779,48 @@ pub enum FfiWriteStatus {
         reason: String,
     },
 }
+
+/// Typed refusal from explicit pre-signature write cancellation. The current
+/// receipt fact survives intact when cancellation is no longer legal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiCancelWriteOutcome {
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiCancelWriteError {
+    UnknownReceipt { receipt_id: u64 },
+    AlreadySigned { receipt_id: u64, event_id: String },
+    AlreadyCompensated { receipt_id: u64 },
+    AlreadyAbandoned { receipt_id: u64 },
+    PersistenceFailed { receipt_id: u64, reason: String },
+    EngineClosed,
+}
+
+impl std::fmt::Display for FfiCancelWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownReceipt { receipt_id } => write!(f, "unknown receipt {receipt_id}"),
+            Self::AlreadySigned {
+                receipt_id,
+                event_id,
+            } => write!(f, "receipt {receipt_id} is already signed as {event_id}"),
+            Self::AlreadyCompensated { receipt_id } => {
+                write!(f, "receipt {receipt_id} is already compensated")
+            }
+            Self::AlreadyAbandoned { receipt_id } => {
+                write!(f, "receipt {receipt_id} was abandoned after restart")
+            }
+            Self::PersistenceFailed { receipt_id, reason } => write!(
+                f,
+                "could not persist cancellation for receipt {receipt_id}: {reason}"
+            ),
+            Self::EngineClosed => write!(f, "engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for FfiCancelWriteError {}
 
 /// Result of looking up a stable retained receipt id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]

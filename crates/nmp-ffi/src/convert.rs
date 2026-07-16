@@ -13,9 +13,10 @@ use std::num::NonZeroUsize;
 
 use nmp::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase,
-    CoverageInterval, DiagnosticsSnapshot, Durability as GDurability, FilterCoverageEntry, Frame,
-    Lane, RelayDiagnosticsSnapshot, RequestRowsError, Row, RowDelta, ShortfallFact, SourceEvidence,
-    SourceStatus, Window, WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
+    CancelWriteError, CancelWriteOutcome, CoverageInterval, DiagnosticsSnapshot,
+    Durability as GDurability, FilterCoverageEntry, Frame, Lane, RelayDiagnosticsSnapshot,
+    RequestRowsError, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus, Window,
+    WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
     WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
@@ -32,13 +33,13 @@ use nostr::{
 
 use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDiagnostics, FfiAuthPhase, FfiBinding,
-    FfiCacheMode, FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot,
-    FfiDurability, FfiFilter, FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentityField,
-    FfiKindCount, FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow,
-    FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
-    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
-    FfiWriteStatus,
+    FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome, FfiCoverageInterval, FfiDemand,
+    FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiFilterCoverage, FfiFrame,
+    FfiFreshness, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics,
+    FfiRelayInformationErrorKind, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp,
+    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority,
+    FfiSourceEvidence, FfiSourceStatus, FfiWindow, FfiWindowContents, FfiWindowLoad,
+    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -1204,6 +1205,7 @@ fn coverage_interval_to_ffi(i: CoverageInterval) -> FfiCoverageInterval {
 pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
     match s.0 {
         GWriteStatus::Accepted => FfiWriteStatus::Accepted,
+        GWriteStatus::Cancelled => FfiWriteStatus::Cancelled,
         GWriteStatus::AwaitingCapability { pubkey } => FfiWriteStatus::AwaitingCapability {
             pubkey: pubkey.to_hex(),
         },
@@ -1274,6 +1276,44 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::Failed(reason) => FfiWriteStatus::Failed {
             reason: reason.clone(),
         },
+    }
+}
+
+pub fn cancel_write_error_to_ffi(error: CancelWriteError) -> FfiCancelWriteError {
+    match error {
+        CancelWriteError::UnknownReceipt { receipt_id } => FfiCancelWriteError::UnknownReceipt {
+            receipt_id: receipt_id.0,
+        },
+        CancelWriteError::AlreadySigned {
+            receipt_id,
+            event_id,
+        } => FfiCancelWriteError::AlreadySigned {
+            receipt_id: receipt_id.0,
+            event_id: event_id.to_hex(),
+        },
+        CancelWriteError::AlreadyCompensated { receipt_id } => {
+            FfiCancelWriteError::AlreadyCompensated {
+                receipt_id: receipt_id.0,
+            }
+        }
+        CancelWriteError::AlreadyAbandoned { receipt_id } => {
+            FfiCancelWriteError::AlreadyAbandoned {
+                receipt_id: receipt_id.0,
+            }
+        }
+        CancelWriteError::PersistenceFailed { receipt_id, reason } => {
+            FfiCancelWriteError::PersistenceFailed {
+                receipt_id: receipt_id.0,
+                reason,
+            }
+        }
+        CancelWriteError::EngineClosed => FfiCancelWriteError::EngineClosed,
+    }
+}
+
+pub fn cancel_write_outcome_to_ffi(outcome: CancelWriteOutcome) -> FfiCancelWriteOutcome {
+    match outcome {
+        CancelWriteOutcome::Cancelled => FfiCancelWriteOutcome::Cancelled,
     }
 }
 
@@ -1406,6 +1446,7 @@ mod write_status_tests {
         let pubkey = nostr::Keys::generate().public_key();
         let cases = vec![
             (GWriteStatus::Accepted, FfiWriteStatus::Accepted),
+            (GWriteStatus::Cancelled, FfiWriteStatus::Cancelled),
             (
                 GWriteStatus::AwaitingCapability { pubkey },
                 FfiWriteStatus::AwaitingCapability {
@@ -1533,6 +1574,47 @@ mod write_status_tests {
         for (source, expected) in cases {
             assert_eq!(write_status_to_ffi(WriteStatusRef(&source)), expected);
         }
+    }
+
+    #[test]
+    fn every_cancel_refusal_maps_without_impossible_states() {
+        let id = nmp::ReceiptId(41);
+        assert_eq!(
+            cancel_write_error_to_ffi(CancelWriteError::UnknownReceipt { receipt_id: id }),
+            FfiCancelWriteError::UnknownReceipt { receipt_id: 41 }
+        );
+        assert_eq!(
+            cancel_write_error_to_ffi(CancelWriteError::AlreadySigned {
+                receipt_id: id,
+                event_id: EventId::all_zeros(),
+            }),
+            FfiCancelWriteError::AlreadySigned {
+                receipt_id: 41,
+                event_id: EventId::all_zeros().to_hex(),
+            }
+        );
+        assert_eq!(
+            cancel_write_error_to_ffi(CancelWriteError::AlreadyCompensated { receipt_id: id }),
+            FfiCancelWriteError::AlreadyCompensated { receipt_id: 41 }
+        );
+        assert_eq!(
+            cancel_write_error_to_ffi(CancelWriteError::AlreadyAbandoned { receipt_id: id }),
+            FfiCancelWriteError::AlreadyAbandoned { receipt_id: 41 }
+        );
+        assert_eq!(
+            cancel_write_error_to_ffi(CancelWriteError::PersistenceFailed {
+                receipt_id: id,
+                reason: "disk full".to_string(),
+            }),
+            FfiCancelWriteError::PersistenceFailed {
+                receipt_id: 41,
+                reason: "disk full".to_string(),
+            }
+        );
+        assert_eq!(
+            cancel_write_error_to_ffi(CancelWriteError::EngineClosed),
+            FfiCancelWriteError::EngineClosed
+        );
     }
 }
 

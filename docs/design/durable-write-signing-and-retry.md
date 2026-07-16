@@ -130,6 +130,15 @@ waiting, signature promotion, route revisions, attempts, ACKs, rejections,
 expiry, cancellation, and ambiguous at-most-once outcomes remain inspectable
 after restart.
 
+The canonical facade operation is `cancel(receipt_id)`. It commits only for a
+still-unsigned accepted obligation, returns `CancelWriteOutcome::Cancelled`,
+persists and broadcasts the matching `WriteStatus::Cancelled` fact, and is
+idempotent once that fact exists. Unknown ids, signed writes, and each other
+terminal state are distinct typed refusals. Store failure is a typed error:
+ownership and signer work remain live, and no observer sees `Cancelled` unless
+the compensation transaction committed. UniFFI, Swift, and Kotlin project the
+same result and refusal axes.
+
 `Enqueued`, `sent`, and `converged` are never synonyms. Product policy may
 interpret a set of per-relay facts; the engine reports them without inventing a
 single success boolean.

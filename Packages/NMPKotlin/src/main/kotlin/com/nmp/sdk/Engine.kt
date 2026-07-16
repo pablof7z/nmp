@@ -295,6 +295,9 @@ class NMPEngine(
     /** Attach to retained facts without conflating corruption with absence. */
     fun reattachReceipt(id: ULong): ReceiptReattachment = reattachReceipt(ffi, id)
 
+    /** Explicitly cancel an accepted unsigned write by stable receipt id. */
+    fun cancel(receiptId: ULong): WriteCancellationOutcome = cancelWrite(ffi, receiptId)
+
     // MARK: - Lifecycle
 
     /** Stop the engine. Idempotent. Also called from `close()` (this class

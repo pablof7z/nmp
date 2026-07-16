@@ -911,11 +911,13 @@ impl<S: EventStore> Engine<S> {
                     row_changes,
                 })
             }
-            CompensateOutcome::NotFound => Ok(CommittedMutationResult {
-                delta: DemandDelta::default(),
-                affected_handles: BTreeSet::new(),
-                row_changes: CommittedRowChanges::default(),
-            }),
+            CompensateOutcome::AlreadySigned | CompensateOutcome::NotFound => {
+                Ok(CommittedMutationResult {
+                    delta: DemandDelta::default(),
+                    affected_handles: BTreeSet::new(),
+                    row_changes: CommittedRowChanges::default(),
+                })
+            }
         }
     }
 

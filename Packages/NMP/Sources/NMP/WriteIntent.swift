@@ -112,6 +112,7 @@ public struct WriteIntent: Sendable, Hashable {
 /// the terminal states).
 public enum WriteStatus: Sendable, Hashable {
     case accepted
+    case cancelled
     /// #47 Unit B: `pubkey` is the exact frozen identity (64-char hex) no
     /// registered signer currently answers for. Retained, not terminal --
     /// re-arrives verbatim on restart replay and resumes only when a
@@ -136,6 +137,7 @@ public enum WriteStatus: Sendable, Hashable {
     init(_ ffi: FfiWriteStatus) {
         switch ffi {
         case .accepted: self = .accepted
+        case .cancelled: self = .cancelled
         case .awaitingCapability(let pubkey): self = .awaitingCapability(pubkey: pubkey)
         case .signed(let eventId): self = .signed(eventId: eventId)
         case .routed(let relays): self = .routed(relays: relays)

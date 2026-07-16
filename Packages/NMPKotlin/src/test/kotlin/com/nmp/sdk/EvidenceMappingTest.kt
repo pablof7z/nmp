@@ -15,11 +15,41 @@ import uniffi.nmp_ffi.FfiShortfallFact
 import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
 import uniffi.nmp_ffi.FfiWriteStatus
+import uniffi.nmp_ffi.FfiCancelWriteException
 import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
 
 class EvidenceMappingTest {
+    @Test
+    fun cancellationFactAndEveryRefusalRemainTyped() {
+        assertEquals(WriteStatus.Cancelled, WriteStatus.from(FfiWriteStatus.Cancelled))
+        assertEquals(
+            NMPWriteCancellationError.UnknownReceipt(42uL),
+            NMPWriteCancellationError.from(FfiCancelWriteException.UnknownReceipt(42uL)),
+        )
+        assertEquals(
+            NMPWriteCancellationError.AlreadySigned(42uL, "event"),
+            NMPWriteCancellationError.from(FfiCancelWriteException.AlreadySigned(42uL, "event")),
+        )
+        assertEquals(
+            NMPWriteCancellationError.AlreadyCompensated(42uL),
+            NMPWriteCancellationError.from(FfiCancelWriteException.AlreadyCompensated(42uL)),
+        )
+        assertEquals(
+            NMPWriteCancellationError.AlreadyAbandoned(42uL),
+            NMPWriteCancellationError.from(FfiCancelWriteException.AlreadyAbandoned(42uL)),
+        )
+        assertEquals(
+            NMPWriteCancellationError.PersistenceFailed(42uL, "disk"),
+            NMPWriteCancellationError.from(FfiCancelWriteException.PersistenceFailed(42uL, "disk")),
+        )
+        assertEquals(
+            NMPWriteCancellationError.EngineClosed,
+            NMPWriteCancellationError.from(FfiCancelWriteException.EngineClosed()),
+        )
+    }
+
     @Test
     fun sourcesGrewReplacesRowInPlaceWithoutDuplicating() {
         // #105: `SourcesGrew` must replace the row's provenance IN PLACE --

@@ -445,12 +445,13 @@ at-most-once handoff; plus retraction doc §5's
 coverage falsifier (retract each way → coverage rows bit-identical, `gc` remains
 the only lowering path).
 
-### Follow-up (flag, do not build here)
+### Follow-up status
 - **Retry-owner policy engine** (backoff curve, concurrency caps, OutcomeUnknown /
   at-most-once policy, transport-vs-outbox boundary) — new issue under #23/#3.
-- **FFI/facade cancel + receipt-reattach surface** — coordinate with #52 (public
-  write surface); this frame adds the core `EngineMsg::CancelWrite` but the FFI
-  projection is #52's serialized surface work.
+- **FFI/facade receipt reattachment landed in #83/#97; explicit typed
+  cancellation landed in #533.** Both use the stable receipt id and project
+  through Rust, UniFFI, Swift, and Kotlin rather than adding a second write
+  noun.
 
 ---
 
