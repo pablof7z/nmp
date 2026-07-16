@@ -702,7 +702,17 @@ pub struct FfiDiagnosticsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteStatus {
     Accepted,
-    AwaitingCapability,
+    /// `nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`
+    /// (64-char hex, the module-wide convention) is the exact identity
+    /// FROZEN at acceptance that no registered signer currently answers
+    /// for -- the same pubkey an `identity_override` pinned, or the active
+    /// account at publish time when no override was given. Retained, not
+    /// terminal: this fact re-arrives verbatim on restart replay, and only
+    /// registering a signer for THIS exact pubkey resumes the write --
+    /// never a different (even currently-active) identity.
+    AwaitingCapability {
+        pubkey: String,
+    },
     Signed {
         event_id: String,
     },

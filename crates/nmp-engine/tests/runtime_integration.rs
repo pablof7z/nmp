@@ -1077,7 +1077,9 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     );
     assert_eq!(
         first.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::AwaitingCapability
+        WriteStatus::AwaitingCapability {
+            pubkey: keys.public_key()
+        }
     );
     assert_eq!(
         second.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -1085,7 +1087,9 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     );
     assert_eq!(
         second.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::AwaitingCapability
+        WriteStatus::AwaitingCapability {
+            pubkey: keys.public_key()
+        }
     );
     handle
         .add_signer(LocalKeySigner::new(keys.clone()))
@@ -1168,7 +1172,9 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
     );
     assert_eq!(
         statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::AwaitingCapability
+        WriteStatus::AwaitingCapability {
+            pubkey: keys.public_key()
+        }
     );
     handle
         .add_signer(LocalKeySigner::new(keys))

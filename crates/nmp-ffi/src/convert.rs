@@ -1185,7 +1185,9 @@ fn coverage_interval_to_ffi(i: CoverageInterval) -> FfiCoverageInterval {
 pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
     match s.0 {
         GWriteStatus::Accepted => FfiWriteStatus::Accepted,
-        GWriteStatus::AwaitingCapability => FfiWriteStatus::AwaitingCapability,
+        GWriteStatus::AwaitingCapability { pubkey } => FfiWriteStatus::AwaitingCapability {
+            pubkey: pubkey.to_hex(),
+        },
         GWriteStatus::Signed(id) => FfiWriteStatus::Signed {
             event_id: id.to_hex(),
         },
@@ -1381,11 +1383,14 @@ mod write_status_tests {
     fn every_write_status_variant_maps_without_terminal_rollup() {
         let relay = RelayUrl::parse("wss://status.example").unwrap();
         let event_id = EventId::from_hex(&"00".repeat(32)).unwrap();
+        let pubkey = nostr::Keys::generate().public_key();
         let cases = vec![
             (GWriteStatus::Accepted, FfiWriteStatus::Accepted),
             (
-                GWriteStatus::AwaitingCapability,
-                FfiWriteStatus::AwaitingCapability,
+                GWriteStatus::AwaitingCapability { pubkey },
+                FfiWriteStatus::AwaitingCapability {
+                    pubkey: pubkey.to_hex(),
+                },
             ),
             (
                 GWriteStatus::Signed(event_id),

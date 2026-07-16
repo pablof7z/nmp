@@ -464,7 +464,12 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
         .is_attached());
     assert_eq!(
         *reattached.0.lock().unwrap(),
-        vec![WriteStatus::Accepted, WriteStatus::AwaitingCapability]
+        vec![
+            WriteStatus::Accepted,
+            WriteStatus::AwaitingCapability {
+                pubkey: keys.public_key()
+            }
+        ]
     );
     assert!(!core
         .handle(EngineMsg::SignerAttached(wrong.public_key()))
@@ -556,7 +561,13 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         .is_attached());
     assert_eq!(
         *reattached.0.lock().unwrap(),
-        vec![WriteStatus::Accepted, WriteStatus::AwaitingCapability]
+        vec![
+            WriteStatus::Accepted,
+            WriteStatus::AwaitingCapability {
+                pubkey: override_keys.public_key()
+            }
+        ],
+        "the parked pubkey must be the frozen override B, never the active account A"
     );
 
     // Post-restart retarget attempts: activating A (the OLD active account)
@@ -598,7 +609,9 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
     assert!(
         reattached.0.lock().unwrap().starts_with(&[
             WriteStatus::Accepted,
-            WriteStatus::AwaitingCapability,
+            WriteStatus::AwaitingCapability {
+                pubkey: override_keys.public_key()
+            },
             WriteStatus::Signed(frozen_id)
         ]),
         "the reattached stream is the SAME receipt, extended in place \
