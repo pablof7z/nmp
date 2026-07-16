@@ -63,26 +63,43 @@ public enum WritePayload: Sendable, Hashable {
 }
 
 /// A caller's publish request (`FfiWriteIntent` mirror).
+///
+/// `identityOverride` (#47) is the identity this ONE write is published
+/// under, as 64-char hex or bech32 `npub`. `nil` -- the default every
+/// existing call site keeps -- means the active account at acceptance time
+/// (see `NMPEngine.setActiveAccount`), unchanged. Non-`nil` must name
+/// exactly the payload's own author; misuse fails closed, never silently
+/// retargets: a malformed string throws synchronously from `publish`
+/// (`NMPError.invalidPublicKey`), while a well-formed-but-mismatched
+/// override surfaces as `WriteStatus.failed` on the receipt stream with no
+/// `.accepted` before it. An override naming a pubkey with no registered
+/// signer parks as `.awaitingCapability` until that capability attaches;
+/// acceptance pins the override, so a later `setActiveAccount` cannot
+/// retarget the write.
 public struct WriteIntent: Sendable, Hashable {
     public var payload: WritePayload
     public var durability: Durability
     public var routing: WriteRouting
+    public var identityOverride: String?
 
     public init(
         payload: WritePayload,
         durability: Durability,
-        routing: WriteRouting
+        routing: WriteRouting,
+        identityOverride: String? = nil
     ) {
         self.payload = payload
         self.durability = durability
         self.routing = routing
+        self.identityOverride = identityOverride
     }
 
     func toFfi() -> FfiWriteIntent {
         FfiWriteIntent(
             payload: payload.toFfi(),
             durability: durability.toFfi(),
-            routing: routing.toFfi()
+            routing: routing.toFfi(),
+            identityOverride: identityOverride
         )
     }
 }

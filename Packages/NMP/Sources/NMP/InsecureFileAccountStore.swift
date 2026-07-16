@@ -1,8 +1,26 @@
 import Foundation
 
-protocol NMPLocalAccountCheckpoint: Sendable {
+/// A pluggable local account checkpoint -- the seam `NMPEngine` uses to
+/// restore the checkpointed account at construction and to persist one on
+/// `addAccount`. ANY conformer is a drop-in through the public
+/// `NMPEngine(config:localAccountStore:)` init: the platform-vault
+/// providers (Keychain / Secure Enclave), an app's own store, or the
+/// plaintext-file convenience below.
+///
+/// A checkpoint hands the raw secret key to its holder by design -- the
+/// engine needs it for account registration, and the app owns its keys
+/// (#47): import, removal, backup, and consent are app policy, never SDK
+/// policy. The recommended secure providers keep material in the platform
+/// vault; `NMPInsecureFileAccountStore` remains the explicit
+/// convenience-over-security option.
+public protocol NMPLocalAccountCheckpoint: Sendable {
+    /// The checkpointed secret key (hex or bech32 `nsec`), or `nil` when no
+    /// account is checkpointed.
     func loadSecretKey() throws -> String?
+    /// Persist `secretKey` as the one checkpointed account, replacing any
+    /// previous checkpoint.
     func saveSecretKey(_ secretKey: String) throws
+    /// Remove the checkpoint. A later `loadSecretKey` returns `nil`.
     func clear() throws
 }
 
@@ -10,8 +28,11 @@ protocol NMPLocalAccountCheckpoint: Sendable {
 ///
 /// The secret is stored as plaintext UTF-8 in the caller-selected app-sandbox
 /// file. This type does not use Keychain, Secure Enclave, encryption, or
-/// hardware-backed protection. Its file operations stay inside the NMP SDK so
-/// a consuming app cannot read the secret back through this public surface.
+/// hardware-backed protection -- and like every `NMPLocalAccountCheckpoint`
+/// its methods hand the raw secret to whoever holds the store (see the
+/// protocol's doc for why that is the design, not a leak). Prefer a
+/// platform-vault conformer; this store exists for the explicit
+/// convenience-over-security call.
 public final class NMPInsecureFileAccountStore: NMPLocalAccountCheckpoint, @unchecked Sendable {
     private let fileURL: URL
     private let lock = NSLock()
@@ -20,7 +41,7 @@ public final class NMPInsecureFileAccountStore: NMPLocalAccountCheckpoint, @unch
         self.fileURL = fileURL
     }
 
-    func loadSecretKey() throws -> String? {
+    public func loadSecretKey() throws -> String? {
         try locked {
             guard FileManager.default.fileExists(atPath: fileURL.path) else {
                 return nil
@@ -36,7 +57,7 @@ public final class NMPInsecureFileAccountStore: NMPLocalAccountCheckpoint, @unch
         }
     }
 
-    func saveSecretKey(_ secretKey: String) throws {
+    public func saveSecretKey(_ secretKey: String) throws {
         try locked {
             let directory = fileURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(
@@ -57,7 +78,7 @@ public final class NMPInsecureFileAccountStore: NMPLocalAccountCheckpoint, @unch
         }
     }
 
-    func clear() throws {
+    public func clear() throws {
         try locked {
             guard FileManager.default.fileExists(atPath: fileURL.path) else {
                 return

@@ -942,6 +942,7 @@ fn publish_private<S: EventStore>(
             routing: WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new(relays),
             }),
+            identity_override: None,
         },
         Box::new(sink),
     ));
@@ -2801,6 +2802,7 @@ fn enqueue_is_not_converged() {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "durable write")),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -2820,6 +2822,7 @@ fn enqueue_is_not_converged() {
             payload: WritePayload::Unsigned(unsigned(&a, 2, "ephemeral write")),
             durability: Durability::Ephemeral,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(eph_sink.clone()),
     ));
@@ -2855,6 +2858,7 @@ fn enqueue_is_not_converged() {
             payload: WritePayload::Unsigned(unsigned(&a, 3, "at most once write")),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(amo_sink.clone()),
     ));
@@ -3834,6 +3838,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
             payload: WritePayload::Unsigned(unsigned(&a, 10, "accepted body")),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(receipt_sink.clone()),
     ));
@@ -3888,6 +3893,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
             payload: WritePayload::Signed(older.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -3905,6 +3911,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
             payload: WritePayload::Unsigned(newer_unsigned),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -3940,6 +3947,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "awaiting signer")),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -3959,6 +3967,189 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == expected_id)));
 }
 
+// ---- explicit per-write identity override (#47) --------------------------
+
+/// #47 falsifier (a) at the reducer level: an explicit
+/// `identity_override: Some(B)` on a B-authored draft is accepted and
+/// signer-requested AS B while A stays the active account -- and a plain
+/// default publish immediately after still roots on A, proving the override
+/// changed exactly one write and not the engine's identity root.
+#[test]
+fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let mut core = new_core(FixtureDirectory::new());
+    activate(&mut core, &a);
+
+    let draft = unsigned(&b, 47, "published as b while a is active");
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(draft.clone()),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(b.public_key()),
+        },
+        Box::new(sink.clone()),
+    ));
+    assert!(matches!(
+        effects.first(),
+        Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
+    ));
+    let (id, generation, template) = find_sign_request(&effects);
+    assert_eq!(
+        template.pubkey,
+        b.public_key(),
+        "the sign request must target the override identity, not the active account"
+    );
+    let signed = template.sign_with_keys(&b).unwrap();
+    let expected_id = signed.id;
+    assert!(signed.verify().is_ok());
+    let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(rid, WriteStatus::Signed(event_id))
+                if *rid == id && *event_id == expected_id
+        )),
+        "the frozen B-authored body must promote to Signed under B's key"
+    );
+
+    // The override never moved the engine's identity root: a default
+    // (no-override) publish authored by A is still accepted.
+    let default_sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 48, "default path still roots on a")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        },
+        Box::new(default_sink.clone()),
+    ));
+    assert!(matches!(
+        effects.first(),
+        Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
+    ));
+    assert_eq!(
+        default_sink.0.lock().unwrap().first(),
+        Some(&WriteStatus::Accepted)
+    );
+}
+
+/// #47 falsifier (b): the DEFAULT arm is byte-for-byte unchanged -- a
+/// non-active author without an override still fails closed with the exact
+/// pre-#47 messages, no `Accepted`, no sign request.
+#[test]
+fn default_publish_without_override_still_fails_closed_for_non_active_author() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let mut core = new_core(FixtureDirectory::new());
+    activate(&mut core, &a);
+
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&b, 1, "no consent given")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        },
+        Box::new(sink.clone()),
+    ));
+    assert_eq!(
+        sink.0.lock().unwrap().as_slice(),
+        [WriteStatus::Failed(
+            "unsigned draft author does not match current active account".to_string()
+        )],
+        "Failed must be the first and only status -- never Accepted"
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::RequestSign(..))));
+
+    core.handle(EngineMsg::SetActivePubkey(None));
+    let logged_out = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&b, 2, "logged out, no override")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        },
+        Box::new(logged_out.clone()),
+    ));
+    assert_eq!(
+        logged_out.0.lock().unwrap().as_slice(),
+        [WriteStatus::Failed(
+            "unsigned publish requires an active account".to_string()
+        )]
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::RequestSign(..))));
+}
+
+/// #47 falsifier (c): an override that CONTRADICTS the draft's author fails
+/// closed pre-acceptance for both payload variants -- the engine never
+/// restamps a draft to satisfy an override, and no `Accepted` is ever
+/// emitted for the contradiction.
+#[test]
+fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let mut core = new_core(FixtureDirectory::new());
+    activate(&mut core, &a);
+
+    // Unsigned draft authored by A, override naming B: mismatch.
+    let sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 1, "authored by a")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(b.public_key()),
+        },
+        Box::new(sink.clone()),
+    ));
+    assert_eq!(
+        sink.0.lock().unwrap().as_slice(),
+        [WriteStatus::Failed(format!(
+            "identity override {} does not match the unsigned draft author {}",
+            b.public_key(),
+            a.public_key()
+        ))],
+        "the mismatch must be Failed-first-and-only, never Accepted"
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::RequestSign(..))));
+
+    // Signed event authored by A, override naming B: same contradiction.
+    let signed = unsigned(&a, 2, "signed by a").sign_with_keys(&a).unwrap();
+    let signed_sink = CapturingReceiptSink::default();
+    let effects = core.handle(EngineMsg::Publish(
+        WriteIntent {
+            payload: WritePayload::Signed(signed),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(b.public_key()),
+        },
+        Box::new(signed_sink.clone()),
+    ));
+    assert_eq!(
+        signed_sink.0.lock().unwrap().as_slice(),
+        [WriteStatus::Failed(format!(
+            "identity override {} does not match the signed event author {}",
+            b.public_key(),
+            a.public_key()
+        ))]
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+}
+
 #[test]
 fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
     let a = Keys::generate();
@@ -3976,6 +4167,7 @@ fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "ephemeral")),
             durability: Durability::Ephemeral,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4012,6 +4204,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
             payload: WritePayload::Signed(signed.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4059,6 +4252,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
             payload: WritePayload::Signed(base.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4076,6 +4270,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
             payload: WritePayload::Unsigned(middle),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4094,6 +4289,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
             payload: WritePayload::Unsigned(newest),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4137,6 +4333,7 @@ fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
             payload: WritePayload::Signed(expired),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4164,6 +4361,7 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
             payload: WritePayload::Unsigned(template.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4173,6 +4371,7 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
             payload: WritePayload::Unsigned(template),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4235,6 +4434,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
             routing: WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new([ack.clone(), drop_relay.clone()]),
             }),
+            identity_override: None,
         },
         Box::new(sink_a.clone()),
     ));
@@ -4246,6 +4446,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
             routing: WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new([nack.clone()]),
             }),
+            identity_override: None,
         },
         Box::new(sink_b.clone()),
     ));
@@ -4338,6 +4539,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
             payload: WritePayload::Unsigned(template.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink_a.clone()),
     ));
@@ -4347,6 +4549,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
             payload: WritePayload::Unsigned(template),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink_b.clone()),
     ));
@@ -4425,6 +4628,7 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "one operation")),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4481,6 +4685,7 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
                 payload: WritePayload::Unsigned(unsigned(&a, 1, "survives signer loss")),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(sink.clone()),
         ));
@@ -4532,6 +4737,7 @@ fn terminal_signer_errors_compensate_the_write() {
                 payload: WritePayload::Unsigned(unsigned(&a, 1, "terminal signer answer")),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(sink.clone()),
         ));
@@ -4568,6 +4774,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "must remain pending")),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4642,6 +4849,7 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
             payload: WritePayload::Signed(forged),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4689,6 +4897,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
             payload: WritePayload::Signed(genuine.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4736,6 +4945,7 @@ fn private_route_fails_closed() {
             routing: WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new(std::iter::empty::<RelayUrl>()),
             }),
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4921,6 +5131,7 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
             routing: WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new([relay_a.clone(), relay_b.clone()]),
             }),
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -5248,6 +5459,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
                 payload: WritePayload::Unsigned(unsigned(&author, 86, "dynamic author route")),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ));
@@ -5325,6 +5537,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
                 payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic inbox route")),
                 durability: Durability::Durable,
                 routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ));
@@ -5460,6 +5673,7 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
                 payload: WritePayload::Unsigned(unsigned(&author, 88, "volatile route")),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ));
@@ -5510,6 +5724,7 @@ fn write_ack_per_relay() {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "durable ack test")),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -5590,6 +5805,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
             payload: WritePayload::Unsigned(unsigned(&a, 2, "finish persistence")),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -5636,6 +5852,7 @@ fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
                 payload: WritePayload::Unsigned(unsigned(&a, seq, "unaccepted")),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ))
@@ -6383,6 +6600,7 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
             payload: WritePayload::Unsigned(unsigned(&author, 1, "inbox dm")),
             durability: Durability::Durable,
             routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -6446,6 +6664,7 @@ fn to_inboxes_write_only_recipient_fails_closed() {
             payload: WritePayload::Unsigned(unsigned(&author, 1, "inbox dm")),
             durability: Durability::Durable,
             routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -6495,6 +6714,7 @@ fn to_inboxes_unknown_recipient_fails_the_whole_intent_closed() {
             payload: WritePayload::Unsigned(unsigned(&author, 1, "group inbox dm")),
             durability: Durability::Durable,
             routing: WriteRouting::ToInboxes(vec![known.public_key(), unknown.public_key()]),
+            identity_override: None,
         },
         Box::new(sink.clone()),
     ));
@@ -7003,6 +7223,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
                 routing: WriteRouting::PrivateNarrow(PrivateRoute {
                     relays: NarrowOnly::new([relay.clone()]),
                 }),
+                identity_override: None,
             },
             Box::new(sink),
         ));
@@ -7083,6 +7304,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
             routing: WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new([relay.clone()]),
             }),
+            identity_override: None,
         },
         Box::new(sink1),
     ));
@@ -7109,6 +7331,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
             routing: WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new([relay.clone()]),
             }),
+            identity_override: None,
         },
         Box::new(sink2),
     ));

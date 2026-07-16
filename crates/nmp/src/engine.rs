@@ -403,6 +403,19 @@ impl Engine {
     /// Exhaustion of the disjoint pre-acceptance correlation namespace is a
     /// synchronous [`EngineError::ReceiptCorrelationIdExhausted`], because
     /// no truthful receipt stream can exist without an id.
+    ///
+    /// Identity (#47): with `identity_override: None` an unsigned draft
+    /// signs as the CURRENT active account and fails closed pre-acceptance
+    /// when the draft's author is anyone else (or when nobody is active).
+    /// `identity_override: Some(pk)` is explicit per-write consent to
+    /// publish as `pk` — a registered/secondary identity — without touching
+    /// the active account: `pk` must equal the draft's author (the engine
+    /// never restamps; a mismatch is `WriteStatus::Failed` with no
+    /// `Accepted`), it works even while logged out, and acceptance pins
+    /// `pk` so later [`Self::set_active_account`] calls cannot retarget the
+    /// write. An override whose key has no registered signing capability
+    /// parks durably as `WriteStatus::AwaitingCapability` until that exact
+    /// key's signer attaches.
     pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, EngineError> {
         self.with_handle(|handle| handle.publish(intent))?
             .map_err(EngineError::from_publish_error)
@@ -411,6 +424,9 @@ impl Engine {
     /// Enqueue a write while retaining the stable store-issued receipt id
     /// needed for process-later reattachment. Pre-acceptance correlation-id
     /// exhaustion returns a typed error without creating a receipt.
+    /// Identity resolution follows [`Self::publish`]'s contract exactly:
+    /// active-account default, or an explicit `identity_override` that must
+    /// equal the draft's author and is pinned at acceptance (#47).
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
         self.with_handle(|handle| handle.publish_tracked(intent))?
             .map_err(EngineError::from_publish_error)
@@ -591,9 +607,13 @@ impl Engine {
     /// Re-root every reactive query AND the active signing capability
     /// together onto `pubkey` (`None` -> logged-out / read-only). `pubkey`
     /// need not have been registered via [`Self::add_account`] -- read-only
-    /// browsing of an account this app holds no key for is legal; any
-    /// publish attempted while active in that state terminates
-    /// `WriteStatus::Failed`, never a panic.
+    /// browsing of an account this app holds no key for is legal. Publishes
+    /// attempted in that keyless-active state resolve truthfully, never a
+    /// panic: an unsigned draft AUTHORED BY the keyless active pubkey is
+    /// accepted and parks durably as `WriteStatus::AwaitingCapability`
+    /// until a matching signing capability attaches, while a draft authored
+    /// by a DIFFERENT pubkey (and carrying no `identity_override`, #47)
+    /// fails closed pre-acceptance as `WriteStatus::Failed`.
     pub fn set_active_account(&self, pubkey: Option<PublicKey>) -> Result<(), EngineError> {
         let mut guard = self
             .inner
@@ -1628,6 +1648,7 @@ mod tests {
                 payload: WritePayload::Signed(event),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             })
             .expect("engine is open");
 
@@ -1638,6 +1659,80 @@ mod tests {
         assert!(
             rx.recv().is_err(),
             "Failed must be the sole terminal status -- no Accepted, nothing further"
+        );
+
+        engine.shutdown();
+    }
+
+    /// #47 falsifier (a) through the facade: with account A active and B
+    /// merely registered ([`Engine::add_account`], never activated), a
+    /// B-authored draft carrying `identity_override: Some(B)` reaches
+    /// `WriteStatus::Signed` bearing the exact id of the frozen B-authored
+    /// body -- which commits cryptographically to author and content --
+    /// and [`Engine::active_account`] still answers A afterward: the
+    /// override consented to ONE write, it never re-rooted the engine.
+    #[test]
+    fn identity_override_publishes_as_secondary_without_moving_active_account() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys_a = Keys::generate();
+        let keys_b = Keys::generate();
+        let pk_a = engine
+            .add_account(&keys_a.secret_key().to_secret_hex())
+            .expect("account A must register")
+            .public_key();
+        let pk_b = engine
+            .add_account(&keys_b.secret_key().to_secret_hex())
+            .expect("account B must register")
+            .public_key();
+        engine
+            .set_active_account(Some(pk_a))
+            .expect("account A must activate");
+
+        let draft = nostr::UnsignedEvent::new(
+            pk_b,
+            Timestamp::from(1_750_000_047),
+            Kind::Custom(9999),
+            Vec::new(),
+            "one write as b, engine still rooted on a",
+        );
+        let expected = draft
+            .clone()
+            .sign_with_keys(&keys_b)
+            .expect("derive the frozen body's id");
+        let rx = engine
+            .publish(WriteIntent {
+                payload: WritePayload::Unsigned(draft),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+                identity_override: Some(pk_b),
+            })
+            .expect("engine is open");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut signed_as_b = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(WriteStatus::Signed(id)) => {
+                    assert_eq!(
+                        id, expected.id,
+                        "Signed must carry the frozen B-authored body's exact id"
+                    );
+                    signed_as_b = true;
+                    break;
+                }
+                Ok(WriteStatus::Failed(reason)) => {
+                    panic!("override publish must not fail pre-routing: {reason}")
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(signed_as_b, "override publish must reach Signed as B");
+        assert_eq!(
+            engine.active_account().expect("engine is open"),
+            Some(pk_a),
+            "the per-write override must never move the active account"
         );
 
         engine.shutdown();
@@ -1694,6 +1789,7 @@ mod tests {
             )),
             durability: Durability::Ephemeral,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         });
         assert_eq!(publish_result.err(), Some(EngineError::EngineClosed));
     }

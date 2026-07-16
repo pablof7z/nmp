@@ -76,17 +76,32 @@ sealed class WritePayload {
         }
 }
 
-/** A caller's publish request (`FfiWriteIntent` mirror). */
+/** A caller's publish request (`FfiWriteIntent` mirror).
+ *
+ * [identityOverride] (#47) is the identity this ONE write is published
+ * under, as 64-char hex or bech32 `npub`. `null` -- the default every
+ * existing call site keeps -- means the active account at acceptance time
+ * (see [NMPEngine.setActiveAccount]), unchanged. Non-`null` must name
+ * exactly the payload's own author; misuse fails closed, never silently
+ * retargets: a malformed string throws synchronously from `publish`
+ * ([NMPError.InvalidPublicKey]), while a well-formed-but-mismatched
+ * override surfaces as [WriteStatus.Failed] on the receipt stream with no
+ * [WriteStatus.Accepted] before it. An override naming a pubkey with no
+ * registered signer parks as [WriteStatus.AwaitingCapability] until that
+ * capability attaches; acceptance pins the override, so a later
+ * [NMPEngine.setActiveAccount] cannot retarget the write. */
 data class WriteIntent(
     val payload: WritePayload,
     val durability: Durability,
     val routing: WriteRouting,
+    val identityOverride: String? = null,
 ) {
     fun toFfi(): FfiWriteIntent =
         FfiWriteIntent(
             payload = payload.toFfi(),
             durability = durability.toFfi(),
             routing = routing.toFfi(),
+            identityOverride = identityOverride,
         )
 }
 

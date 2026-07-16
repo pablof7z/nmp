@@ -1670,6 +1670,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("direct publish must enqueue");
     let receipts = collect_direct_receipts(receipt_rx, &relay_url);
@@ -1802,6 +1803,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(FfiReceipts {
                 tx: Mutex::new(receipt_tx),
@@ -1874,6 +1876,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("direct auth-parked publish must enqueue");
     let receipts = collect_direct_receipts_until_awaiting_auth(&receipt_rx, &relay_url);
@@ -1933,6 +1936,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(FfiReceipts {
                 tx: Mutex::new(receipt_tx),
@@ -1945,6 +1949,124 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         Err(RecvTimeoutError::Timeout),
         "a fail-closed AUTH park must emit no further FFI status: no retry, no terminal"
     );
+
+    discovery_handle.cancel();
+    engine.shutdown();
+    relay.shutdown();
+    receipts
+}
+
+/// #47 Unit A override publish, direct half. The override pubkey is
+/// registered as a SECONDARY account -- in the engine's signer set but
+/// never active -- while the active account is a different registered
+/// identity. Same seeding/discovery preamble as `run_direct_success`, but
+/// the seeded kind:10002 belongs to the OVERRIDE identity: `AuthorOutbox`
+/// routes by the intent's author, which #47 pins to the override. A silent
+/// fallback to the active account would sign a DIFFERENT author and change
+/// the deterministic event id the `Signed` receipt names.
+async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec<NormStatus> {
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    relay
+        .seed_own_relay_list(override_keys, QUERY_CREATED_AT - 1)
+        .await;
+    let relay_url = relay.url.to_string();
+    let engine = Engine::new(EngineConfig {
+        indexer_relays: vec![relay_url.clone()],
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..EngineConfig::default()
+    })
+    .expect("direct override engine must construct");
+    let active_pubkey = engine
+        .add_account(&active.secret_key().to_secret_hex())
+        .expect("direct active account must register")
+        .public_key();
+    engine
+        .set_active_account(Some(active_pubkey))
+        .expect("direct active account must activate");
+    let override_pubkey = engine
+        .add_account(&override_keys.secret_key().to_secret_hex())
+        .expect("direct override account must register as a secondary")
+        .public_key();
+
+    let discovery_cancel = stage_direct_discovery(&engine, &override_pubkey.to_hex(), &relay);
+
+    let unsigned = UnsignedEvent::new(
+        override_pubkey,
+        Timestamp::from(WRITE_CREATED_AT),
+        Kind::Custom(WRITE_KIND),
+        vec![],
+        "parity-write",
+    );
+    let receipt_rx = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(override_pubkey),
+        })
+        .expect("direct override publish must enqueue");
+    let receipts = collect_direct_receipts(receipt_rx, &relay_url);
+
+    discovery_cancel.cancel();
+    engine.shutdown();
+    relay.shutdown();
+    receipts
+}
+
+/// FFI half of the override publish -- its own isolated relay instance and
+/// the identical two-account construction as the direct half (active
+/// account registered AND active, override registered but never active),
+/// so the byte-identical receipt comparison is honest.
+async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<NormStatus> {
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    relay
+        .seed_own_relay_list(override_keys, QUERY_CREATED_AT - 1)
+        .await;
+    let relay_url = relay.url.to_string();
+    let engine = NmpEngine::new(NmpEngineConfig {
+        store_path: None,
+        indexer_relays: vec![relay_url.clone()],
+        app_relays: vec![],
+        fallback_relays: vec![],
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..NmpEngineConfig::default()
+    })
+    .expect("FFI override engine must construct");
+    let active_pubkey = engine
+        .add_account(active.secret_key().to_secret_hex())
+        .expect("FFI active account must register")
+        .public_key();
+    engine
+        .set_active_account(Some(active_pubkey))
+        .expect("FFI active account must activate");
+    let override_pubkey = engine
+        .add_account(override_keys.secret_key().to_secret_hex())
+        .expect("FFI override account must register as a secondary")
+        .public_key();
+
+    let discovery_handle = stage_ffi_discovery(&engine, &override_pubkey, &relay);
+
+    let (receipt_tx, receipt_rx) = mpsc::channel();
+    engine
+        .publish(
+            FfiWriteIntent {
+                payload: FfiWritePayload::Unsigned {
+                    pubkey: override_pubkey.clone(),
+                    created_at: WRITE_CREATED_AT,
+                    kind: WRITE_KIND,
+                    tags: vec![],
+                    content: "parity-write".to_string(),
+                },
+                durability: FfiDurability::Durable,
+                routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: Some(override_pubkey),
+            },
+            Box::new(FfiReceipts {
+                tx: Mutex::new(receipt_tx),
+            }),
+        )
+        .expect("FFI override publish must enqueue");
+    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
 
     discovery_handle.cancel();
     engine.shutdown();
@@ -1970,6 +2092,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("well-formed tampered input is accepted by the direct call boundary");
     let first = rx
@@ -2024,6 +2147,7 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(FfiReceipts {
                 tx: Mutex::new(receipt_tx),
@@ -2122,6 +2246,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("direct publish must enqueue");
 
@@ -2195,6 +2320,7 @@ async fn run_ffi_reattach_live() -> ReattachProof {
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             observer,
         )
@@ -2292,6 +2418,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Ephemeral,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             })
             .expect("direct ephemeral publish must enqueue");
         let deadline = Instant::now() + WAIT;
@@ -2364,6 +2491,7 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                     },
                     durability: FfiDurability::Ephemeral,
                     routing: FfiWriteRouting::AuthorOutbox,
+                    identity_override: None,
                 },
                 observer,
             )
@@ -2509,6 +2637,35 @@ async fn auth_required_relay_parks_write_identically_direct_and_ffi() {
         expected_auth_parked_receipts(&keys),
         "a protected durable write must park on exactly \
          [Accepted, Signed, Routed, AwaitingRelay, Sent, AwaitingAuth]"
+    );
+}
+
+/// #47 Unit A: a per-write `identity_override` naming a registered
+/// SECONDARY account (not the active one) must observe the same semantics
+/// through the direct Rust facade and the FFI facade: accepted, signed BY
+/// THE OVERRIDE, routed via the override's own outbox, and acked. The
+/// `Signed` receipt's event id is the author proof -- an id hashes the
+/// author pubkey, so `expected_success_receipts(&override_keys)` can only
+/// match if `event.pubkey` IS the override; a silent fallback to the active
+/// account on either surface would mint a different id and fail both
+/// comparisons.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identity_override_publish_signs_as_the_override_identically_direct_and_ffi() {
+    let active = fixed_keys();
+    let override_keys = Keys::generate();
+
+    let direct = run_direct_override_publish(&active, &override_keys).await;
+    let ffi = run_ffi_override_publish(&active, &override_keys).await;
+
+    assert_eq!(
+        direct, ffi,
+        "the direct and FFI facades must expose identical ordered override-publish receipts"
+    );
+    assert_eq!(
+        direct,
+        expected_success_receipts(&override_keys),
+        "an override publish must sign as the OVERRIDE author -- the Signed receipt must carry \
+         the deterministic id of the override-authored event, never the active account's"
     );
 }
 

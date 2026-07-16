@@ -58,10 +58,17 @@ data class NMPConfig(
 
 /** The engine object a dev constructs exactly once. Holds zero app-lifecycle
  * concepts -- no scene-phase hook, no required provider/environment
- * wrapper. `NMPEngine(NMPConfig(...))` is the entire adoption cost. */
+ * wrapper. `NMPEngine(NMPConfig(...))` is the entire adoption cost.
+ *
+ * [localAccountStore] accepts ANY conforming [NMPLocalAccountCheckpoint] --
+ * a platform-vault provider, an app-custom store, or
+ * [NMPInsecureFileAccountStore] -- and, when configured, restores the
+ * account it holds on construction: its [NMPLocalAccountCheckpoint.loadSecretKey]
+ * drives the restore and the restored account becomes active before the
+ * constructor returns. */
 class NMPEngine(
     config: NMPConfig,
-    private val localAccountStore: NMPInsecureFileAccountStore? = null,
+    private val localAccountStore: NMPLocalAccountCheckpoint? = null,
 ) : AutoCloseable {
     companion object {
         /** Destructively remove one closed persistent NMP store. A live engine
@@ -103,7 +110,7 @@ class NMPEngine(
 
     /** Register an account from its secret key (hex or bech32 `nsec`). The
      * key crosses this boundary exactly once and lives engine-side from
-     * this point on. When an [NMPInsecureFileAccountStore] was explicitly
+     * this point on. When an [NMPLocalAccountCheckpoint] was explicitly
      * configured, NMP also checkpoints it for restart restoration. Returns
      * an opaque exact-registration proof whose [NMPAccountRegistration.publicKey]
      * identifies the account. Does NOT make the account active -- call
@@ -135,7 +142,7 @@ class NMPEngine(
     /** Remove only the installation proven by [registration]. The proof
      * remains reusable. When the removal succeeds and [registration] proves
      * the identity currently held by the configured
-     * [NMPInsecureFileAccountStore] checkpoint, NMP also deletes that
+     * [NMPLocalAccountCheckpoint] checkpoint, NMP also deletes that
      * checkpoint (#529) -- a removed account never resurrects on the next
      * engine construction. A stale proof (`false` return) or a proof for a
      * different identity leaves the checkpoint untouched. */

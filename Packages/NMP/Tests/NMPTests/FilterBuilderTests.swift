@@ -144,4 +144,42 @@ final class FilterBuilderTests: XCTestCase {
         XCTAssertEqual(tags, [["e", String(repeating: "c", count: 64)]])
         XCTAssertEqual(sig, String(repeating: "d", count: 128))
     }
+
+    /// #47: an `identityOverride` crosses to `FfiWriteIntent` intact -- the
+    /// per-write identity is data, never rewritten or dropped by the mirror.
+    func testWriteIntentConversionCarriesIdentityOverride() {
+        let overridePubkey = String(repeating: "b", count: 64)
+        let intent = WriteIntent(
+            payload: .unsigned(
+                pubkey: overridePubkey,
+                createdAt: 1_700_000_000,
+                kind: 1,
+                tags: [],
+                content: "as the override identity"
+            ),
+            durability: .durable,
+            routing: .authorOutbox,
+            identityOverride: overridePubkey
+        )
+        XCTAssertEqual(intent.toFfi().identityOverride, overridePubkey)
+    }
+
+    /// #47: the pre-existing init shape stays source-compatible AND
+    /// semantically identical -- no override means `nil`, the
+    /// active-account default, all the way through `toFfi()`.
+    func testWriteIntentDefaultInitLeavesIdentityOverrideNil() {
+        let intent = WriteIntent(
+            payload: .unsigned(
+                pubkey: String(repeating: "b", count: 64),
+                createdAt: 1_700_000_000,
+                kind: 1,
+                tags: [],
+                content: "active-account default"
+            ),
+            durability: .durable,
+            routing: .authorOutbox
+        )
+        XCTAssertNil(intent.identityOverride)
+        XCTAssertNil(intent.toFfi().identityOverride)
+    }
 }
