@@ -15,7 +15,34 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 09:51:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 10:51:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 10:51 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0019.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0019</guid>
+<pubDate>Thu, 16 Jul 2026 10:51:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Two things worth talking about this cycle. First, a quiet fix landed: the NIP-sixty-eight picture-event builder now takes an explicit timestamp instead of grabbing the clock at build time. Sounds small, but it closes a real determinism gap -- the same picture draft built twice, or built once in Rust and once through the foreign-function-interface boundary, now produces byte-identical output. That matters more than it sounds like, because the parity checks across Rust, Swift, and Kotlin depend on exactly that kind of determinism.
+
+Now the bigger arc. There's a pull request open right now for what the team's calling the media composition seam -- stitching a blob upload to Blossom and a Nostr publish into one coherent flow, instead of leaving an app to hand-wire the two together. And the interesting design decision here isn't the happy path, it's the failure path.
+
+Uploading a photo and publishing a note are two genuinely separate systems talking to two different kinds of servers. So what happens when one succeeds and the other doesn't? The design keeps those as three distinct, separated outcomes, by construction, not by convention. The upload can fail on its own, cleanly, before anything Nostr-related is even attempted. The publish can fail on its own, after the upload already succeeded -- meaning your app is left holding a perfectly good, verified blob reference it can retry publishing without re-uploading the file. Or both succeed, and you get a real picture event. What the design explicitly refuses to do is fold those into one ambiguous "did it work" boolean. If your upload succeeded and your publish didn't, you get told that precisely, not a generic failure.
+
+Right now that composition pull request is sitting in continuous integration -- Rust tests, cross-software-development-kit parity, and the falsifier-honesty check are running. It hasn't merged yet, so I'm not going to claim it's done. It's real, it's scoped, and it's close.
+
+One more thing worth flagging, separate from the code: the project's fifteen architecture rulings -- decisions the team made about where the v2 surface is heading -- now have a public escalation page with audio for each one. There's an overall briefing plus a deep-dive recording per ruling, so if you've ever wondered why a particular application-programming-interface shape was chosen, you can actually go listen to the reasoning instead of just reading a changelog line.
+
+That's the pulse.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0019.mp3" type="audio/mpeg" length="2924588"/>
+<itunes:title>NMP Pulse — 2026-07-16 10:51 UTC</itunes:title>
+<itunes:duration>183</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-16 09:51 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0018.mp3</link>
