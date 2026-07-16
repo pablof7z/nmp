@@ -342,7 +342,7 @@ class NIP29Test {
     fun groupMessageIntentMaterializesTheCanonicalSemanticTemplate() {
         runBlocking {
             NMPEngine(NMPConfig()).use { engine ->
-                val author = engine.addAccount("0".repeat(63) + "1")
+                val author = engine.addAccount("0".repeat(63) + "1").publicKey
                 engine.setActiveAccount(author)
                 val host = "wss://group-host.example.com"
                 val groupId = "group-a"
@@ -397,7 +397,7 @@ class NIP29Test {
         LocalAckRelay().use { relay ->
             runBlocking {
                 NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("127.0.0.1"))).use { engine ->
-                    val author = engine.addAccount("0".repeat(63) + "1")
+                    val author = engine.addAccount("0".repeat(63) + "1").publicKey
                     engine.setActiveAccount(author)
                     val groupId = "group-acked"
                     val receipt =
@@ -443,7 +443,7 @@ class NIP29Test {
             LocalAckRelay().use { relayY ->
                 runBlocking {
                     NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("127.0.0.1"))).use { engine ->
-                        val author = engine.addAccount("0".repeat(63) + "1")
+                        val author = engine.addAccount("0".repeat(63) + "1").publicKey
                         engine.setActiveAccount(author)
                         val groupId = "same-id-on-two-hosts"
 

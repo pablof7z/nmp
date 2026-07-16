@@ -16,7 +16,7 @@ class SigningTest {
     fun signEventReturnsExactBodyWithoutPublishingIt() =
         runBlocking {
             NMPEngine(NMPConfig()).use { engine ->
-                assertEquals(author, engine.addAccount(secret))
+                assertEquals(author, engine.addAccount(secret).publicKey)
                 engine.setActiveAccount(author)
                 val request =
                     NMPUnsignedEvent(

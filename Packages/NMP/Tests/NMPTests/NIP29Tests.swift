@@ -78,9 +78,10 @@ final class NIP29Tests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
-        let author = try await engine.addAccount(
+        let registration = try await engine.addAccount(
             secretKey: String(repeating: "0", count: 63) + "1"
         )
+        let author = registration.publicKey
         try engine.setActiveAccount(author)
 
         let host = "wss://group-host.example.com"

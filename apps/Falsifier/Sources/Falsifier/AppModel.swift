@@ -54,7 +54,8 @@ final class AppModel {
     /// this model never touches it again.
     func addKeyedAccount(secretKey: String, label: String) async {
         do {
-            let pubkey = try await engine.addAccount(secretKey: secretKey)
+            let registration = try await engine.addAccount(secretKey: secretKey)
+            let pubkey = registration.publicKey
             upsert(Account(id: pubkey, label: label, kind: .keyed))
             setActive(pubkey)
         } catch {

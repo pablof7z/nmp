@@ -12,10 +12,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use nmp::{
-    AcquisitionEvidence, AuthPhase, CoverageInterval, DiagnosticsSnapshot,
-    Durability as GDurability, FilterCoverageEntry, Frame, Lane, RelayDiagnosticsSnapshot,
-    RequestRowsError, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus, Window,
-    WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
+    AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase,
+    CoverageInterval, DiagnosticsSnapshot, Durability as GDurability, FilterCoverageEntry, Frame,
+    Lane, RelayDiagnosticsSnapshot, RequestRowsError, Row, RowDelta, ShortfallFact, SourceEvidence,
+    SourceStatus, Window, WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
     WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nmp_grammar::{
@@ -30,13 +30,14 @@ use nostr::{
 };
 
 use crate::types::{
-    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCacheMode,
-    FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter,
-    FfiFilterCoverage, FfiFrame, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics,
-    FfiRelayInformationErrorKind, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp,
-    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority,
-    FfiSourceEvidence, FfiSourceStatus, FfiWindow, FfiWindowContents, FfiWindowLoad,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDiagnostics, FfiAuthPhase, FfiBinding,
+    FfiCacheMode, FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot,
+    FfiDurability, FfiFilter, FfiFilterCoverage, FfiFrame, FfiIdentityField, FfiKindCount,
+    FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow, FfiRowDelta,
+    FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
+    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
+    FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -77,6 +78,12 @@ pub enum FfiError {
     InvalidSigner {
         reason: String,
     },
+    /// The shared signer/AUTH-policy registry reached its configured bound.
+    AuthCapabilityRegistryFull {
+        limit: u64,
+    },
+    /// The exact capability-instance namespace was exhausted.
+    AuthCapabilityInstanceExhausted,
     /// The sign-only operation has no active account with a registered
     /// signing capability. No operation was accepted.
     NoActiveSigner,
@@ -232,16 +239,14 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
             },
-            // #8 Wave 5: the facade's typed capability-registry refusals.
-            // The dedicated FFI error variants land with the FFI policy/
-            // registration projection (the next wave); until then the exact
-            // reason survives through the existing signer-refusal lane.
-            nmp::EngineError::AuthCapabilityRegistryFull { limit } => Self::InvalidSigner {
-                reason: format!("AUTH capability registry is full at {limit} entries"),
-            },
-            nmp::EngineError::AuthCapabilityInstanceExhausted => Self::InvalidSigner {
-                reason: "AUTH capability instance space exhausted".to_string(),
-            },
+            nmp::EngineError::AuthCapabilityRegistryFull { limit } => {
+                Self::AuthCapabilityRegistryFull {
+                    limit: limit as u64,
+                }
+            }
+            nmp::EngineError::AuthCapabilityInstanceExhausted => {
+                Self::AuthCapabilityInstanceExhausted
+            }
             nmp::EngineError::ReceiptCorrelationIdExhausted => Self::ReceiptCorrelationIdExhausted,
             nmp::EngineError::EngineClosed => Self::EngineClosed,
             nmp::EngineError::WindowInitialExceedsMax { initial, max } => {
@@ -267,6 +272,12 @@ impl std::fmt::Display for FfiError {
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::InvalidSigner { reason } => write!(f, "invalid signer: {reason}"),
+            Self::AuthCapabilityRegistryFull { limit } => {
+                write!(f, "AUTH capability registry is full at {limit} entries")
+            }
+            Self::AuthCapabilityInstanceExhausted => {
+                write!(f, "AUTH capability instance space exhausted")
+            }
             Self::NoActiveSigner => write!(f, "the active account has no registered signer"),
             Self::InvalidSignRequest { reason } => {
                 write!(f, "invalid sign request: {reason}")
@@ -543,6 +554,18 @@ mod engine_error_tests {
         assert_eq!(
             error.to_string(),
             "persistent store is still open: /canonical/nmp.redb"
+        );
+    }
+
+    #[test]
+    fn auth_capability_refusals_remain_typed_ffi_errors() {
+        assert_eq!(
+            FfiError::from(nmp::EngineError::AuthCapabilityRegistryFull { limit: 3 }),
+            FfiError::AuthCapabilityRegistryFull { limit: 3 }
+        );
+        assert_eq!(
+            FfiError::from(nmp::EngineError::AuthCapabilityInstanceExhausted),
+            FfiError::AuthCapabilityInstanceExhausted
         );
     }
 }
@@ -1291,6 +1314,36 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     }
 }
 
+fn auth_diagnostics_phase_to_ffi(phase: AuthDiagnosticsPhase) -> FfiAuthPhase {
+    match phase {
+        AuthDiagnosticsPhase::AwaitingChallenge => FfiAuthPhase::AwaitingChallenge,
+        AuthDiagnosticsPhase::AwaitingPolicy => FfiAuthPhase::AwaitingPolicy,
+        AuthDiagnosticsPhase::AwaitingSignature => FfiAuthPhase::AwaitingSignature,
+        AuthDiagnosticsPhase::AwaitingSend | AuthDiagnosticsPhase::AwaitingRelayAck => {
+            FfiAuthPhase::AwaitingRelayAck
+        }
+        AuthDiagnosticsPhase::Ready => FfiAuthPhase::Ready,
+        AuthDiagnosticsPhase::Denied => FfiAuthPhase::Denied,
+        AuthDiagnosticsPhase::Error => FfiAuthPhase::Error,
+    }
+}
+
+fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnostics {
+    FfiAuthDiagnostics {
+        relay: snapshot.relay.to_string(),
+        access: access_context_to_ffi(snapshot.access),
+        transport_generation: snapshot.transport_generation,
+        epoch_sequence: snapshot.epoch_sequence,
+        challenge_descriptor: snapshot.challenge_hash,
+        phase: auth_diagnostics_phase_to_ffi(snapshot.phase),
+        policy_bound: snapshot.policy_bound,
+        signer_bound: snapshot.signer_bound,
+        auth_event_id: snapshot.auth_event_id.map(|id| id.to_hex()),
+        send_handoff_accepted: snapshot.send_handoff_accepted,
+        relay_ok_accepted: snapshot.relay_ok_accepted,
+    }
+}
+
 /// `nmp::DiagnosticsSnapshot -> FfiDiagnosticsSnapshot` (M5 plan §1.2 step
 /// 5) -- the engine-global diagnostics projection, rendered whole for the
 /// FFI boundary. Every number/string here is copied straight off the
@@ -1298,6 +1351,11 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
 pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnapshot {
     FfiDiagnosticsSnapshot {
         relays: s.relays.into_iter().map(relay_diagnostics_to_ffi).collect(),
+        auth_sessions: s
+            .auth_sessions
+            .into_iter()
+            .map(auth_diagnostics_to_ffi)
+            .collect(),
         uncovered_author_count: s.uncovered_author_count as u32,
         dropped_merge_rules: s
             .dropped_merge_rules
@@ -1608,10 +1666,16 @@ mod tests {
             SourceStatus::Connecting,
             SourceStatus::Disconnected,
             SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingChallenge,
+            },
+            SourceStatus::AwaitingAuth {
                 phase: AuthPhase::AwaitingPolicy,
             },
             SourceStatus::AwaitingAuth {
                 phase: AuthPhase::AwaitingSignature,
+            },
+            SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingRelayAck,
             },
             SourceStatus::AuthDenied,
             SourceStatus::Error,
@@ -1635,7 +1699,7 @@ mod tests {
             ],
         });
 
-        assert_eq!(ffi.sources.len(), 7);
+        assert_eq!(ffi.sources.len(), 9);
         assert_eq!(ffi.sources[0].status, FfiSourceStatus::Requesting);
         assert_eq!(ffi.sources[0].reconciled_through, Some(10));
         assert_eq!(ffi.sources[1].status, FfiSourceStatus::Connecting);
@@ -1644,17 +1708,29 @@ mod tests {
         assert_eq!(
             ffi.sources[3].status,
             FfiSourceStatus::AwaitingAuth {
-                phase: FfiAuthPhase::AwaitingPolicy
+                phase: FfiAuthPhase::AwaitingChallenge
             }
         );
         assert_eq!(
             ffi.sources[4].status,
             FfiSourceStatus::AwaitingAuth {
+                phase: FfiAuthPhase::AwaitingPolicy
+            }
+        );
+        assert_eq!(
+            ffi.sources[5].status,
+            FfiSourceStatus::AwaitingAuth {
                 phase: FfiAuthPhase::AwaitingSignature
             }
         );
-        assert_eq!(ffi.sources[5].status, FfiSourceStatus::AuthDenied);
-        assert_eq!(ffi.sources[6].status, FfiSourceStatus::Error);
+        assert_eq!(
+            ffi.sources[6].status,
+            FfiSourceStatus::AwaitingAuth {
+                phase: FfiAuthPhase::AwaitingRelayAck
+            }
+        );
+        assert_eq!(ffi.sources[7].status, FfiSourceStatus::AuthDenied);
+        assert_eq!(ffi.sources[8].status, FfiSourceStatus::Error);
 
         let atom_json = atom.to_nostr().as_json();
         assert_eq!(
@@ -1672,10 +1748,38 @@ mod tests {
     #[test]
     fn diagnostics_keeps_exact_intervals_distinct_from_query_evidence() {
         let relay = RelayUrl::parse("wss://diagnostics.example.com").unwrap();
+        let public_key = PublicKey::from_hex(&pk_hex()).unwrap();
+        let event_id = EventId::from_hex(&"b".repeat(64)).unwrap();
+        let auth_phases = [
+            AuthDiagnosticsPhase::AwaitingChallenge,
+            AuthDiagnosticsPhase::AwaitingPolicy,
+            AuthDiagnosticsPhase::AwaitingSignature,
+            AuthDiagnosticsPhase::AwaitingSend,
+            AuthDiagnosticsPhase::AwaitingRelayAck,
+            AuthDiagnosticsPhase::Ready,
+            AuthDiagnosticsPhase::Denied,
+            AuthDiagnosticsPhase::Error,
+        ];
+        let auth_sessions = auth_phases
+            .into_iter()
+            .enumerate()
+            .map(|(index, phase)| AuthDiagnosticsSnapshot {
+                relay: relay.clone(),
+                access: GAccessContext::Nip42(public_key),
+                transport_slot: 900 + index as u32,
+                transport_generation: 40 + index as u64,
+                epoch_sequence: Some(80 + index as u64),
+                challenge_hash: Some(format!("challenge-descriptor-{index}")),
+                phase,
+                policy_bound: index >= 2,
+                signer_bound: index >= 3,
+                auth_event_id: (index >= 3).then_some(event_id),
+                send_handoff_accepted: index >= 4,
+                relay_ok_accepted: index == 5,
+            })
+            .collect();
         let ffi = diagnostics_snapshot_to_ffi(DiagnosticsSnapshot {
-            // Facade-owned AUTH session read-out (#8 Wave 5). Not yet
-            // projected through FFI — that mapping is the next wave.
-            auth_sessions: Vec::new(),
+            auth_sessions,
             relays: vec![RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
                 access: GAccessContext::Public,
@@ -1721,6 +1825,44 @@ mod tests {
             })
         );
         assert_eq!(ffi.relays[0].coverage[1].coverage, None);
+        assert_eq!(
+            ffi.auth_sessions
+                .iter()
+                .map(|session| session.phase)
+                .collect::<Vec<_>>(),
+            vec![
+                FfiAuthPhase::AwaitingChallenge,
+                FfiAuthPhase::AwaitingPolicy,
+                FfiAuthPhase::AwaitingSignature,
+                FfiAuthPhase::AwaitingRelayAck,
+                FfiAuthPhase::AwaitingRelayAck,
+                FfiAuthPhase::Ready,
+                FfiAuthPhase::Denied,
+                FfiAuthPhase::Error,
+            ]
+        );
+        assert_eq!(ffi.auth_sessions[0].relay, relay.to_string());
+        assert_eq!(
+            ffi.auth_sessions[0].access,
+            FfiAccessContext::Nip42 {
+                public_key: pk_hex()
+            }
+        );
+        assert_eq!(ffi.auth_sessions[0].transport_generation, 40);
+        assert_eq!(ffi.auth_sessions[0].epoch_sequence, Some(80));
+        assert_eq!(
+            ffi.auth_sessions[0].challenge_descriptor.as_deref(),
+            Some("challenge-descriptor-0")
+        );
+        assert!(!ffi.auth_sessions[0].policy_bound);
+        assert!(!ffi.auth_sessions[0].signer_bound);
+        assert_eq!(ffi.auth_sessions[3].auth_event_id, Some(event_id.to_hex()));
+        assert!(ffi.auth_sessions[3].policy_bound);
+        assert!(ffi.auth_sessions[3].signer_bound);
+        assert!(!ffi.auth_sessions[3].send_handoff_accepted);
+        assert!(ffi.auth_sessions[4].send_handoff_accepted);
+        assert!(!ffi.auth_sessions[4].relay_ok_accepted);
+        assert!(ffi.auth_sessions[5].relay_ok_accepted);
         assert_eq!(
             ffi.transport_degraded.as_deref(),
             Some("signature verification worker unavailable")

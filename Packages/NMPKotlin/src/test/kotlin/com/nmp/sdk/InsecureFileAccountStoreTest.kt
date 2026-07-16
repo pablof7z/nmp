@@ -24,7 +24,7 @@ class InsecureFileAccountStoreTest {
         val store = NMPInsecureFileAccountStore(checkpoint)
 
         NMPEngine(NMPConfig(), store).use { first ->
-            val pubkey = first.addAccount(secretOne)
+            val pubkey = first.addAccount(secretOne).publicKey
             first.setActiveAccount(pubkey)
             assertEquals(publicOne, first.activeAccount())
         }
@@ -50,6 +50,44 @@ class InsecureFileAccountStoreTest {
     }
 
     @Test
+    fun removedAccountClearsCheckpointAndCannotResurrectOnRestart() {
+        val checkpoint = root.resolve("local-account.nsec")
+        val store = NMPInsecureFileAccountStore(checkpoint)
+
+        NMPEngine(NMPConfig(), store).use { engine ->
+            val registration = engine.addAccount(secretOne)
+            assertTrue(Files.exists(checkpoint))
+            assertTrue(engine.removeAccount(registration))
+            assertFalse(
+                Files.exists(checkpoint),
+                "removing the checkpointed identity must also remove its checkpoint (#529)",
+            )
+        }
+
+        NMPEngine(NMPConfig(), store).use { restarted ->
+            assertNull(restarted.activeAccount(), "a removed account must not resurrect on restart")
+        }
+    }
+
+    @Test
+    fun staleRegistrationRemovalLeavesCheckpointIntact() {
+        val checkpoint = root.resolve("local-account.nsec")
+        val store = NMPInsecureFileAccountStore(checkpoint)
+
+        NMPEngine(NMPConfig(), store).use { engine ->
+            val stale = engine.addAccount(secretOne)
+            val replacement = engine.addAccount(secretOne)
+            assertFalse(engine.removeAccount(stale), "a stale proof cannot remove its replacement")
+            assertTrue(
+                Files.exists(checkpoint),
+                "a stale-proof removal must not touch the live checkpoint",
+            )
+            assertTrue(engine.removeAccount(replacement))
+            assertFalse(Files.exists(checkpoint))
+        }
+    }
+
+    @Test
     fun invalidCheckpointFailsClosedDuringConstruction() {
         val checkpoint = root.resolve("local-account.nsec")
         Files.writeString(checkpoint, "not-a-key")
@@ -68,7 +106,7 @@ class InsecureFileAccountStoreTest {
         val config = NMPConfig(storePath = database.toString())
 
         NMPEngine(config, store).use { first ->
-            val pubkey = first.addAccount(secretOne)
+            val pubkey = first.addAccount(secretOne).publicKey
             first.setActiveAccount(pubkey)
             assertThrows(NMPError.StoreStillOpen::class.java) {
                 NMPEngine.resetPersistentStore(database.toString())

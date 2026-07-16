@@ -33,6 +33,10 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
     data class InvalidSigner(val reason: String) : NMPError("invalid signer: $reason")
+    data class AuthCapabilityRegistryFull(val limit: ULong) :
+        NMPError("AUTH capability registry is full at $limit")
+    object AuthCapabilityInstanceExhausted :
+        NMPError("AUTH capability instance namespace exhausted")
     object NoActiveSigner : NMPError("the active account has no registered signer")
     data class InvalidSignRequest(val reason: String) : NMPError("invalid sign request: $reason")
     data class SignerUnavailable(val reason: String) : NMPError("signer unavailable: $reason")
@@ -109,6 +113,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
                 is FfiException.InvalidSecretKey -> InvalidSecretKey
                 is FfiException.InvalidSigner -> InvalidSigner(ffi.reason)
+                is FfiException.AuthCapabilityRegistryFull -> AuthCapabilityRegistryFull(ffi.limit)
+                is FfiException.AuthCapabilityInstanceExhausted -> AuthCapabilityInstanceExhausted
                 is FfiException.NoActiveSigner -> NoActiveSigner
                 is FfiException.InvalidSignRequest -> InvalidSignRequest(ffi.reason)
                 is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
