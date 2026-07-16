@@ -75,7 +75,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 **Signing & identity**
 - ✅ Local key signer — secret held in a `Zeroizing<[u8;32]>` (compiler-fenced wipe on drop), `Debug` redacted to public key only ([#47 Unit C](https://github.com/pablof7z/nmp/pull/546))
 - ✅ Full **NIP-46 bunker** — independent signer-relay connection, request correlation, `auth_url`/`switch_relays`, NIP-44 crypto, **reconnect across store close/reopen**, bounded sign-only across all four surfaces (Rust/FFI/Swift/Kotlin)
-- 🧪 Per-write identity override (publish under a registered secondary identity without changing the active account) — in review, not yet merged ([#47](https://github.com/pablof7z/nmp/issues/47) Unit A, [#550](https://github.com/pablof7z/nmp/pull/550))
+- ✅ Per-write identity override — publish a single write under a registered secondary identity without changing the active account, across Rust/FFI/Swift/Kotlin. Retarget-immunity is proven: once accepted under the override, a later `set_active_account` can never redirect it to a different signer, even across a store close/reopen ([#47](https://github.com/pablof7z/nmp/issues/47) Unit A, [#550](https://github.com/pablof7z/nmp/pull/550))
 - ⛔ No Keychain/Keystore secure providers yet, no NIP-55
 
 **Publishing**
@@ -115,7 +115,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - **Superseded:** [`remove_account` (#529)](https://github.com/pablof7z/nmp/pull/529) was closed — its pubkey-only shape contradicted #8's ratified `AccountRegistration` model. Wave 5 replaced it with `add_account -> AccountRegistration` / `remove_account(&AccountRegistration)`, which also closes [#495](https://github.com/pablof7z/nmp/issues/495).
 - **Headline (merged) — architecture review is now enforced by CI, not just convention.** [#547](https://github.com/pablof7z/nmp/pull/547) closes [#496](https://github.com/pablof7z/nmp/issues/496): `AGENTS.md` gets a checked Noun / Reachability / Bool-Lifecycle / Destructive-API review-gate list (the exact discipline that caught `History*` but missed [#489](https://github.com/pablof7z/nmp/issues/489)), backed by two new blocking CI jobs — cross-SDK parity (Swift/Kotlin FFI surface must match Rust, modulo one documented exception) and falsifier-honesty (a PR's claimed `Updated falsifiers:` symbols/paths must actually exist in the tree). Backtested clean against 8 recent merged PRs / 43 named claims, and catches a fabricated claim plus a simulated #489-class regression.
 - **Merged — signer hardening:** `LocalKeySigner`'s secret is now held in a `Zeroizing<[u8;32]>` with a redacted `Debug` impl ([#47](https://github.com/pablof7z/nmp/issues/47) Unit C, [#546](https://github.com/pablof7z/nmp/pull/546)) — the first landed unit of the broader signer-lifecycle epic.
-- **In flight, not yet merged:** the rest of the **#47 signer-lifecycle epic** — per-write identity override across Rust/FFI/Swift/Kotlin ([#550](https://github.com/pablof7z/nmp/pull/550), in CI), with Keychain (iOS/macOS) and JVM-Keystore secure providers staged behind it. Also just opened: **Blossom media** ([#216](https://github.com/pablof7z/nmp/issues/216) epic, [#545](https://github.com/pablof7z/nmp/issues/545) core unit) — kind:24242-authorized, sha256-verified blob upload — and a consolidated **v2 architecture decision record** ([#548](https://github.com/pablof7z/nmp/issues/548), 15 rulings against standing doctrine).
+- **Merged — #47 signer-lifecycle epic, Unit A:** per-write identity override across Rust/FFI/Swift/Kotlin ([#550](https://github.com/pablof7z/nmp/pull/550)) — publish under a registered secondary identity without moving `currentPubkey`; retarget-immunity is proven directly, including across a real redb close/reopen replay. Keychain (iOS/macOS) and JVM-Keystore secure providers are staged behind it.
+- **In flight, not yet merged:** Also just opened — **Blossom media** ([#216](https://github.com/pablof7z/nmp/issues/216) epic, [#545](https://github.com/pablof7z/nmp/issues/545) core unit) — kind:24242-authorized, sha256-verified blob upload — and a consolidated **v2 architecture decision record** ([#548](https://github.com/pablof7z/nmp/issues/548), 15 rulings against standing doctrine).
 
 ## Performance
 
@@ -139,7 +140,7 @@ Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime pen
 - Govern the provisional demand / receipt / signer shapes toward a **v2 freeze**
 - Encode lifecycle invariants **as types**, not conventions
 - Close **platform qualification** — an iOS-Simulator test target, an Android AAR
-- Ship standard **secure-storage signer providers** (Keychain / Keystore) — staged behind the in-flight [#47](https://github.com/pablof7z/nmp/issues/47) signer-lifecycle epic
+- Ship standard **secure-storage signer providers** (Keychain / Keystore) — staged behind the now-merged per-write identity override, [#47](https://github.com/pablof7z/nmp/issues/47) Unit A
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
 - Land NIP-51 list editing; broaden opt-in protocol modules
 - Land the **Blossom** media/blob module ([#216](https://github.com/pablof7z/nmp/issues/216)) — upload authorization + content-addressed verification, core unit in progress
