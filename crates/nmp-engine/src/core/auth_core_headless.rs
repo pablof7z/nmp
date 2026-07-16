@@ -894,46 +894,12 @@ fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     assert!(matches!(auth_phase(&send), AuthSessionPhase::Error));
 }
 
-#[test]
-fn diagnostics_expose_bounded_safe_auth_facts() {
-    let mut fixture = Fixture::new();
-    let challenge = "diagnostic secret challenge";
-    let (_, policy) = fixture.challenge(challenge);
-    let policy = policy.unwrap();
-    bind(&mut fixture, &policy, AuthCapability::Policy, POLICY);
-    let diagnostics = fixture.core.diagnostics_snapshot();
-    assert_eq!(diagnostics.auth_sessions.len(), 1);
-    let auth = &diagnostics.auth_sessions[0];
-    assert_eq!(auth.relay, fixture.session.relay);
-    assert_eq!(auth.transport_generation, fixture.handle.generation);
-    assert_eq!(auth.phase, AuthDiagnosticsPhase::AwaitingPolicy);
-    assert!(auth.policy_bound);
-    assert!(!auth.signer_bound);
-    let descriptor = auth.challenge_hash.as_deref().unwrap();
-    assert_eq!(descriptor.len(), 64);
-    assert_ne!(descriptor, challenge);
-
-    let (sign_token, unsigned) = fixture.allow(policy);
-    let (send_token, event) = fixture.sign(sign_token, unsigned);
-    let sending = fixture.core.diagnostics_snapshot();
-    let auth = &sending.auth_sessions[0];
-    assert_eq!(auth.phase, AuthDiagnosticsPhase::AwaitingSend);
-    assert!(auth.signer_bound);
-    assert_eq!(auth.auth_event_id, Some(event.id));
-    assert!(!auth.send_handoff_accepted);
-    fixture.send_accepted(send_token);
-    let awaiting_ok = fixture.core.diagnostics_snapshot();
-    assert_eq!(
-        awaiting_ok.auth_sessions[0].phase,
-        AuthDiagnosticsPhase::AwaitingRelayAck
-    );
-    assert!(awaiting_ok.auth_sessions[0].send_handoff_accepted);
-    assert!(!awaiting_ok.auth_sessions[0].relay_ok_accepted);
-    fixture.ok(event.id, true);
-    let ready = fixture.core.diagnostics_snapshot();
-    assert_eq!(ready.auth_sessions[0].phase, AuthDiagnosticsPhase::Ready);
-    assert!(ready.auth_sessions[0].relay_ok_accepted);
-}
+// NOTE: the public AUTH-diagnostics projection falsifier
+// (`diagnostics_expose_bounded_safe_auth_facts`, covering the BLAKE3
+// challenge descriptor and the per-phase `AuthDiagnosticsSnapshot` read-out)
+// is deferred to Wave 3 with that surface. The reducer's internal phase
+// truth this wave stays covered by the `auth_phase(..)`-based falsifiers
+// above, which read `AuthSessionState::phase` directly.
 
 #[test]
 fn every_frozen_auth_field_id_signature_and_tag_order_are_validated() {

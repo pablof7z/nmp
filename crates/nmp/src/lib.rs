@@ -128,9 +128,12 @@ pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,
-// or an app cannot even print what it read. That reachability rule is why
-// `AuthDiagnosticsSnapshot`/`AuthDiagnosticsPhase` (named by
-// `DiagnosticsSnapshot.auth_sessions`) are re-exported alongside it.
+// or an app cannot even print what it read. (The public per-session
+// AUTH-diagnostics projection -- `AuthDiagnosticsSnapshot`/
+// `AuthDiagnosticsPhase` -- is intentionally NOT part of #8 Wave 2:
+// `DiagnosticsSnapshot` carries no `auth_sessions` field this wave, so those
+// types are not reachable here. The whole auth-diagnostics read-out lands in
+// Wave 3 with its FFI projection and the policy API.)
 //
 // Two distinct coverage surfaces live here, deliberately not conflated
 // (`docs/design/scoped-evidence-49-12-plan.md` §4): `AcquisitionEvidence`
@@ -141,9 +144,9 @@ pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
 pub use nmp_engine::core::{
-    AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase,
-    DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot, Row, RowDelta,
-    ShortfallFact, SourceEvidence, SourceStatus, WindowLoad,
+    AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry,
+    RelayDiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
+    WindowLoad,
 };
 pub use nmp_router::Lane;
 pub use nmp_store::CoverageInterval;

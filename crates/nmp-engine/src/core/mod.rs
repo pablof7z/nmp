@@ -469,10 +469,7 @@ const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 pub use admission::RelayAdmissionPolicy;
 use attribution::AttributionState;
-pub use diagnostics::{
-    AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
-    RelayDiagnosticsSnapshot,
-};
+pub use diagnostics::{DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot};
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 // `runtime` (C) needs the EXACT same wire subscription-id string
@@ -2616,79 +2613,11 @@ impl<S: EventStore> EngineCore<S> {
         // see on its own.
         snapshot.store_degraded = self.store_degraded.clone();
         snapshot.transport_degraded = self.transport_degraded.clone();
-        let mut auth_sessions = BTreeMap::new();
-        for (handle, session) in self.slot_to_relay.values() {
-            if session.access == AccessContext::Public || !self.connected_relays.contains(session) {
-                continue;
-            }
-            auth_sessions.insert(
-                session.clone(),
-                AuthDiagnosticsSnapshot {
-                    relay: session.relay.clone(),
-                    access: session.access,
-                    transport_slot: handle.slot,
-                    transport_generation: handle.generation,
-                    epoch_sequence: None,
-                    challenge_hash: None,
-                    phase: AuthDiagnosticsPhase::AwaitingChallenge,
-                    policy_bound: false,
-                    signer_bound: false,
-                    auth_event_id: None,
-                    send_handoff_accepted: false,
-                    relay_ok_accepted: false,
-                },
-            );
-        }
-        for (session, state) in &self.auth_sessions {
-            let (phase, auth_event_id, send_handoff_accepted, relay_ok_accepted) =
-                match &state.phase {
-                    AuthSessionPhase::AwaitingPolicy { .. } => {
-                        (AuthDiagnosticsPhase::AwaitingPolicy, None, false, false)
-                    }
-                    AuthSessionPhase::AwaitingSignature { .. } => {
-                        (AuthDiagnosticsPhase::AwaitingSignature, None, false, false)
-                    }
-                    AuthSessionPhase::AwaitingSend { event_id, .. } => (
-                        AuthDiagnosticsPhase::AwaitingSend,
-                        Some(*event_id),
-                        false,
-                        false,
-                    ),
-                    AuthSessionPhase::AwaitingOk { event_id } => (
-                        AuthDiagnosticsPhase::AwaitingRelayAck,
-                        Some(*event_id),
-                        true,
-                        false,
-                    ),
-                    AuthSessionPhase::Ready { event_id } => {
-                        (AuthDiagnosticsPhase::Ready, Some(*event_id), true, true)
-                    }
-                    AuthSessionPhase::Denied => (AuthDiagnosticsPhase::Denied, None, false, false),
-                    AuthSessionPhase::Error => (AuthDiagnosticsPhase::Error, None, false, false),
-                };
-            auth_sessions.insert(
-                session.clone(),
-                AuthDiagnosticsSnapshot {
-                    relay: session.relay.clone(),
-                    access: session.access,
-                    transport_slot: state.epoch.handle.slot,
-                    transport_generation: state.epoch.handle.generation,
-                    epoch_sequence: Some(state.epoch.sequence),
-                    challenge_hash: (!state.challenge.is_empty()).then(|| {
-                        blake3::hash(state.challenge.as_bytes())
-                            .to_hex()
-                            .to_string()
-                    }),
-                    phase,
-                    policy_bound: state.policy_instance.is_some(),
-                    signer_bound: state.signer_instance.is_some(),
-                    auth_event_id,
-                    send_handoff_accepted,
-                    relay_ok_accepted,
-                },
-            );
-        }
-        snapshot.auth_sessions = auth_sessions.into_values().collect();
+        // The public per-session AUTH-diagnostics projection is deferred to
+        // Wave 3 (see `diagnostics::DiagnosticsSnapshot`'s note): the reducer
+        // owns the phase truth in `self.auth_sessions` this wave, but the
+        // governed facade read-out lands together with its FFI projection and
+        // the policy API in Wave 3.
         for relay in &mut snapshot.relays {
             // NIP-11 advertisement and the NIP-77 behavioral probe are both
             // PUBLIC-session evidence (#8): the one-shot HTTP document and
