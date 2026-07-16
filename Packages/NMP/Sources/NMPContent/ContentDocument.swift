@@ -56,7 +56,14 @@ public enum NostrReferenceTarget: Sendable, Hashable {
 
     /// Stable semantic identity. Hints deliberately do not change identity.
     public var key: String {
-        referenceDemandPlan(for: self).targetKey
+        switch self {
+        case .profile(let pubkey, _):
+            return "profile:\(pubkey)"
+        case .event(let id, _, _, _):
+            return "event:\(id)"
+        case .address(let kind, let author, let identifier, _):
+            return "address:\(kind):\(author):\(identifier)"
+        }
     }
 }
 
@@ -252,26 +259,6 @@ extension NostrReferenceTarget {
         }
     }
 
-    var ffiValue: FfiReferenceTarget {
-        switch self {
-        case .profile(let pubkey, let relayHints):
-            return .profile(pubkey: pubkey, relayHints: relayHints)
-        case .event(let id, let authorHint, let kindHint, let relayHints):
-            return .event(
-                id: id,
-                authorHint: authorHint,
-                kindHint: kindHint,
-                relayHints: relayHints
-            )
-        case .address(let kind, let author, let identifier, let relayHints):
-            return .address(
-                kind: kind,
-                author: author,
-                identifier: identifier,
-                relayHints: relayHints
-            )
-        }
-    }
 }
 
 extension NostrReferenceOccurrence {

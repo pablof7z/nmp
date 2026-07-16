@@ -143,34 +143,47 @@ about current code:
   membership. 29er's scroll anchoring, display order, end-state policy, and
   on-device adoption remain in pablof7z/29er-next#77 rather than moving into
   NMP.
-- **The optional content substrate and first SwiftUI family are built; the
-  multi-platform/open-code ecosystem remains open (#75).** `nmp-content`,
-  governed UniFFI values, and Swift/Kotlin content
-  clients now provide source-ranged plaintext/Markdown semantics, normalized
-  NIP-19 references, kind:0/NIP-23 values, ordinary-demand acquisition,
-  deduplicated claim/release, cycle/depth/target bounds, scoped evidence, and
-  raw-event fallback. `NMPUI` adds fallback-safe Avatar/Name primitives, an
-  arbitrary-native-view content flow, immutable local renderer sets, three
-  mention treatments, generic event chrome, genuinely distinct portrait and
-  Medium-style article cards, three user-card layouts, and three reaction
-  interaction families. NIP-02 is now the first component whose protocol
-  resource/action also ships: `NMPFollowing` projects canonical kind:3 state,
-  `NMPEngine.follow`/`unfollow` own source-evidenced tag-preserving guarded
-  replacement, and `NMPFollowButton` only renders and forwards the tap.
-  Network-free scripted sessions make loading, shortfall, cycle, unknown-kind,
-  and custom-document previews deterministic without an engine. The native iOS
-  Gallery consumes those exact components against real data and configures only
-  the two indexers; separate States and 72-row Stress tabs exercise Dynamic
-  Type, RTL, reduced motion, dark appearance, long Markdown, and
-  visible-reference claim release. Live Swift tests prove a profile mention and
-  a relay-less NIP-23 `naddr` using only the two configured indexers and normal
-  NMP outbox discovery. A real loopback parity proof drives follow, duplicate
+- **The optional parser/reference substrate and first SwiftUI component-owned
+  acquisition slice are built; broad multi-platform UI remains open (#75,
+  #561).** `nmp-content` is now a source-ranged plaintext/Markdown parser with
+  no engine, query lifecycle, kind:0/NIP-23 codec, or hydration budget.
+  `nmp_grammar::reference` owns pure normalized-target-to-demand planning;
+  direct Rust/FFI/Swift/Kotlin consume one shared NIP-19 corpus proving exact
+  canonical/helper filters, untrusted-hint handling, relay safety/bounds, and
+  malformed/secret refusal. Kotlin stops at the parser/planner boundary until
+  a real Compose content surface exists; it has no replacement content session.
+  `NMPUI` walks immutable documents, offers literal components that open zero
+  handles, and gives the standard profile mention/default event loader their
+  own independently cancellable observations. `observeWhileVisible` releases
+  only the selected component's handles while retaining the last snapshot;
+  recursion uses immutable cycle/depth context with no active/resolved count
+  coordinator. The outer event loader is replaceable independently of
+  actual-row-kind/purpose dispatch, and unknown kinds retain a generic fallback.
+  Exact profile and NIP-23 decoding remain gaps for their own protocol owners
+  (#208 for kind:0); the raw-event fallback is honest in the meantime.
+  Independently, #565/PR #577 has landed `Freshness::Live`/`MaxAge`/`CacheOnly`
+  as a per-handle axis over coverage watermarks, enabling cache-only/consent and
+  staleness-tolerant custom loaders without reintroducing a content coordinator.
+  The SwiftUI family still includes Avatar/Name primitives, three mention
+  treatments, generic event chrome, distinct portrait/Medium article cards,
+  three user-card layouts, and three reaction families. NIP-02 remains the
+  first component whose protocol resource/action also ships: `NMPFollowing`
+  projects canonical kind:3 state, `NMPEngine.follow`/`unfollow` own
+  source-evidenced tag-preserving guarded replacement, and `NMPFollowButton`
+  only renders and forwards the tap. Pure documents plus literal or injected
+  component factories make deterministic conformance states possible without
+  a shared fake session. The native iOS Gallery consumes the exact components,
+  configures only two indexers for its live proof, and separately exercises
+  literal/no-fetch policy, cycle/depth, unknown-kind, Dynamic Type, RTL,
+  reduced motion, dark appearance, long Markdown, and 72-row rapid visibility
+  churn while reporting engine wire-subscription evidence rather than a UI
+  claim counter. A real loopback parity proof drives follow, duplicate
   no-op, unrelated-contact preservation, and unfollow through direct Rust and
   the iOS FFI surface. Controlled relay identity/list primitives now ship in
   SwiftUI and a narrow optional desktop-JVM Compose subproject (#198). Both
   render caller-supplied one-shot NIP-11 state and query-scoped `SourceStatus`;
   they own no engine, HTTP, polling, cache, timers, or image loading. The
-  Compose proof is not broad content/session parity and does not qualify an
+  Compose proof is not broad content-component parity and does not qualify an
   Android AAR. The conflict-honest `nmp-ui` source registry/CLI is now built
   (#165 via PR #475): `list`/`view`/`add`/`diff`/`update`, exact app-owned
   dependency closures, lock/merge-base hashes, three-way conflict evidence,
