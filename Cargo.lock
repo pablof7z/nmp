@@ -1616,6 +1616,7 @@ dependencies = [
  "nmp-nip02",
  "nmp-nip29",
  "nmp-nip51",
+ "nmp-nip68",
  "nmp-ownership",
  "nmp-router",
  "serde_json",
@@ -1780,6 +1781,15 @@ name = "nmp-nip51"
 version = "0.1.0"
 dependencies = [
  "nmp-grammar",
+ "nmp-ownership",
+ "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip68"
+version = "0.1.0"
+dependencies = [
+ "nmp-blossom",
  "nmp-ownership",
  "nostr 0.44.4",
 ]
