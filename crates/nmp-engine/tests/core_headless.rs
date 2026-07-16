@@ -6747,6 +6747,194 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
     assert_eq!(core.diagnostics_snapshot().relays.len(), 0);
 }
 
+/// #570 follow-up: the `limit:0` live candidate REQ opened by
+/// `begin_neg_handoff` is tracked only in `pending_neg_handoffs` until its
+/// own EOSE arrives. If the liveness deadline fires FIRST (no candidate
+/// EOSE), `handoff_fallback_to_req` moves it into
+/// `TemporaryReq::BacklogActivatesLive`, deliberately keeping it open on
+/// the wire while a distinct backlog REQ supplies a safe fallback -- now
+/// tracked in NEITHER `pending_neg_handoffs` NOR `active_nip77_live`.
+/// Withdrawing the only demand owner while still inside that fallback
+/// window must still close and discard that orphaned candidate, or it
+/// leaks forever and a later stray EOSE on its id mints phantom coverage.
+#[test]
+fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let subscribed = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let a_handle = subscribed_handle(&subscribed);
+    connect_and_prove_nip77(&mut core, &relay);
+
+    // A reconnect always replans live-first for whatever demand is
+    // currently active (`reconnect_repeats_live_first_and_only_the_
+    // fresh_generation_eose_opens_neg`), which is how a SINGLE demand
+    // owner (no widen/narrow needed) ends up with its own `limit:0` live
+    // candidate here.
+    let _ = core.handle(EngineMsg::RelayDisconnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        DisconnectReason::Error,
+    ));
+    let reconnected = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        public_session(&relay),
+    ));
+    let (live_sub_id, live_filter) = req_for(&reconnected, &relay);
+    let live_sub_id = live_sub_id.clone();
+    assert_eq!(live_filter.limit, Some(0));
+
+    // No candidate EOSE arrives before the liveness deadline: the
+    // candidate is parked in `BacklogActivatesLive`, tracked in neither
+    // `pending_neg_handoffs` nor `active_nip77_live`.
+    let timed_out = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
+    let (backlog_id, backlog_filter) = req_for(&timed_out, &relay);
+    let backlog_id = backlog_id.clone();
+    assert_ne!(backlog_id, live_sub_id);
+    assert_eq!(backlog_filter.limit, None);
+
+    // Withdraw the only demand owner while still inside that fallback
+    // window, before the backlog REQ's own EOSE ever arrives.
+    let closed = core.handle(EngineMsg::Unsubscribe(a_handle));
+    let closed_ids: BTreeSet<SubId> = closed
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+        .filter_map(|op| match op {
+            WireOp::Close(id) => Some(id.clone()),
+            WireOp::Req(..) => None,
+        })
+        .collect();
+    assert!(
+        closed_ids.contains(&live_sub_id),
+        "withdrawing the only demand owner mid-fallback must close the \
+         orphaned live candidate REQ, or it leaks on the wire forever: \
+         {closed:?}"
+    );
+    assert!(
+        closed_ids.contains(&backlog_id),
+        "the backlog fallback REQ itself must still close on withdrawal: {closed:?}"
+    );
+    assert_eq!(core.diagnostics_snapshot().relays.len(), 0);
+
+    // A late EOSE arriving on the orphaned candidate's wire id AFTER
+    // withdrawal must never mint coverage for demand that no longer
+    // exists. The connection is on generation 2 after the reconnect above.
+    let late = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&live_sub_id)),
+    ));
+    assert!(
+        !late
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "a late EOSE on a withdrawn, orphaned candidate must never mint \
+         phantom coverage: {late:?}"
+    );
+}
+
+/// Same leak, but demand is SUPERSEDED (narrowed) rather than fully
+/// withdrawn while the plan sits in the live-EOSE-timeout fallback. The
+/// narrowing itself runs through `begin_neg_handoff` ->
+/// `cancel_nip77_repair_for_plan`, the exact call site of the fix -- distinct
+/// from the full-withdrawal path's `close_nip77_plan`.
+#[test]
+fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let a_handle = subscribed_handle(&initial);
+    connect_and_prove_nip77(&mut core, &relay);
+    let widened = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let b_handle = subscribed_handle(&widened);
+    let live_sub_id = req_for(&widened, &relay).0.clone();
+
+    // No candidate EOSE arrives before the liveness deadline -- same
+    // fallback as above, but this plan still has two demand owners.
+    let timed_out = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
+    let (backlog_id, _) = req_for(&timed_out, &relay);
+    let backlog_id = backlog_id.clone();
+
+    // Narrowing back to a-only demand supersedes the still-parked
+    // fallback via `begin_neg_handoff`'s own
+    // `cancel_nip77_repair_for_plan` call -- it must close the orphaned
+    // candidate too, not just the backlog REQ.
+    let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
+    let replacement_id = req_for(&narrowed, &relay).0.clone();
+    assert_ne!(replacement_id, live_sub_id);
+    let narrowed_closed: BTreeSet<SubId> = narrowed
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+        .filter_map(|op| match op {
+            WireOp::Close(id) => Some(id.clone()),
+            WireOp::Req(..) => None,
+        })
+        .collect();
+    assert!(
+        narrowed_closed.contains(&live_sub_id),
+        "superseding demand mid-fallback must close the orphaned live \
+         candidate REQ, or it leaks on the wire forever: {narrowed:?}"
+    );
+    assert!(
+        narrowed_closed.contains(&backlog_id),
+        "the backlog fallback REQ itself must still close on supersession: {narrowed:?}"
+    );
+
+    // A late EOSE on the orphaned candidate's wire id must never mint
+    // coverage after it has been superseded away.
+    let late = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&live_sub_id)),
+    ));
+    assert!(
+        !late
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "a late EOSE on a superseded, orphaned candidate must never mint \
+         phantom coverage: {late:?}"
+    );
+
+    let _ = core.handle(EngineMsg::Unsubscribe(a_handle));
+}
+
 // ---- #34 retraction seam (retraction-and-negative-deltas.md §1.3/§3) ----
 
 /// `RowDelta::Removed` on kind:5 deletion (issue #34's `root_query_emits_
