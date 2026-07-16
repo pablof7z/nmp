@@ -3,11 +3,10 @@
 //! implicit durable-store eviction policy.
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::{RelayAdmissionPolicy, RowDelta};
-use nmp_engine::runtime::{EngineThread, RowsMsg};
+use nmp_engine::runtime::{EngineThread, RowsReceiver};
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, SourceAuthority,
 };
@@ -29,7 +28,7 @@ fn limited_query(author_hex: String) -> LiveQuery {
     })
 }
 
-fn receive_current_ids(rx: &Receiver<RowsMsg>) -> BTreeSet<EventId> {
+fn receive_current_ids(rx: &RowsReceiver) -> BTreeSet<EventId> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut current = BTreeSet::new();
     loop {

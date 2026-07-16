@@ -85,7 +85,9 @@ private fun observeRows(subscribe: (RowObserver) -> NmpQueryHandle): Flow<RowBat
             object : RowObserver {
                 // These subscriptions are opened with `window = null`, so
                 // every delivered `frame.window` is null and `frame.deltas`
-                // is the exact lossless transition -- fold it. (Windowed
+                // is the exact transition rebased onto the last delivered
+                // Rust frame -- fold it. Intermediate reducer emits may
+                // conflate without changing the resulting state. (Windowed
                 // observations take the other arm of the one frame
                 // vocabulary: authoritative snapshots, no folding -- see
                 // Window.kt's `WindowBridge`.)

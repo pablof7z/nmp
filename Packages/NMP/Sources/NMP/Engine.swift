@@ -302,8 +302,9 @@ public final class NMPEngine: Sendable {
     /// released (see `NMPQuery`'s own doc).
     ///
     /// `window` is the one bounding policy on this read noun (#485).
-    /// `nil` (the default) observes the full live set as a lossless delta
-    /// stream. `.expandable(initial:max:)` bounds the observation to a
+    /// `nil` (the default) observes the full live set through exact rebased
+    /// deltas; intermediate reducer emits may conflate for a slow observer.
+    /// `.expandable(initial:max:)` bounds the observation to a
     /// newest-first window delivered as authoritative snapshots, grown only
     /// by `NMPQuery.requestRows(atLeast:)` -- delivery mode is derived from
     /// that boundedness, never chosen separately (see `Window`'s doc).

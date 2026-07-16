@@ -607,9 +607,10 @@ impl NmpEngine {
     /// timing.
     ///
     /// `window` selects the observation's delivery policy (#485). `None` is
-    /// today's unbounded observation: a lossless delta stream, full set
-    /// never redelivered. `Some(FfiWindow::Expandable { initial, max })` is
-    /// a bounded newest-first window: each frame carries the complete
+    /// today's unbounded observation: exact deltas are rebased when a slow
+    /// observer skips intermediate reducer emits, and the full set is never
+    /// redelivered. `Some(FfiWindow::Expandable { initial, max })` is a
+    /// bounded newest-first window: each frame carries the complete
     /// current row set + growth fact in `FfiFrame::window` (deltas stay
     /// empty on the wire) and grows only via
     /// [`NmpQueryHandle::request_rows`], never above `max`. Zero bounds and

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::{RelayAdmissionPolicy, RowDelta};
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
+use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -191,7 +191,7 @@ fn wait_for_status(
 }
 
 fn wait_for_exact_rows(
-    rows: &mpsc::Receiver<RowsMsg>,
+    rows: &RowsReceiver,
     current: &mut BTreeSet<EventId>,
     expected_present: EventId,
     expected_absent: EventId,

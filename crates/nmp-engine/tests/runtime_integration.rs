@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsMsg};
+use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, Selector, SourceAuthority,
@@ -226,7 +226,7 @@ fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
 /// not snapshots, per `nmp_engine::core::RowDelta`'s doc) matches `pred`, or
 /// return `false` after `timeout`.
 fn wait_for_rows(
-    rx: &Receiver<RowsMsg>,
+    rx: &RowsReceiver,
     timeout: Duration,
     pred: impl Fn(&[nostr::Event]) -> bool,
 ) -> bool {

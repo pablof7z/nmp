@@ -15,12 +15,12 @@
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
-use nmp_engine::runtime::{EngineThread, RowsMsg};
+use nmp_engine::runtime::{EngineThread, RowsReceiver};
 use nmp_grammar::{Binding, Filter};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -54,7 +54,7 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 /// against the freshest evidence seen alongside the freshest accumulated
 /// row set on every batch.
 fn wait_for_rows(
-    rx: &Receiver<RowsMsg>,
+    rx: &RowsReceiver,
     timeout: Duration,
     pred: impl Fn(&[nostr::Event], &nmp_engine::core::AcquisitionEvidence) -> bool,
 ) -> bool {

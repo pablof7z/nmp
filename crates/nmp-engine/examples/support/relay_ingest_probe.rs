@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::{HistoryQuery, RelayAdmissionPolicy, RowDelta};
-use nmp_engine::runtime::{EngineThread, HistoryReceiver, RowsMsg};
+use nmp_engine::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -237,14 +237,14 @@ struct ObservationState {
 }
 
 enum ProbeRows {
-    Lossless(mpsc::Receiver<RowsMsg>),
+    Unbounded(RowsReceiver),
     Windowed(HistoryReceiver),
 }
 
 impl ProbeRows {
     fn recv_timeout(&self, timeout: Duration) -> Result<RowsMsg, mpsc::RecvTimeoutError> {
         match self {
-            Self::Lossless(rows) => rows.recv_timeout(timeout),
+            Self::Unbounded(rows) => rows.recv_timeout(timeout),
             Self::Windowed(batches) => batches
                 .recv_timeout(timeout)
                 .map(|batch| (batch.deltas, batch.evidence)),
@@ -411,7 +411,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         }
         None => {
             let (_, rows) = handle.subscribe(live_query)?;
-            ProbeRows::Lossless(rows)
+            ProbeRows::Unbounded(rows)
         }
     };
     let (diagnostics_handle, diagnostics) = handle.observe_diagnostics();
@@ -641,7 +641,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         delivery_mode: if config.visible_limit.is_some() {
             "bounded-latest-window"
         } else {
-            "lossless-delta"
+            "exact-rebased-delta"
         },
         trim_allocator_during_ingest: config.trim_allocator_during_ingest,
         frame_delay_us: config.frame_delay.as_micros(),
