@@ -7,14 +7,16 @@
 //! own reasoning demands (send-time snapshots, the EOSE intersection rule,
 //! `limit` poisoning, and per-query scoped acquisition evidence).
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::{
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta, RowSink,
-    ShortfallFact, SourceEvidence, SourceStatus,
+    AcquisitionEvidence, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendOutcome,
+    AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta, RowSink, ShortfallFact,
+    SourceEvidence, SourceStatus,
 };
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
@@ -673,13 +675,12 @@ fn public_session(relay: &RelayUrl) -> RelaySessionKey {
     RelaySessionKey::public(relay.clone())
 }
 
-// In the #8 U1 foundation the write plane rides the relay's PUBLIC session
-// (no AUTH reducer yet). This helper keeps its `signer` parameter so the
-// call sites still document which identity's write lane they model, and so
-// the AUTH wave can reintroduce an authenticated session here without
-// re-touching every caller — but today it resolves to the public session.
-fn signer_session(relay: &RelayUrl, _signer: nostr::PublicKey) -> RelaySessionKey {
-    RelaySessionKey::public(relay.clone())
+// With the #8 AUTH reducer landed, the write plane rides the signing
+// identity's authenticated session again: every durable/ephemeral write
+// demands `AccessContext::Nip42(signing pubkey)`, so tests that expect
+// attempts must connect exactly this session.
+fn signer_session(relay: &RelayUrl, signer: nostr::PublicKey) -> RelaySessionKey {
+    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
 }
 
 fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
@@ -741,7 +742,8 @@ fn mark_written<S: EventStore>(
         .iter()
         .find_map(|effect| match effect {
             Effect::PublishEvent(candidate, event, correlation)
-                if &candidate.relay == relay && candidate.access == AccessContext::Public =>
+                if &candidate.relay == relay
+                    && candidate.access == AccessContext::Nip42(event.pubkey) =>
             {
                 Some(*correlation)
             }
@@ -2702,12 +2704,69 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
-        let second = core.handle(EngineMsg::RelayAuthReady(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
+        let handle = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        let challenge = core.handle(EngineMsg::RelayFrame(
+            handle,
             session.clone(),
+            RelayFrame::from(RelayMessage::Auth {
+                challenge: Cow::Borrowed("retry challenge"),
+            }),
+        ));
+        let policy_token = challenge
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. }) => Some(token),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::AuthCapabilityBound {
+            token: policy_token.clone(),
+            capability: nmp_engine::core::AuthCapability::Policy,
+            instance: AuthCapabilityInstance(1),
+        });
+        let signature = core.handle(EngineMsg::AuthPolicyCompleted(
+            policy_token,
+            Some(AuthCapabilityInstance(1)),
+            AuthPolicyOutcome::Allow,
+        ));
+        let (sign_token, unsigned) = signature
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::RelayAuth(AuthEffect::RequestSignature { token, unsigned }) => {
+                    Some((token, unsigned))
+                }
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::AuthCapabilityBound {
+            token: sign_token.clone(),
+            capability: nmp_engine::core::AuthCapability::Signer,
+            instance: AuthCapabilityInstance(2),
+        });
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let send = core.handle(EngineMsg::AuthSignerCompleted(
+            sign_token,
+            Some(AuthCapabilityInstance(2)),
+            AuthSignerOutcome::Signed(signed),
+        ));
+        let (send_token, auth_event) = send
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::RelayAuth(AuthEffect::Send { token, event, .. }) => Some((token, event)),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::AuthSendCompleted(
+            send_token,
+            AuthSendOutcome::Accepted,
+        ));
+        let second = core.handle(EngineMsg::RelayFrame(
+            handle,
+            session.clone(),
+            RelayFrame::from(RelayMessage::ok(auth_event.id, true, "authenticated")),
         ));
         assert!(second.iter().any(|effect| matches!(
             effect,
@@ -2986,7 +3045,9 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
     let published = first_wave
         .iter()
         .filter_map(|effect| match effect {
-            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
+            Effect::PublishEvent(session, event, _)
+                if session.access == AccessContext::Nip42(event.pubkey) =>
+            {
                 Some(session.relay.clone())
             }
             _ => None,
@@ -3009,7 +3070,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
             .iter()
             .filter_map(|effect| match effect {
                 Effect::PublishEvent(session, event, _)
-                    if session.access == AccessContext::Public =>
+                    if session.access == AccessContext::Nip42(event.pubkey) =>
                 {
                     Some(session.relay.clone())
                 }
@@ -5556,7 +5617,9 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
     let published: BTreeSet<RelayUrl> = effects
         .iter()
         .filter_map(|e| match e {
-            Effect::PublishEvent(session, event, _) if session.access == AccessContext::Public => {
+            Effect::PublishEvent(session, event, _)
+                if session.access == AccessContext::Nip42(event.pubkey) =>
+            {
                 Some(session.relay.clone())
             }
             _ => None,

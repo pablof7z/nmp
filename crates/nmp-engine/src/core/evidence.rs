@@ -84,14 +84,9 @@ pub struct SourceEvidence {
 }
 
 /// The closed, honest per-source link-status vocabulary. This frame
-/// populates `Requesting`/`Connecting`/`Disconnected` (folded from the same
-/// connection bookkeeping `EngineCore` already keeps for reconnect/replay)
-/// and — since #8's session-identity half — `AwaitingAuth` (a protected
-/// session that is connected but whose exact current generation has not yet
-/// completed AUTH); `AuthDenied` remains RESERVED for #8's AUTH wire half,
-/// and `Error` is reserved until a transport-level error fold lands (#51) —
-/// every ratified variant is either populated here or documented reserved
-/// with a named landing issue, never vocabulary nothing can ever emit.
+/// populates every state below from exact session/generation bookkeeping.
+/// AUTH policy/signer failures are session-local facts; #51 may later add
+/// richer transport error detail without changing this closed status shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceStatus {
     /// The relay is connected and at least one subtree atom this source
@@ -110,11 +105,12 @@ pub enum SourceStatus {
     /// #8: a PROTECTED (`AccessContext::Nip42`) session is connected, but
     /// its exact current connection generation has not yet completed AUTH —
     /// its planned REQs are parked, so it is honestly not `Requesting` yet.
-    AwaitingAuth { phase: AuthPhase },
-    /// Reserved for #8 — terminal, NOT populated by this frame.
+    AwaitingAuth {
+        phase: AuthPhase,
+    },
     AuthDenied,
-    /// Reserved; populated by #51 (expand diagnostics error evidence) once
-    /// transport surfaces a distinct per-relay wire-error state.
+    /// The exact session's current AUTH policy/signer/send operation failed.
+    /// This is not an aggregate relay-health judgment.
     Error,
 }
 
@@ -126,8 +122,10 @@ pub enum SourceStatus {
 /// or "already denied" would be a representable non-state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthPhase {
+    AwaitingChallenge,
     AwaitingPolicy,
     AwaitingSignature,
+    AwaitingRelayAck,
 }
 
 /// An explicit, never-silent shortfall in a query's subtree acquisition —
@@ -156,10 +154,10 @@ pub enum ShortfallFact {
 /// Compute `subtree_atoms`' [`AcquisitionEvidence`] against `plan` (each
 /// atom's current covering SESSION set — the sessions whose compiled
 /// `WireReq` absorbs that atom's key), `store` (each `(atom, relay)`'s
-/// proven interval), and the engine's own `connected`/`auth_ready`/
-/// `ever_connected` session sets (for `status`). Replaces `query_coverage`'s
-/// min-over-everything collapse: this never returns a single verdict, only
-/// per-source facts plus explicit shortfall.
+/// proven interval), and the engine's own `connected`/`auth_status`/
+/// `ever_connected` session bookkeeping (for `status`). Replaces
+/// `query_coverage`'s min-over-everything collapse: this never returns a
+/// single verdict, only per-source facts plus explicit shortfall.
 ///
 /// - `subtree_atoms` must include every atom in the query's FULL subtree
 ///   (`nmp_resolver::Engine::subtree_atoms`), not just its root atoms (#12)
@@ -176,18 +174,21 @@ pub enum ShortfallFact {
 /// - For each session that covers at least one subtree atom:
 ///   `reconciled_through = Some(min over covered atoms' proven `through`)`
 ///   IFF every atom it covers has a proven row (`from <= window floor`),
-///   else `None`. `status` is `Requesting` if the session is currently
-///   connected AND (Public, or its exact current generation has completed
-///   AUTH); `AwaitingAuth` if connected but protected and not yet ready;
-///   `Disconnected` if it has connected before but is not connected now;
-///   else `Connecting` (planned but never yet connected).
+///   else `None`. `status` for a connected Public session is `Requesting`;
+///   a connected PROTECTED session reads the AUTH reducer's own per-session
+///   truth from `auth_status` (exact phase, `AuthDenied`, `Error`, or
+///   `Requesting` once ready), defaulting to `AwaitingAuth {
+///   AwaitingChallenge }` when the reducer holds no entry (connected but
+///   never challenged); `Disconnected` if it has connected before but is
+///   not connected now; else `Connecting` (planned but never yet
+///   connected).
 /// - Sources are returned sorted by session key for deterministic equality.
 pub(crate) fn acquisition_evidence<S: EventStore>(
     subtree_atoms: &BTreeSet<ContextualAtom>,
     plan: &RelayPlan,
     store: &S,
     connected: &BTreeSet<RelaySessionKey>,
-    auth_ready: &BTreeSet<RelaySessionKey>,
+    auth_status: &BTreeMap<RelaySessionKey, SourceStatus>,
     ever_connected: &BTreeSet<RelaySessionKey>,
 ) -> AcquisitionEvidence {
     if subtree_atoms.is_empty() {
@@ -252,15 +253,15 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         .into_iter()
         .map(|(session, (all_proven, through))| {
             let status = if connected.contains(&session) {
-                if session.access == AccessContext::Public || auth_ready.contains(&session) {
+                if session.access == AccessContext::Public {
                     SourceStatus::Requesting
                 } else {
-                    // Connected but protected and its exact current
-                    // generation has not completed AUTH: its planned REQs
-                    // are parked, so `Requesting` would be a lie.
-                    SourceStatus::AwaitingAuth {
-                        phase: AuthPhase::AwaitingPolicy,
-                    }
+                    auth_status
+                        .get(&session)
+                        .copied()
+                        .unwrap_or(SourceStatus::AwaitingAuth {
+                            phase: AuthPhase::AwaitingChallenge,
+                        })
                 }
             } else if ever_connected.contains(&session) {
                 SourceStatus::Disconnected
@@ -285,6 +286,7 @@ mod tests {
     use nmp_grammar::{AccessContext, SourceAuthority};
     use nmp_router::{SubId, WireReq};
     use nmp_store::MemoryStore;
+    use nostr::Keys;
 
     fn atom() -> ContextualAtom {
         ContextualAtom {
@@ -323,7 +325,7 @@ mod tests {
             &plan,
             &MemoryStore::new(),
             &BTreeSet::new(),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
             &BTreeSet::new(),
         );
 
@@ -352,7 +354,7 @@ mod tests {
             &plan,
             &MemoryStore::new(),
             &BTreeSet::new(),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
             &BTreeSet::new(),
         );
 
@@ -360,6 +362,68 @@ mod tests {
         assert_eq!(
             evidence.shortfall,
             vec![ShortfallFact::LocalLimit { atom: atom.filter }]
+        );
+    }
+
+    #[test]
+    fn protected_source_reports_each_exact_auth_phase_and_terminal_truth() {
+        let mut atom = atom();
+        atom.access = AccessContext::Nip42(Keys::generate().public_key());
+        let relay = RelayUrl::parse("wss://protected-evidence.example").unwrap();
+        let session = RelaySessionKey::new(relay.clone(), atom.access);
+        let key = coverage_key(&atom);
+        let plan = RelayPlan {
+            reqs: BTreeMap::from([(
+                session.clone(),
+                vec![WireReq {
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.source, atom.access),
+                    filter: atom.filter.clone(),
+                    provenance: Vec::new(),
+                    absorbed: BTreeSet::from([key]),
+                }],
+            )]),
+            ..RelayPlan::default()
+        };
+        let connected = BTreeSet::from([session.clone()]);
+        let cases = [
+            SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingPolicy,
+            },
+            SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingSignature,
+            },
+            SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingRelayAck,
+            },
+            SourceStatus::AuthDenied,
+            SourceStatus::Error,
+            SourceStatus::Requesting,
+        ];
+        for status in cases {
+            let evidence = acquisition_evidence(
+                &BTreeSet::from([atom.clone()]),
+                &plan,
+                &MemoryStore::new(),
+                &connected,
+                &BTreeMap::from([(session.clone(), status)]),
+                &connected,
+            );
+            assert_eq!(evidence.sources[0].status, status);
+        }
+
+        let waiting = acquisition_evidence(
+            &BTreeSet::from([atom]),
+            &plan,
+            &MemoryStore::new(),
+            &connected,
+            &BTreeMap::new(),
+            &connected,
+        );
+        assert_eq!(
+            waiting.sources[0].status,
+            SourceStatus::AwaitingAuth {
+                phase: AuthPhase::AwaitingChallenge
+            }
         );
     }
 }

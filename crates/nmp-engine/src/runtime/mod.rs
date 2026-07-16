@@ -60,6 +60,7 @@
 //! reconnected protected socket is unauthenticated until its own AUTH
 //! completes, so nothing may auto-replay on it.
 
+mod auth;
 mod diagnostics_channel;
 
 use std::cell::RefCell;
@@ -871,6 +872,12 @@ struct RegisteredSigner {
 }
 
 impl SignerRegistry {
+    fn auth_instance(identity: &Arc<()>) -> crate::core::AuthCapabilityInstance {
+        // A stale `SignerRegistration` retains this allocation, so its
+        // address cannot be reused while a stale removal can still arrive.
+        crate::core::AuthCapabilityInstance(Arc::as_ptr(identity) as usize as u64)
+    }
+
     /// Register `signer` under its own `public_key()`, replacing any prior
     /// capability already registered for that key.
     fn add(
@@ -912,6 +919,24 @@ impl SignerRegistry {
     /// account switch cannot redirect already-accepted work.
     fn signer_for(&self, pk: PublicKey) -> Option<&(dyn SigningCapability + Send)> {
         self.signers.get(&pk).map(|entry| entry.signer.as_ref())
+    }
+
+    fn auth_signer_for(
+        &self,
+        pk: PublicKey,
+    ) -> Option<(
+        crate::core::AuthCapabilityInstance,
+        &(dyn SigningCapability + Send),
+    )> {
+        self.signers
+            .get(&pk)
+            .map(|entry| (Self::auth_instance(&entry.identity), entry.signer.as_ref()))
+    }
+
+    fn auth_instance_for(&self, pk: PublicKey) -> Option<crate::core::AuthCapabilityInstance> {
+        self.signers
+            .get(&pk)
+            .map(|entry| Self::auth_instance(&entry.identity))
     }
 }
 
@@ -1613,11 +1638,13 @@ mod relay_worker_reconciliation_tests {
     fn durable_write_lane_retains_worker_without_read_demand() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://write-only.example").unwrap();
-        // #8 U1: the write plane rides the relay's PUBLIC session (no AUTH
-        // reducer yet), so the worker this durable lane owns is the public
-        // session for the URL. Authenticated per-identity write sessions
-        // arrive with the AUTH wave.
-        let write_session = RelaySessionKey::public(relay.clone());
+        // With the #8 AUTH reducer landed, the write plane rides the signing
+        // identity's authenticated session, so the worker this durable lane
+        // owns is the Nip42 session for (relay, author).
+        let write_session = RelaySessionKey::new(
+            relay.clone(),
+            nmp_grammar::AccessContext::Nip42(author.public_key()),
+        );
         let directory =
             FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
@@ -1758,7 +1785,8 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
 /// complete current set, not a delta). PROTECTED sessions never own an entry
 /// here (#8): their REQs must never auto-replay on reconnect — a fresh
 /// generation is unauthenticated until its own AUTH completes, and the
-/// engine re-issues `Effect::Replay` itself on `RelayAuthReady`.
+/// engine re-issues `Effect::Replay` itself when the AUTH reducer reaches
+/// Ready for that exact generation (`finish_auth_ok` in `core/mod.rs`).
 type Preambles = HashMap<RelaySessionKey, HashMap<SubId, String>>;
 
 #[derive(Clone, Copy)]
@@ -2045,10 +2073,24 @@ fn engine_loop<S, D>(
                 let _ = applied.send(());
             }
             Cmd::AddSigner { signer, reply } => {
+                let replaced = signer.public_key().and_then(|pubkey| {
+                    registry
+                        .auth_instance_for(pubkey)
+                        .map(|instance| (pubkey, instance))
+                });
                 let result = registry.add(signer);
                 let _ = reply.send(result.clone());
                 if let Ok(registration) = result {
-                    let effects = core.handle(EngineMsg::SignerAttached(registration.public_key()));
+                    let mut effects = Vec::new();
+                    if let Some((pubkey, instance)) = replaced {
+                        effects.extend(core.handle(EngineMsg::AuthCapabilityInvalidated(
+                            pubkey,
+                            crate::core::AuthCapability::Signer,
+                            instance,
+                        )));
+                    }
+                    effects
+                        .extend(core.handle(EngineMsg::SignerAttached(registration.public_key())));
                     dispatch_core_effects(
                         &core,
                         effects,
@@ -2066,7 +2108,27 @@ fn engine_loop<S, D>(
                 registration,
                 reply,
             } => {
-                let _ = reply.send(registry.remove(&registration));
+                let instance = SignerRegistry::auth_instance(&registration.identity);
+                let removed = registry.remove(&registration);
+                let _ = reply.send(removed);
+                if removed {
+                    let effects = core.handle(EngineMsg::AuthCapabilityInvalidated(
+                        registration.public_key(),
+                        crate::core::AuthCapability::Signer,
+                        instance,
+                    ));
+                    dispatch_core_effects(
+                        &core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
             }
             Cmd::SignEvent {
                 unsigned,
@@ -2771,7 +2833,8 @@ mod history_preflight_tests {
 /// worker join releases retirement capacity. Public read sessions replay the
 /// full preamble retained even when their first spawn was refused;
 /// write-only and PROTECTED sessions need only be opened, after which the
-/// ordinary Connected (and, for protected, `RelayAuthReady`) path advances
+/// ordinary Connected (and, for protected, the AUTH reducer's ready
+/// transition on the exact AUTH OK) path advances
 /// them — a protected session's reconnect must never auto-send REQs (#8),
 /// so its fresh worker gets an explicitly EMPTY reconnect preamble.
 fn retry_required_relay_workers<S: EventStore>(
@@ -2953,6 +3016,9 @@ fn dispatch_effect(
                     .send(Cmd::Engine(EngineMsg::SignerUnavailable(id, generation)));
             }
         },
+        Effect::RelayAuth(effect) => {
+            auth::dispatch(effect, pool, registry, runtime.self_inbox);
+        }
         Effect::RearmSignerIfAvailable(pubkey) => {
             if registry
                 .signer_for(pubkey)
@@ -3098,7 +3164,8 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
 ///
 /// PROTECTED sessions take a stricter path (#8): their frames are sent
 /// directly (the reducer only ever emits protected ops AFTER the exact
-/// current generation reported `RelayAuthReady`), but NO reconnect preamble
+/// current generation's AUTH reached Ready via `finish_auth_ok` on its
+/// exact AUTH OK), but NO reconnect preamble
 /// is ever stored for them — a fresh generation is unauthenticated until
 /// its own AUTH completes, so the pool must never auto-replay a protected
 /// REQ, and this module keeps no `preambles` entry that
@@ -3162,8 +3229,9 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
 
 /// `Effect::Replay`: `reqs` is `EngineCore`'s full CURRENT req list for
 /// `session` at the moment it observed `RelayConnected` (`core/mod.rs`'s
-/// `on_relay_connected`) or — for a protected session — `RelayAuthReady`
-/// (`on_relay_auth_ready`) -- an authoritative snapshot, not a delta, so the
+/// `on_relay_connected`) or — for a protected session — the AUTH reducer's
+/// ready transition (`finish_auth_ok`) -- an authoritative snapshot, not a
+/// delta, so the
 /// preamble entry for this session is rebuilt from scratch rather than
 /// patched. Resending these as fresh REQ frames on the just-connected handle
 /// is what makes reconnection replay observable even on the very first

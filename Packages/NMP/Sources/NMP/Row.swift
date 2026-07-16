@@ -60,15 +60,19 @@ public struct Row: Sendable, Identifiable, Hashable {
 }
 
 /// The AUTH negotiation phases worth surfacing while awaiting proof
-/// (reserved for #8 -- not yet populated by the engine).
+/// (populated by the #8 AUTH reducer).
 public enum AuthPhase: Sendable, Hashable {
+    case awaitingChallenge
     case awaitingPolicy
     case awaitingSignature
+    case awaitingRelayAck
 
     init(_ ffi: FfiAuthPhase) {
         switch ffi {
+        case .awaitingChallenge: self = .awaitingChallenge
         case .awaitingPolicy: self = .awaitingPolicy
         case .awaitingSignature: self = .awaitingSignature
+        case .awaitingRelayAck: self = .awaitingRelayAck
         }
     }
 }

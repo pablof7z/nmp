@@ -422,6 +422,26 @@ impl PoolInner {
         state.worker.as_ref()
     }
 
+    /// Exact connected-session command door for nonpersistent protocol
+    /// handoffs. Validation and command enqueue both happen while the one
+    /// `PoolInner` lock is held, so the translator cannot publish a newer
+    /// slot generation between them. The worker repeats the generation check
+    /// when draining to close the remaining worker-side reconnect race.
+    pub(super) fn connected_command_tx_for(
+        &self,
+        session: &RelaySessionKey,
+        h: RelayHandle,
+    ) -> Option<&WorkerHandle> {
+        let state = self.slots.get(h.slot as usize)?;
+        if state.session != *session
+            || state.generation != h.generation
+            || state.health.state != ConnState::Connected
+        {
+            return None;
+        }
+        state.worker.as_ref()
+    }
+
     pub(super) fn set_reconnect_preamble_for(&self, h: RelayHandle, frames: Vec<String>) -> bool {
         match self.command_tx_for(h) {
             Some(worker) => worker.push(WorkerCommand::SetReconnectPreamble(frames)),

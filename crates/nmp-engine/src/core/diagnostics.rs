@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use nostr::{JsonUtil, RelayUrl};
+use nostr::{EventId, JsonUtil, RelayUrl};
 
 use nmp_grammar::{AccessContext, RelaySessionKey};
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
@@ -79,6 +79,37 @@ pub struct RelayDiagnosticsSnapshot {
     pub nip77_behavior: &'static str,
 }
 
+/// Bounded, session-scoped AUTH reducer facts. Raw challenges and opaque
+/// capability identities are deliberately absent; the challenge is exposed
+/// only as a stable BLAKE3 descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthDiagnosticsSnapshot {
+    pub relay: RelayUrl,
+    pub access: AccessContext,
+    pub transport_slot: u32,
+    pub transport_generation: u64,
+    pub epoch_sequence: Option<u64>,
+    pub challenge_hash: Option<String>,
+    pub phase: AuthDiagnosticsPhase,
+    pub policy_bound: bool,
+    pub signer_bound: bool,
+    pub auth_event_id: Option<EventId>,
+    pub send_handoff_accepted: bool,
+    pub relay_ok_accepted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDiagnosticsPhase {
+    AwaitingChallenge,
+    AwaitingPolicy,
+    AwaitingSignature,
+    AwaitingSend,
+    AwaitingRelayAck,
+    Ready,
+    Denied,
+    Error,
+}
+
 /// The engine-global diagnostics snapshot (M5 plan §1.1) — "the acceptance
 /// test rendered on screen, permanently." One snapshot covers every
 /// currently-planned relay; there is no separate per-query diagnostics (that
@@ -87,6 +118,8 @@ pub struct RelayDiagnosticsSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsSnapshot {
     pub relays: Vec<RelayDiagnosticsSnapshot>,
+    /// At most one entry per currently connected protected session.
+    pub auth_sessions: Vec<AuthDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,
     pub dropped_merge_rules: Vec<&'static str>,
     /// DISCOVERED relays rejected by the engine's relay admission policy
@@ -182,6 +215,7 @@ pub(crate) fn build(
 
     DiagnosticsSnapshot {
         relays,
+        auth_sessions: Vec::new(),
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
         discovered_private_relays_rejected,
