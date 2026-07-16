@@ -123,13 +123,12 @@ pub struct DiagnosticsSnapshot {
     /// At most one entry per currently connected protected session.
     ///
     /// `#[doc(hidden)]`: the ENGINE owns this per-session AUTH read-out (#8
-    /// U4 — the capstone and runtime falsifiers consume it), but the governed
-    /// `nmp` facade re-exports `DiagnosticsSnapshot`, and the documented
-    /// facade projection of the auth-diagnostics contract (with its FFI
-    /// mapping and the app-facing policy API) is deliberately a later wave.
-    /// Hiding the field keeps it out of the frozen facade surface snapshot
-    /// exactly like Wave 2's deferral did, without denying engine-level
-    /// consumers the fact.
+    /// U4 — the capstone and runtime falsifiers consume it). The documented,
+    /// supported projection is the `nmp` facade's OWN mirror
+    /// (`nmp::DiagnosticsSnapshot.auth_sessions`, #8 Wave 5), converted at
+    /// its `DiagnosticsSubscription` delivery boundary; this engine-level
+    /// field stays hidden because the engine snapshot is mechanism, not the
+    /// app contract.
     #[doc(hidden)]
     pub auth_sessions: Vec<AuthDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,

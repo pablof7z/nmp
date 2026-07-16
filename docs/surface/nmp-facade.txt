@@ -12,12 +12,10 @@ pub use nmp::CoverageInterval
 pub use nmp::Demand
 pub use nmp::DemandError
 pub use nmp::Derived
-pub use nmp::DiagnosticsSnapshot
 pub use nmp::Durability
 pub use nmp::Event
 pub use nmp::EventId
 pub use nmp::Filter
-pub use nmp::FilterCoverageEntry
 pub use nmp::IdentityField
 pub use nmp::IndexedTagName
 pub use nmp::Kind
@@ -38,7 +36,6 @@ pub use nmp::PublicKey
 pub use nmp::ReceiptId
 pub use nmp::ReceiptReattachment
 pub use nmp::ReceiptStream
-pub use nmp::RelayDiagnosticsSnapshot
 pub use nmp::RelayUrl
 pub use nmp::Row
 pub use nmp::RowDelta
@@ -66,7 +63,88 @@ pub use nmp::WriteRouting
 pub use nmp::WriteStatus
 pub use nmp::decode_nostr_entity
 pub use nmp::known_local_signers
+pub enum nmp::AuthDiagnosticsPhase
+pub nmp::AuthDiagnosticsPhase::AwaitingChallenge
+pub nmp::AuthDiagnosticsPhase::AwaitingPolicy
+pub nmp::AuthDiagnosticsPhase::AwaitingRelayAck
+pub nmp::AuthDiagnosticsPhase::AwaitingSend
+pub nmp::AuthDiagnosticsPhase::AwaitingSignature
+pub nmp::AuthDiagnosticsPhase::Denied
+pub nmp::AuthDiagnosticsPhase::Error
+pub nmp::AuthDiagnosticsPhase::Ready
+impl core::clone::Clone for nmp::AuthDiagnosticsPhase
+pub fn nmp::AuthDiagnosticsPhase::clone(&self) -> nmp::AuthDiagnosticsPhase
+impl core::cmp::Eq for nmp::AuthDiagnosticsPhase
+impl core::cmp::PartialEq for nmp::AuthDiagnosticsPhase
+pub fn nmp::AuthDiagnosticsPhase::eq(&self, &nmp::AuthDiagnosticsPhase) -> bool
+impl core::fmt::Debug for nmp::AuthDiagnosticsPhase
+pub fn nmp::AuthDiagnosticsPhase::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::AuthDiagnosticsPhase
+impl core::marker::StructuralPartialEq for nmp::AuthDiagnosticsPhase
+impl core::marker::Freeze for nmp::AuthDiagnosticsPhase
+impl core::marker::Send for nmp::AuthDiagnosticsPhase
+impl core::marker::Sync for nmp::AuthDiagnosticsPhase
+impl core::marker::Unpin for nmp::AuthDiagnosticsPhase
+impl core::marker::UnsafeUnpin for nmp::AuthDiagnosticsPhase
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthDiagnosticsPhase
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthDiagnosticsPhase
+pub enum nmp::AuthPolicyDecision
+pub nmp::AuthPolicyDecision::Allow
+pub nmp::AuthPolicyDecision::Deny
+pub nmp::AuthPolicyDecision::Deny::reason: alloc::string::String
+impl core::clone::Clone for nmp::AuthPolicyDecision
+pub fn nmp::AuthPolicyDecision::clone(&self) -> nmp::AuthPolicyDecision
+impl core::cmp::Eq for nmp::AuthPolicyDecision
+impl core::cmp::PartialEq for nmp::AuthPolicyDecision
+pub fn nmp::AuthPolicyDecision::eq(&self, &nmp::AuthPolicyDecision) -> bool
+impl core::fmt::Debug for nmp::AuthPolicyDecision
+pub fn nmp::AuthPolicyDecision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::AuthPolicyDecision
+impl core::marker::Freeze for nmp::AuthPolicyDecision
+impl core::marker::Send for nmp::AuthPolicyDecision
+impl core::marker::Sync for nmp::AuthPolicyDecision
+impl core::marker::Unpin for nmp::AuthPolicyDecision
+impl core::marker::UnsafeUnpin for nmp::AuthPolicyDecision
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyDecision
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyDecision
+pub enum nmp::AuthPolicyError
+pub nmp::AuthPolicyError::Technical
+pub nmp::AuthPolicyError::Technical::reason: alloc::string::String
+pub nmp::AuthPolicyError::Unavailable
+impl core::clone::Clone for nmp::AuthPolicyError
+pub fn nmp::AuthPolicyError::clone(&self) -> nmp::AuthPolicyError
+impl core::cmp::Eq for nmp::AuthPolicyError
+impl core::cmp::PartialEq for nmp::AuthPolicyError
+pub fn nmp::AuthPolicyError::eq(&self, &nmp::AuthPolicyError) -> bool
+impl core::error::Error for nmp::AuthPolicyError
+impl core::fmt::Debug for nmp::AuthPolicyError
+pub fn nmp::AuthPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::AuthPolicyError
+pub fn nmp::AuthPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::AuthPolicyError
+impl core::marker::Freeze for nmp::AuthPolicyError
+impl core::marker::Send for nmp::AuthPolicyError
+impl core::marker::Sync for nmp::AuthPolicyError
+impl core::marker::Unpin for nmp::AuthPolicyError
+impl core::marker::UnsafeUnpin for nmp::AuthPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyError
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyError
+pub enum nmp::AuthPolicyResolveError
+pub nmp::AuthPolicyResolveError::AlreadyResolved(nmp::AuthPolicyResult)
+pub nmp::AuthPolicyResolveError::ReceiverDropped(nmp::AuthPolicyResult)
+impl core::fmt::Debug for nmp::AuthPolicyResolveError
+pub fn nmp::AuthPolicyResolveError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nmp::AuthPolicyResolveError
+impl core::marker::Send for nmp::AuthPolicyResolveError
+impl core::marker::Sync for nmp::AuthPolicyResolveError
+impl core::marker::Unpin for nmp::AuthPolicyResolveError
+impl core::marker::UnsafeUnpin for nmp::AuthPolicyResolveError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyResolveError
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyResolveError
 pub enum nmp::EngineError
+pub nmp::EngineError::AuthCapabilityInstanceExhausted
+pub nmp::EngineError::AuthCapabilityRegistryFull
+pub nmp::EngineError::AuthCapabilityRegistryFull::limit: usize
 pub nmp::EngineError::EngineClosed
 pub nmp::EngineError::ExecutorSaturated
 pub nmp::EngineError::ExecutorSaturated::capacity: usize
@@ -243,11 +321,145 @@ impl core::marker::Unpin for nmp::Window
 impl core::marker::UnsafeUnpin for nmp::Window
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::Window
 impl core::panic::unwind_safe::UnwindSafe for nmp::Window
+pub struct nmp::AccountRegistration
+impl nmp::AccountRegistration
+pub fn nmp::AccountRegistration::public_key(&self) -> nostr::key::public_key::PublicKey
+impl core::clone::Clone for nmp::AccountRegistration
+pub fn nmp::AccountRegistration::clone(&self) -> nmp::AccountRegistration
+impl core::cmp::Eq for nmp::AccountRegistration
+impl core::cmp::PartialEq for nmp::AccountRegistration
+pub fn nmp::AccountRegistration::eq(&self, &nmp::AccountRegistration) -> bool
+impl core::fmt::Debug for nmp::AccountRegistration
+pub fn nmp::AccountRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::AccountRegistration
+impl core::marker::Freeze for nmp::AccountRegistration
+impl core::marker::Send for nmp::AccountRegistration
+impl core::marker::Sync for nmp::AccountRegistration
+impl core::marker::Unpin for nmp::AccountRegistration
+impl core::marker::UnsafeUnpin for nmp::AccountRegistration
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AccountRegistration
+impl core::panic::unwind_safe::UnwindSafe for nmp::AccountRegistration
+pub struct nmp::AuthDiagnosticsSnapshot
+pub nmp::AuthDiagnosticsSnapshot::access: nmp_grammar::descriptor::AccessContext
+pub nmp::AuthDiagnosticsSnapshot::auth_event_id: core::option::Option<nostr::event::id::EventId>
+pub nmp::AuthDiagnosticsSnapshot::challenge_hash: core::option::Option<alloc::string::String>
+pub nmp::AuthDiagnosticsSnapshot::epoch_sequence: core::option::Option<u64>
+pub nmp::AuthDiagnosticsSnapshot::phase: nmp::AuthDiagnosticsPhase
+pub nmp::AuthDiagnosticsSnapshot::policy_bound: bool
+pub nmp::AuthDiagnosticsSnapshot::relay: nostr::types::url::RelayUrl
+pub nmp::AuthDiagnosticsSnapshot::relay_ok_accepted: bool
+pub nmp::AuthDiagnosticsSnapshot::send_handoff_accepted: bool
+pub nmp::AuthDiagnosticsSnapshot::signer_bound: bool
+pub nmp::AuthDiagnosticsSnapshot::transport_generation: u64
+pub nmp::AuthDiagnosticsSnapshot::transport_slot: u32
+impl core::clone::Clone for nmp::AuthDiagnosticsSnapshot
+pub fn nmp::AuthDiagnosticsSnapshot::clone(&self) -> nmp::AuthDiagnosticsSnapshot
+impl core::cmp::Eq for nmp::AuthDiagnosticsSnapshot
+impl core::cmp::PartialEq for nmp::AuthDiagnosticsSnapshot
+pub fn nmp::AuthDiagnosticsSnapshot::eq(&self, &nmp::AuthDiagnosticsSnapshot) -> bool
+impl core::fmt::Debug for nmp::AuthDiagnosticsSnapshot
+pub fn nmp::AuthDiagnosticsSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::AuthDiagnosticsSnapshot
+impl core::marker::Freeze for nmp::AuthDiagnosticsSnapshot
+impl core::marker::Send for nmp::AuthDiagnosticsSnapshot
+impl core::marker::Sync for nmp::AuthDiagnosticsSnapshot
+impl core::marker::Unpin for nmp::AuthDiagnosticsSnapshot
+impl core::marker::UnsafeUnpin for nmp::AuthDiagnosticsSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthDiagnosticsSnapshot
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthDiagnosticsSnapshot
+pub struct nmp::AuthPolicyOp
+impl nmp::AuthPolicyOp
+pub fn nmp::AuthPolicyOp::allow() -> Self
+pub fn nmp::AuthPolicyOp::deny(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nmp::AuthPolicyOp::pending_channel() -> (nmp::AuthPolicyPendingSender, Self)
+pub fn nmp::AuthPolicyOp::pending_channel_with_cancel(impl core::ops::function::FnOnce() + core::marker::Send + 'static) -> (nmp::AuthPolicyPendingSender, Self)
+pub fn nmp::AuthPolicyOp::ready(nmp::AuthPolicyResult) -> Self
+impl core::marker::Freeze for nmp::AuthPolicyOp
+impl core::marker::Send for nmp::AuthPolicyOp
+impl !core::marker::Sync for nmp::AuthPolicyOp
+impl core::marker::Unpin for nmp::AuthPolicyOp
+impl core::marker::UnsafeUnpin for nmp::AuthPolicyOp
+impl !core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyOp
+impl !core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyOp
+pub struct nmp::AuthPolicyPendingSender
+impl nmp::AuthPolicyPendingSender
+pub fn nmp::AuthPolicyPendingSender::resolve(&self, nmp::AuthPolicyResult) -> core::result::Result<(), nmp::AuthPolicyResolveError>
+impl core::clone::Clone for nmp::AuthPolicyPendingSender
+pub fn nmp::AuthPolicyPendingSender::clone(&self) -> nmp::AuthPolicyPendingSender
+impl core::marker::Freeze for nmp::AuthPolicyPendingSender
+impl core::marker::Send for nmp::AuthPolicyPendingSender
+impl core::marker::Sync for nmp::AuthPolicyPendingSender
+impl core::marker::Unpin for nmp::AuthPolicyPendingSender
+impl core::marker::UnsafeUnpin for nmp::AuthPolicyPendingSender
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyPendingSender
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyPendingSender
+pub struct nmp::AuthPolicyRegistration
+impl nmp::AuthPolicyRegistration
+pub fn nmp::AuthPolicyRegistration::expected_public_key(&self) -> nostr::key::public_key::PublicKey
+impl core::clone::Clone for nmp::AuthPolicyRegistration
+pub fn nmp::AuthPolicyRegistration::clone(&self) -> nmp::AuthPolicyRegistration
+impl core::cmp::Eq for nmp::AuthPolicyRegistration
+impl core::cmp::PartialEq for nmp::AuthPolicyRegistration
+pub fn nmp::AuthPolicyRegistration::eq(&self, &nmp::AuthPolicyRegistration) -> bool
+impl core::fmt::Debug for nmp::AuthPolicyRegistration
+pub fn nmp::AuthPolicyRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::AuthPolicyRegistration
+impl core::marker::Freeze for nmp::AuthPolicyRegistration
+impl core::marker::Send for nmp::AuthPolicyRegistration
+impl core::marker::Sync for nmp::AuthPolicyRegistration
+impl core::marker::Unpin for nmp::AuthPolicyRegistration
+impl core::marker::UnsafeUnpin for nmp::AuthPolicyRegistration
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyRegistration
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyRegistration
+pub struct nmp::AuthPolicyRequest
+impl nmp::AuthPolicyRequest
+pub fn nmp::AuthPolicyRequest::challenge(&self) -> &str
+pub fn nmp::AuthPolicyRequest::epoch_sequence(&self) -> u64
+pub fn nmp::AuthPolicyRequest::expected_pubkey(&self) -> nostr::key::public_key::PublicKey
+pub fn nmp::AuthPolicyRequest::relay(&self) -> &nostr::types::url::RelayUrl
+pub fn nmp::AuthPolicyRequest::transport_generation(&self) -> u64
+impl core::clone::Clone for nmp::AuthPolicyRequest
+pub fn nmp::AuthPolicyRequest::clone(&self) -> nmp::AuthPolicyRequest
+impl core::cmp::Eq for nmp::AuthPolicyRequest
+impl core::cmp::PartialEq for nmp::AuthPolicyRequest
+pub fn nmp::AuthPolicyRequest::eq(&self, &nmp::AuthPolicyRequest) -> bool
+impl core::fmt::Debug for nmp::AuthPolicyRequest
+pub fn nmp::AuthPolicyRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::AuthPolicyRequest
+impl core::marker::Freeze for nmp::AuthPolicyRequest
+impl core::marker::Send for nmp::AuthPolicyRequest
+impl core::marker::Sync for nmp::AuthPolicyRequest
+impl core::marker::Unpin for nmp::AuthPolicyRequest
+impl core::marker::UnsafeUnpin for nmp::AuthPolicyRequest
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyRequest
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyRequest
+pub struct nmp::DiagnosticsSnapshot
+pub nmp::DiagnosticsSnapshot::auth_sessions: alloc::vec::Vec<nmp::AuthDiagnosticsSnapshot>
+pub nmp::DiagnosticsSnapshot::discovered_private_relays_rejected: u64
+pub nmp::DiagnosticsSnapshot::dropped_merge_rules: alloc::vec::Vec<&'static str>
+pub nmp::DiagnosticsSnapshot::relays: alloc::vec::Vec<nmp::RelayDiagnosticsSnapshot>
+pub nmp::DiagnosticsSnapshot::sessions_rejected_over_cap: u64
+pub nmp::DiagnosticsSnapshot::store_degraded: core::option::Option<alloc::string::String>
+pub nmp::DiagnosticsSnapshot::transport_degraded: core::option::Option<alloc::string::String>
+pub nmp::DiagnosticsSnapshot::uncovered_author_count: usize
+impl core::clone::Clone for nmp::DiagnosticsSnapshot
+pub fn nmp::DiagnosticsSnapshot::clone(&self) -> nmp::DiagnosticsSnapshot
+impl core::default::Default for nmp::DiagnosticsSnapshot
+pub fn nmp::DiagnosticsSnapshot::default() -> nmp::DiagnosticsSnapshot
+impl core::fmt::Debug for nmp::DiagnosticsSnapshot
+pub fn nmp::DiagnosticsSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nmp::DiagnosticsSnapshot
+impl core::marker::Send for nmp::DiagnosticsSnapshot
+impl core::marker::Sync for nmp::DiagnosticsSnapshot
+impl core::marker::Unpin for nmp::DiagnosticsSnapshot
+impl core::marker::UnsafeUnpin for nmp::DiagnosticsSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::DiagnosticsSnapshot
+impl core::panic::unwind_safe::UnwindSafe for nmp::DiagnosticsSnapshot
 pub struct nmp::DiagnosticsSubscription
 impl nmp::DiagnosticsSubscription
 pub fn nmp::DiagnosticsSubscription::cancel(self)
 pub fn nmp::DiagnosticsSubscription::cancel_handle(&self) -> nmp::ObservationCancel
-pub fn nmp::DiagnosticsSubscription::recv(&self) -> core::option::Option<nmp_engine::core::diagnostics::DiagnosticsSnapshot>
+pub fn nmp::DiagnosticsSubscription::recv(&self) -> core::option::Option<nmp::DiagnosticsSnapshot>
 impl core::ops::drop::Drop for nmp::DiagnosticsSubscription
 pub fn nmp::DiagnosticsSubscription::drop(&mut self)
 impl core::marker::Freeze for nmp::DiagnosticsSubscription
@@ -260,7 +472,8 @@ impl !core::panic::unwind_safe::UnwindSafe for nmp::DiagnosticsSubscription
 pub struct nmp::Engine
 impl nmp::Engine
 pub fn nmp::Engine::active_account(&self) -> core::result::Result<core::option::Option<nostr::key::public_key::PublicKey>, nmp::EngineError>
-pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nostr::key::public_key::PublicKey, nmp::EngineError>
+pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nmp::AccountRegistration, nmp::EngineError>
+pub fn nmp::Engine::add_auth_policy<P>(&self, nostr::key::public_key::PublicKey, P) -> core::result::Result<nmp::AuthPolicyRegistration, nmp::EngineError> where P: nmp::AuthPolicy + 'static
 pub fn nmp::Engine::add_signer<Sig>(&self, Sig) -> core::result::Result<nmp_engine::runtime::SignerRegistration, nmp::EngineError> where Sig: nmp_signer::capability::SigningCapability + core::marker::Send + 'static
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
@@ -269,6 +482,8 @@ pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::res
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
+pub fn nmp::Engine::remove_account(&self, &nmp::AccountRegistration) -> core::result::Result<bool, nmp::EngineError>
+pub fn nmp::Engine::remove_auth_policy(&self, &nmp::AuthPolicyRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::remove_signer(&self, nmp_engine::runtime::SignerRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
@@ -288,6 +503,7 @@ pub nmp::EngineConfig::allowed_local_relay_hosts: alloc::vec::Vec<alloc::string:
 pub nmp::EngineConfig::app_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::fallback_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::indexer_relays: alloc::vec::Vec<alloc::string::String>
+pub nmp::EngineConfig::max_auth_capabilities: usize
 pub nmp::EngineConfig::max_native_tasks: usize
 pub nmp::EngineConfig::max_relays: usize
 pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
@@ -304,6 +520,20 @@ impl core::marker::Unpin for nmp::EngineConfig
 impl core::marker::UnsafeUnpin for nmp::EngineConfig
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineConfig
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineConfig
+pub struct nmp::FilterCoverageEntry
+pub nmp::FilterCoverageEntry::coverage: core::option::Option<nmp_store::coverage::CoverageInterval>
+pub nmp::FilterCoverageEntry::filter: alloc::string::String
+impl core::clone::Clone for nmp::FilterCoverageEntry
+pub fn nmp::FilterCoverageEntry::clone(&self) -> nmp::FilterCoverageEntry
+impl core::fmt::Debug for nmp::FilterCoverageEntry
+pub fn nmp::FilterCoverageEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nmp::FilterCoverageEntry
+impl core::marker::Send for nmp::FilterCoverageEntry
+impl core::marker::Sync for nmp::FilterCoverageEntry
+impl core::marker::Unpin for nmp::FilterCoverageEntry
+impl core::marker::UnsafeUnpin for nmp::FilterCoverageEntry
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::FilterCoverageEntry
+impl core::panic::unwind_safe::UnwindSafe for nmp::FilterCoverageEntry
 pub struct nmp::Frame
 pub nmp::Frame::deltas: alloc::vec::Vec<nmp_engine::core::RowDelta>
 pub nmp::Frame::evidence: nmp_engine::core::evidence::AcquisitionEvidence
@@ -331,6 +561,32 @@ impl core::marker::Unpin for nmp::ObservationCancel
 impl core::marker::UnsafeUnpin for nmp::ObservationCancel
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::ObservationCancel
 impl !core::panic::unwind_safe::UnwindSafe for nmp::ObservationCancel
+pub struct nmp::RelayDiagnosticsSnapshot
+pub nmp::RelayDiagnosticsSnapshot::access: nmp_grammar::descriptor::AccessContext
+pub nmp::RelayDiagnosticsSnapshot::authors_served: usize
+pub nmp::RelayDiagnosticsSnapshot::by_lane: alloc::vec::Vec<(nmp_router::facts::Lane, usize)>
+pub nmp::RelayDiagnosticsSnapshot::coverage: alloc::vec::Vec<nmp::FilterCoverageEntry>
+pub nmp::RelayDiagnosticsSnapshot::events_by_kind: alloc::vec::Vec<(u16, u64)>
+pub nmp::RelayDiagnosticsSnapshot::filters: alloc::vec::Vec<alloc::string::String>
+pub nmp::RelayDiagnosticsSnapshot::nip11_document_revision: core::option::Option<alloc::string::String>
+pub nmp::RelayDiagnosticsSnapshot::nip11_freshness: core::option::Option<&'static str>
+pub nmp::RelayDiagnosticsSnapshot::nip11_last_error: core::option::Option<alloc::string::String>
+pub nmp::RelayDiagnosticsSnapshot::nip11_supported_nips: core::option::Option<alloc::vec::Vec<u16>>
+pub nmp::RelayDiagnosticsSnapshot::nip77_advertisement: &'static str
+pub nmp::RelayDiagnosticsSnapshot::nip77_behavior: &'static str
+pub nmp::RelayDiagnosticsSnapshot::relay: nostr::types::url::RelayUrl
+pub nmp::RelayDiagnosticsSnapshot::wire_sub_count: usize
+impl core::clone::Clone for nmp::RelayDiagnosticsSnapshot
+pub fn nmp::RelayDiagnosticsSnapshot::clone(&self) -> nmp::RelayDiagnosticsSnapshot
+impl core::fmt::Debug for nmp::RelayDiagnosticsSnapshot
+pub fn nmp::RelayDiagnosticsSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nmp::RelayDiagnosticsSnapshot
+impl core::marker::Send for nmp::RelayDiagnosticsSnapshot
+impl core::marker::Sync for nmp::RelayDiagnosticsSnapshot
+impl core::marker::Unpin for nmp::RelayDiagnosticsSnapshot
+impl core::marker::UnsafeUnpin for nmp::RelayDiagnosticsSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayDiagnosticsSnapshot
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayDiagnosticsSnapshot
 pub struct nmp::RelayInformationDocument
 pub nmp::RelayInformationDocument::banner: core::option::Option<alloc::string::String>
 pub nmp::RelayInformationDocument::contact: core::option::Option<alloc::string::String>
@@ -482,7 +738,10 @@ impl core::marker::Unpin for nmp::WindowHandle
 impl core::marker::UnsafeUnpin for nmp::WindowHandle
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::WindowHandle
 impl !core::panic::unwind_safe::UnwindSafe for nmp::WindowHandle
+pub trait nmp::AuthPolicy: core::marker::Send
+pub fn nmp::AuthPolicy::evaluate(&self, nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp
 pub fn nmp::admits_network_relay_hint(&nostr::types::url::RelayUrl) -> bool
+pub type nmp::AuthPolicyResult = core::result::Result<nmp::AuthPolicyDecision, nmp::AuthPolicyError>
 
 # resolved dependency-owned reexports (rustdoc JSON format 60)
 reexport nmp::AccessContext => nmp_grammar::descriptor::AccessContext
@@ -5809,791 +6068,6 @@ reexport nmp::DemandError => nmp_grammar::descriptor::DemandError
 reexport nmp::Derived => nmp_grammar::binding::Derived
 {
   "previously_defined": "nmp_grammar::binding::Derived"
-}
-reexport nmp::DiagnosticsSnapshot => nmp_engine::core::diagnostics::DiagnosticsSnapshot
-{
-  "attrs": [],
-  "inner": {
-    "struct": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "kind": {
-        "plain": {
-          "fields": [
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "RelayDiagnosticsSnapshot",
-                                "resolved_item": {
-                                  "definition": {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct": {
-                                        "generics": {
-                                          "params": [],
-                                          "where_predicates": []
-                                        },
-                                        "kind": {
-                                          "plain": {
-                                            "fields": [
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": null,
-                                                      "path": "nostr::RelayUrl",
-                                                      "resolved_item": {
-                                                        "definition": {
-                                                          "previously_defined": "nostr::types::url::RelayUrl"
-                                                        },
-                                                        "path": "nostr::types::url::RelayUrl"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "relay",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": null,
-                                                      "path": "nmp_grammar::AccessContext",
-                                                      "resolved_item": {
-                                                        "definition": {
-                                                          "previously_defined": "nmp_grammar::descriptor::AccessContext"
-                                                        },
-                                                        "path": "nmp_grammar::descriptor::AccessContext"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "access",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "primitive": "usize"
-                                                  }
-                                                },
-                                                "name": "wire_sub_count",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "primitive": "usize"
-                                                  }
-                                                },
-                                                "name": "authors_served",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "tuple": [
-                                                                  {
-                                                                    "resolved_path": {
-                                                                      "args": null,
-                                                                      "path": "nmp_router::Lane",
-                                                                      "resolved_item": {
-                                                                        "definition": {
-                                                                          "attrs": [],
-                                                                          "inner": {
-                                                                            "enum": {
-                                                                              "generics": {
-                                                                                "params": [],
-                                                                                "where_predicates": []
-                                                                              },
-                                                                              "has_stripped_variants": false,
-                                                                              "variants": [
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "Nip65Write",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "Hint",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "Provenance",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "UserConfigured",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "IndexerDiscovery",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "GroupHost",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "DmInbox",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "Nip65Read",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "AppRelay",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "Fallback",
-                                                                                  "visibility": "default"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "variant": {
-                                                                                      "discriminant": null,
-                                                                                      "kind": "plain"
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "ExplicitPinned",
-                                                                                  "visibility": "default"
-                                                                                }
-                                                                              ]
-                                                                            }
-                                                                          },
-                                                                          "name": "Lane",
-                                                                          "visibility": "public"
-                                                                        },
-                                                                        "path": "nmp_router::facts::Lane"
-                                                                      }
-                                                                    }
-                                                                  },
-                                                                  {
-                                                                    "primitive": "usize"
-                                                                  }
-                                                                ]
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Vec",
-                                                      "resolved_item": {
-                                                        "path": "alloc::vec::Vec"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "by_lane",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "resolved_path": {
-                                                                  "args": null,
-                                                                  "path": "String",
-                                                                  "resolved_item": {
-                                                                    "path": "alloc::string::String"
-                                                                  }
-                                                                }
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Vec",
-                                                      "resolved_item": {
-                                                        "path": "alloc::vec::Vec"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "filters",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "tuple": [
-                                                                  {
-                                                                    "primitive": "u16"
-                                                                  },
-                                                                  {
-                                                                    "primitive": "u64"
-                                                                  }
-                                                                ]
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Vec",
-                                                      "resolved_item": {
-                                                        "path": "alloc::vec::Vec"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "events_by_kind",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "resolved_path": {
-                                                                  "args": null,
-                                                                  "path": "FilterCoverageEntry",
-                                                                  "resolved_item": {
-                                                                    "definition": {
-                                                                      "attrs": [],
-                                                                      "inner": {
-                                                                        "struct": {
-                                                                          "generics": {
-                                                                            "params": [],
-                                                                            "where_predicates": []
-                                                                          },
-                                                                          "kind": {
-                                                                            "plain": {
-                                                                              "fields": [
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "struct_field": {
-                                                                                      "resolved_path": {
-                                                                                        "args": null,
-                                                                                        "path": "String",
-                                                                                        "resolved_item": {
-                                                                                          "path": "alloc::string::String"
-                                                                                        }
-                                                                                      }
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "filter",
-                                                                                  "visibility": "public"
-                                                                                },
-                                                                                {
-                                                                                  "attrs": [],
-                                                                                  "inner": {
-                                                                                    "struct_field": {
-                                                                                      "resolved_path": {
-                                                                                        "args": {
-                                                                                          "angle_bracketed": {
-                                                                                            "args": [
-                                                                                              {
-                                                                                                "type": {
-                                                                                                  "resolved_path": {
-                                                                                                    "args": null,
-                                                                                                    "path": "nmp_store::CoverageInterval",
-                                                                                                    "resolved_item": {
-                                                                                                      "definition": {
-                                                                                                        "previously_defined": "nmp_store::coverage::CoverageInterval"
-                                                                                                      },
-                                                                                                      "path": "nmp_store::coverage::CoverageInterval"
-                                                                                                    }
-                                                                                                  }
-                                                                                                }
-                                                                                              }
-                                                                                            ],
-                                                                                            "constraints": []
-                                                                                          }
-                                                                                        },
-                                                                                        "path": "Option",
-                                                                                        "resolved_item": {
-                                                                                          "path": "core::option::Option"
-                                                                                        }
-                                                                                      }
-                                                                                    }
-                                                                                  },
-                                                                                  "name": "coverage",
-                                                                                  "visibility": "public"
-                                                                                }
-                                                                              ],
-                                                                              "has_stripped_fields": false
-                                                                            }
-                                                                          }
-                                                                        }
-                                                                      },
-                                                                      "name": "FilterCoverageEntry",
-                                                                      "visibility": "public"
-                                                                    },
-                                                                    "path": "nmp_engine::core::diagnostics::FilterCoverageEntry"
-                                                                  }
-                                                                }
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Vec",
-                                                      "resolved_item": {
-                                                        "path": "alloc::vec::Vec"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "coverage",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "resolved_path": {
-                                                                  "args": {
-                                                                    "angle_bracketed": {
-                                                                      "args": [
-                                                                        {
-                                                                          "type": {
-                                                                            "primitive": "u16"
-                                                                          }
-                                                                        }
-                                                                      ],
-                                                                      "constraints": []
-                                                                    }
-                                                                  },
-                                                                  "path": "Vec",
-                                                                  "resolved_item": {
-                                                                    "path": "alloc::vec::Vec"
-                                                                  }
-                                                                }
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Option",
-                                                      "resolved_item": {
-                                                        "path": "core::option::Option"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "nip11_supported_nips",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "resolved_path": {
-                                                                  "args": null,
-                                                                  "path": "String",
-                                                                  "resolved_item": {
-                                                                    "path": "alloc::string::String"
-                                                                  }
-                                                                }
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Option",
-                                                      "resolved_item": {
-                                                        "path": "core::option::Option"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "nip11_document_revision",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "borrowed_ref": {
-                                                                  "is_mutable": false,
-                                                                  "lifetime": "'static",
-                                                                  "type": {
-                                                                    "primitive": "str"
-                                                                  }
-                                                                }
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Option",
-                                                      "resolved_item": {
-                                                        "path": "core::option::Option"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "nip11_freshness",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "resolved_path": {
-                                                      "args": {
-                                                        "angle_bracketed": {
-                                                          "args": [
-                                                            {
-                                                              "type": {
-                                                                "resolved_path": {
-                                                                  "args": null,
-                                                                  "path": "String",
-                                                                  "resolved_item": {
-                                                                    "path": "alloc::string::String"
-                                                                  }
-                                                                }
-                                                              }
-                                                            }
-                                                          ],
-                                                          "constraints": []
-                                                        }
-                                                      },
-                                                      "path": "Option",
-                                                      "resolved_item": {
-                                                        "path": "core::option::Option"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "nip11_last_error",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "borrowed_ref": {
-                                                      "is_mutable": false,
-                                                      "lifetime": "'static",
-                                                      "type": {
-                                                        "primitive": "str"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "nip77_advertisement",
-                                                "visibility": "public"
-                                              },
-                                              {
-                                                "attrs": [],
-                                                "inner": {
-                                                  "struct_field": {
-                                                    "borrowed_ref": {
-                                                      "is_mutable": false,
-                                                      "lifetime": "'static",
-                                                      "type": {
-                                                        "primitive": "str"
-                                                      }
-                                                    }
-                                                  }
-                                                },
-                                                "name": "nip77_behavior",
-                                                "visibility": "public"
-                                              }
-                                            ],
-                                            "has_stripped_fields": false
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "RelayDiagnosticsSnapshot",
-                                    "visibility": "public"
-                                  },
-                                  "path": "nmp_engine::core::diagnostics::RelayDiagnosticsSnapshot"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Vec",
-                    "resolved_item": {
-                      "path": "alloc::vec::Vec"
-                    }
-                  }
-                }
-              },
-              "name": "relays",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "primitive": "usize"
-                }
-              },
-              "name": "uncovered_author_count",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "borrowed_ref": {
-                                "is_mutable": false,
-                                "lifetime": "'static",
-                                "type": {
-                                  "primitive": "str"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Vec",
-                    "resolved_item": {
-                      "path": "alloc::vec::Vec"
-                    }
-                  }
-                }
-              },
-              "name": "dropped_merge_rules",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "primitive": "u64"
-                }
-              },
-              "name": "discovered_private_relays_rejected",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "primitive": "u64"
-                }
-              },
-              "name": "sessions_rejected_over_cap",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "store_degraded",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "String",
-                                "resolved_item": {
-                                  "path": "alloc::string::String"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Option",
-                    "resolved_item": {
-                      "path": "core::option::Option"
-                    }
-                  }
-                }
-              },
-              "name": "transport_degraded",
-              "visibility": "public"
-            }
-          ],
-          "has_stripped_fields": true
-        }
-      }
-    }
-  },
-  "name": "DiagnosticsSnapshot",
-  "visibility": "public"
 }
 reexport nmp::Durability => nmp_grammar::write::Durability
 {
@@ -20180,10 +19654,6 @@ reexport nmp::Filter => nmp_grammar::binding::Filter
 {
   "previously_defined": "nmp_grammar::binding::Filter"
 }
-reexport nmp::FilterCoverageEntry => nmp_engine::core::diagnostics::FilterCoverageEntry
-{
-  "previously_defined": "nmp_engine::core::diagnostics::FilterCoverageEntry"
-}
 reexport nmp::IdentityField => nmp_grammar::selector::IdentityField
 {
   "previously_defined": "nmp_grammar::selector::IdentityField"
@@ -20198,7 +19668,141 @@ reexport nmp::Kind => nostr::event::kind::Kind
 }
 reexport nmp::Lane => nmp_router::facts::Lane
 {
-  "previously_defined": "nmp_router::facts::Lane"
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Nip65Write",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Hint",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Provenance",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "UserConfigured",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "IndexerDiscovery",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "GroupHost",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "DmInbox",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Nip65Read",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "AppRelay",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Fallback",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "ExplicitPinned",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "Lane",
+  "visibility": "public"
 }
 reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
 {
@@ -25602,10 +25206,6 @@ reexport nmp::ReceiptStream => nmp_engine::runtime::ReceiptStream
   },
   "name": "ReceiptStream",
   "visibility": "public"
-}
-reexport nmp::RelayDiagnosticsSnapshot => nmp_engine::core::diagnostics::RelayDiagnosticsSnapshot
-{
-  "previously_defined": "nmp_engine::core::diagnostics::RelayDiagnosticsSnapshot"
 }
 reexport nmp::RelayUrl => nostr::types::url::RelayUrl
 {

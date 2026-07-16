@@ -14,7 +14,9 @@
 //! - [`Engine::publish`] -- a [`WriteIntent`] in, a `Receiver<`[`WriteStatus`]`>`
 //!   out.
 //!
-//! Plus identity and signer lifecycle ([`Engine::add_account`],
+//! Plus identity, signer, and NIP-42 AUTH-policy lifecycle
+//! ([`Engine::add_account`], [`Engine::remove_account`],
+//! [`Engine::add_auth_policy`], [`Engine::remove_auth_policy`],
 //! [`Engine::add_signer`], [`Engine::remove_signer`], and
 //! [`Engine::set_active_account`]), [`Engine::observe_diagnostics`], and
 //! [`Engine::shutdown`]. Every verb fails closed with
@@ -47,17 +49,27 @@
 //! proved by `nmp-consumer-check`, a separate crate whose `Cargo.toml`
 //! depends on `nmp` alone.
 
+mod auth;
 mod config;
+mod diagnostics;
 mod engine;
 mod error;
 mod relay_information;
 mod subscription;
 
+pub use auth::{
+    AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
+    AuthPolicyRequest, AuthPolicyResolveError, AuthPolicyResult,
+};
 pub use config::EngineConfig;
+pub use diagnostics::{
+    AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
+    RelayDiagnosticsSnapshot,
+};
 #[doc(hidden)]
 pub use engine::NativeTaskCancel;
 pub use engine::RelayInformationRequestError;
-pub use engine::{Engine, SignEventRequest};
+pub use engine::{AccountRegistration, AuthPolicyRegistration, Engine, SignEventRequest};
 pub use error::EngineError;
 #[doc(hidden)]
 pub use nmp_executor::{
@@ -128,14 +140,13 @@ pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,
-// or an app cannot even print what it read. (The public per-session
-// AUTH-diagnostics projection -- `AuthDiagnosticsSnapshot`/
-// `AuthDiagnosticsPhase` -- is intentionally NOT part of the supported
-// facade surface yet: #8 U4 gives `DiagnosticsSnapshot` an engine-owned
-// `auth_sessions` read-out for its own falsifiers/capstone, but the field is
-// `#[doc(hidden)]` and its types are not re-exported here. The documented
-// facade/FFI auth-diagnostics read-out lands with the app-facing policy
-// API's wave.)
+// or an app cannot even print what it read. The diagnostics snapshot family
+// itself (`DiagnosticsSnapshot`/`RelayDiagnosticsSnapshot`/
+// `FilterCoverageEntry` plus the #8 AUTH read-out
+// `AuthDiagnosticsSnapshot`/`AuthDiagnosticsPhase`) is facade-OWNED --
+// defined in [`mod@diagnostics`] and exported above, converted once at the
+// `DiagnosticsSubscription` delivery boundary -- rather than re-exported
+// from the engine (the `bc8fb97` NIP-11 pattern).
 //
 // Two distinct coverage surfaces live here, deliberately not conflated
 // (`docs/design/scoped-evidence-49-12-plan.md` §4): `AcquisitionEvidence`
@@ -146,8 +157,7 @@ pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
 pub use nmp_engine::core::{
-    AcquisitionEvidence, AuthPhase, DiagnosticsSnapshot, FilterCoverageEntry,
-    RelayDiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
+    AcquisitionEvidence, AuthPhase, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
     WindowLoad,
 };
 pub use nmp_router::Lane;

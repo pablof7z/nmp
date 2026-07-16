@@ -42,6 +42,14 @@ pub enum EngineError {
     InvalidSecretKey,
     /// A custom capability did not expose a stable registry identity.
     SignerMissingPublicKey,
+    /// The shared account-signer/AUTH-policy capability registry reached its
+    /// configured [`EngineConfig::max_auth_capabilities`](crate::EngineConfig::max_auth_capabilities)
+    /// bound (#8). Nothing was registered behind this refusal.
+    AuthCapabilityRegistryFull { limit: usize },
+    /// The monotonic capability-instance namespace that distinguishes stale
+    /// registrations from their replacements has been exhausted (#8). It
+    /// never wraps or reuses an identity; registration fails closed instead.
+    AuthCapabilityInstanceExhausted,
     /// A windowed [`Engine::observe`](crate::Engine::observe) declared an
     /// `initial` window size greater than its `max` ceiling (#485). Caught
     /// before the engine is touched; zero sizes are unrepresentable via
@@ -82,6 +90,12 @@ impl std::fmt::Display for EngineError {
             ),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
+            Self::AuthCapabilityRegistryFull { limit } => {
+                write!(f, "AUTH capability registry is full at {limit} entries")
+            }
+            Self::AuthCapabilityInstanceExhausted => {
+                write!(f, "AUTH capability instance space exhausted")
+            }
             Self::WindowInitialExceedsMax { initial, max } => {
                 write!(f, "window initial size {initial} exceeds its max {max}")
             }
@@ -125,6 +139,33 @@ impl EngineError {
                 Self::ReceiptCorrelationIdExhausted
             }
             nmp_engine::core::PublishError::EngineShuttingDown => Self::EngineClosed,
+        }
+    }
+
+    pub(crate) fn from_add_signer_error(error: nmp_engine::runtime::AddSignerError) -> Self {
+        match error {
+            nmp_engine::runtime::AddSignerError::MissingPublicKey => Self::SignerMissingPublicKey,
+            nmp_engine::runtime::AddSignerError::CapabilityInstanceExhausted => {
+                Self::AuthCapabilityInstanceExhausted
+            }
+            nmp_engine::runtime::AddSignerError::RegistryFull { limit } => {
+                Self::AuthCapabilityRegistryFull { limit }
+            }
+            nmp_engine::runtime::AddSignerError::EngineShuttingDown => Self::EngineClosed,
+        }
+    }
+
+    pub(crate) fn from_add_auth_policy_error(
+        error: nmp_engine::runtime::AddAuthPolicyError,
+    ) -> Self {
+        match error {
+            nmp_engine::runtime::AddAuthPolicyError::CapabilityInstanceExhausted => {
+                Self::AuthCapabilityInstanceExhausted
+            }
+            nmp_engine::runtime::AddAuthPolicyError::RegistryFull { limit } => {
+                Self::AuthCapabilityRegistryFull { limit }
+            }
+            nmp_engine::runtime::AddAuthPolicyError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 }
