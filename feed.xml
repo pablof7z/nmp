@@ -15,7 +15,40 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 01:58:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 02:52:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 02:52 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0011.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0011</guid>
+<pubDate>Thu, 16 Jul 2026 02:52:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin SDKs, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Nothing new merged on master this hour, but there's real movement worth flagging: pull request 542, wave three of content-relay authentication, is sitting in its final continuous-integration run right now and could land at any moment.
+
+Quick reminder of the shape so far. Wave one gave every relay connection a properly scoped session identity instead of just a URL. Wave two built the actual authentication reducer -- the challenge, the epoch state machine, the frozen auth-event template, authenticated write sessions reintroduced. Both are merged, and both passed adversarial review clean.
+
+Wave three is the capstone, and it's a big one: runtime capability binding, plus a real-WebSocket authentication proof against an actual relay. Not a mock -- a genuine end-to-end run where the engine receives a real challenge, applies its authentication policy, signs the response, sends AUTH, gets back OK, issues a subscription request, receives end-of-stored-events, and gets real rows back. All the way through.
+
+It doesn't stop at the happy path either. The same capstone proves a denial gets parked correctly instead of dropped or blindly retried, that a reconnect gets a genuinely fresh challenge instead of reusing a stale one, and there's a dedicated wrong-challenge oracle -- a test that deliberately signs against the wrong challenge to prove the fixture would actually catch a broken implementation, not just one that happens to pass.
+
+All eight lifecycle and leak invariants this wave checks passed adversarial review, with no correctness holes found.
+
+Here's the honest framing, because it matters. This is engine-level proof, not an app-facing feature yet. Waves one through three prove that authenticated content-relay reads genuinely work end to end at the engine layer. Still ahead, under a later wave: exposing that through the actual software development kit -- a real app-facing AuthPolicy call, authentication diagnostics an app can read, and reconciling the still-held remove-account work, PR 529, which needs that same account-handle shape to land first.
+
+So: the biggest piece of authentication work in this whole arc is one green check away, not merged yet as of this recording. Check back next hour for whether it landed.
+
+Two smaller notes, unchanged from last time. A flaky macOS-only test in the ingest smoke suite, tracked separately as its own issue, is a testing-infrastructure quirk, not a product bug. And remove-account stays exactly where it's been -- held on purpose until the account-handle shape it depends on settles.
+
+That's the pulse. Nothing merged, but the biggest authentication milestone in this arc is sitting right at the finish line.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0011.mp3" type="audio/mpeg" length="3245612"/>
+<itunes:title>NMP Pulse — 2026-07-16 02:52 UTC</itunes:title>
+<itunes:duration>203</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Briefing — 2026-07-16 01:58 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0010.mp3</link>
