@@ -80,6 +80,8 @@ pub struct RelayDiagnosticsSnapshot {
     /// `unknown`, `probing`, `behaviorally_proven`, or
     /// `behaviorally_rejected`. Kept separate from advertisement evidence.
     pub nip77_behavior: &'static str,
+    /// Current gap-free live-first handoff phase.
+    pub nip77_handoff: &'static str,
 }
 
 impl RelayDiagnosticsSnapshot {
@@ -102,6 +104,7 @@ impl RelayDiagnosticsSnapshot {
             nip11_last_error,
             nip77_advertisement,
             nip77_behavior,
+            nip77_handoff,
         } = value;
         Self {
             relay,
@@ -121,6 +124,7 @@ impl RelayDiagnosticsSnapshot {
             nip11_last_error,
             nip77_advertisement,
             nip77_behavior,
+            nip77_handoff,
         }
     }
 }
@@ -373,6 +377,7 @@ mod tests {
                 nip11_last_error: Some("timed out".to_string()),
                 nip77_advertisement: "advertised_supported",
                 nip77_behavior: "behaviorally_proven",
+                nip77_handoff: "reconciling",
             }],
             auth_sessions: vec![engine_auth_session(
                 nmp_engine::core::AuthDiagnosticsPhase::AwaitingRelayAck,
@@ -411,6 +416,7 @@ mod tests {
         assert_eq!(row.nip11_last_error.as_deref(), Some("timed out"));
         assert_eq!(row.nip77_advertisement, "advertised_supported");
         assert_eq!(row.nip77_behavior, "behaviorally_proven");
+        assert_eq!(row.nip77_handoff, "reconciling");
 
         assert_eq!(facade.auth_sessions.len(), 1);
         let auth = &facade.auth_sessions[0];

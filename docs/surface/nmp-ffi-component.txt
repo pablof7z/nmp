@@ -6158,6 +6158,12 @@ record Record {
             default: None,
             docstring: None,
         },
+        Field {
+            name: "nip77_handoff",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
     ],
     docstring: Some(
         "One relay's full diagnostics (M5 plan §1.1) -- per-relay wire-sub count,\nexact filters, lane breakdown, reverse coverage (authors served), events\nactually received per kind, and per-filter coverage state. Every field\nhere is a REAL number read off the running engine -- never fabricated or\nestimated (the plan's truth-anchor rule).",

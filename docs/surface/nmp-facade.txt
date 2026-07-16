@@ -574,6 +574,7 @@ pub nmp::RelayDiagnosticsSnapshot::nip11_last_error: core::option::Option<alloc:
 pub nmp::RelayDiagnosticsSnapshot::nip11_supported_nips: core::option::Option<alloc::vec::Vec<u16>>
 pub nmp::RelayDiagnosticsSnapshot::nip77_advertisement: &'static str
 pub nmp::RelayDiagnosticsSnapshot::nip77_behavior: &'static str
+pub nmp::RelayDiagnosticsSnapshot::nip77_handoff: &'static str
 pub nmp::RelayDiagnosticsSnapshot::relay: nostr::types::url::RelayUrl
 pub nmp::RelayDiagnosticsSnapshot::wire_sub_count: usize
 impl core::clone::Clone for nmp::RelayDiagnosticsSnapshot
