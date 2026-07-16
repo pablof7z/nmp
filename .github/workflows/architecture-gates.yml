@@ -1,0 +1,61 @@
+# Architecture review gates -- the two mechanical checks from
+# docs/design/architecture-review-gates.md (issue #496):
+#
+#   gate 5  Cross-SDK parity: the hand-written Swift and Kotlin SDK surfaces
+#           must both cover every concept the Rust FFI exports
+#           (scripts/check-sdk-parity.sh + its documented allowlist).
+#   gate 6  Falsifier honesty: every symbol/path a PR's "Updated falsifiers"
+#           field or "Falsifiers" section concretely names must exist in the
+#           tree the PR produces (scripts/check-falsifier-honesty.sh).
+#
+# This is a separate workflow file on purpose: .github/workflows/ci.yml is a
+# protected surface-governance program (scripts/check-surface-governance.sh
+# rejects ordinary-PR edits to it), while these two checks are plain
+# shell-over-git with no toolchain, no secrets, and no pull_request_target
+# trust decisions -- an ordinary reviewable workflow is the right home.
+#
+# Both jobs are intended to be branch-protection REQUIRED checks (an
+# owner/admin setting; see the gate doc). They gate on content only and never
+# execute PR-provided code beyond these two repo scripts.
+
+name: Architecture gates
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  sdk-parity:
+    name: Cross-SDK parity (gate 5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Diff Swift/Kotlin SDK vocabulary against the Rust FFI export surface
+        run: bash scripts/check-sdk-parity.sh
+
+  falsifier-honesty:
+    name: Falsifier honesty (gate 6)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The PR body is untrusted text. It reaches the script only as a file
+      # via an env var (never shell-interpolated), and the script only ever
+      # greps it.
+      - name: Capture PR body as claim text
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+
+      - name: Verify named falsifiers/mechanisms exist in the PR tree
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/check-falsifier-honesty.sh "$BASE_SHA" HEAD "$RUNNER_TEMP/pr-body.md"

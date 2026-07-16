@@ -1,0 +1,16 @@
+# Cross-SDK parity allowlist for scripts/check-sdk-parity.sh (gate 5, #496).
+#
+# Each entry suppresses EXACTLY ONE concept word on EXACTLY ONE side. This is
+# the narrow escape hatch for a documented, intentional per-platform modeling
+# difference -- it is not a mute button. An entry needs a justification that a
+# reviewer can verify against the named source locations; if you cannot write
+# one, the report line is a real parity gap and the fix belongs in the SDK,
+# not here. The checker validates this file's format and fails on a malformed
+# line, and reports (without failing) any entry that no longer suppresses
+# anything, so stale entries surface for deletion.
+#
+# Format: <concept-word> <swift|kotlin> <justification, one line>
+# - <concept-word>: lowercase token exactly as the checker reports it.
+# - <side>: the single SDK side the word may be absent from.
+#
+decision swift FfiContentClaimDecision/FfiContentResolutionDecision: Swift consumes evaluateContentClaim/resolution via exhaustive dot-shorthand switches (Packages/NMP/Sources/NMPContent/ContentSession.swift) and models the app-facing handle as NostrContentClaim, so the type name -- and with it the word "decision" -- never appears as a hand-written Swift identifier; Kotlin must import FfiContentClaimDecision by name to pattern-match it (Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/ContentSession.kt). All four decision arms (Acquire/Cycle/DepthLimit/ActiveLimit) are handled identically on both platforms: an idiomatic naming difference, not a parity gap. Kept even while the word is incidentally present via a doc comment ("authorization decision", Packages/NMP/Sources/NMP/AuthPolicy.swift) so that rewording an unrelated comment cannot re-break CI (#496).
