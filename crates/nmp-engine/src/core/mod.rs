@@ -6734,14 +6734,46 @@ impl<S: EventStore> EngineCore<S> {
             .map(|(sub_id, _)| sub_id.clone())
             .collect();
         for sub_id in temporary {
-            if let Some(TemporaryReq::MissingIds { neg_sub_id, .. }) =
-                self.pending_backfills.remove(&sub_id)
-            {
-                // NEG has already closed on the wire, but its coverage
-                // snapshot intentionally remained alive while the missing
-                // ids were in flight. Withdrawing/superseding that fetch
-                // must release the deferred snapshot too.
-                self.attribution.discard_sub(&neg_sub_id);
+            match self.pending_backfills.remove(&sub_id) {
+                Some(TemporaryReq::MissingIds { neg_sub_id, .. }) => {
+                    // NEG has already closed on the wire, but its coverage
+                    // snapshot intentionally remained alive while the missing
+                    // ids were in flight. Withdrawing/superseding that fetch
+                    // must release the deferred snapshot too.
+                    self.attribution.discard_sub(&neg_sub_id);
+                }
+                Some(TemporaryReq::BacklogActivatesLive {
+                    live_sub_id,
+                    prior_live_sub_id,
+                    ..
+                }) => {
+                    // The live candidate REQ is tracked ONLY inside this
+                    // fallback entry while its own EOSE is still
+                    // outstanding -- it lives in neither
+                    // `pending_neg_handoffs` nor `active_nip77_live`.
+                    // Withdrawing/superseding demand mid-fallback must
+                    // close and discard it here, or it leaks forever: a
+                    // late EOSE on its orphaned wire id would otherwise
+                    // still resolve through `attribution` and mint
+                    // phantom coverage for demand that no longer exists.
+                    self.attribution.discard_sub(&live_sub_id);
+                    closes.insert(live_sub_id);
+                    // `prior_live_sub_id` is ordinarily still the entry
+                    // tracked in `active_nip77_live[plan_sub_id]`, closed
+                    // either by `close_nip77_plan` (full withdrawal) or
+                    // carried forward into the next handoff's own
+                    // `prior_live_sub_id` (supersession, see
+                    // `begin_neg_handoff`). Only close it here if it has
+                    // already drifted away from that slot, so this never
+                    // double-closes a subscription another path owns.
+                    if let Some(prior) = prior_live_sub_id {
+                        if self.active_nip77_live.get(plan_sub_id) != Some(&prior) {
+                            self.attribution.discard_sub(&prior);
+                            closes.insert(prior);
+                        }
+                    }
+                }
+                Some(TemporaryReq::Backlog { .. }) | None => {}
             }
             self.attribution.discard_sub(&sub_id);
             closes.insert(sub_id);
