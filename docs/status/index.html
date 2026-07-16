@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-16 08:58 UTC</p>
-    <p class="ep-sub">2026-07-16 &middot; Pulse: the #47 signer-lifecycle epic closes; Blossom verbs land; the SDK projection is honestly red &middot; ~3.2 min</p>
-    <audio controls preload="none" src="reports/pulse-0017.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0017.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-16 09:51 UTC</p>
+    <p class="ep-sub">2026-07-16 &middot; Pulse: Blossom media lands on Swift + Kotlin, not just Rust &middot; ~3.0 min</p>
+    <audio controls preload="none" src="reports/pulse-0018.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0018.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">Two stories this cycle. The signer-lifecycle epic (<a href="https://github.com/pablof7z/nmp/issues/47">#47</a>) is <b>fully closed</b>: last cycle's failing final unit &mdash; carrying a parked write's exact frozen pubkey (<a href="https://github.com/pablof7z/nmp/pull/556">#556</a>) &mdash; was fixed and merged, so all four units (zeroization, per-write override, reattachment, Keychain + JVM KeyStore vaults) now ship across Rust/FFI/Swift/Kotlin. Blossom media (<a href="https://github.com/pablof7z/nmp/issues/216">#216</a>) added mirror/delete/list with per-verb bound authorizations (<a href="https://github.com/pablof7z/nmp/pull/557">#557</a>) on top of the upload core &mdash; the full BUD-11 verb set, direct-Rust. The honest note: the FFI + Swift + Kotlin projection (<a href="https://github.com/pablof7z/nmp/pull/560">#560</a>) is in review and <b>not green</b> &mdash; Rust, parity, falsifier, and surface gates pass, but the Swift build fails on a real <code>[UInt8]</code>&rarr;<code>Data</code> type mismatch, not a flake. No app-facing Blossom call on any platform until that lands.</p>
+    <p class="ep-blurb">Blossom media (<a href="https://github.com/pablof7z/nmp/issues/216">#216</a>) T15-A is now complete end-to-end: the FFI + Swift + Kotlin projection (<a href="https://github.com/pablof7z/nmp/pull/560">#560</a>) that was red last cycle on a real <code>[UInt8]</code>&rarr;<code>Data</code> mismatch is fixed and merged clean &mdash; Rust, parity, falsifier-honesty, and both the Swift and Kotlin package builds all pass. Upload/mirror/delete/list are now callable from Rust, Swift, and Kotlin alike. Honest note: upload durability is currently <b>app-owned</b> (a standalone async call, not yet a persisted/retried engine obligation) &mdash; an engine-integrated durable-upload upgrade is tracked as an explicit additive follow-up (<a href="https://github.com/pablof7z/nmp/issues/562">#562</a>), not a silent gap. NIP-68 <code>imeta</code> (<a href="https://github.com/pablof7z/nmp/issues/558">#558</a>) and upload-then-publish composition (<a href="https://github.com/pablof7z/nmp/issues/559">#559</a>) are next.</p>
   </section>
 
   <details class="archive" id="archive">
