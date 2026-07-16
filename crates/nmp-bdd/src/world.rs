@@ -614,6 +614,7 @@ impl NmpWorld {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             })
             .expect("BDD receipt correlation namespace must be available");
         self.last_receipt = Some(ReceiptState {
@@ -644,6 +645,7 @@ impl NmpWorld {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             })
             .expect("BDD receipt correlation namespace must be available");
         self.last_receipt = Some(ReceiptState {

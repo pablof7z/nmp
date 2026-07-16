@@ -39,6 +39,7 @@ fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
         routing: "lane-contract".into(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
+        correlation: None,
     }
 }
 

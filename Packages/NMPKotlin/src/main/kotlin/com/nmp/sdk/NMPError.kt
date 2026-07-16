@@ -103,6 +103,12 @@ sealed class NMPError(message: String) : Exception(message) {
     data class RelayInformationWaitersSaturated(val capacity: ULong) :
         NMPError("relay information refused: per-relay waiter capacity $capacity is full")
 
+    /** #591: [WriteIntent.correlation]/`reattachReceipt`'s correlation
+     * overload was given a token that failed the bounded/non-empty
+     * validation. */
+    data class InvalidCorrelationToken(val got: String, val reason: String) :
+        NMPError("invalid correlation token $got: $reason")
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -139,6 +145,8 @@ sealed class NMPError(message: String) : Exception(message) {
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
                 is FfiException.RelayInformationWaitersSaturated ->
                     RelayInformationWaitersSaturated(ffi.capacity)
+                is FfiException.InvalidCorrelationToken ->
+                    InvalidCorrelationToken(ffi.got, ffi.reason)
             }
     }
 }

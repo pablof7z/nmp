@@ -1048,6 +1048,7 @@ fn write_ack_per_relay_over_real_relays() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
 
@@ -1242,6 +1243,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -1407,6 +1409,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -1431,6 +1434,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(

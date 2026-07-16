@@ -97,6 +97,7 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
         routing: "author-outbox".to_string(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
+        correlation: None,
     }
 }
 

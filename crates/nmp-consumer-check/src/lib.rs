@@ -102,6 +102,7 @@ pub fn build_unsigned_intent(author: PublicKey, content: &str) -> WriteIntent {
         durability: Durability::Ephemeral,
         routing: WriteRouting::AuthorOutbox,
         identity_override: None,
+        correlation: None,
     }
 }
 
