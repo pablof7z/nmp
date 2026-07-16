@@ -63,7 +63,8 @@ private func demand(from ffi: FfiDemand) -> NMPDemand {
         selection: filter(from: ffi.selection),
         source: source(from: ffi.source),
         access: access(from: ffi.access),
-        cache: cache(from: ffi.cache)
+        cache: cache(from: ffi.cache),
+        freshness: freshness(from: ffi.freshness)
     )
 }
 
@@ -140,5 +141,13 @@ private func cache(from ffi: FfiCacheMode) -> NMPCacheMode {
     switch ffi {
     case .agnostic: return .agnostic
     case .strict: return .strict
+    }
+}
+
+private func freshness(from ffi: FfiFreshness) -> NMPFreshness {
+    switch ffi {
+    case .live: return .live
+    case let .maxAge(seconds): return .maxAge(seconds: seconds)
+    case .cacheOnly: return .cacheOnly
     }
 }

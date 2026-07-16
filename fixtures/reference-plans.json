@@ -23,7 +23,8 @@
           "selection": { "kinds": [0], "authors": ["aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4"], "ids": [], "tags": {}, "since": null, "until": null, "limit": 1 },
           "source": { "kind": "author_outboxes", "relays": [] },
           "access": "public",
-          "cache": "agnostic"
+          "cache": "agnostic",
+          "freshness": "live"
         },
         "helpers": [],
         "discarded_relay_hints": 0
@@ -51,14 +52,16 @@
           "selection": { "kinds": [0], "authors": ["3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"], "ids": [], "tags": {}, "since": null, "until": null, "limit": 1 },
           "source": { "kind": "author_outboxes", "relays": [] },
           "access": "public",
-          "cache": "agnostic"
+          "cache": "agnostic",
+          "freshness": "live"
         },
         "helpers": [
           {
             "selection": { "kinds": [0], "authors": ["3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"], "ids": [], "tags": {}, "since": null, "until": null, "limit": 1 },
             "source": { "kind": "pinned", "relays": ["wss://djbas.sadkb.com/", "wss://r.x.com/"] },
             "access": "public",
-            "cache": "agnostic"
+            "cache": "agnostic",
+            "freshness": "live"
           }
         ],
         "discarded_relay_hints": 0
@@ -86,7 +89,8 @@
           "selection": { "kinds": [], "authors": [], "ids": ["d94a3f4dd87b9a3b0bed183b32e916fa29c8020107845d1752d72697fe5309a5"], "tags": {}, "since": null, "until": null, "limit": 1 },
           "source": { "kind": "public", "relays": [] },
           "access": "public",
-          "cache": "agnostic"
+          "cache": "agnostic",
+          "freshness": "live"
         },
         "helpers": [],
         "discarded_relay_hints": 0
@@ -114,14 +118,16 @@
           "selection": { "kinds": [], "authors": [], "ids": ["dbe57554549f92c08bea790b05dc37dec6f3373303123f9e231635ee594ceb6a"], "tags": {}, "since": null, "until": null, "limit": 1 },
           "source": { "kind": "public", "relays": [] },
           "access": "public",
-          "cache": "agnostic"
+          "cache": "agnostic",
+          "freshness": "live"
         },
         "helpers": [
           {
             "selection": { "kinds": [], "authors": ["32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245"], "ids": ["dbe57554549f92c08bea790b05dc37dec6f3373303123f9e231635ee594ceb6a"], "tags": {}, "since": null, "until": null, "limit": 1 },
             "source": { "kind": "author_outboxes", "relays": [] },
             "access": "public",
-            "cache": "agnostic"
+            "cache": "agnostic",
+            "freshness": "live"
           }
         ],
         "discarded_relay_hints": 0
@@ -149,7 +155,8 @@
           "selection": { "kinds": [30023], "authors": ["787338757fc25d65cd929394d5e7713cf43638e8d259e8dcf5c73b834eb851f2"], "ids": [], "tags": { "d": ["1692282117831"] }, "since": null, "until": null, "limit": 1 },
           "source": { "kind": "author_outboxes", "relays": [] },
           "access": "public",
-          "cache": "agnostic"
+          "cache": "agnostic",
+          "freshness": "live"
         },
         "helpers": [],
         "discarded_relay_hints": 0
@@ -177,20 +184,23 @@
           "selection": { "kinds": [], "authors": [], "ids": ["1111111111111111111111111111111111111111111111111111111111111111"], "tags": {}, "since": null, "until": null, "limit": 1 },
           "source": { "kind": "public", "relays": [] },
           "access": "public",
-          "cache": "agnostic"
+          "cache": "agnostic",
+          "freshness": "live"
         },
         "helpers": [
           {
             "selection": { "kinds": [], "authors": [], "ids": ["1111111111111111111111111111111111111111111111111111111111111111"], "tags": {}, "since": null, "until": null, "limit": 1 },
             "source": { "kind": "pinned", "relays": ["wss://relay-0.example.com", "wss://relay-1.example.com", "wss://relay-2.example.com", "wss://relay-3.example.com", "wss://relay-4.example.com", "wss://relay-5.example.com", "wss://relay-6.example.com", "wss://relay-7.example.com"] },
             "access": "public",
-            "cache": "agnostic"
+            "cache": "agnostic",
+            "freshness": "live"
           },
           {
             "selection": { "kinds": [], "authors": ["2222222222222222222222222222222222222222222222222222222222222222"], "ids": ["1111111111111111111111111111111111111111111111111111111111111111"], "tags": {}, "since": null, "until": null, "limit": 1 },
             "source": { "kind": "author_outboxes", "relays": [] },
             "access": "public",
-            "cache": "agnostic"
+            "cache": "agnostic",
+            "freshness": "live"
           }
         ],
         "discarded_relay_hints": 5

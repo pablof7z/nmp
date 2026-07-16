@@ -62,6 +62,7 @@ pub struct NormalizedDemand {
     pub source: NormalizedSource,
     pub access: String,
     pub cache: String,
+    pub freshness: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

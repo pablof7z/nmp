@@ -194,6 +194,16 @@ private fun normalize(demand: NMPDemand): JsonObject =
                 },
             ),
         )
+        put(
+            "freshness",
+            JsonPrimitive(
+                when (val freshness = demand.freshness) {
+                    NMPFreshness.Live -> "live"
+                    is NMPFreshness.MaxAge -> "max_age:${freshness.seconds}"
+                    NMPFreshness.CacheOnly -> "cache_only"
+                },
+            ),
+        )
     }
 
 private fun normalize(filter: NMPFilter): JsonObject =

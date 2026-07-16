@@ -98,6 +98,7 @@ private struct NormalizedDemand: Decodable, Equatable {
     let source: NormalizedSource
     let access: String
     let cache: String
+    let freshness: String
 }
 
 private struct NormalizedFilter: Decodable, Equatable {
@@ -243,6 +244,16 @@ private func normalize(_ demand: NMPDemand) throws -> NormalizedDemand {
         cache = "strict"
     }
 
+    let freshness: String
+    switch demand.freshness {
+    case .live:
+        freshness = "live"
+    case .maxAge(let seconds):
+        freshness = "max_age:\(seconds)"
+    case .cacheOnly:
+        freshness = "cache_only"
+    }
+
     return NormalizedDemand(
         selection: NormalizedFilter(
             kinds: (demand.selection.kinds ?? []).sorted(),
@@ -259,7 +270,8 @@ private func normalize(_ demand: NMPDemand) throws -> NormalizedDemand {
         ),
         source: source,
         access: access,
-        cache: cache
+        cache: cache,
+        freshness: freshness
     )
 }
 

@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use nmp::{AccessContext, Binding, CacheMode, Demand, NostrEntityError, SourceAuthority};
+use nmp::{
+    AccessContext, Binding, CacheMode, Demand, Freshness, NostrEntityError, SourceAuthority,
+};
 use nmp_bdd::reference_fixtures::{
     reference_fixtures, NormalizedDemand, NormalizedFilter, NormalizedReferencePlan,
     NormalizedReferenceTarget, NormalizedSource, ReferenceFixtureOutcome,
@@ -16,7 +18,9 @@ use nmp_ffi::reference::{
     reference_demand_plan as ffi_reference_demand_plan, FfiReferenceDemandPlan, FfiReferenceTarget,
 };
 use nmp_ffi::types::FfiNostrEntity;
-use nmp_ffi::types::{FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiSourceAuthority};
+use nmp_ffi::types::{
+    FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFreshness, FfiSourceAuthority,
+};
 use nmp_grammar::reference::{ReferenceDemandPlan, ReferenceTarget};
 
 #[test]
@@ -397,6 +401,11 @@ fn normalize_demand(demand: Demand) -> NormalizedDemand {
         CacheMode::Agnostic => "agnostic".to_string(),
         CacheMode::Strict => "strict".to_string(),
     };
+    let freshness = match demand.freshness {
+        Freshness::Live => "live".to_string(),
+        Freshness::MaxAge { seconds } => format!("max_age:{seconds}"),
+        Freshness::CacheOnly => "cache_only".to_string(),
+    };
     NormalizedDemand {
         selection: NormalizedFilter {
             kinds: demand
@@ -422,6 +431,7 @@ fn normalize_demand(demand: Demand) -> NormalizedDemand {
         source,
         access,
         cache,
+        freshness,
     }
 }
 
@@ -459,6 +469,11 @@ fn normalize_ffi_demand(demand: FfiDemand) -> NormalizedDemand {
         FfiCacheMode::Agnostic => "agnostic".to_string(),
         FfiCacheMode::Strict => "strict".to_string(),
     };
+    let freshness = match demand.freshness {
+        FfiFreshness::Live => "live".to_string(),
+        FfiFreshness::MaxAge { seconds } => format!("max_age:{seconds}"),
+        FfiFreshness::CacheOnly => "cache_only".to_string(),
+    };
     NormalizedDemand {
         selection: NormalizedFilter {
             kinds: demand.selection.kinds.unwrap_or_default(),
@@ -477,6 +492,7 @@ fn normalize_ffi_demand(demand: FfiDemand) -> NormalizedDemand {
         source,
         access,
         cache,
+        freshness,
     }
 }
 
