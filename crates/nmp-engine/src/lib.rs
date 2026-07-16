@@ -23,3 +23,9 @@ pub mod negentropy;
 pub mod outbox;
 pub mod relay_information;
 pub mod runtime;
+
+pub use runtime::{
+    AddAuthPolicyError, AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp,
+    AuthPolicyPendingSender, AuthPolicyRegistration, AuthPolicyRequest, AuthPolicyResolveError,
+    PendingAuthPolicyOp, RuntimeConfig, DEFAULT_MAX_AUTH_CAPABILITIES,
+};

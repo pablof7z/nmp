@@ -18,6 +18,27 @@ about current code:
   exact per-relay/filter intervals as a distinct type. `AwaitingAuth` and
   `AuthDenied` land with #8, and `Error` lands with #51. Full source-authority
   and access-context identity remains part of the descriptor gap above (#49).
+- **Protected-session AUTH discovery is bounded, not proof that a relay will
+  never challenge.** On each protected connection generation the transport
+  observes until the socket first becomes readable or 250 ms elapse, whichever
+  comes first. When readable, it drains that initial batch to a true
+  `WouldBlock`; only an AUTH challenge in that drain is reduced before ordinary
+  REQ/EVENT release. Public sessions skip this observation entirely. AUTH that
+  arrives after the initial drain, including after a non-AUTH first frame,
+  still parks protected work and supersedes the exact current AUTH epoch, but
+  may follow an initial ordinary request or event. Asynchronous absence cannot
+  be guaranteed without an explicit required-auth signal. This bounded
+  liveness tradeoff is part of #8; security-policy enforcement remains outside
+  that issue's scope.
+- **Engine shutdown drains app-owned AUTH work, so a pending cancel hook that
+  blocks forever blocks `EngineThread::join`.** The runtime's finite drain
+  cancels every live policy/signer operation without polling and never blocks
+  the engine thread on app code (cancellation is a nonblocking signal), but
+  safe Rust cannot force-kill the executor thread running an app hook that
+  ignores its cancellation. A well-behaved `AuthPolicy`/signing capability —
+  one whose pending cancel hook merely signals, or whose resolver eventually
+  completes — drains cleanly; the symmetric property already holds for the
+  sign-event completion path.
 - **Whole-demand relay admission and fan-out limiting are built (#20).** One
   finite ceiling now covers the fully assembled read plan and the live
   transport worker set, including outbox, indexer, app, fallback, and explicit

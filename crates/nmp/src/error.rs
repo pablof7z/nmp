@@ -112,6 +112,10 @@ impl EngineError {
                     ),
                 }
             }
+            // The runtime's finite shutdown drain (#8 U4) refuses new work
+            // with a typed engine-level error; at this facade it is the same
+            // closed-engine fact `EngineClosed` already names.
+            nmp_engine::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 
@@ -120,6 +124,7 @@ impl EngineError {
             nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted => {
                 Self::ReceiptCorrelationIdExhausted
             }
+            nmp_engine::core::PublishError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 }

@@ -527,17 +527,20 @@ fn only_exact_ready_wakes_the_current_waiting_auth_write_once() {
 }
 
 #[test]
-fn unchallenged_protected_write_is_not_parked_behind_auth() {
-    // The reconciled schedule_ready gate (#8 U2): a relay that never
-    // challenges must not wedge the write plane — with NO auth_sessions
-    // entry for the exact session, a connected protected write proceeds
-    // straight to its attempt.
+fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds() {
+    // The reconciled schedule_ready gate, refined by #8 U4's bounded AUTH
+    // discovery: a relay that never challenges must not wedge the write
+    // plane. While the exact fresh generation's initial observation window
+    // is still open the write parks WITHOUT consuming an attempt; the
+    // transport's ordered first-read completion (`AuthProbeReleased`) then
+    // releases it straight to its attempt — no auth_sessions entry, no AUTH
+    // handshake.
     let mut fixture = Fixture::new();
     let event = EventBuilder::new(Kind::TextNote, "no challenge needed")
         .custom_created_at(Timestamp::from(9))
         .sign_with_keys(&fixture.keys)
         .unwrap();
-    let effects = fixture.core.handle(EngineMsg::Publish(
+    let parked = fixture.core.handle(EngineMsg::Publish(
         WriteIntent {
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Durable,
@@ -545,8 +548,24 @@ fn unchallenged_protected_write_is_not_parked_behind_auth() {
         },
         Box::new(DiscardReceipt),
     ));
+    assert!(!parked
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    assert!(parked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay })
+            if relay == &fixture.session.relay
+    )));
+
+    let released = fixture.core.handle(EngineMsg::AuthProbeReleased(
+        fixture.handle,
+        fixture.session.clone(),
+    ));
+    assert!(released.iter().any(
+        |effect| matches!(effect, Effect::ReleaseInitialRead(handle) if *handle == fixture.handle)
+    ));
     assert_eq!(
-        effects
+        released
             .iter()
             .filter(|effect| matches!(
                 effect,
@@ -556,10 +575,11 @@ fn unchallenged_protected_write_is_not_parked_behind_auth() {
             .count(),
         1
     );
-    assert!(!effects.iter().any(|effect| matches!(
+    assert!(!released.iter().any(|effect| matches!(
         effect,
         Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { .. })
     )));
+    assert!(!fixture.core.auth_sessions.contains_key(&fixture.session));
 }
 
 #[test]
@@ -1013,4 +1033,61 @@ fn slot_replacement_releases_the_displaced_session_without_waiting_for_disconnec
     assert!(!fixture.core.connected_relays.contains(&fixture.session));
     assert!(fixture.core.connected_relays.contains(&replacement));
     assert!(fixture.core.auth_sessions.len() <= fixture.core.connected_relays.len());
+}
+
+/// #8 U4 latent-item hardening: `u64::MAX` is reserved BY VALUE for the
+/// counter-exhausted fallback epoch, never minted as a real sequence. The
+/// exhausted counter fails closed (typed `Error` state, no policy request),
+/// and a token forged around the sentinel epoch cannot advance the session.
+#[test]
+fn auth_sequence_counter_reserves_the_sentinel_and_exhaustion_fails_closed() {
+    // The last REAL mintable epoch sequence is u64::MAX - 1.
+    let mut fixture = Fixture::new();
+    fixture.core.next_auth_epoch = Some(u64::MAX - 1);
+    let (_, policy) = fixture.challenge("last-real-epoch");
+    let token = policy.expect("u64::MAX - 1 is still a real mintable epoch");
+    assert_eq!(token.epoch.sequence, u64::MAX - 1);
+
+    // A counter whose next value would be the sentinel is exhausted: the
+    // challenge records the sentinel fallback epoch in phase Error and
+    // requests nothing.
+    let mut fixture = Fixture::new();
+    fixture.core.next_auth_epoch = Some(u64::MAX);
+    let (effects, policy) = fixture.challenge("sentinel-reserved");
+    assert!(
+        policy.is_none(),
+        "an exhausted epoch counter must fail closed, never mint the sentinel as a real epoch"
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::RelayAuth(AuthEffect::RequestPolicy { .. }))));
+    let state = fixture.core.auth_sessions.get(&fixture.session).unwrap();
+    assert_eq!(state.epoch.sequence, u64::MAX);
+    assert!(matches!(state.phase, AuthSessionPhase::Error));
+
+    // A forged operation token equal to the stored sentinel epoch can never
+    // advance the session out of its failed-closed state.
+    let forged = AuthOpToken {
+        epoch: state.epoch.clone(),
+        sequence: 1,
+    };
+    assert!(fixture
+        .core
+        .handle(EngineMsg::AuthPolicyCompleted(
+            forged.clone(),
+            Some(POLICY),
+            AuthPolicyOutcome::Allow,
+        ))
+        .iter()
+        .all(|effect| !matches!(
+            effect,
+            Effect::RelayAuth(AuthEffect::RequestSignature { .. })
+        )));
+    let state = fixture.core.auth_sessions.get(&fixture.session).unwrap();
+    assert!(matches!(state.phase, AuthSessionPhase::Error));
+
+    // Once exhausted, later challenges stay failed-closed instead of reusing
+    // sequences.
+    let (_, reissued) = fixture.challenge("still-exhausted");
+    assert!(reissued.is_none());
 }
