@@ -165,6 +165,22 @@ The kill (VISION §6): *after honest effort, the app still needs NMP-shaped scaf
 4. RelaysView: follows' 10002 relays ranked by count.
 5. DiagnosticsView: per-relay sub counts + exact filters + events-by-kind + coverage — captured (a) at steady state and (b) immediately after an account switch, showing **zero stale subs for the old pubkey** (ledger #10 evidence).
 
+### 6.1 On-device suspend/resume runbook (M5/M6 device checklist, issue #4)
+
+The simulator does not faithfully exercise iOS backgrounding socket kills, so this step CANNOT be run on a sim — it requires a physical device and a human. It is the evidence gate for issue #4's requirement that suspend/resume stay fully transparent (reconnect, replay subscriptions, and repair coverage with **zero app code**, per the M4 kill condition against scene-phase/app-lifecycle machinery).
+
+**Steps (owner or a builder with a physical device runs these):**
+
+1. Install the Falsifier app on a physical iOS device and sign in / select an account so the feed is live (`FeedView` showing rows, `DiagnosticsView` showing at least one relay with a nonzero wire-sub count).
+2. Background the app (press Home / swipe up) and leave it backgrounded for **10+ minutes**. Do not force-quit.
+3. Verify the sockets actually died during that window — do not just assume it. Acceptable evidence: a companion relay-side log showing the connection dropped, or (simplest) toggling the device to Airplane Mode partway through the background window and back before foregrounding, which guarantees a dead/stale socket state on resume regardless of how long iOS itself took to reap the connection.
+4. Foreground the app again. Take no action beyond bringing it to the foreground — no pull-to-refresh, no relaunch.
+5. Confirm the feed catches up on its own: new events posted while backgrounded should appear without any user action.
+6. Open `DiagnosticsView` and confirm (a) wire-sub counts are nonzero again for the relevant relays (re-established subscriptions, not a stale zero/frozen snapshot) and (b) coverage evidence reflects a repaired interval through the current time, not a gap left over from the background window.
+7. Record the result here (pass/fail, device model + iOS version, approximate background duration, and whether Airplane Mode was used to force the socket kill) and attach diagnostics screenshots analogous to the M5 §6 set above.
+
+**Status:** not yet run. This is the one piece of issue #4 an agent cannot execute (no physical device in this environment); the issue stays open citing this pending pass. The transport-internal resume-gap heuristic (`crates/nmp-transport/src/keepalive.rs`'s `SuspendGapDetector`) and the suspension-spanning clock audit landed ahead of this device pass and are covered by deterministic Rust unit/integration tests instead; they narrow what this manual pass needs to newly discover (stale TLS sessions, a changed network path, and the actual on-device backgrounding kill semantics), none of which a simulator or a headless test can stand in for.
+
 ---
 
 ## 7. Honest read on whether M5 can pass (friction already visible)
