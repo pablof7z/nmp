@@ -445,10 +445,10 @@ fn no_deadlines_blocks_indefinitely() {
 /// On connect it immediately pushes one scripted `EVENT` frame (`seed`) --
 /// `EngineCore::on_relay_frame`'s `Event` arm ingests any inbound event
 /// unconditionally, with no sub-id check, so this needs no matching REQ to
-/// have been sent first. It then replies to exactly the FIRST `NEG-OPEN` it
-/// sees (the capability probe) with a `NEG-MSG` -- any payload classifies
-/// `Supported`, per `Prober::on_neg_msg`'s own contract -- and goes silent
-/// for every `NEG-OPEN` after that while holding the TCP connection open
+/// have been sent first. It replies to exactly the FIRST `NEG-OPEN` it sees
+/// (the capability probe) with a `NEG-MSG`, answers the live-first
+/// `REQ {limit:0}` with its EOSE barrier, and goes silent for every later
+/// `NEG-OPEN` while holding the TCP connection open
 /// (never closing it, which would just make `EngineCore::on_relay_disconnected`
 /// silently drop the session instead of exercising the liveness sweep at
 /// all). Every text frame it reads is forwarded to `frames_tx` so the test
@@ -488,12 +488,32 @@ fn run_uncooperative_neg_relay(
                     // "the relay is slow to answer negentropy", the
                     // scenario the liveness sweep exists for.
                 }
+                if let Some(sub_id) = limit_zero_req_sub_id(&text) {
+                    let reply = format!("[\"EOSE\",{sub_id}]");
+                    let _ = ws.send(Message::text(reply));
+                }
                 let _ = frames_tx.send(text);
             }
             Ok(Message::Close(_)) | Err(_) => break,
             Ok(_) => {}
         }
     }
+}
+
+/// Extract the quoted id from a live-first `REQ` whose filter carries
+/// `limit:0`. Other ordinary/fallback REQs are deliberately ignored.
+fn limit_zero_req_sub_id(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let arr = value.as_array()?;
+    if arr.first()?.as_str()? != "REQ"
+        || !arr
+            .iter()
+            .skip(2)
+            .any(|filter| filter.get("limit").and_then(|value| value.as_u64()) == Some(0))
+    {
+        return None;
+    }
+    serde_json::to_string(arr.get(1)?.as_str()?).ok()
 }
 
 /// Extract `sub_id` (still JSON-quoted, ready to splice straight back into
@@ -665,10 +685,11 @@ fn neg_liveness_deadline_does_not_busy_spin() {
     // unpredictable fraction of one.
     align_to_next_second_boundary(Duration::from_millis(30));
 
-    // Now open the real negentropy session: b's kind:1 widens the same
+    // Now open the real live-first handoff: b's kind:1 widens the same
     // (kind:1) skeleton under the sub-id the capability probe already
     // proved `Supported` -- same probe-then-widen dance the headless tests
-    // use, just driven over the real wire this time.
+    // use, just driven over the real wire this time. The stub EOSEs the
+    // intervening `limit:0` REQ before the real NEG session can open.
     let (_qh_b, _rows_rx_b) = handle
         .subscribe(literal_kind1(&b.public_key().to_hex()))
         .expect("test subscription construction");

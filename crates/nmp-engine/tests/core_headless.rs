@@ -5891,6 +5891,25 @@ fn neg_err_frame(sub: &str) -> RelayFrame {
     })
 }
 
+fn connect_and_prove_nip77(core: &mut EngineCore<MemoryStore>, relay: &RelayUrl) {
+    let effects = connect(core, 0, relay);
+    let probe_sub = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartProbe(url, sub_id, ..) if url == relay => Some(sub_id),
+            _ => None,
+        })
+        .expect("connected demanded relay must start its NIP-77 probe");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(relay),
+        neg_msg_frame(&wire_sub_string(probe_sub), "6100"),
+    ));
+}
+
 /// Test 3 (ledger #8) first half: an unprobed relay (never even connected,
 /// so its `Prober` state stays `Unknown`) must never see `Effect::NegOpen`
 /// -- only a plain REQ.
@@ -6125,8 +6144,8 @@ fn connected_relay_outside_the_compiled_plan_emits_no_read_wire_effect() {
 /// Prober FSM to a real `Supported` verdict via a scripted NEG-MSG (exactly
 /// what a real relay's probe response looks like from `EngineCore`'s point
 /// of view), then proves a broad/unlimited demand change on that relay
-/// routes negentropy-first while a small/limited query on the SAME relay
-/// still stays on plain REQ.
+/// routes through the gap-free live-first handoff while a small/limited
+/// query on the SAME relay still stays on plain REQ.
 #[test]
 fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_req() {
     let a = Keys::generate();
@@ -6172,20 +6191,96 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
 
     // b's kind:1 atom widens the SAME (kind:1) skeleton -- same sub-id,
     // now the relay is Supported and the widened filter is broad
-    // (unlimited), so it routes through negentropy instead of a plain REQ.
+    // (unlimited), so it first opens a distinct live REQ with `limit:0`.
     let effects = core.handle(EngineMsg::Subscribe(
         literal_query(&[1], &b.public_key().to_hex()),
         Box::new(CapturingSink::default()),
     ));
+    let (live_sub_id, live_filter) = req_for(&effects, &relay0);
+    let live_sub_id = live_sub_id.clone();
+    assert_eq!(live_filter.limit, Some(0));
+    assert_eq!(
+        core.diagnostics_snapshot().relays[0].nip77_handoff,
+        "awaiting_live_eose"
+    );
     assert!(
-        effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
-        "a probed relay's broad demand change must route negentropy-first"
+        !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
+        "NEG must wait until the candidate live REQ's exact EOSE"
+    );
+
+    // `limit:0` is a client request, not permission to trust relay
+    // compliance. If a relay overdelivers a stored event before EOSE, the
+    // canonical ingest path accepts/deduplicates it, while the limited EOSE
+    // remains poisoned for coverage.
+    let overdelivered = nmp_resolver::testkit::kind1(&b, "relay ignored limit zero", 1);
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        event_frame(&wire_sub_string(&live_sub_id), overdelivered.clone()),
+    ));
+    assert!(effects.iter().any(|effect| matches!(effect,
+        Effect::EmitRows(_, rows, _) if rows.iter().any(|delta|
+            matches!(delta, RowDelta::Added(row) if row.event.id == overdelivered.id))
+    )));
+
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        eose_frame(&wire_sub_string(&live_sub_id)),
+    ));
+    let neg_sub_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, ..) => Some(sub_id),
+            _ => None,
+        })
+        .expect("the live EOSE barrier must open Negentropy");
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "a limit:0 EOSE must never mint coverage even when the relay overdelivered"
+    );
+    assert_ne!(
+        neg_sub_id, &live_sub_id,
+        "REQ and NEG ids are separate namespaces"
+    );
+    assert_eq!(
+        core.diagnostics_snapshot().relays[0].nip77_handoff,
+        "reconciling"
     );
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::Wire(d)
             if d.ops.iter().any(|(r, ops)| r.relay == relay0
-                && ops.iter().any(|op| matches!(op, WireOp::Req(..)))))),
-        "the widened atom must NOT ALSO reach the relay as a plain REQ"
+                && ops.iter().any(|op| matches!(op, WireOp::Close(id) if id == &live_sub_id))))),
+        "opening NEG must never close the active live REQ"
+    );
+
+    // The exact old failure window: reconciliation has snapshotted local
+    // holdings, but has not completed. A newly-published event whose own
+    // timestamp is old still arrives through the already-active live REQ;
+    // a `since: now` tail would have lost it.
+    let boundary = nmp_resolver::testkit::kind1(&b, "published during NEG", 1);
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        event_frame(&wire_sub_string(&live_sub_id), boundary.clone()),
+    ));
+    assert!(
+        effects.iter().any(|effect| matches!(effect,
+            Effect::EmitRows(_, rows, _) if rows.iter().any(|delta|
+                matches!(delta, RowDelta::Added(row) if row.event.id == boundary.id))
+        )),
+        "the live-first handoff must deliver a backdated boundary event"
     );
 
     // A LIMITED (small-exact-result) query on the SAME relay stays on plain
@@ -6322,13 +6417,24 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
         literal_query(&[1], &b.public_key().to_hex()),
         Box::new(CapturingSink::default()),
     ));
+    let (live_sub_id, live_filter) = req_for(&effects, &relay0);
+    let live_sub_id = live_sub_id.clone();
+    assert_eq!(live_filter.limit, Some(0));
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        eose_frame(&wire_sub_string(&live_sub_id)),
+    ));
     let neg_sub_id = effects
         .iter()
         .find_map(|e| match e {
             Effect::NegOpen(_, sub_id, ..) => Some(sub_id.clone()),
             _ => None,
         })
-        .expect("the widened broad demand must have opened a negentropy session");
+        .expect("the candidate EOSE must open a negentropy session");
 
     // No reply ever arrives; advance the clock past the liveness deadline.
     let effects = core.handle(EngineMsg::Tick(Timestamp::from(31u64)));
@@ -6341,9 +6447,304 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
     assert!(
         effects.iter().any(|e| matches!(e, Effect::Wire(d)
             if d.ops.iter().any(|(r, ops)| r.relay == relay0
-                && ops.iter().any(|op| matches!(op, WireOp::Req(sid, _) if sid == &neg_sub_id))))),
-        "a stale session must fall back to a plain REQ for the same sub-id"
+                && ops.iter().any(|op| matches!(op, WireOp::Req(sid, filter)
+                    if sid != &neg_sub_id && sid != &live_sub_id
+                        && filter.limit.is_none()
+                        && filter.since.is_none()
+                        && filter.until.is_none()))))),
+        "a stale session must fall back through a distinct unlimited backlog REQ"
     );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Wire(d)
+            if d.ops.iter().any(|(r, ops)| r.relay == relay0
+                && ops.iter().any(|op| matches!(op, WireOp::Close(sid) if sid == &live_sub_id))))),
+        "NEG timeout must leave the active live REQ open"
+    );
+}
+
+#[test]
+fn neg_err_falls_back_without_closing_the_active_live_req() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    req_for(&initial, &relay);
+    connect_and_prove_nip77(&mut core, &relay);
+
+    let candidate = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let (live_sub_id, filter) = req_for(&candidate, &relay);
+    let live_sub_id = live_sub_id.clone();
+    assert_eq!(filter.limit, Some(0));
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&live_sub_id)),
+    ));
+    let neg_sub_id = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, ..) => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("candidate EOSE opens NEG");
+
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        neg_err_frame(&wire_sub_string(&neg_sub_id)),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::NegClose(url, id)
+            if url == &relay && id == &neg_sub_id)));
+    let (fallback_id, fallback_filter) = req_for(&failed, &relay);
+    assert_ne!(fallback_id, &neg_sub_id);
+    assert_ne!(fallback_id, &live_sub_id);
+    assert_eq!(fallback_filter.limit, None);
+    assert_eq!(fallback_filter.since, None);
+    assert_eq!(fallback_filter.until, None);
+    assert!(!failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::Wire(delta)
+            if delta.ops.iter().any(|(_, ops)| ops.iter().any(
+                |op| matches!(op, WireOp::Close(id) if id == &live_sub_id)
+            ))
+        )));
+    assert_eq!(
+        core.diagnostics_snapshot().relays[0].nip77_handoff,
+        "fallback_backlog"
+    );
+}
+
+#[test]
+fn live_eose_timeout_uses_a_distinct_backlog_and_keeps_overlap_until_proven() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let prior_live_id = req_for(&initial, &relay).0.clone();
+    connect_and_prove_nip77(&mut core, &relay);
+    let candidate = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let live_sub_id = req_for(&candidate, &relay).0.clone();
+
+    // No candidate EOSE arrives. At the exact deadline a separate full
+    // backlog REQ starts; both old and new live subscriptions stay open.
+    let timed_out = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
+    let (backlog_id, backlog_filter) = req_for(&timed_out, &relay);
+    let backlog_id = backlog_id.clone();
+    assert_ne!(backlog_id, live_sub_id);
+    assert_ne!(backlog_id, prior_live_id);
+    assert_eq!(backlog_filter.limit, None);
+    assert!(!timed_out
+        .iter()
+        .any(|effect| matches!(effect, Effect::Wire(delta)
+            if delta.ops.iter().any(|(_, ops)| ops.iter().any(|op|
+                matches!(op, WireOp::Close(id) if id == &live_sub_id || id == &prior_live_id)
+            ))
+        )));
+
+    // EOSE for the later full request proves backlog delivery and ordered
+    // processing. It closes the one-shot + predecessor, never the live
+    // candidate that owns future delivery.
+    let completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&backlog_id)),
+    ));
+    assert!(completed
+        .iter()
+        .any(|effect| matches!(effect, Effect::Wire(delta)
+            if delta.ops.iter().any(|(_, ops)| ops.iter().any(
+                |op| matches!(op, WireOp::Close(id) if id == &backlog_id)
+            ))
+        )));
+    assert!(completed
+        .iter()
+        .any(|effect| matches!(effect, Effect::Wire(delta)
+            if delta.ops.iter().any(|(_, ops)| ops.iter().any(
+                |op| matches!(op, WireOp::Close(id) if id == &prior_live_id)
+            ))
+        )));
+    assert!(!completed
+        .iter()
+        .any(|effect| matches!(effect, Effect::Wire(delta)
+            if delta.ops.iter().any(|(_, ops)| ops.iter().any(
+                |op| matches!(op, WireOp::Close(id) if id == &live_sub_id)
+            ))
+        )));
+    assert_eq!(core.diagnostics_snapshot().relays[0].nip77_handoff, "live");
+}
+
+#[test]
+fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let _ = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    connect_and_prove_nip77(&mut core, &relay);
+    let candidate = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let old_live_id = req_for(&candidate, &relay).0.clone();
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&old_live_id)),
+    ));
+
+    let _ = core.handle(EngineMsg::RelayDisconnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        DisconnectReason::Error,
+    ));
+    let reconnected = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        public_session(&relay),
+    ));
+    assert!(reconnected.iter().any(|effect| matches!(effect,
+        Effect::Replay(session, reqs) if session == &public_session(&relay) && reqs.is_empty()
+    )));
+    let (fresh_live_id, fresh_filter) = req_for(&reconnected, &relay);
+    let fresh_live_id = fresh_live_id.clone();
+    assert_eq!(fresh_filter.limit, Some(0));
+    assert!(!reconnected
+        .iter()
+        .any(|effect| matches!(effect, Effect::NegOpen(..))));
+
+    let stale = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&fresh_live_id)),
+    ));
+    assert!(stale.is_empty(), "old-generation EOSE must be inert");
+
+    let fresh = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&fresh_live_id)),
+    ));
+    assert!(fresh
+        .iter()
+        .any(|effect| matches!(effect, Effect::NegOpen(..))));
+}
+
+#[test]
+fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let a_handle = subscribed_handle(&initial);
+    connect_and_prove_nip77(&mut core, &relay);
+    let widened = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let b_handle = subscribed_handle(&widened);
+    let live_id = req_for(&widened, &relay).0.clone();
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&live_id)),
+    ));
+    let neg_id = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, id, ..) => Some(id.clone()),
+            _ => None,
+        })
+        .expect("candidate EOSE opens repair");
+
+    // Removing b starts an overlap-safe replacement for a-only demand and
+    // cancels the in-flight NEG. Removing the final a owner then closes both
+    // that replacement candidate and the still-active predecessor.
+    let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
+    assert!(narrowed.iter().any(|effect| matches!(effect,
+        Effect::NegClose(url, id) if url == &relay && id == &neg_id
+    )));
+    let replacement_id = req_for(&narrowed, &relay).0.clone();
+    let closed = core.handle(EngineMsg::Unsubscribe(a_handle));
+    let closed_ids: BTreeSet<SubId> = closed
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+        .filter_map(|op| match op {
+            WireOp::Close(id) => Some(id.clone()),
+            WireOp::Req(..) => None,
+        })
+        .collect();
+    assert!(closed_ids.contains(&live_id));
+    assert!(closed_ids.contains(&replacement_id));
+    assert_eq!(core.diagnostics_snapshot().relays.len(), 0);
 }
 
 // ---- #34 retraction seam (retraction-and-negative-deltas.md §1.3/§3) ----
@@ -6538,9 +6939,19 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
         literal_query(&[1], &b.public_key().to_hex()),
         Box::new(CapturingSink::default()),
     ));
+    let (live_sub_id, live_filter) = req_for(&effects, &relay0);
+    assert_eq!(live_filter.limit, Some(0));
+    let effects = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        eose_frame(&wire_sub_string(live_sub_id)),
+    ));
     assert!(
         effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
-        "setup: b's widened demand must actually open a neg session"
+        "setup: the candidate live EOSE must actually open a neg session"
     );
 
     // `NegSession::started_at` is `core`'s clock, which nothing above has

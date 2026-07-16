@@ -46,8 +46,8 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash, Durability,
-    Filter, HostAuthority, NarrowOnly, PrivateRoute, RelaySessionKey, RoutingEvidence,
+    fold_byte, AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
+    Durability, Filter, HostAuthority, NarrowOnly, PrivateRoute, RelaySessionKey, RoutingEvidence,
     SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
@@ -81,6 +81,24 @@ use crate::relay_information::RelayInformationCapabilityEvidence;
 /// again on the same generation -- `tick`'s own staleness sweep is the only
 /// caller of this constant).
 const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
+
+// Internal wire-id roles for the gap-free NIP-77 handoff (#563). They are
+// folded onto the router-owned plan id plus the exact full filter hash, so a
+// live candidate, NEG session, missing-id fetch, and ordinary fallback can
+// coexist on one websocket without aliasing either NIP-01's or NIP-77's
+// subscription namespace.
+const NIP77_LIVE_ROLE: u8 = 0x71;
+const NIP77_NEG_ROLE: u8 = 0x72;
+const NIP77_MISSING_ROLE: u8 = 0x73;
+const NIP77_FALLBACK_ROLE: u8 = 0x74;
+
+fn nip77_role_sub_id(plan_sub_id: &SubId, role: u8, filter: &ConcreteFilter) -> SubId {
+    let mut hash = fold_byte(plan_sub_id.1, role);
+    for byte in filter.hash().as_bytes() {
+        hash = fold_byte(hash, *byte);
+    }
+    SubId(plan_sub_id.0.clone(), hash, plan_sub_id.2)
+}
 
 const RETRY_INITIAL_SECS: u64 = 3;
 const RETRY_MAX_SECS: u64 = 300;
@@ -834,10 +852,10 @@ pub enum Effect {
     /// no negentropy-protocol knowledge of its own): the sub-id, the
     /// throwaway probe filter, and the hex initial message.
     StartProbe(RelayUrl, SubId, ConcreteFilter, String),
-    /// Place a REAL negentropy-first `NEG-OPEN` for `filter` against a
-    /// PROVEN-supported relay (ledger #8's compile-fence: the first field
-    /// can only ever be a `ProbedRelay`), under `sub_id`, with the hex
-    /// initial message this reducer already built from its own store.
+    /// Place a real `NEG-OPEN` after the live-first EOSE barrier for
+    /// `filter` against a PROVEN-supported relay (ledger #8's compile-fence:
+    /// the first field can only ever be a `ProbedRelay`), under its own
+    /// NIP-77 `sub_id`, with the initial message built from the local store.
     NegOpen(ProbedRelay, SubId, ConcreteFilter, String),
     /// Continue an open reconciliation: place this hex payload as the next
     /// outbound `NEG-MSG` for `sub_id` on `relay`.
@@ -1054,11 +1072,47 @@ struct PendingWrite {
 /// correct floor:None/until:None/limited:false snapshot the ruling
 /// requires, with no separate bookkeeping to keep in sync.
 struct NegSession {
+    /// Router-owned semantic subscription this reconciliation repairs.
+    plan_sub_id: SubId,
     relay: RelayUrl,
     filter: ConcreteFilter,
     absorbed: BTreeSet<CoverageKey>,
     started_at: Timestamp,
     reconciler: Reconciler,
+}
+
+/// A live candidate REQ has been sent with `limit:0`; no Negentropy work is
+/// allowed to begin until this exact candidate's EOSE arrives on the exact
+/// current transport generation. The previously-active live sub stays open
+/// until that barrier, making replacement overlap safe.
+struct PendingNegHandoff {
+    probed: ProbedRelay,
+    plan_sub_id: SubId,
+    live_sub_id: SubId,
+    prior_live_sub_id: Option<SubId>,
+    filter: ConcreteFilter,
+    absorbed: BTreeSet<CoverageKey>,
+    started_at: Timestamp,
+}
+
+enum TemporaryReq {
+    /// Missing ids proven by a completed Negentropy exchange. Coverage for
+    /// `neg_sub_id` is deferred until this request's EOSE.
+    MissingIds {
+        plan_sub_id: SubId,
+        neg_sub_id: SubId,
+    },
+    /// Plain unlimited backlog fallback after NEG failure/timeout. Its own
+    /// attribution snapshot earns coverage directly at EOSE.
+    Backlog { plan_sub_id: SubId },
+    /// The live candidate never produced EOSE. A later full-backlog EOSE is
+    /// also an ordered proof that the earlier candidate REQ was processed;
+    /// only then may the prior live sub be retired.
+    BacklogActivatesLive {
+        plan_sub_id: SubId,
+        live_sub_id: SubId,
+        prior_live_sub_id: Option<SubId>,
+    },
 }
 
 #[derive(Debug)]
@@ -1221,22 +1275,20 @@ pub struct EngineCore<S: EventStore> {
     /// prevent historical relay churn from becoming a shadow cache. This is
     /// kept separate from `prober`: advertisement is evidence, never proof.
     nip11_information: HashMap<RelayUrl, RelayInformationCapabilityEvidence>,
-    /// Live reconciliation sessions, keyed by the SAME `SubId` a plain REQ
-    /// for this shape would have used (REQ and negentropy share one
-    /// subscription-id namespace on the wire, NIP-77) -- never more than one
-    /// entry per sub-id at a time.
+    /// Router plan id -> exact NIP-01 subscription currently owning the live
+    /// tail. NIP-77 candidates use full-filter-derived ids, so an old live
+    /// selection can overlap a replacement until the replacement's EOSE.
+    active_nip77_live: HashMap<SubId, SubId>,
+    /// Candidate live REQs waiting for their exact EOSE barrier.
+    pending_neg_handoffs: HashMap<SubId, PendingNegHandoff>,
+    /// Live reconciliation sessions keyed by their role-derived NIP-77 id.
+    /// NIP-01 REQ ids and NIP-77 ids are separate namespaces by protocol and
+    /// distinct values here, so closing one can never close the other.
     neg_sessions: HashMap<SubId, NegSession>,
-    /// One-shot `ids`-filter REQs opened to backfill exactly what a
-    /// completed reconciliation proved we are missing (`finish_neg_session`)
-    /// -- tracked so this reducer closes them itself once their EOSE
-    /// arrives, rather than leaking a subscription the router's own
-    /// demand-diffing does not know about.
-    pending_backfills: BTreeSet<SubId>,
-    /// Backfill `SubId` -> the reconciled negentropy session's own `SubId`,
-    /// whose coverage credit is deferred until THIS backfill's EOSE proves
-    /// the missing events actually landed (ledger #7 -- see
-    /// `finish_neg_session`'s doc comment).
-    pending_neg_credit: HashMap<SubId, SubId>,
+    /// Every temporary NIP-01 request outside router demand: missing-id
+    /// fetches and ordinary unlimited backlog fallbacks. The typed value
+    /// determines the exact EOSE consequence; no boolean lifecycle flag.
+    pending_backfills: HashMap<SubId, TemporaryReq>,
     /// The self-bootstrapping outbox (M5): an internal, engine-owned
     /// resolver subscription discovering kind:10002 for exactly the authors
     /// current demand references but whose write relays are still unknown
@@ -1389,9 +1441,10 @@ impl<S: EventStore> EngineCore<S> {
             lane_relay_index_degraded: false,
             prober: Prober::new(),
             nip11_information: HashMap::new(),
+            active_nip77_live: HashMap::new(),
+            pending_neg_handoffs: HashMap::new(),
             neg_sessions: HashMap::new(),
-            pending_backfills: BTreeSet::new(),
-            pending_neg_credit: HashMap::new(),
+            pending_backfills: HashMap::new(),
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
             events_by_session_kind: HashMap::new(),
@@ -2775,6 +2828,42 @@ impl<S: EventStore> EngineCore<S> {
                 crate::negentropy::ProbeState::Supported => "behaviorally_proven",
                 crate::negentropy::ProbeState::Unsupported => "behaviorally_rejected",
             };
+            relay.nip77_handoff = if self.pending_backfills.iter().any(|(sub_id, request)| {
+                sub_id.0 == relay.relay
+                    && matches!(
+                        request,
+                        TemporaryReq::Backlog { .. } | TemporaryReq::BacklogActivatesLive { .. }
+                    )
+            }) {
+                "fallback_backlog"
+            } else if self.pending_backfills.iter().any(|(sub_id, request)| {
+                sub_id.0 == relay.relay && matches!(request, TemporaryReq::MissingIds { .. })
+            }) {
+                "backfilling"
+            } else if self
+                .neg_sessions
+                .values()
+                .any(|session| session.relay == relay.relay)
+            {
+                "reconciling"
+            } else if self
+                .pending_neg_handoffs
+                .keys()
+                .any(|sub_id| sub_id.0 == relay.relay)
+            {
+                "awaiting_live_eose"
+            } else if self
+                .active_nip77_live
+                .keys()
+                .any(|plan_sub_id| plan_sub_id.0 == relay.relay)
+                && self
+                    .connected_relays
+                    .contains(&RelaySessionKey::public(relay.relay.clone()))
+            {
+                "live"
+            } else {
+                "none"
+            };
         }
         snapshot
     }
@@ -2847,13 +2936,25 @@ impl<S: EventStore> EngineCore<S> {
         // deadline, so `next_deadline()` recomputes without it and the loop
         // parks -- see #39's fix-up review and the regression test this
         // predicate exists to satisfy.
-        let stale: Vec<SubId> = self
+        let stale_handoffs: Vec<SubId> = self
+            .pending_neg_handoffs
+            .iter()
+            .filter(|(_, handoff)| now >= handoff.started_at + NEG_LIVENESS_DEADLINE_SECS)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for live_sub_id in stale_handoffs {
+            if let Some(handoff) = self.pending_neg_handoffs.remove(&live_sub_id) {
+                self.handoff_fallback_to_req(handoff, &mut effects);
+            }
+        }
+
+        let stale_neg: Vec<SubId> = self
             .neg_sessions
             .iter()
             .filter(|(_, s)| now >= s.started_at + NEG_LIVENESS_DEADLINE_SECS)
             .map(|(id, _)| id.clone())
             .collect();
-        for sub_id in stale {
+        for sub_id in stale_neg {
             if let Some(session) = self.neg_sessions.remove(&sub_id) {
                 self.neg_session_fallback_to_req(sub_id, session, &mut effects);
             }
@@ -2880,6 +2981,11 @@ impl<S: EventStore> EngineCore<S> {
             .neg_sessions
             .values()
             .map(|session| session.started_at + NEG_LIVENESS_DEADLINE_SECS)
+            .chain(
+                self.pending_neg_handoffs
+                    .values()
+                    .map(|handoff| handoff.started_at + NEG_LIVENESS_DEADLINE_SECS),
+            )
             .min();
         let outbox = (!self.retry_scheduler_blocked)
             .then(|| self.resolver.store().next_outbox_deadline().ok().flatten())
@@ -5415,9 +5521,11 @@ impl<S: EventStore> EngineCore<S> {
                 self.auth_probe_sessions.insert(session.clone(), handle);
             }
         }
-        // Reconnect (new generation): clear stale attribution, then replay
-        // + re-snapshot every currently-planned REQ for this session (ruling
-        // §2: "a replayed sub on the new generation gets fresh snapshots").
+        // Reconnect (new generation): clear stale attribution, then rebuild
+        // every currently-planned REQ for this session. A behaviorally-proven
+        // broad Public request repeats the same live-first NIP-77 handoff as
+        // an ordinary recompile; it must never regress to reconcile-first or
+        // silently change strategy on reconnect (#563).
         self.attribution.clear_session(&session);
         // ONLY a Public session replays its planned REQs at connect time. A
         // protected session's REQs park until the AUTH reducer's ready
@@ -5427,16 +5535,43 @@ impl<S: EventStore> EngineCore<S> {
         // honest EOSE can ever discharge.
         if session.access == AccessContext::Public {
             if let Some(reqs) = planned_read_reqs.as_ref() {
+                // A new websocket generation has no live subscriptions even
+                // if the previous generation's preamble still names them.
+                // `Replay` below resets the runtime preamble first; the
+                // live-first candidates are appended afterward.
+                self.active_nip77_live
+                    .retain(|plan_sub_id, _| plan_sub_id.0 != session.relay);
+                self.pending_neg_handoffs
+                    .retain(|_, handoff| handoff.probed.url() != &session.relay);
+
+                let mut plain_reqs = Vec::new();
+                let mut handoffs = Vec::new();
                 for req in reqs {
+                    if req.filter.limit.is_none() {
+                        if let Some(probed) = self.prober.probed(&session.relay) {
+                            handoffs.push((
+                                probed,
+                                req.sub_id.clone(),
+                                req.filter.clone(),
+                                req.absorbed.clone(),
+                            ));
+                            continue;
+                        }
+                    }
                     self.attribution.record_send(
                         &session,
                         &req.sub_id,
                         &req.filter,
                         req.absorbed.clone(),
                     );
+                    plain_reqs.push(req.clone());
                 }
-                if !reqs.is_empty() {
-                    effects.push(Effect::Replay(session.clone(), reqs.clone()));
+                // Even an empty plain set is meaningful: clear stale
+                // reconnect-preamble entries before adding candidate live
+                // REQs through `Effect::Wire` below.
+                effects.push(Effect::Replay(session.clone(), plain_reqs));
+                for (probed, sub_id, filter, absorbed) in handoffs {
+                    self.begin_neg_handoff(probed, sub_id, None, filter, absorbed, &mut effects);
                 }
             }
         }
@@ -5597,21 +5732,32 @@ impl<S: EventStore> EngineCore<S> {
                 // re-opens whatever demand still wants this shape.
                 self.neg_sessions
                     .retain(|_, neg| neg.relay != session.relay);
-                // A one-shot negentropy backfill (`finish_neg_session`) that
-                // was mid-flight on this relay will never EOSE now -- its
-                // own socket is gone -- so `pending_backfills`/
-                // `pending_neg_credit` (both keyed by the backfill's
-                // relay-scoped `SubId`, whose `.0` is exactly this URL)
-                // would otherwise orphan forever: the only other removal
-                // site is EOSE-gated (`on_relay_frame`'s `EndOfStoredEvents`
-                // arm). Coverage is not permanently lost -- a reconnect's
-                // `recompile()` re-opens the live REQ and negentropy runs
-                // again -- only the orphaned one-shot bookkeeping for THIS
-                // attempt is dropped, exactly like `neg_sessions` above.
-                self.pending_backfills
-                    .retain(|sub_id| sub_id.0 != session.relay);
-                self.pending_neg_credit
+                self.pending_neg_handoffs
                     .retain(|sub_id, _| sub_id.0 != session.relay);
+
+                // One-shot repair REQs live in the runtime preamble even
+                // though the router never planned them. Remove their
+                // reducer state and their preamble entries together. The
+                // socket is already gone, so the CLOSE is bookkeeping for
+                // the next generation rather than a wire expectation.
+                let stale_temporary: Vec<SubId> = self
+                    .pending_backfills
+                    .keys()
+                    .filter(|sub_id| sub_id.0 == session.relay)
+                    .cloned()
+                    .collect();
+                for sub_id in &stale_temporary {
+                    self.pending_backfills.remove(sub_id);
+                    self.attribution.discard_sub(sub_id);
+                }
+                if !stale_temporary.is_empty() {
+                    effects.push(Effect::Wire(WireDelta {
+                        ops: vec![(
+                            session.clone(),
+                            stale_temporary.into_iter().map(WireOp::Close).collect(),
+                        )],
+                    }));
+                }
             }
             // Feeds `AcquisitionEvidence.sources[_].status`: this session is
             // no longer connected, but `ever_connected_relays` is untouched
@@ -5911,6 +6057,10 @@ impl<S: EventStore> EngineCore<S> {
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 let wire_id = sub_id.as_str();
+                // Resolve before consuming the snapshot. The resolved typed
+                // id routes the same EOSE into the NIP-77 handoff/repair
+                // state machine after ordinary coverage attribution.
+                let resolved = self.attribution.sub_id_for_wire(&session, wire_id);
                 let attributed = self
                     .attribution
                     .attribute_eose(&session, wire_id, self.clock);
@@ -5949,23 +6099,56 @@ impl<S: EventStore> EngineCore<S> {
                 // points").
                 effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
 
-                // A one-shot negentropy backfill REQ (`finish_neg_session`)
-                // has nothing further to prove once it EOSEs -- close it so
-                // it does not linger as a subscription the router's own
-                // demand-diffing never knew existed, and -- if it was
-                // deferring a reconciliation's coverage credit -- THIS is
-                // the moment the backfilled events are proven ingested
-                // (EVENT precedes EOSE, NIP-01), so it is now safe to credit
-                // (ledger #7: never before this point).
-                if let Some(resolved) = self.attribution.sub_id_for_wire(&session, wire_id) {
-                    if self.pending_backfills.remove(&resolved) {
+                if let Some(resolved) = resolved {
+                    // This exact limited REQ is now proven active. Keep it
+                    // open, overlap-close its predecessor, and only then
+                    // begin Negentropy (#563).
+                    if let Some(handoff) = self.pending_neg_handoffs.remove(&resolved) {
+                        self.attribution.discard_sub(&resolved);
+                        self.activate_live_and_open_neg(handoff, &mut effects);
+                    }
+
+                    // Every repair REQ is one-shot and outside router-owned
+                    // demand. Its EOSE closes it and either unlocks deferred
+                    // NEG coverage or completes a handoff-timeout fallback.
+                    if let Some(request) = self.pending_backfills.remove(&resolved) {
                         effects.push(Effect::Wire(WireDelta {
                             ops: vec![(session.clone(), vec![WireOp::Close(resolved.clone())])],
                         }));
+                        self.attribution.discard_sub(&resolved);
+                        match request {
+                            TemporaryReq::MissingIds { neg_sub_id, .. } => {
+                                self.credit_neg_coverage(&neg_sub_id, &session.relay, &mut effects);
+                                self.attribution.discard_sub(&neg_sub_id);
+                            }
+                            TemporaryReq::Backlog { .. } => {}
+                            TemporaryReq::BacklogActivatesLive {
+                                plan_sub_id,
+                                live_sub_id,
+                                prior_live_sub_id,
+                            } => {
+                                self.attribution.discard_sub(&live_sub_id);
+                                self.active_nip77_live
+                                    .insert(plan_sub_id, live_sub_id.clone());
+                                if let Some(prior) = prior_live_sub_id {
+                                    if prior != live_sub_id {
+                                        self.attribution.discard_sub(&prior);
+                                        effects.push(Effect::Wire(WireDelta {
+                                            ops: vec![(
+                                                session.clone(),
+                                                vec![WireOp::Close(prior)],
+                                            )],
+                                        }));
+                                    }
+                                }
+                            }
+                        }
                     }
-                    if let Some(original_sub_id) = self.pending_neg_credit.remove(&resolved) {
-                        self.credit_neg_coverage(&original_sub_id, &session.relay, &mut effects);
-                    }
+
+                    // State transitions above are diagnostics state in
+                    // their own right; publish them without waiting for a
+                    // later router recompile.
+                    effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
                 }
             }
             RelayMessage::Ok {
@@ -6062,16 +6245,12 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Recompile the router from the resolver's CURRENT demand, record any
     /// newly-sent REQs' attribution snapshots, and push `Effect::Wire` for
-    /// whatever op actually changed on the wire -- EXCEPT a broad
-    /// (unlimited) `Req` for a relay this reducer has PROVEN supports
-    /// NIP-77 (`Prober::probed`), which is routed negentropy-first instead
-    /// (plan §6 E: "negentropy-FIRST for a probed relay + broad filter; REQ
-    /// fallback otherwise"). Ledger #8 is structural here, not a runtime
-    /// `if` bolted on top: `open_neg_session` is the ONLY call site that can
-    /// produce an `Effect::NegOpen`, and it can only be reached by first
-    /// obtaining a `ProbedRelay` from `Prober::probed` -- an unprobed relay
-    /// has no token to pass, so its `Req` arm always falls through to the
-    /// plain-REQ branch below, every time.
+    /// whatever op actually changed on the wire. A broad request for a
+    /// behaviorally-proven NIP-77 relay becomes a gap-free handoff: first a
+    /// distinct live candidate REQ with `limit:0`, then (only after that
+    /// candidate's exact EOSE) Negentropy while the live REQ stays open.
+    /// Ledger #8 remains structural: only a `ProbedRelay` token can enter
+    /// [`Self::begin_neg_handoff`].
     fn recompile(&mut self, effects: &mut Vec<Effect>) {
         #[cfg(test)]
         self.router_compiles
@@ -6088,6 +6267,7 @@ impl<S: EventStore> EngineCore<S> {
         // (`planned`/`demand`) recompile just established.
         self.attribution.prune_shapes(demand.iter());
         let admitted_demand = self.admit_projected_routing_evidence(&demand);
+        let previous_plan = self.router.plan().clone();
         let wire_delta: WireDelta =
             self.router
                 .compile(&admitted_demand, self.directory.as_ref(), self.cap);
@@ -6168,8 +6348,8 @@ impl<S: EventStore> EngineCore<S> {
                         // -- a bounded, terminating fetch is not what
                         // negentropy set-reconciliation is for, and `limit`
                         // poisons coverage attribution regardless (ruling
-                        // §3), so there is nothing negentropy-first would
-                        // buy it. Negentropy-first is additionally PUBLIC-
+                        // §3), so there is nothing reconciliation would buy
+                        // it. The live-first NIP-77 handoff is additionally PUBLIC-
                         // session-only (#8): the probe verdict was earned on
                         // the unauthenticated socket and proves nothing
                         // about an authenticated session's view.
@@ -6179,9 +6359,20 @@ impl<S: EventStore> EngineCore<S> {
                             self.prober.probed(&session.relay),
                         ) {
                             (true, Some(probed)) => {
-                                self.open_neg_session(
+                                let prior_live_sub_id =
+                                    self.active_nip77_live.get(sub_id).cloned().or_else(|| {
+                                        previous_plan
+                                            .reqs
+                                            .get(session)
+                                            .is_some_and(|reqs| {
+                                                reqs.iter().any(|req| &req.sub_id == sub_id)
+                                            })
+                                            .then(|| sub_id.clone())
+                                    });
+                                self.begin_neg_handoff(
                                     probed,
                                     sub_id.clone(),
+                                    prior_live_sub_id,
                                     filter.clone(),
                                     absorbed,
                                     effects,
@@ -6195,8 +6386,7 @@ impl<S: EventStore> EngineCore<S> {
                         }
                     }
                     WireOp::Close(sub_id) => {
-                        self.neg_sessions.remove(sub_id);
-                        kept_ops.push(op.clone());
+                        kept_ops.extend(self.close_nip77_plan(sub_id, effects));
                     }
                 }
             }
@@ -6437,32 +6627,183 @@ impl<S: EventStore> EngineCore<S> {
             || before_read != self.directory.read_relays(&author)
     }
 
-    /// Open a real negentropy reconciliation for `filter` against `probed`
-    /// (plan §6 E). Reads the local store's own current holdings for the
-    /// (window-erased) shape to seed the `Reconciler`, records the send-time
-    /// attribution snapshot exactly as a plain REQ would (ruling §2: NEG
-    /// runs unfloored/unlimited, so `neg_filter` below IS that snapshot's
-    /// filter, with no separate floor/until/limited fields to keep in
-    /// sync), and emits the `NegOpen` effect.
-    fn open_neg_session(
+    /// Start the gap-free NIP-77 handoff (#563). This function can only be
+    /// called with a behaviorally-minted [`ProbedRelay`]. It sends a distinct
+    /// candidate live REQ with `limit:0`, keeps the prior live REQ open, and
+    /// records a typed pending state. `open_neg_session` is reachable only
+    /// when the candidate's exact EOSE arrives.
+    fn begin_neg_handoff(
         &mut self,
         probed: ProbedRelay,
-        sub_id: SubId,
+        plan_sub_id: SubId,
+        prior_live_sub_id: Option<SubId>,
         filter: ConcreteFilter,
         absorbed: BTreeSet<CoverageKey>,
         effects: &mut Vec<Effect>,
     ) {
-        // REQ and NEG-OPEN share ONE subscription-id namespace on the wire
-        // (NIP-77): release whatever this `sub_id` may already mean to the
-        // relay (a live plain REQ from before this relay was known
-        // `Supported`, or nothing at all -- closing an id the relay never
-        // opened is a harmless no-op) before reopening it as a NEG session.
+        let stale_closes = self.cancel_nip77_repair_for_plan(&plan_sub_id, effects);
+        if !stale_closes.is_empty() {
+            effects.push(Effect::Wire(WireDelta {
+                ops: vec![(RelaySessionKey::public(probed.url().clone()), stale_closes)],
+            }));
+        }
+
+        if let Some(prior) = prior_live_sub_id.as_ref() {
+            self.active_nip77_live
+                .insert(plan_sub_id.clone(), prior.clone());
+        }
+
+        let live_filter = ConcreteFilter {
+            limit: Some(0),
+            ..filter.clone()
+        };
+        let live_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_LIVE_ROLE, &live_filter);
+        let public_session = RelaySessionKey::public(probed.url().clone());
+        self.attribution.record_send(
+            &public_session,
+            &live_sub_id,
+            &live_filter,
+            absorbed.clone(),
+        );
+        self.pending_neg_handoffs.insert(
+            live_sub_id.clone(),
+            PendingNegHandoff {
+                probed,
+                plan_sub_id,
+                live_sub_id: live_sub_id.clone(),
+                prior_live_sub_id,
+                filter,
+                absorbed,
+                started_at: self.clock,
+            },
+        );
         effects.push(Effect::Wire(WireDelta {
-            ops: vec![(
-                RelaySessionKey::public(probed.url().clone()),
-                vec![WireOp::Close(sub_id.clone())],
-            )],
+            ops: vec![(public_session, vec![WireOp::Req(live_sub_id, live_filter)])],
         }));
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+    }
+
+    /// Withdraw every pending/repair phase belonging to one semantic router
+    /// subscription while deliberately leaving its currently-active live REQ
+    /// alone. Used before a replacement handoff; [`Self::close_nip77_plan`]
+    /// additionally withdraws the active live owner on demand removal.
+    fn cancel_nip77_repair_for_plan(
+        &mut self,
+        plan_sub_id: &SubId,
+        effects: &mut Vec<Effect>,
+    ) -> Vec<WireOp> {
+        let mut closes = BTreeSet::new();
+
+        let pending: Vec<SubId> = self
+            .pending_neg_handoffs
+            .iter()
+            .filter(|(_, handoff)| &handoff.plan_sub_id == plan_sub_id)
+            .map(|(live_id, _)| live_id.clone())
+            .collect();
+        for live_id in pending {
+            self.pending_neg_handoffs.remove(&live_id);
+            self.attribution.discard_sub(&live_id);
+            closes.insert(live_id);
+        }
+
+        let neg_ids: Vec<SubId> = self
+            .neg_sessions
+            .iter()
+            .filter(|(_, session)| &session.plan_sub_id == plan_sub_id)
+            .map(|(neg_id, _)| neg_id.clone())
+            .collect();
+        for neg_id in &neg_ids {
+            if let Some(session) = self.neg_sessions.remove(neg_id) {
+                self.attribution.discard_sub(neg_id);
+                effects.push(Effect::NegClose(session.relay, neg_id.clone()));
+            }
+        }
+
+        let temporary: Vec<SubId> = self
+            .pending_backfills
+            .iter()
+            .filter(|(_, request)| match request {
+                TemporaryReq::MissingIds {
+                    plan_sub_id: owner, ..
+                }
+                | TemporaryReq::Backlog { plan_sub_id: owner }
+                | TemporaryReq::BacklogActivatesLive {
+                    plan_sub_id: owner, ..
+                } => owner == plan_sub_id,
+            })
+            .map(|(sub_id, _)| sub_id.clone())
+            .collect();
+        for sub_id in temporary {
+            if let Some(TemporaryReq::MissingIds { neg_sub_id, .. }) =
+                self.pending_backfills.remove(&sub_id)
+            {
+                // NEG has already closed on the wire, but its coverage
+                // snapshot intentionally remained alive while the missing
+                // ids were in flight. Withdrawing/superseding that fetch
+                // must release the deferred snapshot too.
+                self.attribution.discard_sub(&neg_sub_id);
+            }
+            self.attribution.discard_sub(&sub_id);
+            closes.insert(sub_id);
+        }
+
+        closes.into_iter().map(WireOp::Close).collect()
+    }
+
+    fn close_nip77_plan(&mut self, plan_sub_id: &SubId, effects: &mut Vec<Effect>) -> Vec<WireOp> {
+        let mut closes: BTreeSet<SubId> = self
+            .cancel_nip77_repair_for_plan(plan_sub_id, effects)
+            .into_iter()
+            .filter_map(|op| match op {
+                WireOp::Close(sub_id) => Some(sub_id),
+                WireOp::Req(..) => None,
+            })
+            .collect();
+        let active = self
+            .active_nip77_live
+            .remove(plan_sub_id)
+            .unwrap_or_else(|| plan_sub_id.clone());
+        self.attribution.discard_sub(&active);
+        closes.insert(active);
+        closes.into_iter().map(WireOp::Close).collect()
+    }
+
+    /// The candidate live REQ's EOSE is the handoff barrier. Promote it to
+    /// the only active live owner, retire the overlapped predecessor, then
+    /// and only then snapshot local holdings and open Negentropy.
+    fn activate_live_and_open_neg(
+        &mut self,
+        handoff: PendingNegHandoff,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.active_nip77_live
+            .insert(handoff.plan_sub_id.clone(), handoff.live_sub_id.clone());
+        if let Some(prior) = handoff.prior_live_sub_id.as_ref() {
+            if prior != &handoff.live_sub_id {
+                self.attribution.discard_sub(prior);
+                effects.push(Effect::Wire(WireDelta {
+                    ops: vec![(
+                        RelaySessionKey::public(handoff.probed.url().clone()),
+                        vec![WireOp::Close(prior.clone())],
+                    )],
+                }));
+            }
+        }
+        self.open_neg_session(handoff, effects);
+    }
+
+    /// Open a real reconciliation only after the candidate live REQ is
+    /// active. NIP-01 and NIP-77 use separate subscription namespaces; the
+    /// role-derived `neg_sub_id` makes that separation explicit in reducer
+    /// state and permits both protocols to remain open concurrently.
+    fn open_neg_session(&mut self, handoff: PendingNegHandoff, effects: &mut Vec<Effect>) {
+        let PendingNegHandoff {
+            probed,
+            plan_sub_id,
+            filter,
+            absorbed,
+            ..
+        } = handoff;
 
         let neg_filter = ConcreteFilter {
             since: None,
@@ -6478,6 +6819,14 @@ impl<S: EventStore> EngineCore<S> {
             Ok(rows) => rows,
             Err(e) => {
                 self.degrade_store(e, effects);
+                let owner = plan_sub_id.clone();
+                self.start_backlog_req(
+                    plan_sub_id,
+                    neg_filter,
+                    absorbed,
+                    TemporaryReq::Backlog { plan_sub_id: owner },
+                    effects,
+                );
                 return;
             }
         };
@@ -6487,15 +6836,18 @@ impl<S: EventStore> EngineCore<S> {
             .collect();
         let (reconciler, initial_hex) = Reconciler::open(&local_ids);
 
+        let neg_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
+
         self.attribution.record_send(
             &RelaySessionKey::public(probed.url().clone()),
-            &sub_id,
+            &neg_sub_id,
             &neg_filter,
             absorbed.clone(),
         );
         self.neg_sessions.insert(
-            sub_id.clone(),
+            neg_sub_id.clone(),
             NegSession {
+                plan_sub_id,
                 relay: probed.url().clone(),
                 filter: neg_filter.clone(),
                 absorbed,
@@ -6503,7 +6855,7 @@ impl<S: EventStore> EngineCore<S> {
                 reconciler,
             },
         );
-        effects.push(Effect::NegOpen(probed, sub_id, neg_filter, initial_hex));
+        effects.push(Effect::NegOpen(probed, neg_sub_id, neg_filter, initial_hex));
     }
 
     /// Drive one inbound `NEG-MSG` round for `sub_id`'s live session, if any
@@ -6545,24 +6897,19 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    /// Reconciliation completed (plan §6 E, the ruling's "feed a NEG-DONE
-    /// the same way [as EOSE]"). Releases the session's sub-id, backfills
-    /// whatever ids negentropy proved we are missing through the ordinary
-    /// REQ/EOSE/ingest pipeline (never a separate ingest path), and reopens
-    /// the same sub-id as a plain, live REQ floored at "now" -- negentropy
-    /// is a point-in-time backlog sync, not a persistent subscription
-    /// (ruling §3), so the relay's ongoing live tail still needs an open
-    /// REQ once the backlog is settled.
+    /// Reconciliation completed. Close only the NIP-77 namespace and
+    /// backfill whatever ids Negentropy proved we are missing through the
+    /// ordinary REQ/EOSE/ingest pipeline. The live NIP-01 subscription was
+    /// opened before reconciliation and deliberately remains untouched.
     ///
     /// Evidence crediting (ledger #7) is NOT immediate when a backfill is
     /// needed: recording a reconciled watermark before the backfilled events
     /// are actually ingested would attach evidence to a store
     /// that is still, transiently, missing precisely the events negentropy
     /// just proved are missing.
-    /// `pending_neg_credit` defers the credit to the backfill sub's OWN
-    /// EOSE (`on_relay_frame`), by which point the events are already
-    /// ingested (EVENT frames precede EOSE, NIP-01). An empty `need_ids`
-    /// has nothing to wait for, so it credits right away.
+    /// `TemporaryReq::MissingIds` defers credit to the backfill sub's OWN
+    /// EOSE, by which point the events are already ingested (EVENT precedes
+    /// EOSE, NIP-01). An empty `need_ids` credits immediately.
     fn finish_neg_session(
         &mut self,
         sub_id: SubId,
@@ -6571,13 +6918,12 @@ impl<S: EventStore> EngineCore<S> {
         need_ids: BTreeSet<EventId>,
         effects: &mut Vec<Effect>,
     ) {
-        let NegSession {
-            filter, absorbed, ..
-        } = session;
+        let NegSession { plan_sub_id, .. } = session;
         effects.push(Effect::NegClose(relay.clone(), sub_id.clone()));
 
         if need_ids.is_empty() {
             self.credit_neg_coverage(&sub_id, &relay, effects);
+            self.attribution.discard_sub(&sub_id);
         } else {
             let backfill = ConcreteFilter {
                 ids: Some(need_ids.iter().map(|id| id.to_hex()).collect()),
@@ -6588,22 +6934,20 @@ impl<S: EventStore> EngineCore<S> {
             // `Public`/`Public` is the exact context `Demand::from_filter`'s
             // static default would assign an authorless filter -- and this
             // sub carries no coverage credit of its own anyway (`absorbed`
-            // is empty below; the credit it unlocks is `sub_id`'s, via
-            // `pending_neg_credit`).
-            let backfill_sub = SubId::for_wire(
-                relay.clone(),
-                &backfill,
-                &SourceAuthority::Public,
-                AccessContext::Public,
+            // is empty below; its typed `TemporaryReq::MissingIds` owner
+            // unlocks `sub_id`'s credit at EOSE).
+            let backfill_sub = nip77_role_sub_id(&plan_sub_id, NIP77_MISSING_ROLE, &backfill);
+            self.pending_backfills.insert(
+                backfill_sub.clone(),
+                TemporaryReq::MissingIds {
+                    plan_sub_id,
+                    neg_sub_id: sub_id.clone(),
+                },
             );
-            self.pending_backfills.insert(backfill_sub.clone());
-            self.pending_neg_credit
-                .insert(backfill_sub.clone(), sub_id.clone());
             // No coverage credit of its OWN for this one-shot id-set fetch
             // -- `absorbed` is deliberately empty; it targets exactly the
             // ids negentropy already proved, it is not itself a proof over
-            // any atom's shape (the credit it unlocks is `sub_id`'s, via
-            // `pending_neg_credit` above).
+            // any atom's shape (the credit it unlocks is `sub_id`'s).
             self.attribution.record_send(
                 &RelaySessionKey::public(relay.clone()),
                 &backfill_sub,
@@ -6617,30 +6961,13 @@ impl<S: EventStore> EngineCore<S> {
                 )],
             }));
         }
-
-        let live_tail = ConcreteFilter {
-            since: Some(self.clock.as_secs()),
-            ..filter
-        };
-        self.attribution.record_send(
-            &RelaySessionKey::public(relay.clone()),
-            &sub_id,
-            &live_tail,
-            absorbed,
-        );
-        effects.push(Effect::Wire(WireDelta {
-            ops: vec![(
-                RelaySessionKey::public(relay),
-                vec![WireOp::Req(sub_id, live_tail)],
-            )],
-        }));
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
     }
 
     /// Attribute coverage for `sub_id` through the EXACT SAME
     /// `AttributionState::attribute_eose` call the real EOSE path uses --
     /// no second coverage mechanism, whether called directly (no backfill
-    /// needed) or from `on_relay_frame`'s EOSE arm once a deferred backfill
-    /// lands (`pending_neg_credit`).
+    /// needed) or from the missing-id EOSE arm once deferred backfill lands.
     fn credit_neg_coverage(&mut self, sub_id: &SubId, relay: &RelayUrl, effects: &mut Vec<Effect>) {
         // Negentropy sessions are opened exclusively on the Public session
         // (#8), so their credit resolves through the same Public-session
@@ -6670,15 +6997,78 @@ impl<S: EventStore> EngineCore<S> {
         self.refresh_all_histories(effects);
     }
 
-    /// Abandon a live reconciliation and fall back to a plain REQ for the
-    /// SAME (unfloored/unlimited) filter -- shared by the liveness-deadline
-    /// sweep (`tick`), an inbound `NEG-ERR`, and a malformed reconcile
-    /// payload (`step_neg_session`'s `Err` arm). The abandoned session's own
-    /// attribution snapshot is left outstanding rather than popped: the
-    /// fallback REQ's EOSE will credit it via the SAME intersection rule an
-    /// overwriting REQ already relies on (both snapshots carry the
-    /// identical `absorbed`/`floor`/`until`/`limited` fields, since both
-    /// derive from `session.filter`), so pop order does not matter here.
+    /// Start one unlimited one-shot backlog REQ under a role-separated id.
+    /// It never aliases the live NIP-01 id or the NIP-77 session id.
+    fn start_backlog_req(
+        &mut self,
+        plan_sub_id: SubId,
+        filter: ConcreteFilter,
+        absorbed: BTreeSet<CoverageKey>,
+        request: TemporaryReq,
+        effects: &mut Vec<Effect>,
+    ) {
+        let filter = ConcreteFilter {
+            since: None,
+            until: None,
+            limit: None,
+            ..filter
+        };
+        let backlog_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_FALLBACK_ROLE, &filter);
+        let relay = plan_sub_id.0.clone();
+        let mut ops = Vec::new();
+        if self
+            .pending_backfills
+            .insert(backlog_sub_id.clone(), request)
+            .is_some()
+        {
+            self.attribution.discard_sub(&backlog_sub_id);
+            ops.push(WireOp::Close(backlog_sub_id.clone()));
+        }
+        self.attribution.record_send(
+            &RelaySessionKey::public(relay.clone()),
+            &backlog_sub_id,
+            &filter,
+            absorbed,
+        );
+        ops.push(WireOp::Req(backlog_sub_id, filter));
+        effects.push(Effect::Wire(WireDelta {
+            ops: vec![(RelaySessionKey::public(relay), ops)],
+        }));
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+    }
+
+    /// A relay that accepted `limit:0` but never sent its barrier EOSE must
+    /// not strand acquisition. Keep that candidate (and any prior live
+    /// owner) open while a distinct unlimited backlog REQ supplies a safe
+    /// fallback. Its EOSE promotes the already-sent candidate and retires
+    /// the predecessor; no Negentropy is attempted on this path.
+    fn handoff_fallback_to_req(&mut self, handoff: PendingNegHandoff, effects: &mut Vec<Effect>) {
+        let PendingNegHandoff {
+            plan_sub_id,
+            live_sub_id,
+            prior_live_sub_id,
+            filter,
+            absorbed,
+            ..
+        } = handoff;
+        let owner = plan_sub_id.clone();
+        self.start_backlog_req(
+            plan_sub_id,
+            filter,
+            absorbed,
+            TemporaryReq::BacklogActivatesLive {
+                plan_sub_id: owner,
+                live_sub_id,
+                prior_live_sub_id,
+            },
+            effects,
+        );
+    }
+
+    /// Abandon a live reconciliation and fall back to a distinct plain REQ
+    /// for the same unfloored/unlimited filter. The already-active live REQ
+    /// remains open throughout timeout, NEG-ERR, malformed-message, and
+    /// store-failure recovery.
     fn neg_session_fallback_to_req(
         &mut self,
         sub_id: SubId,
@@ -6686,18 +7076,15 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) {
         effects.push(Effect::NegClose(session.relay.clone(), sub_id.clone()));
-        self.attribution.record_send(
-            &RelaySessionKey::public(session.relay.clone()),
-            &sub_id,
-            &session.filter,
-            session.absorbed.clone(),
+        self.attribution.discard_sub(&sub_id);
+        let owner = session.plan_sub_id.clone();
+        self.start_backlog_req(
+            session.plan_sub_id,
+            session.filter,
+            session.absorbed,
+            TemporaryReq::Backlog { plan_sub_id: owner },
+            effects,
         );
-        effects.push(Effect::Wire(WireDelta {
-            ops: vec![(
-                RelaySessionKey::public(session.relay),
-                vec![WireOp::Req(sub_id, session.filter)],
-            )],
-        }));
     }
 
     fn refresh_all_handles(&mut self, effects: &mut Vec<Effect>) {
