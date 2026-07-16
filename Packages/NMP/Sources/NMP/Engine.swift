@@ -308,8 +308,12 @@ public final class NMPEngine: Sendable {
     /// restored registration left to detach: no account was restored at
     /// construction (no checkpoint configured, or the checkpoint was empty),
     /// a previous `detachPersistedAccount()` or `removeAccount` call already
-    /// spent it, or a later `addAccount` has since overwritten the
-    /// checkpoint with a different installation.
+    /// spent it, a later `addAccount` has since overwritten the checkpoint
+    /// with a different installation, or `clearPersistedAccount()` was
+    /// called directly (it also spends the tracked restored registration --
+    /// after that call the live restored signer can only be removed by
+    /// shutting down the engine, never by a later `detachPersistedAccount()`
+    /// call).
     public func detachPersistedAccount() throws -> Bool {
         guard let registration = checkpointedPubkey.restoredRegistrationIfCurrent() else {
             return false

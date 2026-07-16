@@ -2,6 +2,7 @@ package com.nmp.sdk
 
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -166,6 +167,9 @@ class DetachPersistedAccountTest {
         }
     }
 
+    /** Proves "cache preserved" by actually writing a row through the
+     * soon-to-be-detached account and reading it back afterward -- not
+     * merely by observing that the redb file survives and reopens. */
     @Test
     fun canonicalStoreAndCachePreservedAcrossDetach() =
         runBlocking {
@@ -173,10 +177,27 @@ class DetachPersistedAccountTest {
             val database = root.resolve("nmp.redb")
             val store = NMPInsecureFileAccountStore(checkpoint)
             val config = NMPConfig(storePath = database.toString())
+            val cachedKind = 30_333.toUShort()
 
             NMPEngine(config, store).use { seed ->
                 val registration = seed.addAccount(secretOne)
                 seed.setActiveAccount(registration.publicKey)
+
+                val receipt = seed.publish(
+                    WriteIntent(
+                        payload = WritePayload.Unsigned(
+                            pubkey = publicOne,
+                            createdAt = 1_723_456_999uL,
+                            kind = cachedKind,
+                            tags = emptyList(),
+                            content = "cached before detach",
+                        ),
+                        durability = Durability.Durable,
+                        routing = WriteRouting.AuthorOutbox,
+                    ),
+                )
+                val accepted = receipt.status.first { it == WriteStatus.Accepted }
+                assertEquals(WriteStatus.Accepted, accepted)
             }
 
             NMPEngine(config, store).use { restored ->
@@ -190,6 +211,11 @@ class DetachPersistedAccountTest {
 
             NMPEngine(config, store).use { reopened ->
                 assertNull(reopened.activeAccount())
+                assertEquals(
+                    listOf("cached before detach"),
+                    reopened.observe(NMPFilter(kinds = listOf(cachedKind))).first().rows.map { it.content },
+                    "public cached data written before detach must survive it",
+                )
             }
         }
 }
