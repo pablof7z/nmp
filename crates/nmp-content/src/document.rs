@@ -1,4 +1,4 @@
-use crate::ReferenceTarget;
+use nmp_grammar::reference::ReferenceTarget;
 
 /// Input syntax selected by the caller or an owning protocol module.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

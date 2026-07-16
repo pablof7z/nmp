@@ -102,19 +102,6 @@ pub use nmp_resolver::LiveQuery;
 // boundary, rather than each hand-rolling its own bech32 decode.
 pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 
-/// Apply NMP's secure default classification to a network-authored relay
-/// hint before a protocol module promotes it into an explicit acquisition
-/// candidate. Public hosts are accepted; loopback, private/link-local, and
-/// onion hosts are rejected. Operator-configured relays do not use this
-/// predicate because their provenance is explicit local configuration.
-#[must_use]
-pub fn admits_network_relay_hint(relay: &nostr::RelayUrl) -> bool {
-    matches!(
-        nmp_transport::classify_relay_host(relay),
-        nmp_transport::RelayHostClass::Public
-    )
-}
-
 // The write plane a `WriteIntent` is built from, and its receipt stream.
 // `Durability`/`WriteIntent`/`WritePayload`/`WriteRouting` moved to
 // `nmp-grammar` (#115 Fable ruling, Fork 3) -- a protocol module composing
@@ -176,27 +163,6 @@ pub use nmp_signer::{
     Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer, PendingSignerResolveError,
     PendingSignerSender, SignerError, SignerOp, SigningCapability,
 };
-
-#[cfg(test)]
-mod relay_hint_tests {
-    use super::*;
-
-    #[test]
-    fn network_hint_gate_rejects_local_and_onion_but_keeps_public_hosts() {
-        assert!(admits_network_relay_hint(
-            &RelayUrl::parse("wss://relay.example.com").unwrap()
-        ));
-        assert!(!admits_network_relay_hint(
-            &RelayUrl::parse("ws://127.0.0.1:7777").unwrap()
-        ));
-        assert!(!admits_network_relay_hint(
-            &RelayUrl::parse("ws://10.0.0.9").unwrap()
-        ));
-        assert!(!admits_network_relay_hint(
-            &RelayUrl::parse("wss://hiddenservice.onion").unwrap()
-        ));
-    }
-}
 
 // The concrete mechanism types are internal by default (#52's "internal or
 // explicitly unstable"). `Engine::from_parts` needs `EventStore`/
