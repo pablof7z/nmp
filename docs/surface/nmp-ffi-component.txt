@@ -5062,6 +5062,18 @@ record Record {
             default: None,
             docstring: None,
         },
+        Field {
+            name: "identity_override",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "`nmp::WriteIntent::identity_override` mirror (#47 Unit A): the\nidentity this ONE write is published under, as 64-char hex (the\nmodule-wide `convert::parse_pubkey` rule every other pubkey input\nhere follows) or bech32 `npub` (an identity is the one input an app\nmost plausibly holds in display form). `None` -- the default, and\nwhat every existing caller gets -- means \"the active account at\nacceptance time\", unchanged.\n`Some` must name exactly the payload's own author; misuse fails\nclosed, never silently retargets: a MALFORMED string is a typed\nsynchronous [`crate::convert::FfiError::InvalidPublicKey`] before any\nengine call, while a well-formed-but-MISMATCHED override (not the\ndraft/event author) is rejected at the engine's acceptance boundary\nas `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`\never precedes it. An override naming a pubkey with no registered\nsigner parks as `FfiWriteStatus::AwaitingCapability` (retained, not\nterminated) until that capability attaches; acceptance PINS the\noverride, so a later `set_active_account` cannot retarget the write.",
+            ),
+        },
     ],
     docstring: Some(
         "A caller's publish request (`nmp::WriteIntent` mirror).",
