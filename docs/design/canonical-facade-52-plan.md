@@ -99,7 +99,7 @@ list *is* the product surface — a feature, not a cost.
     router cap (the `ROUTER_CAP = 10` both callers duplicate becomes one facade
     constant).
 - **Noun 1 — live query:** `observe(LiveQuery) -> Subscription` (wraps
-  `Handle::subscribe`; `Subscription` carries the `QueryHandle` + `Receiver<RowsMsg>`
+  `Handle::subscribe`; `Subscription` carries the `QueryHandle` + `RowsReceiver`
   and withdraws on `Drop`, folding in `NmpQueryHandle`'s Drop discipline,
   facade.rs:249-253).
 - **Noun 2 — write intent:** `publish(WriteIntent) -> Receiver<WriteStatus>` —

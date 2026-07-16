@@ -310,10 +310,10 @@ pub enum FfiWindowLoad {
 /// vocabulary both observation modes share. Delivery is DERIVED from
 /// boundedness, never a knob, and never carried twice on the wire:
 ///
-/// - Unbounded (`window` is `None`): `deltas` is the exact lossless
-///   transition from the previously delivered frame; the full row set is
-///   never redelivered (full-set redelivery is the O(rows squared) P0 #485
-///   exists to kill).
+/// - Unbounded (`window` is `None`): `deltas` is the exact transition rebased
+///   onto the previously delivered frame. Intermediate reducer emits may be
+///   conflated for a slow observer; the full row set is never redelivered
+///   (full-set redelivery is the O(rows squared) P0 #485 exists to kill).
 /// - Windowed (`window` is `Some`): `window.rows` is the complete current
 ///   bounded set and `deltas` is ALWAYS empty -- bridges replace state from
 ///   the snapshot, so shipping deltas too would cross every row the FFI

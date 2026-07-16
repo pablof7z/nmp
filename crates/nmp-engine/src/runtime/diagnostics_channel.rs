@@ -1,12 +1,11 @@
-//! A single-slot "latest value wins" mailbox (M5 plan §1.2 step 4). It backs
-//! self-contained diagnostics snapshots and bounded history snapshots: a
-//! slow consumer sees the MOST RECENT state next, never a growing backlog of
-//! stale frames. Ordinary `RowsMsg` remains on plain `mpsc` because its raw
-//! incremental deltas cannot be dropped. `recv` still blocks via
-//! `Condvar::wait` (D8: never a poll loop) and reports sender-disconnect like
-//! `mpsc::Receiver::recv`'s `Err`.
+//! A single-slot mailbox (M5 plan §1.2 step 4). Diagnostics and history use
+//! it as "latest complete snapshot wins" storage; ordinary row delivery uses
+//! the same slot with an atomic in-place fold that rebases skipped deltas.
+//! In every case a slow consumer has at most one pending value, never a
+//! growing backlog. `recv` still blocks via `Condvar::wait` (D8: never a poll
+//! loop) and reports sender-disconnect like `mpsc::Receiver::recv`'s `Err`.
 
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -52,8 +51,16 @@ impl<T> LatestSender<T> {
     /// the receiver had not yet consumed is silently dropped — the whole
     /// point of "latest wins" (see module doc).
     pub fn send(&self, value: T) {
+        self.update(|pending| *pending = Some(value));
+    }
+
+    /// Mutate the pending value while holding the slot lock, then wake a
+    /// blocked receiver. Row delivery uses this to compose a new reducer
+    /// delta onto the single pending rebased transition without any gap in
+    /// which a consumer could observe the intermediate value.
+    pub(crate) fn update(&self, update: impl FnOnce(&mut Option<T>)) {
         let mut slot = self.inner.slot.lock().unwrap();
-        slot.value = Some(value);
+        update(&mut slot.value);
         self.inner.cvar.notify_one();
     }
 }
@@ -105,6 +112,20 @@ impl<T> LatestReceiver<T> {
             unreachable!("condvar wait ended without a value, close, or timeout")
         }
     }
+
+    /// Return the pending value immediately, distinguishing an empty open
+    /// slot from a closed one like `mpsc::Receiver::try_recv`.
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        let mut slot = self.inner.slot.lock().unwrap();
+        if let Some(value) = slot.value.take() {
+            return Ok(value);
+        }
+        if slot.closed {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +173,15 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)),
             Err(RecvTimeoutError::Disconnected)
         );
+    }
+
+    #[test]
+    fn try_recv_distinguishes_empty_value_and_disconnect() {
+        let (tx, rx) = latest_channel::<u32>();
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        tx.send(9);
+        assert_eq!(rx.try_recv(), Ok(9));
+        drop(tx);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
     }
 }

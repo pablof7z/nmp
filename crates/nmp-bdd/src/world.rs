@@ -22,7 +22,7 @@ use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta};
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsMsg};
+use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsReceiver};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
@@ -86,7 +86,7 @@ pub fn my_follows_query() -> LiveQuery {
 /// scenario.
 struct FeedState {
     _handle: QueryHandle,
-    rx: std::sync::mpsc::Receiver<RowsMsg>,
+    rx: RowsReceiver,
     rows: BTreeMap<EventId, nostr::Event>,
     evidence: AcquisitionEvidence,
 }

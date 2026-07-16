@@ -12,9 +12,10 @@ import NMPFFI
 ///
 /// Each element is the full current snapshot (`RowBatch`), never a bare
 /// delta. How that snapshot is produced derives from the observation's
-/// boundedness (#485): an UNBOUNDED query is delivered as a lossless delta
-/// stream that the bridge folds into its accumulated state (redelivering
-/// the full set per change is the known O(rows²) class); a WINDOWED query
+/// boundedness (#485): an UNBOUNDED query is delivered as exact rebased
+/// deltas that the bridge folds into its accumulated state (intermediate
+/// reducer emits may conflate; redelivering the full set per change is the
+/// known O(rows²) class); a WINDOWED query
 /// is delivered as authoritative bounded snapshots that replace the state
 /// wholesale, each carrying the window's `WindowLoad` growth fact.
 ///
@@ -126,8 +127,9 @@ public struct NMPQuery: AsyncSequence, Sendable {
 /// observation's boundedness (#485):
 ///
 /// - `frame.window == nil` (unbounded): `frame.deltas` is the exact
-///   lossless transition; it is folded synchronously into the accumulated
-///   state on every `onFrame` call, so no delta is ever missed.
+///   transition rebased onto the last delivered Rust frame. Intermediate
+///   reducer emits may be skipped, but folding every delivered transition
+///   keeps the accumulated state exact.
 /// - `frame.window != nil` (windowed): `frame.window!.rows` is the complete
 ///   authoritative bounded set and REPLACES the state wholesale -- windowed
 ///   frames conflate to latest-state on the Rust side, so no per-frame

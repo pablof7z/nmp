@@ -1,8 +1,9 @@
 // Windowing is a POLICY on the read noun (#485), never a parallel noun:
 // there is no separate bounded-query type, only `NMPEngine.observe`
 // with an optional `Window`. Delivery mode is DERIVED from boundedness --
-// unbounded observations stream lossless deltas (full-set redelivery is
-// the known O(rows²) class), bounded observations deliver conflated
+// unbounded observations stream exact rebased deltas (intermediate reducer
+// emits may conflate; full-set redelivery is the known O(rows²) class),
+// bounded observations deliver conflated
 // authoritative snapshots. Growth is declarative (`requestRows(atLeast:)`),
 // never token-shaped.
 

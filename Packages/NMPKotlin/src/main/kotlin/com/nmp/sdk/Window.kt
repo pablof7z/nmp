@@ -6,7 +6,7 @@
 //
 // Delivery mode is DERIVED from boundedness, never a knob:
 // - Unbounded observations have no ceiling, so redelivering the full row
-//   set on every change is the O(rows^2) class -- they stream lossless
+//   set on every change is the O(rows^2) class -- they stream exact rebased
 //   deltas (Query.kt) and each element is the bridge-accumulated snapshot.
 // - Windowed observations are bounded by `max`, so a full snapshot per
 //   frame is cheap AND makes every frame self-contained -- a conflated
