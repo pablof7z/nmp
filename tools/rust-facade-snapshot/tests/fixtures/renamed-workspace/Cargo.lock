@@ -7,7 +7,7 @@ name = "nested-package"
 version = "0.0.0"
 
 [[package]]
-name = "nmp"
+name = "nmp-rust-facade-fixture"
 version = "0.0.0"
 dependencies = [
  "renamed-package",

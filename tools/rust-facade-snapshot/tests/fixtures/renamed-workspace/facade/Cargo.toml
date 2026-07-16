@@ -1,8 +1,14 @@
 [package]
-name = "nmp"
+name = "nmp-rust-facade-fixture"
 version = "0.0.0"
 edition = "2021"
 publish = false
+
+[lib]
+# Preserve the supported facade's public crate-root spelling in rustdoc while
+# keeping this synthetic package unselectable as the repository's `nmp`
+# package by Git consumers.
+name = "nmp"
 
 [dependencies]
 first_alias = { package = "renamed-package", path = "../renamed-package" }
