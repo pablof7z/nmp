@@ -42,6 +42,9 @@ public struct NMPReferenceObservationFactory: @unchecked Sendable {
         self.open = open
     }
 
+    /// Open one ordinary observation because the calling component explicitly
+    /// chose resolution. Parsing, document walking, and visibility never call
+    /// this method on their own.
     @MainActor
     public func observe(
         _ demand: NMPDemand,
