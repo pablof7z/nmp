@@ -15,7 +15,44 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 04:53:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 05:54:00 GMT</lastBuildDate>
+<item>
+<title>NMP Briefing — 2026-07-16 05:54 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0014.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0014</guid>
+<pubDate>Thu, 16 Jul 2026 05:54:00 GMT</pubDate>
+<description><![CDATA[
+Hey, it's the NMP briefing. Time to zoom out, because this is a big one: the headline this session is that content-relay authentication is complete, end to end, and issue eight -- the umbrella tracking all of it -- is closed.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Let's walk the arc, because the story isn't just that it shipped -- it's how it shipped. Six waves, delivered this session, every single one adversarially reviewed before it was allowed to land.
+
+Wave one gave every relay connection a properly scoped session identity instead of just a URL -- closing a real structural gap where two accounts on the same relay could quietly bleed into each other's credit. Clean identity-isolation review.
+
+Wave two built the actual authentication reducer: the challenge, the epoch state machine, a frozen event template for the auth response, authentication-ok kept structurally separate from an ordinary write acknowledgement. Here's where the discipline shows -- the adversarial review on this wave found a real missed-wakeup bug, a write that could get stranded waiting on authentication across a disconnect or restart and never get re-driven. That's about as serious a bug class as this project tracks. Fixed, with a proper fallback and a boot-time safety net, and the re-review came back clean.
+
+Wave three was the engine capstone: runtime capability binding, plus a real-relay proof, not a mock -- a genuine challenge comes in, the policy is consulted, the response gets signed, authentication goes out, the relay says okay, and real rows come back. Challenge to rows, proven, plus denial-parking, a fresh challenge on reconnect, and a dedicated wrong-challenge oracle to prove the test would actually catch a broken implementation.
+
+Wave five moved that onto the app-facing Rust interface: register an authentication policy, add an account and get back a real registration handle, remove an account by that handle -- which is also why the old pull request five twenty nine, with its cruder pubkey-only shape, got closed as superseded. Worth pausing on: doing it the naive way, re-exporting the engine's internal types, would have blown through this project's governed thirty-thousand-line facade ceiling. Instead every type got redefined fresh at the boundary. The public surface didn't grow to pay for this feature -- it shrank.
+
+Wave six, merged this session, closed it out: the projection to Swift and Kotlin. An authentication-policy interface, a resolve-or-cancel completion object, per-session diagnostics, typed errors instead of vague failure reasons. Verdict: no correctness holes. Seven dedicated race tests around resolving versus cancelling, all held.
+
+In practice: an iOS app, an Android app, a desktop app, can now register an authentication policy, respond to a relay's challenge, do authenticated reads and writes against a content relay, and read back per-session diagnostics. Proven against a real relay that enforces strict authentication, with a wrong-challenge oracle built so the proof can't be accused of testing nothing.
+
+The soul of this arc is the discipline, not just the feature. Every one of the six waves got an independent adversarial review before it was allowed to merge -- reviewed like an adversary wrote it. And the governed public-surface ceiling was never bypassed once. When a wave needed more room, the team either deferred the surface to a later wave, or redesigned it to shrink instead.
+
+A few other things landed this session worth naming. The read side got its own flagship: observe of a query and a window, replacing two overlapping read concepts with one, so a deep scroll now holds a constant number of live subscriptions per relay instead of leaking one every time you page forward. A batch of bounded-memory and indexing fixes closed out several unbounded bookkeeping structures across the store and router. And the store's page cache got an explicit sixty-four megabyte ceiling, cutting peak memory on a million-event ingest run by eighty-four percent.
+
+The honest part, because that's the point of these reports. Two things remain open. Engine shutdown can still block forever if an app's own cancellation hook never returns -- an app-hook contract issue, not specific to authentication, and it's tracked. And there's a flaky macOS-only test in the ingest-smoke suite, tracked as infrastructure, not a product bug. Beyond those two, there is no known app-facing gap left in the authentication path itself.
+
+So: NIP-42 came in through the front door this arc. Every wave reviewed like an adversary wrote it, and a governed public surface that never had to bend to get it done. That's the briefing. Thanks for listening.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0014.mp3" type="audio/mpeg" length="5271212"/>
+<itunes:title>NMP Briefing — 2026-07-16 05:54 UTC</itunes:title>
+<itunes:duration>329</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-16 04:53 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0013.mp3</link>
