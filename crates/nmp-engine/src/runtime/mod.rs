@@ -4752,11 +4752,11 @@ fn dispatch_effect(
 }
 
 /// The wire `["NEG-OPEN", sub_id, filter, initial_message]` text for
-/// `sub_id`/`filter` -- the SAME wire subscription-id convention
-/// `req_frame_text`/`close_frame_text` use (`core::wire_sub_id_string`),
-/// since REQ and NEG-OPEN share one subscription-id namespace on the wire
-/// (NIP-77) and `core::mod`'s attribution/session bookkeeping looks either
-/// up by that identical literal string.
+/// `sub_id`/`filter`. It uses the same stable literal rendering helper as
+/// REQ (`core::wire_sub_id_string`), while NIP-77 explicitly defines a
+/// protocol namespace separate from REQ. The reducer supplies role-derived
+/// ids so both can stay open concurrently, and `core::mod` resolves either
+/// protocol by the exact rendered string it recorded at send time.
 fn neg_open_frame_text(
     sub_id: &SubId,
     filter: &ConcreteFilter,
