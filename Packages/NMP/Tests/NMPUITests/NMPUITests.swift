@@ -27,18 +27,6 @@ final class NMPUITests: XCTestCase {
         XCTAssertEqual(NMPReadingTime.minutes(for: "one two three", wordsPerMinute: 2), 2)
     }
 
-    func testSelectedComponentGetsRustValidatedOrdinaryDemandPlan() throws {
-        let plan = try referenceDemandPlan(for: .profile(pubkey: pubkey))
-        XCTAssertEqual(plan.targetKey, "profile:\(pubkey)")
-        XCTAssertEqual(plan.canonical.source, .authorOutboxes)
-        XCTAssertEqual(plan.canonical.selection.kinds, [0])
-        XCTAssertTrue(plan.helpers.isEmpty)
-        XCTAssertEqual(plan.discardedRelayHints, 0)
-        XCTAssertThrowsError(
-            try referenceDemandPlan(for: .event(id: "not-an-event-id"))
-        )
-    }
-
     func testLiteralVisibleProfileAndEventComponentsOpenZeroHandles() {
         let probe = ObservationProbe()
         let renderers = NostrContentRenderers.literalReferences

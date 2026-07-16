@@ -5,7 +5,10 @@ import SwiftUI
 /// not attach a modifier, open an observation, or imply network work.
 public struct NostrContent: View {
     public let document: NostrContentDocument
+    /// Capability offered to app-selected reference components. Supplying it
+    /// does not cause `NostrContent` or the document walk to observe anything.
     public let observationFactory: NMPReferenceObservationFactory?
+    /// Immutable cycle/depth ancestry for nested event components.
     public let context: NostrContentRenderContext
     public let purpose: NostrContentPurpose
     public let renderers: NostrContentRenderers

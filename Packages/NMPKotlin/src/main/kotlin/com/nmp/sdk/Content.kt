@@ -1,21 +1,15 @@
 package com.nmp.sdk
 
-import uniffi.nmp_ffi.FfiArticle
 import uniffi.nmp_ffi.FfiBlockKind
 import uniffi.nmp_ffi.FfiContentDiagnostic
 import uniffi.nmp_ffi.FfiContentDocument
 import uniffi.nmp_ffi.FfiContentSyntax
 import uniffi.nmp_ffi.FfiInlineNode
 import uniffi.nmp_ffi.FfiInlineStyle
-import uniffi.nmp_ffi.FfiProfileMetadata
 import uniffi.nmp_ffi.FfiReferenceOccurrence
 import uniffi.nmp_ffi.FfiReferencePlacement
 import uniffi.nmp_ffi.FfiReferenceTarget
-import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiSourceRange
-import uniffi.nmp_ffi.contentReferenceDemandPlan as ffiReferenceDemandPlan
-import uniffi.nmp_ffi.decodeArticleResource as ffiDecodeArticleResource
-import uniffi.nmp_ffi.decodeProfileResource as ffiDecodeProfileResource
 import uniffi.nmp_ffi.parseNostrContent as ffiParseNostrContent
 
 enum class NostrContentSyntax {
@@ -128,14 +122,12 @@ sealed class NostrReferenceTarget {
     ) : NostrReferenceTarget()
 
     val key: String
-        get() = referenceDemandPlan(this).targetKey
-
-    internal fun toFfi(): FfiReferenceTarget =
-        when (this) {
-            is Profile -> FfiReferenceTarget.Profile(pubkey, relayHints)
-            is Event -> FfiReferenceTarget.Event(id, authorHint, kindHint, relayHints)
-            is Address -> FfiReferenceTarget.Address(kind, author, identifier, relayHints)
-        }
+        get() =
+            when (this) {
+                is Profile -> "profile:$pubkey"
+                is Event -> "event:$id"
+                is Address -> "address:$kind:$author:$identifier"
+            }
 
     companion object {
         internal fun from(ffi: FfiReferenceTarget): NostrReferenceTarget =
@@ -298,94 +290,3 @@ fun parseNostrContent(
     content: String,
     syntax: NostrContentSyntax = NostrContentSyntax.PlainText,
 ): NostrContentDocument = NostrContentDocument.from(ffiParseNostrContent(content, syntax.toFfi()))
-
-data class NostrReferenceDemandPlan(
-    val targetKey: String,
-    val canonical: NMPDemand,
-    val helpers: List<NMPDemand>,
-)
-
-fun referenceDemandPlan(target: NostrReferenceTarget): NostrReferenceDemandPlan {
-    val ffi = ffiReferenceDemandPlan(target.toFfi())
-    return NostrReferenceDemandPlan(
-        targetKey = ffi.targetKey,
-        canonical = NMPDemand.from(ffi.canonical),
-        helpers = ffi.helpers.map(NMPDemand::from),
-    )
-}
-
-data class NostrProfileMetadata(
-    val pubkey: String,
-    val name: String?,
-    val displayName: String?,
-    val about: String?,
-    val picture: String?,
-    val banner: String?,
-    val nip05: String?,
-    val lud06: String?,
-    val lud16: String?,
-) {
-    companion object {
-        internal fun from(ffi: FfiProfileMetadata) =
-            NostrProfileMetadata(
-                ffi.pubkey,
-                ffi.name,
-                ffi.displayName,
-                ffi.about,
-                ffi.picture,
-                ffi.banner,
-                ffi.nip05,
-                ffi.lud06,
-                ffi.lud16,
-            )
-    }
-}
-
-data class NostrArticle(
-    val eventId: String,
-    val author: String,
-    val createdAt: ULong,
-    val identifier: String,
-    val title: String?,
-    val summary: String?,
-    val image: String?,
-    val publishedAt: ULong?,
-    val content: String,
-) {
-    companion object {
-        internal fun from(ffi: FfiArticle) =
-            NostrArticle(
-                ffi.eventId,
-                ffi.author,
-                ffi.createdAt,
-                ffi.identifier,
-                ffi.title,
-                ffi.summary,
-                ffi.image,
-                ffi.publishedAt,
-                ffi.content,
-            )
-    }
-}
-
-fun decodeNostrProfile(row: Row): NostrProfileMetadata? {
-    if (row.kind != 0.toUShort()) return null
-    return NostrProfileMetadata.from(ffiDecodeProfileResource(row.toFfi()))
-}
-
-fun decodeNip23Article(row: Row): NostrArticle? {
-    if (row.kind != 30_023.toUShort()) return null
-    return NostrArticle.from(ffiDecodeArticleResource(row.toFfi()))
-}
-
-private fun Row.toFfi() =
-    FfiRow(
-        id = id,
-        pubkey = pubkey,
-        createdAt = createdAt,
-        kind = kind,
-        tags = tags,
-        content = content,
-        sig = sig,
-        sources = sources,
-    )

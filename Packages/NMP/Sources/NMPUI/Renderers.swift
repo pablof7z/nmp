@@ -190,6 +190,8 @@ public struct NostrContentRenderers {
         }
     }
 
+    /// Replace the profile-reference component, including its decision to
+    /// observe or render only the authored occurrence.
     public func profileReference<Content: View>(
         layout: NMPContentNodeLayout = .inline,
         @ViewBuilder _ component: @escaping (NMPProfileReferenceInput) -> Content
@@ -211,6 +213,8 @@ public struct NostrContentRenderers {
         return copy
     }
 
+    /// Replace the outer event loader without changing any actual-kind
+    /// renderer. The loader owns whether and how acquisition occurs.
     public func eventLoader<Content: View>(
         layout: NMPContentNodeLayout = .block,
         @ViewBuilder _ component: @escaping (NMPEventReferenceInput) -> Content
@@ -232,6 +236,8 @@ public struct NostrContentRenderers {
         return copy
     }
 
+    /// Register presentation for a validated acquired row's actual kind and
+    /// optional purpose. This renderer never decides acquisition.
     public func event<Content: View>(
         kind: UInt16,
         purpose: NostrContentPurpose? = nil,

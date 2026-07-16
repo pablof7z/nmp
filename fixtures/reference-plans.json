@@ -1,0 +1,214 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "name": "npub-profile",
+      "input": "nostr:npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy",
+      "outcome": "public",
+      "target": {
+        "kind": "profile",
+        "key": "profile:aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4",
+        "pubkey": "aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4",
+        "id": null,
+        "author_hint": null,
+        "kind_hint": null,
+        "address_kind": null,
+        "author": null,
+        "identifier": null,
+        "relay_hints": []
+      },
+      "plan": {
+        "target_key": "profile:aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4",
+        "canonical": {
+          "selection": { "kinds": [0], "authors": ["aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4"], "ids": [], "tags": {}, "since": null, "until": null, "limit": 1 },
+          "source": { "kind": "author_outboxes", "relays": [] },
+          "access": "public",
+          "cache": "agnostic"
+        },
+        "helpers": [],
+        "discarded_relay_hints": 0
+      }
+    },
+    {
+      "name": "nprofile-relay-hints",
+      "input": "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gppemhxue69uhhytnc9e3k7mf0qyt8wumn8ghj7er2vfshxtnnv9jxkc3wvdhk6tclr7lsh",
+      "outcome": "public",
+      "target": {
+        "kind": "profile",
+        "key": "profile:3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+        "pubkey": "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+        "id": null,
+        "author_hint": null,
+        "kind_hint": null,
+        "address_kind": null,
+        "author": null,
+        "identifier": null,
+        "relay_hints": ["wss://r.x.com/", "wss://djbas.sadkb.com/"]
+      },
+      "plan": {
+        "target_key": "profile:3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+        "canonical": {
+          "selection": { "kinds": [0], "authors": ["3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"], "ids": [], "tags": {}, "since": null, "until": null, "limit": 1 },
+          "source": { "kind": "author_outboxes", "relays": [] },
+          "access": "public",
+          "cache": "agnostic"
+        },
+        "helpers": [
+          {
+            "selection": { "kinds": [0], "authors": ["3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"], "ids": [], "tags": {}, "since": null, "until": null, "limit": 1 },
+            "source": { "kind": "pinned", "relays": ["wss://djbas.sadkb.com/", "wss://r.x.com/"] },
+            "access": "public",
+            "cache": "agnostic"
+          }
+        ],
+        "discarded_relay_hints": 0
+      }
+    },
+    {
+      "name": "note-event",
+      "input": "note1m99r7nwc0wdrkzldrqan96gklg5usqspq7z9696j6unf0ljnpxjspqfw99",
+      "outcome": "public",
+      "target": {
+        "kind": "event",
+        "key": "event:d94a3f4dd87b9a3b0bed183b32e916fa29c8020107845d1752d72697fe5309a5",
+        "pubkey": null,
+        "id": "d94a3f4dd87b9a3b0bed183b32e916fa29c8020107845d1752d72697fe5309a5",
+        "author_hint": null,
+        "kind_hint": null,
+        "address_kind": null,
+        "author": null,
+        "identifier": null,
+        "relay_hints": []
+      },
+      "plan": {
+        "target_key": "event:d94a3f4dd87b9a3b0bed183b32e916fa29c8020107845d1752d72697fe5309a5",
+        "canonical": {
+          "selection": { "kinds": [], "authors": [], "ids": ["d94a3f4dd87b9a3b0bed183b32e916fa29c8020107845d1752d72697fe5309a5"], "tags": {}, "since": null, "until": null, "limit": 1 },
+          "source": { "kind": "public", "relays": [] },
+          "access": "public",
+          "cache": "agnostic"
+        },
+        "helpers": [],
+        "discarded_relay_hints": 0
+      }
+    },
+    {
+      "name": "nevent-author-hint",
+      "input": "nevent1qqsdhet4232flykq3048jzc9msmaa3hnxuesxy3lnc33vd0wt9xwk6szyqewrqnkx4zsaweutf739s0cu7et29zrntqs5elw70vlm8zudr3y24sqsgy",
+      "outcome": "public",
+      "target": {
+        "kind": "event",
+        "key": "event:dbe57554549f92c08bea790b05dc37dec6f3373303123f9e231635ee594ceb6a",
+        "pubkey": null,
+        "id": "dbe57554549f92c08bea790b05dc37dec6f3373303123f9e231635ee594ceb6a",
+        "author_hint": "32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245",
+        "kind_hint": null,
+        "address_kind": null,
+        "author": null,
+        "identifier": null,
+        "relay_hints": []
+      },
+      "plan": {
+        "target_key": "event:dbe57554549f92c08bea790b05dc37dec6f3373303123f9e231635ee594ceb6a",
+        "canonical": {
+          "selection": { "kinds": [], "authors": [], "ids": ["dbe57554549f92c08bea790b05dc37dec6f3373303123f9e231635ee594ceb6a"], "tags": {}, "since": null, "until": null, "limit": 1 },
+          "source": { "kind": "public", "relays": [] },
+          "access": "public",
+          "cache": "agnostic"
+        },
+        "helpers": [
+          {
+            "selection": { "kinds": [], "authors": ["32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245"], "ids": ["dbe57554549f92c08bea790b05dc37dec6f3373303123f9e231635ee594ceb6a"], "tags": {}, "since": null, "until": null, "limit": 1 },
+            "source": { "kind": "author_outboxes", "relays": [] },
+            "access": "public",
+            "cache": "agnostic"
+          }
+        ],
+        "discarded_relay_hints": 0
+      }
+    },
+    {
+      "name": "naddr-article-coordinate",
+      "input": "naddr1qqxnzd3exgersv33xymnsve3qgs8suecw4luyht9ekff89x4uacneapk8r5dyk0gmn6uwwurf6u9rusrqsqqqa282m3gxt",
+      "outcome": "public",
+      "target": {
+        "kind": "address",
+        "key": "address:30023:787338757fc25d65cd929394d5e7713cf43638e8d259e8dcf5c73b834eb851f2:1692282117831",
+        "pubkey": null,
+        "id": null,
+        "author_hint": null,
+        "kind_hint": null,
+        "address_kind": 30023,
+        "author": "787338757fc25d65cd929394d5e7713cf43638e8d259e8dcf5c73b834eb851f2",
+        "identifier": "1692282117831",
+        "relay_hints": []
+      },
+      "plan": {
+        "target_key": "address:30023:787338757fc25d65cd929394d5e7713cf43638e8d259e8dcf5c73b834eb851f2:1692282117831",
+        "canonical": {
+          "selection": { "kinds": [30023], "authors": ["787338757fc25d65cd929394d5e7713cf43638e8d259e8dcf5c73b834eb851f2"], "ids": [], "tags": { "d": ["1692282117831"] }, "since": null, "until": null, "limit": 1 },
+          "source": { "kind": "author_outboxes", "relays": [] },
+          "access": "public",
+          "cache": "agnostic"
+        },
+        "helpers": [],
+        "discarded_relay_hints": 0
+      }
+    },
+    {
+      "name": "nevent-adversarial-hints",
+      "input": "nevent1qqspzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygzyq3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyqcyqqq823cpzamhxue69uhhyetvv9ujuetcv9khqmr99e3k7mgpzamhxue69uhhyetvv9ujuetcv9khqmr99e3k7mgprpmhxue69uhhyetvv9ujuetcv9khqmr99e3k7mf0qyfhwue69uhnzv3h9cczuvpwxyarwdehxuqs6amn8ghj7vfs9cczuvpwxgq3jamnwvaz7tmgd9jxgetwwdjhyanfvdjjummwd9hkuqgewaehxw309aex2mrp0yknqtn90psk6urvv5hxxmmdqyvhwumn8ghj7un9d3shjtf39ejhsctdwpkx2tnrdakszxthwden5te0wfjkccte95ezuetcv9khqmr99e3k7mgpr9mhxue69uhhyetvv9uj6vewv4uxzmtsd3jjucm0d5q3jamnwvaz7tmjv4kxz7fdxshx27rpd4cxcefwvdhk6qgewaehxw309aex2mrp0ykn2tn90psk6urvv5hxxmmdqyvhwumn8ghj7un9d3shjtfk9ejhsctdwpkx2tnrdakszxthwden5te0wfjkccte95mjuetcv9khqmr99e3k7mgpr9mhxue69uhhyetvv9uj6wpwv4uxzmtsd3jjucm0d55d36wa",
+      "outcome": "public",
+      "target": {
+        "kind": "event",
+        "key": "event:1111111111111111111111111111111111111111111111111111111111111111",
+        "pubkey": null,
+        "id": "1111111111111111111111111111111111111111111111111111111111111111",
+        "author_hint": "2222222222222222222222222222222222222222222222222222222222222222",
+        "kind_hint": 30023,
+        "address_kind": null,
+        "author": null,
+        "identifier": null,
+        "relay_hints": ["wss://relay.example.com", "wss://relay.example.com", "wss://relay.example.com/", "ws://127.0.0.1:7777", "ws://10.0.0.2", "wss://hiddenservice.onion", "wss://relay-0.example.com", "wss://relay-1.example.com", "wss://relay-2.example.com", "wss://relay-3.example.com", "wss://relay-4.example.com", "wss://relay-5.example.com", "wss://relay-6.example.com", "wss://relay-7.example.com", "wss://relay-8.example.com"]
+      },
+      "plan": {
+        "target_key": "event:1111111111111111111111111111111111111111111111111111111111111111",
+        "canonical": {
+          "selection": { "kinds": [], "authors": [], "ids": ["1111111111111111111111111111111111111111111111111111111111111111"], "tags": {}, "since": null, "until": null, "limit": 1 },
+          "source": { "kind": "public", "relays": [] },
+          "access": "public",
+          "cache": "agnostic"
+        },
+        "helpers": [
+          {
+            "selection": { "kinds": [], "authors": [], "ids": ["1111111111111111111111111111111111111111111111111111111111111111"], "tags": {}, "since": null, "until": null, "limit": 1 },
+            "source": { "kind": "pinned", "relays": ["wss://relay-0.example.com", "wss://relay-1.example.com", "wss://relay-2.example.com", "wss://relay-3.example.com", "wss://relay-4.example.com", "wss://relay-5.example.com", "wss://relay-6.example.com", "wss://relay-7.example.com"] },
+            "access": "public",
+            "cache": "agnostic"
+          },
+          {
+            "selection": { "kinds": [], "authors": ["2222222222222222222222222222222222222222222222222222222222222222"], "ids": ["1111111111111111111111111111111111111111111111111111111111111111"], "tags": {}, "since": null, "until": null, "limit": 1 },
+            "source": { "kind": "author_outboxes", "relays": [] },
+            "access": "public",
+            "cache": "agnostic"
+          }
+        ],
+        "discarded_relay_hints": 5
+      }
+    },
+    {
+      "name": "nsec-secret-key",
+      "input": "nsec1j4c6269y9w0q2er2xjw8sv2ehyrtfxq3jwgdlxj6qfn8z4gjsq5qfvfk99",
+      "outcome": "secret_key",
+      "target": null,
+      "plan": null
+    },
+    {
+      "name": "malformed-npub",
+      "input": "npub1notvalidbech32",
+      "outcome": "malformed",
+      "target": null,
+      "plan": null
+    }
+  ]
+}

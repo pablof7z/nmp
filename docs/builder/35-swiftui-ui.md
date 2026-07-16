@@ -1,9 +1,9 @@
 # SwiftUI content and components
 
-`NMPUI` is the optional native UI product above `NMPContent`. It opens no
-socket, owns no event cache, and selects no canonical event. A supplied
-`NostrContentSession` delivers the latest shared document and resolved
-resources; the views render that state synchronously.
+`NMPUI` is the optional native UI product above parser-only `NMPContent`. A
+`NostrContent` view walks an immutable document and invokes app-selected
+components. The walk itself does not attach a modifier, open an observation, or
+imply network work.
 
 ```swift
 import NMP
@@ -16,38 +16,211 @@ let engine = try NMPEngine(
         "wss://relay.primal.net",
     ])
 )
-let content = NMPContentClient(engine: engine)
-let session = content.session(
-    content: "hello nostr:npub1... read nostr:naddr1..."
+let document = parseNostrContent(
+    "hello nostr:npub1... read nostr:naddr1..."
+)
+let observations = NMPReferenceObservationFactory.live(engine: engine)
+```
+
+Render with the standard components:
+
+```swift
+NostrContent(
+    document: document,
+    observationFactory: observations,
+    renderers: .standard
 )
 ```
 
-Render it with useful defaults:
+Passing a factory only makes observation available. `NostrContent` never calls
+it directly. The selected profile component or outer event loader decides
+whether to use it.
+
+## Prove the zero-acquisition path first
+
+The same document can be rendered literally even when a live factory is in
+scope:
 
 ```swift
-NostrContent(session: session, renderers: .standard)
+NostrContent(
+    document: document,
+    observationFactory: observations,
+    renderers: .literalReferences
+)
 ```
+
+Both `npub` and event references remain authored text. No handle and no relay
+work is created. This is not an optimization of the standard loader; it is a
+different component choice.
 
 There is deliberately no `NostrInlineContent`, `NostrBlockContent`, public
 `ListBlock`, or public `CodeBlock`. `NostrContent` owns the semantic document
-walk. Internally it lays text and arbitrary native views into flow and applies
-authored Markdown contexts. Apps choose renderers, not parser plumbing.
+walk and lays text plus arbitrary native views into flow. Apps choose
+components, not parser plumbing.
+
+## The component hierarchy
+
+```text
+NostrContent
+  document walk
+    profile reference -> app-selected profile component
+      literal component: no observation
+      NMPStandardProfileMention: owns optional kind:0 observation
+    event/address reference -> app-selected outer loader
+      literal/consent/cache loader: app policy
+      NMPDefaultEventLoader: owns optional canonical/helper observations
+        NMPResolvedEventDispatcher
+          actual event.kind + purpose -> registered renderer
+          otherwise -> generic event fallback
+```
+
+The outer loader and resolved-event table are independent extension points. A
+loader can change acquisition policy without changing how kind:1 or kind:30023
+renders. A renderer only receives a validated acquired `Row`; it does not
+fetch.
+
+An authored `nevent` kind hint never selects the renderer. Dispatch uses
+`input.event.kind` plus `NostrContentPurpose`. Unknown kinds always reach the
+generic event component instead of blank space.
+
+## Component-owned visibility
+
+`NMPVisibleReferenceObservation` is per component. It asks
+`referenceDemandPlan(for:)` for the canonical/helper demands and owns a fresh
+independent handle for every observation it opens.
+
+```swift
+struct MyResolvingComponent: View {
+    @StateObject private var observation: NMPVisibleReferenceObservation
+
+    init(target: NostrReferenceTarget, factory: NMPReferenceObservationFactory) {
+        _observation = StateObject(
+            wrappedValue: NMPVisibleReferenceObservation(
+                target: target,
+                factory: factory
+            )
+        )
+    }
+
+    var body: some View {
+        MyResolvedOrFallbackView(batch: observation.canonical)
+            .observeWhileVisible(observation)
+    }
+}
+```
+
+`observeWhileVisible` is optional reusable behavior, not framework policy:
+
+- appearing opens only this component's handles;
+- leaving the scroll-visible region releases all of those handles;
+- the last canonical/helper batches remain renderable while hidden, so return
+  does not flicker empty;
+- scroll thrash cannot accumulate handles or iteration tasks;
+- custom components may instead observe unconditionally or never observe.
+
+Equal components still own independent handles. Core may coalesce their equal
+demands into one wire subscription, but releasing one component cannot release
+the other component's interest.
+
+## Choose acquisition policy in the component
+
+The observation factory is an injectable seam around ordinary `engine.observe`.
+The standard factory opens the supplied `NMPDemand` unchanged. A custom loader
+can wrap or replace it to choose the merged per-handle freshness policy from
+#565:
+
+```swift
+let cacheOnly = NMPReferenceObservationFactory { demand, receive in
+    var demand = demand
+    demand.freshness = .cacheOnly
+    return try observations.observe(demand, receive: receive)
+}
+```
+
+A consent loader can render from `cacheOnly`, show "Fetch preview?" when the
+canonical batch is empty, and open a separate `.live` observation only after
+the user agrees. A feed mention can choose `.maxAge(seconds: 14_400)` while a
+profile detail component chooses `.live`. Parser output, target identity, and
+the resolved-event renderer table stay unchanged.
+
+Freshness is not a second cache or timer. `CacheOnly` contributes no wire work;
+an unsatisfied `MaxAge` opens ordinary cache-then-live work once. Evidence and
+shortfalls remain on the exact handles the component chose.
+
+## Replace profile and event decisions separately
+
+Literal profile references with otherwise-standard event behavior:
+
+```swift
+let renderers = NostrContentRenderers.standard
+    .profileReference { input in
+        NMPReferenceLiteral(original: input.occurrence.original)
+    }
+```
+
+A replaceable outer event loader:
+
+```swift
+let renderers = NostrContentRenderers.standard
+    .eventLoader { input in
+        ConsentBeforeNetworkEventLoader(input: input)
+    }
+```
+
+The custom loader may eventually delegate its acquired row without copying the
+kind switch:
+
+```swift
+NMPResolvedEventDispatcher(
+    reference: input,
+    event: acquiredRow,
+    context: descendedContext
+)
+```
+
+Register an app-only kind independently:
+
+```swift
+let renderers = renderers
+    .event(kind: 12_938, purpose: .embedded, layout: .block) { input in
+        MyPrivateRecordCard(event: input.event)
+    }
+    .fallbackEvent { input in
+        MyRawEventCard(event: input.event)
+    }
+```
+
+No Rust enum, FFI union, app-root provider, or process-global registry changes.
+
+## Immutable recursion context
+
+`NostrContentRenderContext` carries only ancestor target keys, current depth,
+and maximum depth. `descending(into:)` produces the next value or returns
+`nil` for a cycle/depth stop. There is no mutable document coordinator and no
+active/resolved reference count budget.
+
+The default event loader descends before acquisition and passes the resulting
+context into `NMPResolvedEventDispatcher`. Nested `NostrContent` receives that
+same immutable context.
 
 ## Identity primitives
 
-`NMPAvatar` and `NMPName` are the shared base of mentions, bylines, event
-chrome, and user cards:
+`NMPAvatar` and `NMPName` are presentation leaves used by mentions, bylines,
+event chrome, and user cards:
 
 ```swift
 NMPAvatar(pubkey: pubkey, profile: profile, size: 44)
 NMPName(pubkey: pubkey, profile: profile)
 ```
 
-Before kind:0 resolves, Avatar uses a deterministic pubkey-derived color and
-initials while Name uses a stable abbreviated pubkey. A resolved image never
-changes layout. Remote HTTP image loading is disabled by default because profile
-and event URLs are network-authored. Explicitly opt into the small `AsyncImage`
-policy with `.nmpImageLoader(.system)`, or replace image policy for any subtree:
+Before a profile protocol owner supplies a decoded value, Avatar uses a
+deterministic pubkey-derived fallback and Name uses an abbreviated pubkey. The
+standard profile mention owns its kind:0 observation when a factory is
+supplied; the content package does not decode kind:0.
+
+Remote HTTP image loading is disabled by default because profile and event URLs
+are network-authored. Explicitly opt into the small `AsyncImage` policy with
+`.nmpImageLoader(.system)`, or replace image policy for a subtree:
 
 ```swift
 view.nmpImageLoader(
@@ -57,11 +230,7 @@ view.nmpImageLoader(
 )
 ```
 
-`NMPResolvedProfile(session:pubkey:)` is the connected convenience. It claims
-kind:0 through the existing content session and supplies the optional profile
-to arbitrary child views; it does not independently query.
-
-The same leaves are available below the composed cards:
+The same leaves remain available below composed cards:
 
 ```swift
 NMPNIP05(profile.nip05 ?? "")
@@ -129,76 +298,7 @@ outcomes all arrive as action state; `follow` itself does not throw. See
 [Editing replaceable state safely](15-editing-replaceable.md) for the
 source-scoped base contract.
 
-## Replace one renderer
-
-Renderer sets are immutable ordinary values. The last explicit builder call on
-your local value replaces that key; another screen can use a different value.
-
-```swift
-let previewRenderers = NostrContentRenderers.standard
-    .profileMention { input in
-        NMPProfileMention(
-            pubkey: input.pubkey,
-            profile: input.profile,
-            variant: .text
-        )
-    }
-
-NostrContent(
-    session: previewSession,
-    purpose: .preview,
-    renderers: previewRenderers,
-    maximumBlocks: 1,
-    maximumLinesPerBlock: 2
-)
-```
-
-This is the channel-preview path: a NIP-27 mention becomes the current name as
-kind:0 arrives instead of remaining a bech32 string. It uses the same parser,
-claim, query, cache, routing, and replacement path as full content.
-
-## Add an app-only kind
-
-No Rust enum, FFI union, application provider, or global registry changes:
-
-```swift
-let renderers = NostrContentRenderers.standard
-    .event(kind: 12_938, purpose: .embedded, layout: .block) { input in
-        MyPrivateRecordCard(event: input.event)
-    }
-```
-
-An event renderer receives the validated current row, authored placement,
-render purpose, structural recursion context, parent content session, actions,
-and the renderer set for nested content. It does not fetch.
-
-## Script previews and deterministic states
-
-Previews and component tests do not need an engine, fake socket, or app-root
-provider. A scripted session has the same synchronous rendering contract, but
-its claims are inert and it cannot open a query:
-
-```swift
-let preview = NostrContentSession.scripted(
-    document: document,
-    resources: [
-        target: .resolved(
-            resource: .event(fixtureRow),
-            evidence: NostrContentEvidence()
-        )
-    ]
-)
-
-NostrContent(session: preview, renderers: .standard)
-```
-
-`Row` has a public raw-value initializer for fixtures and import adapters. It
-does not validate or insert anything into NMP. If an application owns a Djot,
-AsciiDoc, or custom-kind parser, it constructs `NostrContentDocument` directly
-and passes that document to either a live or scripted session. NMP reference
-targets inside the document keep the same rendering and acquisition contract.
-
-## Ready-made components
+## Ready-made component catalog
 
 The first SwiftUI family includes:
 
@@ -220,20 +320,27 @@ The first SwiftUI family includes:
 - `NMPAvatarReactionButton` and `NMPEmojiReactionBar`.
 
 Article reading time is presentation-derived through `NMPReadingTime`; it is
-not inserted into the NIP-23 protocol value. Reaction views remain controlled
+not inserted into a NIP-23 protocol value. Reaction views remain controlled
 components: the host supplies selected/count/people state and actions until the
 typed NIP-25 work tracked in issue #155 lands. The follow button does not use
-that controlled-state pattern because NMP now ships the NIP-02 resource and
+that controlled-state pattern because NMP ships the NIP-02 resource and
 semantic action itself.
+
+These components do not transfer their unrelated protocol ownership into
+`nmp-content`. For example, `NMPFollowing` observes the active account's
+canonical kind:3 relationship and invokes NMP's guarded follow/unfollow action;
+it is not part of reference parsing.
 
 ## Theme and actions
 
-Override `NMPUITheme` at any subtree. Supply navigation and product policy as
-`NostrContentActions`; components never install routes or own navigation.
+Renderer sets are immutable ordinary values. Different screens can use
+different local values. Themes, navigation, and product actions never affect
+demand identity.
 
 ```swift
 NostrContent(
-    session: session,
+    document: document,
+    observationFactory: observations,
     renderers: renderers,
     actions: NostrContentActions(
         openProfile: router.profile,
@@ -245,6 +352,19 @@ NostrContent(
 .nmpUITheme(myTheme)
 ```
 
+## Previews and tests
+
+There is no scripted content-session API. Parse a fixture document and choose
+one of three honest inputs:
+
+1. `.literalReferences` for a no-acquisition preview;
+2. a custom renderer with explicit fixture values;
+3. an injected `NMPReferenceObservationFactory` whose independently owned
+   handles deliver fixture `RowBatch` values and cancel deterministically.
+
+The factory seam tests component lifecycle; it does not pretend to be a second
+event store or shared session.
+
 ## Run the real Gallery
 
 The source of truth is `apps/UIGallery/project.yml`:
@@ -255,15 +375,35 @@ cd apps/UIGallery
 xcodegen generate
 ```
 
-Build and run `NMPUIGallery`. The app imports the exact package components,
-configures only `purplepag.es` and `relay.primal.net`, and hardcodes real
-profile/article/note entities. Its article and note seeds have no relay URL;
-the Live proof screen shows the additional author relays NMP discovers through
-ordinary kind:10002 outbox routing.
+Build and run `NMPUIGallery`. The app imports the exact package components and
+uses `NMPReferenceObservationFactory.live(engine:)`, configures only
+`purplepag.es` and `relay.primal.net`, and hardcodes real profile/article/note
+entities. Its article and note seeds carry no relay URL; the Live proof shows
+ordinary kind:10002 discovery and outbox routing.
 
-The States tab is the deterministic conformance surface for loading, shortfall,
-cycle, unknown-kind, missing media, Dynamic Type, RTL, reduced motion, dark
-appearance, and long Markdown. The Stress tab mounts 72 production content
-rows with two live references each and exposes the current visible-claim count
-while rapidly scrolling. Those tabs are intentionally separate from the live
-relay proof so a missing network never disguises a rendering regression.
+The conformance surfaces include literal references with zero acquisition,
+standard profile/event components, misleading-kind dispatch, cycle/depth
+stops, unknown-kind fallback, missing media, Dynamic Type, RTL, reduced motion,
+dark appearance, and long Markdown. The Stress tab mounts production content
+rows and reports engine wire-subscription evidence rather than a UI-owned claim
+counter or hydration budget. Those deterministic surfaces remain separate from
+the live relay proof so network availability cannot disguise a rendering
+regression.
+
+## Migration checklist
+
+- Replace `NostrContent(session:...)` with `NostrContent(document:...)` (or the
+  `content:` convenience) and pass an observation factory only where selected
+  components may resolve references.
+- Replace `NMPResolvedProfile(session:pubkey:)` with a component that owns the
+  kind:0 observation, or use `NMPStandardProfileMention`.
+- Delete `NMPReferenceClaimModifier`, `NostrContentClaim`, session pause/resume,
+  scripted sessions, and hydration counters. None has an alias.
+- Move custom acquisition policy into `.profileReference` or `.eventLoader`.
+- Keep `.event(kind:purpose:)` and `.fallbackEvent` presentation-only; dispatch
+  on the acquired row's actual kind.
+- Pass `NostrContentRenderContext` through nested loaders; do not introduce a
+  mutable budget/coordinator replacement.
+
+See [Mixed Nostr content and reference plans](34-content.md) for the complete
+cross-platform ownership and clean-break migration table.
