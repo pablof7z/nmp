@@ -164,15 +164,41 @@ final class DetachPersistedAccountTests: XCTestCase {
         XCTAssertNil(try checkpoint.loadSecretKey())
     }
 
+    /// Proves "cache preserved" by actually writing a row through the
+    /// soon-to-be-detached account and reading it back afterward -- not
+    /// merely by observing that the redb file survives and reopens.
     func testCanonicalStoreAndCachePreservedAcrossDetach() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let database = fixture.root.appendingPathComponent("nmp.redb")
         let config = NMPConfig(storePath: database.path)
+        let cachedKind: UInt16 = 30_333
 
         let seed = try NMPEngine(config: config, localAccountStore: fixture.store)
         let registration = try await seed.addAccount(secretKey: secretOne)
         try seed.setActiveAccount(registration.publicKey)
+
+        let receipt = try await seed.publish(
+            WriteIntent(
+                payload: .unsigned(
+                    pubkey: publicOne,
+                    createdAt: 1_723_456_999,
+                    kind: cachedKind,
+                    tags: [],
+                    content: "cached before detach"
+                ),
+                durability: .durable,
+                routing: .authorOutbox
+            )
+        )
+        var sawAccepted = false
+        for await status in receipt.status {
+            if status == .accepted {
+                sawAccepted = true
+                break
+            }
+        }
+        XCTAssertTrue(sawAccepted, "the write must be durably accepted into the store before detach")
         seed.shutdown()
 
         let restored = try NMPEngine(config: config, localAccountStore: fixture.store)
@@ -185,9 +211,19 @@ final class DetachPersistedAccountTests: XCTestCase {
         )
 
         // The canonical store reopens cleanly with no active account -- the
-        // detach only removed the signer + checkpoint, never cached data.
+        // detach only removed the signer + checkpoint -- and the row
+        // written before detach is still there to read back.
         let reopened = try NMPEngine(config: config, localAccountStore: fixture.store)
         XCTAssertNil(try reopened.activeAccount())
+        let query = try reopened.observe(NMPFilter(kinds: [cachedKind]))
+        var iterator = query.makeAsyncIterator()
+        let first = await iterator.next()
+        XCTAssertEqual(
+            first?.rows.map(\.content),
+            ["cached before detach"],
+            "public cached data written before detach must survive it"
+        )
+        query.cancel()
         reopened.shutdown()
     }
 

@@ -179,8 +179,12 @@ class NMPEngine(
      * Returns `false` -- and removes nothing -- when there is no exact
      * restored registration left to detach: no account was restored at
      * construction, a previous [detachPersistedAccount] or [removeAccount]
-     * call already spent it, or a later [addAccount] has since overwritten
-     * the checkpoint with a different installation. */
+     * call already spent it, a later [addAccount] has since overwritten the
+     * checkpoint with a different installation, or [clearPersistedAccount]
+     * was called directly (it also spends the tracked restored registration
+     * -- after that call the live restored signer can only be removed by
+     * shutting down the engine, never by a later [detachPersistedAccount]
+     * call). */
     fun detachPersistedAccount(): Boolean {
         val registration = synchronized(checkpointLock) {
             restoredRegistration?.takeIf { checkpointedPubkey == it.publicKey }
