@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-16 02:52 UTC</p>
-    <p class="ep-sub">2026-07-16 &middot; NIP-42 Wave 3 in final CI, not yet merged &middot; ~3.4 min</p>
-    <audio controls preload="none" src="reports/pulse-0011.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0011.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-16 03:58 UTC</p>
+    <p class="ep-sub">2026-07-16 &middot; NIP-42 Wave 3 merged — authenticated content-relay reads proven end to end at the engine level &middot; ~3.5 min</p>
+    <audio controls preload="none" src="reports/pulse-0012.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0012.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">Nothing new merged this hour, but <a href="https://github.com/pablof7z/nmp/pull/542">#542</a> (NIP-42 Wave 3 — runtime capability binding + a real-WebSocket AUTH capstone, part of <a href="https://github.com/pablof7z/nmp/issues/8">#8</a>) is in its final CI run and could land any moment. The capstone proves an authenticated content-relay read end to end against a real relay (challenge → policy → sign → AUTH → OK → REQ → EOSE → rows), plus denial-parking, reconnect-fresh-challenge, and a wrong-challenge oracle; all eight lifecycle/leak invariants passed adversarial review clean. Honest framing: this proves the engine layer, not an app-facing API yet — the AuthPolicy SDK surface, auth-diagnostics, and reconciling <code>remove_account</code> (#529) remain for the wave after. Also unchanged: a macOS-only flaky test (<a href="https://github.com/pablof7z/nmp/issues/538">#538</a>) is testing-infra, not a product bug.</p>
+    <p class="ep-blurb"><a href="https://github.com/pablof7z/nmp/pull/542">#542</a> (NIP-42 Wave 3 — runtime capability binding + a real-WebSocket AUTH capstone, part of <a href="https://github.com/pablof7z/nmp/issues/8">#8</a>) merged. The capstone proves an authenticated content-relay read end to end against a real relay (challenge → policy → sign → AUTH → OK → REQ → EOSE → rows), plus denial-parking, reconnect-fresh-challenge, and a wrong-challenge oracle; all eight lifecycle/leak invariants passed adversarial review clean. Honest framing: this proves the engine layer, not an app-facing API yet — the <code>AuthPolicy</code> SDK surface and account registration through Swift/Kotlin are not merged; Wave 5 (Rust facade) is in the build gate now, Wave 6 (FFI/Swift/Kotlin) follows. Also: <a href="https://github.com/pablof7z/nmp/pull/529">#529</a> (<code>remove_account</code>) was closed as superseded — replaced by Wave 5's <code>add_account -&gt; AccountRegistration</code> / <code>remove_account(&amp;AccountRegistration)</code>, which closes <a href="https://github.com/pablof7z/nmp/issues/495">#495</a>. Unchanged: a macOS-only flaky test (<a href="https://github.com/pablof7z/nmp/issues/538">#538</a>) is testing-infra, not a product bug.</p>
   </section>
 
   <details class="archive" id="archive">
