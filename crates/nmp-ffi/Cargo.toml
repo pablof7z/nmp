@@ -39,6 +39,20 @@ nmp-nip51.workspace = true
 nmp-nip02.workspace = true
 nmp-nip29 = { workspace = true, features = ["engine"] }
 nmp-content.workspace = true
+# #555 (epic #216 T15-A-BLOSSOM): the opt-in Blossom blob projection, same
+# direct-dep treatment as nmp-nip51/nmp-nip29 above -- nmp-ffi is the ONE
+# staticlib/cdylib every Swift/Kotlin app links, so it bundles the
+# projection without the crate joining the canonical `nmp` facade.
+nmp-blossom.workspace = true
+# #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
+# `FfiSignedEvent` record into canonical event JSON for nostr's strict
+# `Event::from_json` parser (typed refusal on malformed id/sig hex).
+serde_json.workspace = true
+# #555: `FfiBlossomClient`'s blocking methods each drive the async
+# `nmp-blossom` client on a per-call current-thread runtime (the engine's
+# `relay_information.rs` `http_runtime()` discipline). Same production
+# feature set as nmp-engine's own tokio dependency, minus `sync`.
+tokio = { version = "1", features = ["rt", "time", "net"] }
 
 # #99: the corrupt-retained-receipt reattach falsifier needs to write a
 # genuinely undecodable row directly into a real `RedbStore` file, the same

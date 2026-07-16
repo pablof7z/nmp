@@ -27,13 +27,19 @@
 //! - [`nip29`] -- the read-only NIP-29 host-browser projection (#108):
 //!   `nmp-nip51`/`nmp-nip29`'s constructors/codec as top-level free
 //!   functions, same "no `NmpEngine` instance needed" shape as [`entity`].
+//! - [`blossom`] -- the opt-in Blossom blob projection (#555): kind:24242
+//!   authorization drafts/validation and the blocking BUD-02/04/12 client,
+//!   engine-less like [`entity`]/[`nip29`], with each operation's failure
+//!   taxonomy crossing as its own typed error enum.
 //!
 //! This crate has NO dependency on `nmp-engine` (or any other mechanism
 //! crate) at all -- every engine-side value type it mirrors is sourced
 //! through `nmp`'s own re-exports (#52 Unit B). `nmp-nip51`/`nmp-nip29`
-//! are the one deliberate exception (see [`nip29`]'s own doc for why).
+//! (see [`nip29`]'s own doc) and `nmp-blossom` (#555, see [`blossom`]'s)
+//! are the deliberate opt-in-protocol-crate exceptions.
 
 pub mod auth;
+pub mod blossom;
 pub mod content;
 pub mod convert;
 pub mod entity;
