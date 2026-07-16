@@ -645,12 +645,11 @@ public final class BlossomClient: @unchecked Sendable {
     ) async throws -> BlobDescriptor {
         let ffi = self.ffi
         let auth = authorization.ffi
-        let bytes = Array(blob)
         return try await blossomBlocking {
             do {
                 return BlobDescriptor(
                     try ffi.upload(
-                        serverUrl: serverURL, blob: bytes, contentType: contentType, auth: auth
+                        serverUrl: serverURL, blob: blob, contentType: contentType, auth: auth
                     )
                 )
             } catch let error as FfiBlossomUploadError {
