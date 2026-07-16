@@ -129,11 +129,11 @@ public struct NMPReactionButton: View {
 
 public struct NMPReactionPerson: Identifiable, Hashable, Sendable {
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
 
     public var id: String { pubkey }
 
-    public init(pubkey: String, profile: NostrProfileMetadata? = nil) {
+    public init(pubkey: String, profile: NMPProfilePresentation? = nil) {
         self.pubkey = pubkey
         self.profile = profile
     }

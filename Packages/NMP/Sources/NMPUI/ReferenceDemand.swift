@@ -1,28 +1,61 @@
 import NMP
+import NMPContent
 import NMPFFI
 
-/// The ordinary NMP observations used for one normalized reference. Only the
-/// canonical demand supplies rendered truth; helper demands use trustworthy
-/// hints to acquire into NMP's one store.
+/// The ordinary NMP observations a selected reference component may choose
+/// to open. This is a pure value; it owns no engine, handle, or lifecycle.
 public struct NostrReferenceDemandPlan: Sendable, Hashable {
     public let targetKey: String
     public let canonical: NMPDemand
     public let helpers: [NMPDemand]
+    public let discardedRelayHints: UInt32
 
-    public init(targetKey: String, canonical: NMPDemand, helpers: [NMPDemand]) {
+    public init(
+        targetKey: String,
+        canonical: NMPDemand,
+        helpers: [NMPDemand],
+        discardedRelayHints: UInt32
+    ) {
         self.targetKey = targetKey
         self.canonical = canonical
         self.helpers = helpers
+        self.discardedRelayHints = discardedRelayHints
     }
 }
 
-public func referenceDemandPlan(for target: NostrReferenceTarget) -> NostrReferenceDemandPlan {
-    let ffi = contentReferenceDemandPlan(target: target.ffiValue)
+/// Ask the Rust grammar owner to validate and lower one authored reference.
+/// The selected component calls this helper; parsing does not.
+public func referenceDemandPlan(
+    for target: NostrReferenceTarget
+) throws -> NostrReferenceDemandPlan {
+    let ffi = try referenceDemandPlan(target: ffiTarget(from: target))
     return NostrReferenceDemandPlan(
         targetKey: ffi.targetKey,
         canonical: demand(from: ffi.canonical),
-        helpers: ffi.helpers.map(demand(from:))
+        helpers: ffi.helpers.map(demand(from:)),
+        discardedRelayHints: ffi.discardedRelayHints
     )
+}
+
+private func ffiTarget(from target: NostrReferenceTarget) -> FfiReferenceTarget {
+    switch target {
+    case .profile(let pubkey, let relayHints):
+        return .profile(pubkey: pubkey, relayHints: relayHints)
+    case .event(let id, let authorHint, let kindHint, let relayHints):
+        return .event(
+            id: id,
+            authorHint: authorHint,
+            kindHint: kindHint,
+            relayHints: relayHints
+        )
+    case .address(let kind, let author, let identifier, let relayHints):
+        return .address(
+            kind: kind,
+            author: author,
+            identifier: identifier,
+            relayHints: relayHints
+        )
+    }
 }
 
 private func demand(from ffi: FfiDemand) -> NMPDemand {
@@ -39,12 +72,11 @@ private func filter(from ffi: FfiFilter) -> NMPFilter {
         guard key.count == 1, let character = key.first else { return nil }
         return (character, binding(from: value))
     }
-    let tags = Dictionary(uniqueKeysWithValues: pairs)
     return NMPFilter(
         kinds: ffi.kinds,
         authors: ffi.authors.map(binding(from:)),
         ids: ffi.ids.map(binding(from:)),
-        tags: tags,
+        tags: Dictionary(uniqueKeysWithValues: pairs),
         since: ffi.since,
         until: ffi.until,
         limit: ffi.limit

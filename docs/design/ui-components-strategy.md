@@ -1,12 +1,13 @@
 # Optional Nostr content and UI building blocks
 
 - **Date:** 2026-07-12
-- **Status:** Ratified architecture for issue #75. The shared content engine
-  is implemented by #147. The first SwiftUI family and live iOS Gallery are
-  implemented by #154. NIP-02 following is the first NMP-owned semantic
-  resource/action consumed by a view-only component (#180); Compose, the
-  open-code registry/CLI, and broader protocol families remain separately
-  tracked work.
+- **Status:** Ratified architecture for issue #75, amended by #561. Shared
+  parsing and reference planning are implemented without engine ownership;
+  Swift components own optional observation, while Kotlin currently projects
+  only the parser/planner contract. The first SwiftUI family and live iOS
+  Gallery are implemented, as is the open-code registry/CLI. Broad Compose
+  content UI, broader protocol families, and deeper cross-platform performance
+  proof remain separately tracked work.
 - **Core boundary:** NMP Core remains the content-neutral live-query and
   write-intent engine. The content runtime and UI kits are optional consumers
   of its public API.
@@ -29,9 +30,10 @@ other machinery needed to render an open protocol well.
 
 The selected distribution model is deliberately hybrid:
 
-1. **Linked, versioned substrate** for correctness-sensitive semantics,
-   reference-session lifecycle, and low-level native primitives. Fixes to
-   parsing, cancellation, accessibility, and resolution propagate normally.
+1. **Linked, versioned substrate** for correctness-sensitive semantics, pure
+   reference planning, component-owned observation primitives, and low-level
+   native primitives. Fixes to parsing, cancellation, accessibility, and safe
+   target lowering propagate normally.
 2. **Source-installable, styled compositions** for opinionated cards, readers,
    product views, and blocks. An app receives readable native source, may edit
    it without permission, and may selectively install only what it uses.
@@ -59,8 +61,9 @@ Rendering it requires a coordinated system:
 - recognize NIP-21/NIP-27 entities, hashtags, links, custom emoji, invoices,
   media, code spans, and protocol extensions;
 - decode `npub`, `nprofile`, `note`, `nevent`, and `naddr` correctly;
-- turn each reference into the right live demand, including relay hints,
-  authors, coordinates, and source authority;
+- let the selected component choose whether to turn a reference into a safe
+  live demand plan, including bounded relay hints, authors, coordinates, and
+  source authority;
 - render cached content immediately while acquisition continues;
 - resolve profiles and event references without a second cache or one network
   stack per view;
@@ -80,28 +83,34 @@ continuously across platforms.
 
 ## 3. Product goals
 
-An application can start with:
+An application can start on SwiftUI with:
 
 ```swift
-let session = contentClient.session(content: row.content)
-NostrContent(session: session, renderers: .standard)
+let document = parseNostrContent(row.content)
+let observations = NMPReferenceObservationFactory.live(engine: engine)
+NostrContent(
+    document: document,
+    observationFactory: observations,
+    renderers: .standard
+)
 ```
 
-```kotlin
-NostrContent(event = row.event, content = contentClient)
-```
+and receive a useful, styled, accessible default renderer whose standard
+mention and event-loader components explicitly own live observations. Supplying
+the factory alone does not open anything; `.literalReferences` uses the same
+document with zero handles. Kotlin currently shares the parser and safe demand
+planner but does not claim a broad Compose content renderer.
 
-and receive a useful, styled, accessible default renderer with live mentions
-and embeds. It should then be able to move progressively, without a rewrite,
-through these levels of ownership:
+An app should then be able to move progressively, without a rewrite, through
+these levels of ownership:
 
 1. change theme tokens;
 2. replace a primitive slot such as media, profile name, or embed chrome;
 3. replace one renderer such as the NIP-23 article card;
 4. install and edit the source of a composed renderer;
 5. add a renderer for an app-defined or newly standardized kind;
-6. replace the whole top-level content view while retaining the parser and
-   reference runtime;
+6. replace the whole top-level content view while retaining the parser and pure
+   reference planner;
 7. replace every optional layer and consume NMP Core directly.
 
 The adoption path is therefore a gradient, not take-it-or-leave-it.
@@ -118,8 +127,8 @@ Application
       ├── linked native primitive kit
       │     content · embed · profile · media · article · product primitives
       │
-      └── linked content client/runtime
-            parser · entity decoder · render session · reference acquisition
+      └── linked content semantics and reference grammar
+            parser · entity decoder · pure target/demand planning
                          │
                          ▼ public API only
                     NMP Core
@@ -130,17 +139,18 @@ The dependency arrow points downward only:
 
 - NMP Core has no renderer catalog, component manifest, theme, view type, or UI
   lifecycle concept.
-- The optional content runtime depends on NMP's supported public facade.
-- Native primitive kits depend on the content runtime and native UI framework.
+- The optional parser depends only on grammar values, not the NMP engine.
+- Native primitive kits depend on content semantics, the public NMP facade when
+  a component chooses observation, and the native UI framework.
 - Styled components depend on primitives and are copied into the app.
 - The app may replace or bypass any optional layer.
 
 Repository placement does not define the boundary; the dependency graph does.
 The implemented physical split is:
 
-- this repository owns the optional shared content semantics and platform
-  content-client packages because they must track the governed NMP facade and
-  FFI contract closely;
+- this repository owns optional shared content semantics, reference-plan
+  projection, and native observation primitives because they must track the
+  governed grammar/facade and FFI contract closely;
 - this repository also owns first-party native primitive packages, the source
   registry, galleries, and styled component sources as separately optional
   products above the public content boundary. The CLI is named `nmp-ui`; it is
@@ -204,143 +214,105 @@ permanent so unknown kinds never render as blank space.
 
 ### 5.3 What is shared across platforms
 
-The parser, entity decoding, stable node identity, recursion-budget rules, and
-protocol decoders should be shared Rust semantics projected to native values.
-SwiftUI and Compose must not independently reinterpret the same NIP fields.
+The parser, entity decoding, stable node identity, reference target/plan rules,
+and exact protocol decoders should be shared Rust semantics projected to native
+values. SwiftUI and Compose must not independently reinterpret the same NIP
+fields. Cycle/depth is an immutable native render-context value; it is not a
+shared mutable counter.
 
-## 6. Layer B — the content client and render session
+## 6. Layer B — pure planning and component-owned observation
 
-Layer B is the missing piece in both the current no-component direction and the
-old “pure renderer” rule. It prevents every application from rebuilding nested
-query orchestration.
+Layer B keeps reusable reference correctness without binding authored syntax to
+network policy. The selected component is the decision point.
 
-### 6.1 Content client
+### 6.1 Parsing stops at an authored occurrence
 
-An app creates one optional content client from an existing engine:
+`nmp-content` produces a `ContentDocument` containing source-faithful
+`ReferenceOccurrence` values. It has no engine dependency, query handle,
+kind:0/NIP-23 codec, cache, renderer, or acquisition callback.
 
-```swift
-let contentClient = NMPContentClient(engine: engine)
-```
+Merely parsing, walking, or making an occurrence visible creates no demand. A
+literal component renders `occurrence.original` and stops there.
 
-```kotlin
-val contentClient = NmpContentClient(engine)
-```
+### 6.2 Reference lowering is a pure grammar operation
 
-This is not a second engine. It owns no event database, sockets, relay routing,
-or global account state. It uses public live queries and relies on NMP Core for
-canonical rows, query sharing, routing, provenance, and evidence.
+When a selected component wants resolution, `nmp_grammar::reference` validates
+the normalized target and returns ordinary closed NMP demands:
 
-Environment/`CompositionLocal` injection may be offered as convenience, but is
-never required. Every component must have an explicit initializer accepting the
-content client or an already-created session. A bare preview/test can use a
-scripted session without constructing an engine.
+- `npub` / `nprofile` -> current kind:0 selection for that author;
+- `note` / `nevent` -> exact event-id selection;
+- `naddr` -> exact address selection: kind + author + `d` identifier.
 
-### 6.2 Render session
+Optional `nevent` author/kind fields remain hints and never constrain canonical
+matching. Relay hints are canonicalized, deduplicated, safety-filtered, and
+bounded. The plan contains one canonical demand plus optional pinned/outbox
+helpers and the explicit discarded-hint count. Constructing it performs no I/O.
 
-A `ContentSession` is scoped to one root document or rendered event. It exposes
-an observable latest-state `ContentSnapshot`:
+Only the canonical observation supplies rendered winner state. Helpers may feed
+the same NMP store and keep their own evidence, but cannot become a second
+winner or a global absence authority.
 
-```text
-ContentSnapshot
-  document
-  nodes: NodeId -> NodeState
-  revision
-  activeReferenceCount
-  shortfalls
-```
+### 6.3 The selected component owns policy and handles
 
-Reference node states are explicit:
+Reasonable components include:
 
-```text
-idle
-loading(cachedRow?)
-resolved(row, typedValue?, evidence)
-unavailable(evidence)
-shortfall(reason, evidence)
-invalid(originalText, reason)
-collapsed(depth | cycle | budget)
-```
+- literal/link: open nothing;
+- standard profile mention: open the profile demand;
+- default event loader: open canonical/helper event demands;
+- consent loader: inspect cache, then ask before live acquisition;
+- explicit-relay fallback: add a pinned helper after scoped failure evidence.
 
-The runtime never translates scoped evidence into “globally missing.” A failed
-relay hint or EOSE is a fact about that acquisition path, not proof that the
-referenced event does not exist.
+Every call to the observation factory returns an independent handle owned by
+that component. NMP Core may coalesce equal demands, but releasing one component
+cannot release another component's interest. The last handle withdraws live
+demand without deleting canonical store truth.
 
-### 6.3 Reference lowering
+Freshness (#565) is an orthogonal per-handle choice: `Live`,
+`MaxAge(seconds)`, or `CacheOnly`. It is not parser or session configuration.
+This is how a feed mention accepts stale-but-recent coverage while a profile
+screen forces ordinary live refresh, or a loader asks permission before network
+work.
 
-The session converts Nostr entities into ordinary public NMP demands:
+### 6.4 Visibility scopes an existing choice
 
-- `npub` / `nprofile` -> current kind:0 metadata for that author;
-- `note` -> exact event-id selection;
-- `nevent` -> exact event-id selection; optional author/kind values are
-  validation/routing hints rather than extra match constraints, and relay hints
-  inform acquisition;
-- `naddr` -> exact address selection: kind + author + `d` identifier, retaining
-  replaceable-event semantics;
-- nested references -> the same process under a descended render context.
+Swift's opt-in `observeWhileVisible` primitive calls `appear`/`disappear` on one
+component-owned `NMPVisibleReferenceObservation`:
 
-Acquisition uses a configurable `ReferenceAcquisitionPolicy`. The sensible
-default is:
+- off-screen means zero handles for that component;
+- return reopens ordinary observations;
+- the last delivered batches stay visible while hidden, avoiding flicker;
+- rapid visibility churn cannot leak handles or native tasks.
 
-1. expose matching cached rows immediately;
-2. use explicit relay hints when present;
-3. use author outboxes when an author is known and the target is author-owned;
-4. otherwise use the configured public/indexer authority;
-5. retain each path's evidence rather than merging it into a false global
-   success/failure flag.
+Custom components may observe unconditionally or not at all. Visibility never
+invents a query before component selection. There is no grace-window claim
+table, active/resolved count budget, or document-wide mutable coordinator.
 
-One logical reference may therefore own multiple ordinary live-query handles.
-NMP Core still coalesces compatible wire work and preserves distinct contextual
-evidence.
+### 6.5 Event references have two stages
 
-### 6.4 Claim/release and visibility
+The app first selects an **outer event loader** because the event's actual kind
+is unknown until acquisition. After a row arrives, the loader delegates to a
+resolved-event dispatcher keyed by the validated row's actual `kind` and the
+presentation purpose. An untrusted `nevent` kind hint cannot choose a renderer.
+Unknown kinds permanently reach a generic/raw fallback.
 
-Parsing a document must not eagerly fetch an unbounded number of embeds. Each
-resolvable node supports idempotent claim/release:
+The outer loader and actual-kind renderer table are independently replaceable.
+Changing consent, freshness, or explicit-relay fallback policy therefore does
+not copy the renderer switch.
 
-- a native primitive claims a node when it becomes render-relevant;
-- the last release tears down its child query after a small configurable grace
-  period to avoid scroll thrash;
-- identical targets within or across sessions share NMP's underlying demand and
-  cache even though their render paths remain distinct;
-- a session has explicit caps for active references, total resolved nodes,
-  recursion depth, and concurrent acquisitions;
-- exceeding a cap yields a visible collapsed/shortfall state, never silent
-  truncation.
+### 6.6 Lifetime and cross-platform split
 
-The old claim/release concept was sound. Its defect was requiring apps to wire
-`refs.event`, `refs.event.envelopes`, and an app-root host. The new client owns
-that orchestration directly over the public live-query API.
+- Rust owns parsing, normalized targets, safe closed demand plans, and shared
+  parity fixtures.
+- Swift owns its component-local `NMPQuery` tasks, visibility lifecycle, and
+  native observable state.
+- Kotlin currently projects the same parser/plan values; component/Compose
+  lifecycle waits for a real Compose content surface rather than shipping a
+  session-shaped placeholder.
+- NMP Core owns query sharing, cache/store truth, routing, relay I/O, and
+  evidence on every platform.
 
-### 6.5 Lifetime
-
-- A Swift session follows ARC/task cancellation and emits through an
-  `AsyncSequence` or `@Observable` adapter on the correct actor.
-- A Kotlin session follows coroutine/`Flow` cancellation.
-- Dropping a session releases all claims and query handles deterministically.
-- A native view may own a session for convenience; apps may also create and
-  retain sessions in their existing state architecture.
-- No app-wide NMP `ViewModel`, reducer, provider, or navigation container is
-  required.
-
-### 6.6 Shared versus native implementation
-
-The split must be explicit so “cross-platform” does not become either duplicated
-protocol logic or a hidden UI framework:
-
-- optional Rust content code owns parsing, stable node ids, entity-to-reference
-  plans, recursion/budget rules, and pure snapshot-reducer semantics;
-- Swift and Kotlin content clients own their native `NMPQuery`/`Flow` tasks,
-  visibility claims, actor/coroutine lifetime, and projection into observable
-  platform state;
-- the same fixture traces drive the pure reducer and both native clients;
-- query sharing, cache, routing, and evidence remain in NMP Core.
-
-This avoids forcing a foreign Rust-owned view lifecycle across FFI while keeping
-the protocol and state-transition semantics shared. If a later prototype proves
-a Rust-owned session object can share the supported engine facade without a
-second FFI component or host callback scaffold, it may replace the duplicated
-native orchestration. The public `ContentSession` contract does not depend on
-that internal choice.
+No app-wide NMP `ViewModel`, reducer, provider, navigation container, or content
+session is required.
 
 ## 7. Layer C — native headless primitives
 
@@ -373,8 +345,9 @@ These names are illustrative, not frozen API.
 ### 7.1 Primitive contract
 
 - State flows down; typed actions flow up.
-- Primitives consume a content session, node, or typed protocol value. They do
-  not parse raw events independently.
+- Primitives consume semantic nodes, explicit component observation state, or
+  typed protocol values. They do not parse raw events independently or acquire
+  merely because a node exists.
 - SwiftUI uses generic `@ViewBuilder` slots; Compose uses composable lambdas and
   standard `Modifier` conventions.
 - Simple element-local state may stay local. Business/product state remains
@@ -424,7 +397,7 @@ or image loader. Advertised icon text may be exposed for app policy, but the
 view accepts only an already-resolved SwiftUI `Image` or Compose `Painter`.
 Issue #198 implements this family in SwiftUI and in a narrow optional
 desktop-JVM Compose subproject. That subproject is an API-parity proof, not an
-Android/AAR qualification or broad Compose content-session implementation.
+Android/AAR qualification or broad Compose content-renderer implementation.
 
 ### 7.2 Resource-owning slots
 
@@ -523,7 +496,8 @@ Every component must:
   platform versions, and renderer keys;
 - expose important subviews as slots or small replaceable source files;
 - emit actions instead of owning navigation or product flows;
-- compile in a one-screen bare host with a scripted content session;
+- compile in a one-screen bare host with a pure fixture document and explicit
+  literal or injected component state;
 - include previews/examples and accessibility metadata;
 - use only released public NMP/content/UI APIs.
 
@@ -547,7 +521,7 @@ The hybrid boundary puts code on the side matching its change character:
 | Linked and versioned | Source-installed and app-owned |
 |---|---|
 | parsing and entity decoding | styled cards and blocks |
-| reference/session lifecycle | visual composition |
+| reference planning and component observation primitives | visual composition |
 | protocol semantic adapters | app-specific renderer catalog assembly |
 | accessibility/behavior primitives | local theme presets and product chrome |
 | stable fallback behavior | opinionated resource-policy choices |
@@ -613,7 +587,7 @@ Rules:
 - Any subtree can override theme values.
 - Component parameters/slots override theme defaults when local control is
   needed.
-- Themes never cross FFI and never affect engine or content-session identity.
+- Themes never cross FFI and never affect demand or observation identity.
 - Compact/standard/reader layouts are separate compositions, not giant mode
   enums with dozens of unrelated switches.
 
@@ -636,13 +610,14 @@ ontology change, or registry-server approval is required.
 
 The app keeps the standard note/article compositions but supplies a lazy,
 tap-to-play video slot. Another app supplies eager playback. Neither forks the
-content parser or reference runtime.
+content parser or component observation primitives.
 
-### 12.4 Use only the headless runtime
+### 12.4 Use only the headless semantics
 
 An app with a radically different design can ignore all styled components and
-walk `ContentSnapshot` using its own views. It still avoids rebuilding parsing,
-entity lowering, nested query lifetime, and cycle/budget handling.
+walk `ContentDocument` using its own views. It still avoids rebuilding parsing
+or safe entity lowering. If it resolves a reference, its selected component
+owns the ordinary NMP handle and threads immutable cycle/depth context.
 
 ## 13. Failure and fallback rules
 
@@ -654,8 +629,9 @@ entity lowering, nested query lifetime, and cycle/budget handling.
 - Relay failure/EOSE: expose scoped state; never claim global absence.
 - Deleted/expired/replaced row: update through the ordinary live-query path.
 - Reference cycle: render a collapsed link/card explaining the cycle boundary.
-- Depth or active-reference budget reached: render a collapsed continuation.
-- Slow consumer: deliver the latest complete content snapshot.
+- Depth reached: render a collapsed continuation.
+- Slow observation consumer: render the latest authoritative `RowBatch` the
+  component received.
 - Media loader failure: preserve layout and expose a retry/open-externally slot.
 - Protocol decoder failure: fall back to the generic raw event renderer.
 
@@ -671,8 +647,8 @@ entity lowering, nested query lifetime, and cycle/budget handling.
 - Embedded private/decrypted content must not be inserted into a public shared
   cache or rendered outside its authorized access context.
 - Rendered Markdown/HTML never executes arbitrary script or unsafe markup.
-- Recursion, node, byte, media, and concurrent-acquisition budgets are enforced
-  before work is scheduled.
+- Parser byte/node limits, immutable recursion depth, media limits, and NMP's
+  independent engine resource ceilings are enforced at their owning layers.
 
 ## 15. Verification strategy
 
@@ -686,24 +662,32 @@ The UI ecosystem needs stronger proof than “the package compiles.”
 - identical expected semantic documents across Rust, Swift, and Kotlin;
 - protocol-specific typed-value fixtures owned by each module.
 
-### Render-session falsifiers
+### Component-observation falsifiers
 
-- two visible references to the same target share underlying demand;
-- release of one claimant does not close another claimant's work;
-- final release closes after the configured grace window;
+- parsing and literal profile/event components create zero handles and zero
+  relay work;
+- two visible components with the same target own independent handles while
+  NMP shares compatible underlying demand;
+- releasing one component does not close the other's work; releasing the last
+  withdraws demand without deleting canonical store truth;
+- an off-screen component owns zero handles, rapid visibility churn returns
+  tasks/handles to baseline, and retained last state prevents flicker;
 - `naddr` selects the correct current replaceable winner;
-- relay hints and fallback sources retain distinct evidence;
-- a self-reference and a multi-event cycle collapse deterministically;
-- depth, node, and concurrency budgets produce explicit states;
-- scroll churn does not grow active queries or tasks without bound;
-- cached rows render before live acquisition completes;
-- deletion/replacement/retraction updates mounted embeds.
+- relay hints and fallback sources retain distinct scoped evidence;
+- a self-reference and a multi-event cycle stop through immutable context;
+- the outer loader is replaceable independently of the actual-kind table;
+- a misleading `nevent` kind hint cannot select the wrong renderer, and an
+  unknown actual kind reaches the generic fallback;
+- `CacheOnly` contributes zero wire work and per-handle freshness choices do
+  not change a sibling handle's contract;
+- deletion/replacement/retraction updates mounted resolving components through
+  the ordinary canonical query path.
 
 ### Platform conformance
 
 - every primitive and source component compiles in a bare sample app;
-- scripted previews cover loading, resolved, unavailable, shortfall, unknown,
-  cycle, and budget states;
+- fixture documents and injected component factories cover loading, resolved,
+  unavailable, shortfall, unknown, and cycle/depth states;
 - accessibility, dynamic type/font scale, dark mode, RTL, reduced motion, and
   keyboard/focus behavior are exercised where applicable;
 - screenshot/golden tests cover the default styled components;
@@ -766,8 +750,10 @@ These are the structural gates for implementation:
 3. **No parallel truth:** content runtime owns no event store or transport.
 4. **No app-root requirement:** explicit initializers work without a provider;
    environment injection is convenience only.
-5. **Scoped resolution:** nested demand belongs to observable, cancellable,
-   bounded content sessions.
+5. **Component-owned resolution:** in the content-rendering path, only an
+   app-selected component's explicit choice creates nested demand, and it owns
+   independently cancellable handles; parsing and visibility alone create
+   none. Apps remain free to use ordinary NMP APIs outside this UI path.
 6. **Explicit catalog:** no import-time or process-global renderer mutation.
 7. **Native composition:** slots and child builders are normal SwiftUI/Compose
    constructs, not a cross-platform render IR.
@@ -786,26 +772,30 @@ These are the structural gates for implementation:
 
 Implementation should be split into issue-backed vertical proofs:
 
-1. **Contract and fixtures — built (#147):** define `ContentDocument`, stable node identity,
-   malformed fallback, and the shared cross-platform corpus.
-2. **Reference-session proof — built (#147):** resolve `npub`/`nevent`/`naddr` through public
-   NMP queries with claim/release, evidence, cycle, and budget falsifiers.
-3. **One platform primitive proof — built (#154):** SwiftUI content/embed primitives consuming
-   scripted and real sessions, with no app-root provider.
-4. **Second platform parity proof — narrow relay family built (#198), broad
-   content/session proof open:** controlled Compose relay primitives establish
-   native construction and fallback parity without claiming the shared
-   fixture/session contract is complete.
-5. **Hybrid distribution proof:** install one styled component whose linked
-   primitives can update independently; prove local edits survive registry
-   updates honestly.
+1. **Contract and parser boundary — built (#147, corrected by #567):** define
+   `ContentDocument`, stable occurrence identity, malformed fallback, and a
+   parser with no engine or protocol-schema ownership.
+2. **Pure reference-plan proof — built (#567/#583):** lower
+   `npub`/`nevent`/`naddr` into safe canonical/helper demand values and prove
+   exact Rust/FFI/Swift/Kotlin parity from one shared corpus.
+3. **One platform component proof — built (#573):** SwiftUI document walking,
+   literal zero-fetch components, component-owned visibility observations,
+   outer event loading, actual-kind/purpose dispatch, and generic fallback with
+   no app-root provider or shared session.
+4. **Second platform parity proof — parser/planner built (#580/#583), narrow
+   relay family built (#198), broad Compose UI open:** Kotlin consumes the same
+   semantic/plan corpus, while controlled Compose relay primitives establish
+   native construction without claiming a content-loader surface exists.
+5. **Hybrid distribution proof — built (#165 / PR #475):** install one styled
+   component whose linked primitives can update independently; prove local
+   edits survive registry updates honestly.
 6. **Kind-diverse renderer proof:** ship a note plus at least two materially
    different schemas such as an article and a product/photo, including an
    app-defined fallback/override.
 7. **Gallery and performance gate — iOS proof built (#154):** the live Gallery,
    deterministic conformance states, screenshot-bearing UI tests, and a 72-row
    rapid-scroll nested-reference case now exercise the production SwiftUI path
-   and assert visible claims return to a bounded window. Compose Gallery and
+   and assert component handles/tasks return to baseline. Compose Gallery and
    deeper allocation/frame-time automation remain open.
 8. **First protocol action component — built (#180):** NIP-02 relationship
    state, guarded follow/unfollow, direct/FFI live-relay parity, and a SwiftUI
@@ -825,7 +815,7 @@ following still require implementation issues or owner selection:
   `com.nmp.ui` without freezing the rest of the ecosystem);
 - exact default theme direction;
 - the first protocol renderer set after the kind-diverse proof;
-- the default reference-acquisition fallback timings and budgets;
+- default loader freshness/consent policy by presentation purpose;
 - whether registry update uses an embedded merge library or shells out to Git;
 - supported Compose platform/version matrix;
 - governance for accepting third-party registry namespaces.
