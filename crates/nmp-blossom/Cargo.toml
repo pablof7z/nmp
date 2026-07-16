@@ -1,0 +1,23 @@
+[package]
+name = "nmp-blossom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Opt-in Blossom (BUD-01/02/11) blob-upload core (#545, epic #216
+# T15-A-BLOSSOM). Engine-free by construction: no router/resolver/store/
+# engine dependency -- the crate composes UnsignedEvents and performs HTTP,
+# and NEVER signs (signing and publishing are orthogonal stages, #47/#32).
+[dependencies]
+nostr.workspace = true
+nmp-ownership.workspace = true
+nmp-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+base64.workspace = true
+hickory-resolver.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
