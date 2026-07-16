@@ -766,6 +766,43 @@ fn spawn_server(
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // `listener` is non-blocking so this accept loop can race the
+                        // deadline/`claimed` checks above. On Linux, a socket returned
+                        // by `accept()` does NOT inherit the listening socket's
+                        // `O_NONBLOCK` flag and always comes back blocking. On macOS
+                        // (and BSD generally) it DOES inherit it, so without this reset
+                        // the per-connection socket below is silently non-blocking:
+                        // `tungstenite::accept`'s handshake read usually still succeeds
+                        // because the client's HTTP upgrade bytes are typically already
+                        // in the kernel receive buffer by the time this thread runs, but
+                        // the very next blocking-style `socket.read()` in `serve_corpus`
+                        // (waiting for the first REQ frame) can hit the socket before the
+                        // client has flushed it, return `WouldBlock`, and — since that
+                        // read loop treats any error as fatal — tear the connection down
+                        // before the client's REQ arrives. That is the exact "ECONNRESET
+                        // before the first REQ flushes" race from #538: forcing the
+                        // accepted socket back to blocking mode makes every platform
+                        // behave like the thread-per-connection design already assumes.
+                        if let Err(error) = stream.set_nonblocking(false) {
+                            return Err(format!(
+                                "failed to clear O_NONBLOCK on accepted connection: {error}"
+                            ));
+                        }
+                        // Bound writes so a rejected-message test can't hang the mock
+                        // for the full probe timeout: a client that detects an
+                        // over-ceiling frame is only required to stop trusting the
+                        // relay, not to promptly close/reset the raw TCP connection.
+                        // If it just stops draining the socket, an unbounded blocking
+                        // write here can stall on a full receive window until
+                        // whatever eventually tears the connection down (in the worst
+                        // case, the probe's own top-level timeout). A write deadline
+                        // turns that stall into a prompt, tolerated send error
+                        // instead (see `expect_rejection` handling in serve_corpus).
+                        if let Err(error) = stream.set_write_timeout(Some(Duration::from_secs(2))) {
+                            return Err(format!(
+                                "failed to set write timeout on accepted connection: {error}"
+                            ));
+                        }
                         let claimed = Arc::clone(&claimed);
                         let stats_tx = stats_tx.clone();
                         let config = config.clone();
@@ -824,7 +861,7 @@ fn serve_corpus(
     let started = Instant::now();
     let mut frames = 0u64;
     let mut bytes = 0u64;
-    for _ in 0..config.passes {
+    'passes: for _ in 0..config.passes {
         let reader = BufReader::new(File::open(&config.corpus_path).map_err(|e| e.to_string())?);
         for (ordinal, line) in reader.lines().enumerate() {
             let line = line.map_err(|e| e.to_string())?;
@@ -835,9 +872,23 @@ fn serve_corpus(
             let _ = sent_at[ordinal].compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
             let frame = format!("[\"EVENT\",{encoded_subscription},{line}]");
             bytes = bytes.saturating_add(frame.len() as u64);
-            socket
-                .send(Message::Text(frame.into()))
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = socket.send(Message::Text(frame.into())) {
+                if !config.expect_rejection {
+                    return Err(error.to_string());
+                }
+                // A rejected message is expected to make the client close or
+                // reset the connection as soon as it observes the frame
+                // exceeds the ceiling. A payload this large needs several
+                // underlying TCP writes, so the client can hang up mid-write
+                // (racing this thread's send with the client's own close).
+                // Still count the frame as sent — the probe's completion
+                // detection watches `server_sent_frames` to know the mock is
+                // done offering data, and a write the client already
+                // rejected should not make it wait out the full timeout.
+                frames += 1;
+                server_sent_frames.fetch_add(1, Ordering::Release);
+                break 'passes;
+            }
             frames += 1;
             server_sent_frames.fetch_add(1, Ordering::Release);
             if !config.frame_delay.is_zero() {
