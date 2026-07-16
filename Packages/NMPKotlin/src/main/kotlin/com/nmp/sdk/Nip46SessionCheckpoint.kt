@@ -86,14 +86,24 @@ data class NMPNip46SessionCheckpoint(
         return lines.joinToString("\n").toByteArray(StandardCharsets.UTF_8)
     }
 
-    /** A serialized checkpoint blob did not decode as this format -- never
-     * carries the raw bytes, so this is always safe to log. */
+    /**
+     * A serialized checkpoint blob did not decode as this format.
+     *
+     * This wire format is POSITIONAL (fixed line indices), unlike Swift's
+     * keyed-JSON equivalent: a blob missing or shifted by one line can make
+     * an unrelated field's raw content -- including the client secret --
+     * land at the exact line index this decoder reads as "version" or
+     * "origin". Every message below is therefore purely positional/
+     * descriptive (line index, counts) and NEVER interpolates the actual
+     * line content read from the blob, so this is always safe to log even
+     * against a corrupt or adversarially shifted blob.
+     */
     sealed class SerializationException(message: String) : Exception(message) {
         class UnsupportedVersion(val version: Int) :
             SerializationException("unsupported NIP-46 checkpoint wire version: $version")
 
-        class InvalidOrigin(val origin: String) :
-            SerializationException("unrecognized NIP-46 checkpoint origin: $origin")
+        object InvalidOrigin :
+            SerializationException("checkpoint wire line 1 (origin) did not match a known origin tag")
 
         class Malformed(reason: String) : SerializationException("malformed NIP-46 checkpoint: $reason")
     }
@@ -111,17 +121,17 @@ data class NMPNip46SessionCheckpoint(
                 throw SerializationException.Malformed("expected at least 6 lines, got ${lines.size}")
             }
             val version = lines[0].toIntOrNull()
-                ?: throw SerializationException.Malformed("non-numeric version ${lines[0]!!}")
+                ?: throw SerializationException.Malformed("wire line 0 (version) was not numeric")
             if (version != WIRE_VERSION) {
                 throw SerializationException.UnsupportedVersion(version)
             }
             val origin = when (lines[1]) {
                 NMPNip46SessionOrigin.ClientInitiated.name -> NMPNip46SessionOrigin.ClientInitiated
                 NMPNip46SessionOrigin.Bunker.name -> NMPNip46SessionOrigin.Bunker
-                else -> throw SerializationException.InvalidOrigin(lines[1])
+                else -> throw SerializationException.InvalidOrigin
             }
             val relayCount = lines[5].toIntOrNull()
-                ?: throw SerializationException.Malformed("non-numeric relay count ${lines[5]}")
+                ?: throw SerializationException.Malformed("wire line 5 (relay count) was not numeric")
             val relays = lines.drop(6)
             if (relays.size != relayCount) {
                 throw SerializationException.Malformed(

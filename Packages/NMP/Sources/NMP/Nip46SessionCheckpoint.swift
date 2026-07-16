@@ -165,3 +165,21 @@ public protocol NMPNip46SessionCheckpointStore: Sendable {
     /// removal clears it.
     func clear() throws
 }
+
+/// The raw generated FFI record (`NMPFFI.FfiNip46SessionCheckpoint`) has no
+/// redacted `Debug` of its own -- unlike `nmp-signer`'s Rust type it
+/// mirrors, a plain Swift struct's default reflection-based description
+/// prints every stored property, including `clientSecretKey`. This
+/// retroactive conformance closes that gap for the one boundary moment the
+/// raw FFI value exists (inside `NMPNip46SessionCheckpoint.init(_:)` and
+/// `NMPNip46Connection.checkpoint()`) before it is wrapped into the redacted
+/// `NMPNip46SessionCheckpoint` apps actually hold.
+extension FfiNip46SessionCheckpoint: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String {
+        "FfiNip46SessionCheckpoint(userPublicKey: \(userPublicKey), " +
+            "remoteSignerPublicKey: \(remoteSignerPublicKey), relays: \(relays), " +
+            "origin: \(origin), clientSecretKey: [redacted])"
+    }
+
+    public var debugDescription: String { description }
+}

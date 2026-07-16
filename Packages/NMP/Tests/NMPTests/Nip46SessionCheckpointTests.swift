@@ -85,6 +85,21 @@ final class Nip46SessionCheckpointTests: XCTestCase {
         XCTAssertTrue("\(checkpoint)".contains("[redacted]"))
     }
 
+    /// #571 secrecy falsifier: the raw generated FFI record has no redacted
+    /// `Debug` of its own -- a plain Swift struct's default reflection-based
+    /// description would otherwise print every stored property, including
+    /// the secret. This proves the retroactive `CustomStringConvertible`/
+    /// `CustomDebugStringConvertible` conformance on `FfiNip46SessionCheckpoint`
+    /// closes that gap too.
+    func testRawFfiCheckpointDescriptionAndDebugDescriptionRedactTheClientSecret() {
+        let checkpoint = makeCheckpoint()
+        let ffi = checkpoint.toFfi()
+
+        XCTAssertFalse("\(ffi)".contains(checkpoint.clientSecretKey))
+        XCTAssertFalse("\(ffi.debugDescription)".contains(checkpoint.clientSecretKey))
+        XCTAssertTrue("\(ffi)".contains("[redacted]"))
+    }
+
     func testRestoreFromStoreReturnsNilWithoutConnectingWhenNoCheckpointExists() throws {
         final class EmptyCheckpointStore: NMPNip46SessionCheckpointStore, @unchecked Sendable {
             func loadCheckpoint() throws -> NMPNip46SessionCheckpoint? { nil }
