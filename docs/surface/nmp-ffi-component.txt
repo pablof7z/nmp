@@ -2929,8 +2929,17 @@ enum Enum {
         Variant {
             name: "AwaitingCapability",
             discr: None,
-            fields: [],
-            docstring: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`\n(64-char hex, the module-wide convention) is the exact identity\nFROZEN at acceptance that no registered signer currently answers\nfor -- the same pubkey an `identity_override` pinned, or the active\naccount at publish time when no override was given. Retained, not\nterminal: this fact re-arrives verbatim on restart replay, and only\nregistering a signer for THIS exact pubkey resumes the write --\nnever a different (even currently-active) identity.",
+            ),
         },
         Variant {
             name: "Signed",
