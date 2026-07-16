@@ -40,3 +40,21 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nmp.falsifier
         TARGETED_DEVICE_FAMILY: "1"
+  FalsifierTests:
+    # #465: the smallest maintainable repo-owned iOS simulator test host --
+    # a unit-test bundle hosted inside the existing Falsifier app rather than
+    # a new xcodegen spec. Runtime-qualifies NIP-11 hostname resolution
+    # (Hickory DNS + HTTP through NMPEngine.relayInformation) on an actual
+    # iOS Simulator process, not just the macOS `swift test` host.
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests/FalsifierTests
+    dependencies:
+      - target: Falsifier
+      - package: NMP
+        product: NMP
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmp.falsifier.tests
