@@ -41,7 +41,7 @@ final class KeychainAccountStoreTests: XCTestCase {
 
     func testLoadSecretKeyReturnsNilWhenNothingIsCheckpointed() throws {
         let store = makeStore()
-        try store.clear()
+        try runOrSkipIfKeychainUnavailable { try store.clear() }
 
         XCTAssertNil(try store.loadSecretKey())
     }
@@ -59,7 +59,7 @@ final class KeychainAccountStoreTests: XCTestCase {
 
     func testClearIsIdempotentWhenNothingIsCheckpointed() throws {
         let store = makeStore()
-        try store.clear()
+        try runOrSkipIfKeychainUnavailable { try store.clear() }
         try store.clear()
         XCTAssertNil(try store.loadSecretKey())
     }
