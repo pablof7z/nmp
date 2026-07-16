@@ -142,6 +142,56 @@ impl core::marker::Unpin for nmp::AuthPolicyResolveError
 impl core::marker::UnsafeUnpin for nmp::AuthPolicyResolveError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyResolveError
 impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyResolveError
+pub enum nmp::CancelWriteError
+pub nmp::CancelWriteError::AlreadyAbandoned
+pub nmp::CancelWriteError::AlreadyAbandoned::receipt_id: nmp_engine::core::ReceiptId
+pub nmp::CancelWriteError::AlreadyCompensated
+pub nmp::CancelWriteError::AlreadyCompensated::receipt_id: nmp_engine::core::ReceiptId
+pub nmp::CancelWriteError::AlreadySigned
+pub nmp::CancelWriteError::AlreadySigned::event_id: nostr::event::id::EventId
+pub nmp::CancelWriteError::AlreadySigned::receipt_id: nmp_engine::core::ReceiptId
+pub nmp::CancelWriteError::EngineClosed
+pub nmp::CancelWriteError::PersistenceFailed
+pub nmp::CancelWriteError::PersistenceFailed::reason: alloc::string::String
+pub nmp::CancelWriteError::PersistenceFailed::receipt_id: nmp_engine::core::ReceiptId
+pub nmp::CancelWriteError::UnknownReceipt
+pub nmp::CancelWriteError::UnknownReceipt::receipt_id: nmp_engine::core::ReceiptId
+impl core::clone::Clone for nmp::CancelWriteError
+pub fn nmp::CancelWriteError::clone(&self) -> nmp::CancelWriteError
+impl core::cmp::Eq for nmp::CancelWriteError
+impl core::cmp::PartialEq for nmp::CancelWriteError
+pub fn nmp::CancelWriteError::eq(&self, &nmp::CancelWriteError) -> bool
+impl core::error::Error for nmp::CancelWriteError
+impl core::fmt::Debug for nmp::CancelWriteError
+pub fn nmp::CancelWriteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::CancelWriteError
+pub fn nmp::CancelWriteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::CancelWriteError
+impl core::marker::Freeze for nmp::CancelWriteError
+impl core::marker::Send for nmp::CancelWriteError
+impl core::marker::Sync for nmp::CancelWriteError
+impl core::marker::Unpin for nmp::CancelWriteError
+impl core::marker::UnsafeUnpin for nmp::CancelWriteError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::CancelWriteError
+impl core::panic::unwind_safe::UnwindSafe for nmp::CancelWriteError
+pub enum nmp::CancelWriteOutcome
+pub nmp::CancelWriteOutcome::Cancelled
+impl core::clone::Clone for nmp::CancelWriteOutcome
+pub fn nmp::CancelWriteOutcome::clone(&self) -> nmp::CancelWriteOutcome
+impl core::cmp::Eq for nmp::CancelWriteOutcome
+impl core::cmp::PartialEq for nmp::CancelWriteOutcome
+pub fn nmp::CancelWriteOutcome::eq(&self, &nmp::CancelWriteOutcome) -> bool
+impl core::fmt::Debug for nmp::CancelWriteOutcome
+pub fn nmp::CancelWriteOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::CancelWriteOutcome
+impl core::marker::StructuralPartialEq for nmp::CancelWriteOutcome
+impl core::marker::Freeze for nmp::CancelWriteOutcome
+impl core::marker::Send for nmp::CancelWriteOutcome
+impl core::marker::Sync for nmp::CancelWriteOutcome
+impl core::marker::Unpin for nmp::CancelWriteOutcome
+impl core::marker::UnsafeUnpin for nmp::CancelWriteOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::CancelWriteOutcome
+impl core::panic::unwind_safe::UnwindSafe for nmp::CancelWriteOutcome
 pub enum nmp::EngineError
 pub nmp::EngineError::AuthCapabilityInstanceExhausted
 pub nmp::EngineError::AuthCapabilityRegistryFull
@@ -476,6 +526,7 @@ pub fn nmp::Engine::active_account(&self) -> core::result::Result<core::option::
 pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nmp::AccountRegistration, nmp::EngineError>
 pub fn nmp::Engine::add_auth_policy<P>(&self, nostr::key::public_key::PublicKey, P) -> core::result::Result<nmp::AuthPolicyRegistration, nmp::EngineError> where P: nmp::AuthPolicy + 'static
 pub fn nmp::Engine::add_signer<Sig>(&self, Sig) -> core::result::Result<nmp_engine::runtime::SignerRegistration, nmp::EngineError> where Sig: nmp_signer::capability::SigningCapability + core::marker::Send + 'static
+pub fn nmp::Engine::cancel(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp::CancelWriteOutcome, nmp::CancelWriteError>
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
@@ -24462,6 +24513,17 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                                                     }
                                                   },
                                                   "name": "Accepted",
+                                                  "visibility": "default"
+                                                },
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "variant": {
+                                                      "discriminant": null,
+                                                      "kind": "plain"
+                                                    }
+                                                  },
+                                                  "name": "Cancelled",
                                                   "visibility": "default"
                                                 },
                                                 {
