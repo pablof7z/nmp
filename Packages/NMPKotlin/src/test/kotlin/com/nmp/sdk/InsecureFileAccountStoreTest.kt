@@ -18,6 +18,40 @@ class InsecureFileAccountStoreTest {
     private val secretOne = "0".repeat(63) + "1"
     private val publicOne = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
+    /** A NON-SDK conformer: the minimal store an app (or a Keystore-backed
+     * provider) would write itself, proving [NMPLocalAccountCheckpoint] is a
+     * genuinely public seam, not a blessed-concrete-type parameter. */
+    private class InMemoryCheckpoint(private var secretKey: String? = null) :
+        NMPLocalAccountCheckpoint {
+        override fun loadSecretKey(): String? = secretKey
+
+        override fun saveSecretKey(secretKey: String) {
+            this.secretKey = secretKey
+        }
+
+        override fun clear() {
+            secretKey = null
+        }
+    }
+
+    /** Any conforming checkpoint store is a drop-in through the public
+     * [NMPEngine] constructor: a custom conformer's `loadSecretKey` drives
+     * the restore exactly like the SDK's own file store, and [NMPEngine.addAccount]
+     * checkpoints back into it. */
+    @Test
+    fun customCheckpointConformerRestoresThroughPublicConstructor() {
+        NMPEngine(NMPConfig(), InMemoryCheckpoint(secretOne)).use { restored ->
+            assertEquals(publicOne, restored.activeAccount())
+        }
+
+        val empty = InMemoryCheckpoint()
+        NMPEngine(NMPConfig(), empty).use { engine ->
+            assertNull(engine.activeAccount())
+            engine.addAccount(secretOne)
+            assertEquals(secretOne, empty.loadSecretKey())
+        }
+    }
+
     @Test
     fun checkpointRestoresActiveAccountAndClearReturnsToReadOnly() {
         val checkpoint = root.resolve("local-account.nsec")

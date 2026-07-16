@@ -35,8 +35,50 @@ final class InsecureFileAccountStoreTests: XCTestCase {
         }
     }
 
+    /// A NON-SDK conformer: the minimal store an app (or a secure vault
+    /// provider) would write itself, proving `NMPLocalAccountCheckpoint` is
+    /// a genuinely public seam, not a blessed-concrete-type parameter.
+    private final class InMemoryCheckpoint: NMPLocalAccountCheckpoint, @unchecked Sendable {
+        private let lock = NSLock()
+        private var secretKey: String?
+
+        init(secretKey: String? = nil) {
+            self.secretKey = secretKey
+        }
+
+        func loadSecretKey() throws -> String? {
+            lock.withLock { secretKey }
+        }
+
+        func saveSecretKey(_ secretKey: String) throws {
+            lock.withLock { self.secretKey = secretKey }
+        }
+
+        func clear() throws {
+            lock.withLock { secretKey = nil }
+        }
+    }
+
     private let secretOne = String(repeating: "0", count: 63) + "1"
     private let publicOne = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+    /// Any conforming checkpoint store is a drop-in through the PUBLIC
+    /// `init(config:localAccountStore:)`: a custom conformer's
+    /// `loadSecretKey` drives the restore exactly like the SDK's own file
+    /// store, and `addAccount` checkpoints back into it.
+    func testCustomCheckpointConformerRestoresThroughPublicInit() async throws {
+        let seeded = InMemoryCheckpoint(secretKey: secretOne)
+        let restored = try NMPEngine(config: NMPConfig(), localAccountStore: seeded)
+        XCTAssertEqual(try restored.activeAccount(), publicOne)
+        restored.shutdown()
+
+        let empty = InMemoryCheckpoint()
+        let engine = try NMPEngine(config: NMPConfig(), localAccountStore: empty)
+        XCTAssertNil(try engine.activeAccount())
+        _ = try await engine.addAccount(secretKey: secretOne)
+        XCTAssertEqual(try empty.loadSecretKey(), secretOne)
+        engine.shutdown()
+    }
 
     func testCheckpointRestoresActiveAccountAndClearReturnsToReadOnly() async throws {
         let fixture = try makeFixture()

@@ -161,11 +161,15 @@ public final class NMPEngine: Sendable {
         }
     }
 
-    /// Construct an engine and, when explicitly configured, restore the local
-    /// account held by NMP's plaintext app-sandbox file provider.
+    /// Construct an engine and, when a checkpoint store is explicitly
+    /// configured, restore the account it holds: ANY conforming
+    /// `NMPLocalAccountCheckpoint` -- a platform-vault provider, an
+    /// app-custom store, or `NMPInsecureFileAccountStore` -- is a drop-in;
+    /// its `loadSecretKey` drives the restore and the restored account
+    /// becomes active before init returns.
     public convenience init(
         config: NMPConfig,
-        localAccountStore: NMPInsecureFileAccountStore? = nil
+        localAccountStore: (any NMPLocalAccountCheckpoint)? = nil
     ) throws {
         try self.init(config: config, localAccountCheckpoint: localAccountStore)
     }
@@ -203,7 +207,7 @@ public final class NMPEngine: Sendable {
 
     /// Register an account from its secret key (hex or bech32 `nsec`). The
     /// key crosses this boundary exactly once and lives engine-side from
-    /// this point on. When an `NMPInsecureFileAccountStore` was explicitly
+    /// this point on. When an `NMPLocalAccountCheckpoint` was explicitly
     /// configured, NMP also checkpoints it for restart restoration. Returns
     /// the opaque exact registration required for stale-safe removal. Does
     /// NOT make the account active -- use `registration.publicKey` with
