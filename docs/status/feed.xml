@@ -15,7 +15,32 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 12:53:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 13:53:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 13:53 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0022.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0022</guid>
+<pubDate>Thu, 16 Jul 2026 13:53:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+This cycle's throughline is reliability under pressure -- two stories, one lesson: never let something you can't control turn into unbounded growth or unrecoverable state.
+
+First story: bounded delivery for a slow reader. Every live query in NMP hands you results as they change, but what happens if your app is busy -- a slow render, a paused view, a background tab -- and can't keep up with how fast the network produces updates? Before this fix, the channel feeding that query was an ordinary unbounded queue. Every skipped update sat there waiting, so a slow consumer paired with a fast relay could mean unbounded memory growth, plus replaying a pile of stale intermediate states once your app caught up. The fix replaces that queue with a single slot. When a new update arrives and the last one hasn't been picked up yet, the engine doesn't queue it behind the old one -- it merges them into one exact transition, rebased on top of whatever your app last actually saw. So when your app does catch up, it gets the current truth in one hop, not a backlog of everything it missed. Memory is now bounded by the gap between what you've seen and what's true right now, never by how many updates arrived while you weren't looking.
+
+Second story, landing right alongside it: writes can now be explicitly cancelled before they're signed. Your app accepts a post the moment the user hits send -- that's how NMP gives you a responsive local view immediately. But then the user backs out, or the content changes, before that post reaches a signer. Until now, there was no clean, durable way to say "actually, forget that one." Now there is: a real cancel call, keyed to the exact receipt for that write, on every platform -- Rust, the foreign function interface, Swift, and Kotlin. Call it, and if the write hasn't signed yet, the engine atomically undoes the optimistic local row, restores whatever it displaced, and writes a durable cancelled fact to disk in the same transaction, so a crash right after cancelling can't resurrect the write. If the write already crossed the signature boundary, you get a precise typed refusal instead of a silent no-op -- your app never has to guess whether the cancel actually took effect.
+
+Put those two together and here's what it means if you're the one embedding NMP. Your memory footprint under a flood of updates is now predictable -- a slow screen doesn't turn into a leak. And your write path finally has an honest undo button for the one window where undo is actually possible: before the signature exists. Both are typed, both are durable, and both went through adversarial review before merging -- the cancellation work in particular caught and fixed real bugs around signer-task leaks and quarantined writes during review, not after it shipped.
+
+That's the pulse.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0022.mp3" type="audio/mpeg" length="3246380"/>
+<itunes:title>NMP Pulse — 2026-07-16 13:53 UTC</itunes:title>
+<itunes:duration>203</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-16 12:53 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0021.mp3</link>

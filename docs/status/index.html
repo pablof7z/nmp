@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-16 12:53 UTC</p>
-    <p class="ep-sub">2026-07-16 &middot; Pulse: two reliability wins &mdash; a root-caused macOS test flake and query freshness &middot; ~3.2 min</p>
-    <audio controls preload="none" src="reports/pulse-0021.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0021.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-16 13:53 UTC</p>
+    <p class="ep-sub">2026-07-16 &middot; Pulse: bounded query delivery under slow consumers, plus pre-signature write cancellation &middot; ~3.4 min</p>
+    <audio controls preload="none" src="reports/pulse-0022.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0022.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">Two unglamorous-but-real reliability wins this cycle. A chronic macOS/BSD-only test flake in the ingest-smoke suite is root-caused and fixed &mdash; a mock server's non-blocking listening socket doesn't get inherited by accepted connections on Linux the way it does on macOS/BSD, producing spurious resets (<a href="https://github.com/pablof7z/nmp/issues/538">#538</a> closed, <a href="https://github.com/pablof7z/nmp/pull/581">#581</a> merged). And queries now carry an explicit freshness policy &mdash; <code>MaxAge</code>/<code>CacheOnly</code> served straight from per-handle coverage watermarks, so an app can express staleness tolerance without an extra network round-trip (<a href="https://github.com/pablof7z/nmp/issues/565">#565</a> closed, <a href="https://github.com/pablof7z/nmp/pull/577">#577</a> merged). Also noted: explicit pre-signature write cancellation just landed (<a href="https://github.com/pablof7z/nmp/issues/533">#533</a> closed, <a href="https://github.com/pablof7z/nmp/pull/585">#585</a> merged).</p>
+    <p class="ep-blurb">Two reliability stories under one theme: never let something you can't control turn into unbounded growth or unrecoverable state. First, ordinary live-query delivery now runs through a one-slot mailbox instead of an unbounded queue &mdash; a slow observer gets one rebased transition to the current truth instead of a growing backlog of stale intermediate states, bounding memory by the delta since last delivery, not by how many updates it missed (<a href="https://github.com/pablof7z/nmp/pull/586">#586</a> merged, progresses <a href="https://github.com/pablof7z/nmp/issues/46">#46</a>). Second, writes can now be explicitly cancelled before they're signed &mdash; a durable, typed, idempotent <code>cancel(receiptId)</code> across Rust/FFI/Swift/Kotlin that atomically compensates the optimistic row and persists a durable Cancelled fact, or returns a precise refusal if the write already signed (<a href="https://github.com/pablof7z/nmp/issues/533">#533</a> closed, <a href="https://github.com/pablof7z/nmp/pull/585">#585</a> merged).</p>
   </section>
 
   <details class="archive" id="archive">
