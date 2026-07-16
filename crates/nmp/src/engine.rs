@@ -26,7 +26,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::ReceiptId;
-use nmp_engine::outbox::{CancelWriteError, CancelWriteOutcome, WriteStatus};
+use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{
     EngineThread, Handle, ReceiptReattachment, ReceiptStream, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
@@ -36,7 +36,7 @@ use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
-use nostr::{Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use nostr::{EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 use crate::config::{build_admission_policy, build_directory, EngineConfig};
@@ -65,6 +65,100 @@ pub struct Engine {
     inner: Mutex<Option<Inner>>,
     native_tasks: nmp_executor::Executor,
 }
+
+/// The only successful result from explicit pre-signature cancellation.
+/// The closed success type cannot carry a status that cancellation did not
+/// commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelWriteOutcome {
+    Cancelled,
+}
+
+/// Typed refusal from explicit pre-signature write cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelWriteError {
+    UnknownReceipt {
+        receipt_id: ReceiptId,
+    },
+    AlreadySigned {
+        receipt_id: ReceiptId,
+        event_id: EventId,
+    },
+    AlreadyCompensated {
+        receipt_id: ReceiptId,
+    },
+    AlreadyAbandoned {
+        receipt_id: ReceiptId,
+    },
+    PersistenceFailed {
+        receipt_id: ReceiptId,
+        reason: String,
+    },
+    EngineClosed,
+}
+
+fn cancel_write_outcome_from_engine(
+    outcome: nmp_engine::outbox::CancelWriteOutcome,
+) -> CancelWriteOutcome {
+    match outcome {
+        nmp_engine::outbox::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
+    }
+}
+
+fn cancel_write_error_from_engine(error: nmp_engine::outbox::CancelWriteError) -> CancelWriteError {
+    match error {
+        nmp_engine::outbox::CancelWriteError::UnknownReceipt { receipt_id } => {
+            CancelWriteError::UnknownReceipt { receipt_id }
+        }
+        nmp_engine::outbox::CancelWriteError::AlreadySigned {
+            receipt_id,
+            event_id,
+        } => CancelWriteError::AlreadySigned {
+            receipt_id,
+            event_id,
+        },
+        nmp_engine::outbox::CancelWriteError::AlreadyCompensated { receipt_id } => {
+            CancelWriteError::AlreadyCompensated { receipt_id }
+        }
+        nmp_engine::outbox::CancelWriteError::AlreadyAbandoned { receipt_id } => {
+            CancelWriteError::AlreadyAbandoned { receipt_id }
+        }
+        nmp_engine::outbox::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
+            CancelWriteError::PersistenceFailed { receipt_id, reason }
+        }
+        nmp_engine::outbox::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
+    }
+}
+
+impl std::fmt::Display for CancelWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownReceipt { receipt_id } => write!(f, "unknown receipt {}", receipt_id.0),
+            Self::AlreadySigned {
+                receipt_id,
+                event_id,
+            } => write!(
+                f,
+                "receipt {} is already signed as {event_id}",
+                receipt_id.0
+            ),
+            Self::AlreadyCompensated { receipt_id } => {
+                write!(f, "receipt {} is already compensated", receipt_id.0)
+            }
+            Self::AlreadyAbandoned { receipt_id } => {
+                write!(f, "receipt {} was abandoned after restart", receipt_id.0)
+            }
+            Self::PersistenceFailed { receipt_id, reason } => write!(
+                f,
+                "could not persist cancellation for receipt {}: {reason}",
+                receipt_id.0
+            ),
+            Self::EngineClosed => f.write_str("engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for CancelWriteError {}
 
 /// Opaque ownership proof for one exact local-account installation (#8's
 /// ratified account model, closing #495). Returned by
@@ -445,6 +539,8 @@ impl Engine {
     pub fn cancel(&self, id: ReceiptId) -> Result<CancelWriteOutcome, CancelWriteError> {
         self.with_handle(|handle| handle.cancel_write(id))
             .map_err(|_| CancelWriteError::EngineClosed)?
+            .map(cancel_write_outcome_from_engine)
+            .map_err(cancel_write_error_from_engine)
     }
 
     /// Register an account from its secret key (hex or bech32 `nsec`). Does
