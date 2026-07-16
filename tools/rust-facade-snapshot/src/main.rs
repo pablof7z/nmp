@@ -31,13 +31,22 @@ fn main() -> Result<()> {
 }
 
 fn generate(root: &Path, toolchain: &str, target_dir: &Path) -> Result<String> {
+    generate_for_package(root, toolchain, target_dir, "nmp")
+}
+
+fn generate_for_package(
+    root: &Path,
+    toolchain: &str,
+    target_dir: &Path,
+    facade_package: &str,
+) -> Result<String> {
     let manifest = root.join("Cargo.toml");
     let metadata = MetadataCommand::new()
         .manifest_path(&manifest)
         .other_options(vec!["--locked".to_owned()])
         .exec()
         .context("locked cargo metadata for facade workspace")?;
-    let facade = package(&metadata, "nmp")?.id.clone();
+    let facade = package(&metadata, facade_package)?.id.clone();
     let mut graph = CargoDocGraph::new(root, toolchain, target_dir, manifest, metadata)?;
     graph.ensure_doc(&facade)?;
     let facade_doc = graph.doc(&facade)?;
@@ -773,7 +782,12 @@ mod tests {
     }
 
     fn render_fixture(root: &Path, label: &str) -> Result<String> {
-        generate(root, &toolchain(), &temp_dir(label).join("target"))
+        generate_for_package(
+            root,
+            &toolchain(),
+            &temp_dir(label).join("target"),
+            "nmp-rust-facade-fixture",
+        )
     }
 
     fn mutate_fixture(label: &str, relative: &str, from: &str, to: &str) -> PathBuf {
