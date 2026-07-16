@@ -100,12 +100,12 @@
 
   <section class="player-card">
     <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Briefing — 2026-07-16 07:53 UTC</p>
-    <p class="ep-sub">2026-07-16 &middot; Briefing: the NIP-42 &rarr; signer-lifecycle &rarr; Blossom arc, and an honest CI-caught failure &middot; ~4.3 min</p>
-    <audio controls preload="none" src="reports/pulse-0016.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0016.mp3">Download the mp3</a>.
+    <p class="ep-title">NMP Pulse — 2026-07-16 08:58 UTC</p>
+    <p class="ep-sub">2026-07-16 &middot; Pulse: the #47 signer-lifecycle epic closes; Blossom verbs land; the SDK projection is honestly red &middot; ~3.2 min</p>
+    <audio controls preload="none" src="reports/pulse-0017.mp3">
+      Your browser does not support audio. <a href="reports/pulse-0017.mp3">Download the mp3</a>.
     </audio>
-    <p class="ep-blurb">A deeper briefing walking the throughline across three epics, all the same two-noun shape underneath. Content-relay authentication (<a href="https://github.com/pablof7z/nmp/issues/8">#8</a>) is done end-to-end. Signer lifecycle (<a href="https://github.com/pablof7z/nmp/issues/47">#47</a>) is three of four units in: zeroize-hardening, per-write identity override, and now platform-backed secure vaults &mdash; Keychain (Swift) and JVM KeyStore (Kotlin) &mdash; just merged (<a href="https://github.com/pablof7z/nmp/pull/554">#554</a>). The honest note: the last unit, carrying a parked write's frozen identity (<a href="https://github.com/pablof7z/nmp/pull/556">#556</a>), is in CI right now and its own cross-surface parity test is <b>failing</b> &mdash; it caught direct-Rust and FFI reporting two different frozen pubkeys for the same reattached receipt, a real bug, not a flake. And Blossom media (<a href="https://github.com/pablof7z/nmp/issues/216">#216</a>) has its first brick down: a new <code>nmp-blossom</code> crate with upload authorization merged (<a href="https://github.com/pablof7z/nmp/pull/552">#552</a>), Rust-only &mdash; mirror/delete/list (<a href="https://github.com/pablof7z/nmp/issues/551">#551</a>) and the FFI+SDK projection (<a href="https://github.com/pablof7z/nmp/issues/555">#555</a>) still open, no app-facing call yet.</p>
+    <p class="ep-blurb">Two stories this cycle. The signer-lifecycle epic (<a href="https://github.com/pablof7z/nmp/issues/47">#47</a>) is <b>fully closed</b>: last cycle's failing final unit &mdash; carrying a parked write's exact frozen pubkey (<a href="https://github.com/pablof7z/nmp/pull/556">#556</a>) &mdash; was fixed and merged, so all four units (zeroization, per-write override, reattachment, Keychain + JVM KeyStore vaults) now ship across Rust/FFI/Swift/Kotlin. Blossom media (<a href="https://github.com/pablof7z/nmp/issues/216">#216</a>) added mirror/delete/list with per-verb bound authorizations (<a href="https://github.com/pablof7z/nmp/pull/557">#557</a>) on top of the upload core &mdash; the full BUD-11 verb set, direct-Rust. The honest note: the FFI + Swift + Kotlin projection (<a href="https://github.com/pablof7z/nmp/pull/560">#560</a>) is in review and <b>not green</b> &mdash; Rust, parity, falsifier, and surface gates pass, but the Swift build fails on a real <code>[UInt8]</code>&rarr;<code>Data</code> type mismatch, not a flake. No app-facing Blossom call on any platform until that lands.</p>
   </section>
 
   <details class="archive" id="archive">

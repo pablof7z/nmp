@@ -15,7 +15,32 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 07:53:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 08:58:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 08:58 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0017.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0017</guid>
+<pubDate>Thu, 16 Jul 2026 08:58:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin software development kits, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Big news this cycle: issue forty-seven, the signer-lifecycle epic, is fully closed. Last time, the final unit was sitting in continuous integration with its own parity test failing, correctly, having caught direct-Rust and the foreign-function interface reporting two different frozen identities for the same parked write. That fix landed clean. So all four units are now merged across Rust, the foreign-function interface, Swift, and Kotlin: the local key signer's secret lives in memory that gets wiped on drop; an app can publish a single write under a registered secondary identity without touching its active account, and that identity can never be silently retargeted later, even across a restart; a reattached write now carries the exact pubkey it's still waiting on, not just a vague still-parked status; and both platforms ship a proper secure vault -- Keychain on Swift, Java KeyStore on Kotlin -- so a session restores itself automatically instead of relying on a plaintext development file. If you're embedding NMP and juggling more than one identity, or you care about a session surviving an app restart without stashing a raw key on disk, that whole story is done.
+
+Second story this cycle: Blossom, the media and blob-storage module, kept moving. Mirror, delete, and list all landed on top of the upload-authorization core that shipped earlier -- each one its own bound authorization, so a server can trust exactly the one operation it's asked to perform, not a blanket credential. That's the whole BUD-eleven verb set now proven on the Rust side.
+
+Now the honest part, because that's the point of these reports. The next piece -- projecting all of that out through the foreign-function interface to Swift and Kotlin, so an app can actually call it -- is sitting in a pull request right now, and it is not green. The Rust tests pass, cross-software-development-kit parity passes, the falsifier-honesty check passes, the surface-governance check passes. But the Swift package build itself fails: a real type mismatch, a raw byte array being passed where the wrapper expects Apple's Data type. That's not a flaky test or infrastructure noise -- it's a genuine compile error in the generated wrapper, caught before merge instead of after. So: Blossom's core verbs are solid direct-Rust today, but there's still no app-facing blob-upload call on any platform until that fix lands.
+
+Put together: the signer story closes clean this cycle, and the media story is one honest bug fix away from reaching the app layer.
+
+That's the pulse.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0017.mp3" type="audio/mpeg" length="3047084"/>
+<itunes:title>NMP Pulse — 2026-07-16 08:58 UTC</itunes:title>
+<itunes:duration>190</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Briefing — 2026-07-16 07:53 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0016.mp3</link>
